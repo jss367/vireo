@@ -1,7 +1,6 @@
 """Read Lightroom .lrcat catalogs and extract keyword data per image file."""
 
 import sqlite3
-from pathlib import Path
 
 
 def _build_keyword_map(conn):
@@ -34,8 +33,10 @@ def _build_hierarchy_path(keyword_id, keyword_map):
     parts = [kw["name"]]
 
     if kw["include_parents"]:
+        seen = set()
         parent_id = kw["parent"]
-        while parent_id is not None:
+        while parent_id is not None and parent_id not in seen:
+            seen.add(parent_id)
             parent = keyword_map.get(parent_id)
             if not parent or not parent["name"]:
                 break

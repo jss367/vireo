@@ -121,6 +121,8 @@ def test_read_catalog_keywords():
         path1 = "/Volumes/Photography/Raw Files/Australia/2024/DSC_0001.NEF"
         assert path1 in result
         assert "Black kite" in result[path1]["flat_keywords"]
+        assert "Raptors" in result[path1]["flat_keywords"]
+        assert "Birds" in result[path1]["flat_keywords"]
         assert any("Black kite" in h for h in result[path1]["hierarchical_keywords"])
 
         # Check DSC_0002 -> Koala + Whistling kite
