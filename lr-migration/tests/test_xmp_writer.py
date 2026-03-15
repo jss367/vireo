@@ -88,3 +88,10 @@ def test_merge_into_existing_sidecar():
         # crs:Version attribute should be preserved
         desc = root.find(".//rdf:Description", NS)
         assert desc.get("{http://ns.adobe.com/camera-raw-settings/1.0/}Version") == "15.0"
+
+        # Verify the crs: prefix is preserved in raw output (not renamed to ns0/ns2/etc.)
+        with open(xmp_path, "r") as f:
+            raw_content = f.read()
+        assert "crs:Version" in raw_content, (
+            f"crs: prefix was renamed in output; got: {raw_content}"
+        )

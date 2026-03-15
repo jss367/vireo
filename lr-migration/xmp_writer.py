@@ -1,7 +1,10 @@
 """Write and merge XMP sidecar files with keyword metadata."""
 
+import logging
 from xml.etree import ElementTree as ET
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 NS_X = "adobe:ns:meta/"
 NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
@@ -13,6 +16,12 @@ ET.register_namespace("x", NS_X)
 ET.register_namespace("rdf", NS_RDF)
 ET.register_namespace("dc", NS_DC)
 ET.register_namespace("lr", NS_LR)
+ET.register_namespace("crs", "http://ns.adobe.com/camera-raw-settings/1.0/")
+ET.register_namespace("xmp", "http://ns.adobe.com/xap/1.0/")
+ET.register_namespace("photoshop", "http://ns.adobe.com/photoshop/1.0/")
+ET.register_namespace("exif", "http://ns.adobe.com/exif/1.0/")
+ET.register_namespace("tiff", "http://ns.adobe.com/tiff/1.0/")
+ET.register_namespace("aux", "http://ns.adobe.com/exif/1.0/aux/")
 
 
 def _get_or_create_bag(parent, tag_ns, tag_name):
@@ -47,8 +56,13 @@ def write_xmp_sidecar(xmp_path, flat_keywords, hierarchical_keywords):
     path = Path(xmp_path)
 
     if path.exists():
-        tree = ET.parse(path)
-        root = tree.getroot()
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except ET.ParseError:
+            log.warning("Corrupt XMP file %s — creating new sidecar", path)
+            root = ET.Element(f"{{{NS_X}}}xmpmeta")
+            tree = ET.ElementTree(root)
     else:
         root = ET.Element(f"{{{NS_X}}}xmpmeta")
         tree = ET.ElementTree(root)
@@ -62,10 +76,6 @@ def write_xmp_sidecar(xmp_path, flat_keywords, hierarchical_keywords):
     desc = rdf.find(f"{{{NS_RDF}}}Description")
     if desc is None:
         desc = ET.SubElement(rdf, f"{{{NS_RDF}}}Description")
-
-    # Ensure namespace declarations on Description
-    desc.set(f"xmlns:dc", NS_DC)
-    desc.set(f"xmlns:lr", NS_LR)
 
     # Merge flat keywords into dc:subject
     dc_bag = _get_or_create_bag(desc, NS_DC, "subject")
