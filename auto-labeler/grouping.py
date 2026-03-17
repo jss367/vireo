@@ -57,6 +57,8 @@ def consensus_prediction(predictions):
             total_votes: total number of frames
             individual_predictions: dict of species -> count
     """
+    if not predictions:
+        return None
     counts = Counter(p['prediction'] for p in predictions)
     individual = dict(counts)
 
@@ -96,16 +98,16 @@ def read_exif_timestamp(image_path):
     from PIL.ExifTags import Base as ExifBase
 
     try:
-        img = Image.open(str(image_path))
-        exif = img.getexif()
-        if not exif:
-            return None
+        with Image.open(str(image_path)) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
 
-        # DateTimeOriginal tag
-        dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(ExifBase.DateTimeDigitized)
-        if dt_str:
-            return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+            # DateTimeOriginal tag
+            dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(ExifBase.DateTimeDigitized)
+            if dt_str:
+                return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
     except Exception:
-        log.debug("Could not read EXIF from %s", image_path)
+        log.warning("Could not read EXIF from %s", image_path)
 
     return None
