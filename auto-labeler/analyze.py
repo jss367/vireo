@@ -85,11 +85,17 @@ def analyze(folder, output_dir, labels, taxonomy_path,
             existing_results = json.load(f)
         log.info("Found existing results.json — will merge model '%s'", slug)
 
-    # Build a lookup of existing photo entries by image_path for merging
+    # Build lookups for merging: individual photos by image_path, groups by group_id
     existing_photos = {}
+    existing_groups = {}
     if existing_results:
         for p in existing_results.get('photos', []):
-            existing_photos[p['image_path']] = p
+            ip = p.get('image_path')
+            gid = p.get('group_id')
+            if ip:
+                existing_photos[ip] = p
+            elif gid:
+                existing_groups[gid] = p
 
     # Phase 1: classify all images and read timestamps
     classified = []
@@ -153,7 +159,7 @@ def analyze(folder, output_dir, labels, taxonomy_path,
             'category': category,
             'existing_species': existing_species,
             'timestamp': timestamp,
-            'img': img,
+            'source_path': image_path,
         })
 
         if (i + 1) % 100 == 0:
@@ -172,9 +178,10 @@ def analyze(folder, output_dir, labels, taxonomy_path,
             item = group[0]
             # Generate thumbnail
             thumb_path = os.path.join(thumb_dir, item['filename'])
-            thumb = item['img'].copy()
-            thumb.thumbnail((thumbnail_size, thumbnail_size))
-            thumb.save(thumb_path, quality=85)
+            thumb_img = load_image(str(item['source_path']))
+            if thumb_img:
+                thumb_img.thumbnail((thumbnail_size, thumbnail_size))
+                thumb_img.save(thumb_path, quality=85)
 
             model_pred = {
                 'prediction': item['prediction'],
@@ -217,9 +224,10 @@ def analyze(folder, output_dir, labels, taxonomy_path,
 
             # Generate thumbnail for representative
             rep_thumb = os.path.join(thumb_dir, representative['filename'])
-            thumb = representative['img'].copy()
-            thumb.thumbnail((thumbnail_size, thumbnail_size))
-            thumb.save(rep_thumb, quality=85)
+            rep_img = load_image(str(representative['source_path']))
+            if rep_img:
+                rep_img.thumbnail((thumbnail_size, thumbnail_size))
+                rep_img.save(rep_thumb, quality=85)
 
             # Also save individual member thumbnails
             members = []
@@ -227,15 +235,25 @@ def analyze(folder, output_dir, labels, taxonomy_path,
                 members.append(item['filename'])
                 member_thumb_path = os.path.join(thumb_dir, item['filename'])
                 if not os.path.exists(member_thumb_path):
-                    t = item['img'].copy()
-                    t.thumbnail((thumbnail_size, thumbnail_size))
-                    t.save(member_thumb_path, quality=85)
+                    member_img = load_image(str(item['source_path']))
+                    if member_img:
+                        member_img.thumbnail((thumbnail_size, thumbnail_size))
+                        member_img.save(member_thumb_path, quality=85)
 
             model_consensus = {
                 'prediction': cons['prediction'],
                 'confidence': cons['confidence'],
                 'individual_predictions': cons['individual_predictions'],
             }
+
+            # Merge consensus from existing group entries with matching members
+            merged_consensus = {}
+            member_paths_set = set(item['image_path'] for item in group)
+            for eg in existing_groups.values():
+                if set(eg.get('member_paths', [])) == member_paths_set:
+                    merged_consensus.update(eg.get('consensus', {}))
+                    break
+            merged_consensus[slug] = model_consensus
 
             photo = {
                 'group_id': group_id,
@@ -244,7 +262,7 @@ def analyze(folder, output_dir, labels, taxonomy_path,
                 'member_paths': [item['image_path'] for item in group],
                 'member_xmp_paths': [item['xmp_path'] for item in group],
                 'existing_species': representative['existing_species'],
-                'consensus': {slug: model_consensus},
+                'consensus': merged_consensus,
                 'category': cons_category,
                 'status': 'pending',
             }
@@ -261,13 +279,20 @@ def analyze(folder, output_dir, labels, taxonomy_path,
         'threshold': threshold,
     }
 
-    # For photos that were in existing results but not re-classified (e.g., matches),
-    # keep them if they had predictions from other models
+    # Preserve entries from prior runs that weren't re-classified
     if existing_results:
-        existing_image_paths = {p.get('image_path') or '' for p in photos}
+        current_image_paths = {p['image_path'] for p in photos if 'image_path' in p}
+        current_member_paths = set()
+        for p in photos:
+            if 'member_paths' in p:
+                current_member_paths.update(p['member_paths'])
         for p in existing_results.get('photos', []):
-            ip = p.get('image_path', '')
-            if ip and ip not in existing_image_paths:
+            ip = p.get('image_path')
+            gid = p.get('group_id')
+            if ip and ip not in current_image_paths and ip not in current_member_paths:
+                photos.append(p)
+            elif gid and set(p.get('member_paths', [])) - current_member_paths:
+                # Group from prior run whose members weren't re-grouped
                 photos.append(p)
 
     results = {
