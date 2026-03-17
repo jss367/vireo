@@ -12,7 +12,6 @@ import logging
 import os
 import zipfile
 from datetime import date
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ class Taxonomy:
 
         Returns:
             'same' — identical taxon
-            'ancestor' — a is an ancestor of b (a's lineage contains b)
+            'ancestor' — a is an ancestor of b (a's name appears in b's lineage)
             'descendant' — b is an ancestor of a
             'sibling' — same immediate parent (same genus for species)
             'unrelated' — different lineages (no close relationship)

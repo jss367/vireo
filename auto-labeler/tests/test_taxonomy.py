@@ -222,3 +222,27 @@ def test_relationship_same_family_different_genus():
         # both in family Troglodytidae but different genus
         result = tax.relationship("Carolina Wren", "Northern House Wren")
         assert result == 'unrelated'
+
+
+def test_relationship_unknown_taxon():
+    """relationship returns None when one or both names are not in taxonomy."""
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax_path = _create_mock_taxonomy(tmpdir)
+        tax = Taxonomy(tax_path)
+
+        assert tax.relationship("Song Sparrow", "Unknown Bird") is None
+        assert tax.relationship("Unknown Bird", "Song Sparrow") is None
+        assert tax.relationship("Unknown A", "Unknown B") is None
+
+
+def test_relationship_same_cross_lookup():
+    """relationship returns 'same' when common name matches scientific name."""
+    from taxonomy import Taxonomy
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tax_path = _create_mock_taxonomy(tmpdir)
+        tax = Taxonomy(tax_path)
+
+        assert tax.relationship("Song Sparrow", "Melospiza melodia") == 'same'
