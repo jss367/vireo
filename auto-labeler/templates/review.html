@@ -2,10 +2,632 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Photo Review</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+
+  /* ---------- Header ---------- */
+  .header {
+    background: #16213e;
+    padding: 14px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #0f3460;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
+  .header-right { display: flex; align-items: center; gap: 8px; }
+  .stats { font-size: 13px; color: #a0a0a0; display: flex; gap: 14px; }
+  .stats .stat { white-space: nowrap; }
+  .stats .new-count { color: #4ecca3; }
+  .stats .ref-count { color: #f0c040; }
+  .stats .dis-count { color: #e74c3c; }
+  .stats .accepted-count { color: #7ec8e3; }
+  .gear-btn {
+    background: none; border: none; color: #a0a0a0;
+    font-size: 22px; cursor: pointer; padding: 4px 8px;
+    line-height: 1; transition: color 0.15s;
+  }
+  .gear-btn:hover { color: #fff; }
+
+  /* ---------- Settings Panel ---------- */
+  .settings-panel {
+    display: none;
+    background: #16213e;
+    padding: 14px 24px;
+    border-bottom: 1px solid #0f3460;
+  }
+  .settings-panel.open {
+    display: flex;
+    gap: 40px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .setting-group { display: flex; align-items: center; gap: 8px; }
+  .setting-group label { font-size: 13px; color: #a0a0a0; white-space: nowrap; }
+  .setting-group input[type=range] {
+    width: 180px;
+    accent-color: #4ecca3;
+    cursor: pointer;
+  }
+  .setting-group .value {
+    font-size: 13px;
+    min-width: 48px;
+    color: #e0e0e0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Category Tabs ---------- */
+  .tabs {
+    display: flex;
+    background: #16213e;
+    padding: 0 24px;
+    border-bottom: 1px solid #0f3460;
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 11px 18px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #a0a0a0;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .tab:hover { color: #fff; }
+  .tab.active { color: #fff; border-bottom-color: #4ecca3; }
+  .tab .count {
+    margin-left: 6px;
+    font-size: 11px;
+    background: #0f3460;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Batch Action Bar ---------- */
+  .batch-bar {
+    padding: 10px 24px;
+    background: #1a1a2e;
+    border-bottom: 1px solid #0f3460;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .batch-bar button {
+    padding: 6px 18px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  .btn-batch-accept { background: #4ecca3; color: #1a1a2e; }
+  .btn-batch-accept:hover { background: #3db890; }
+  .btn-batch-accept:disabled { background: #2a5a4a; color: #555; cursor: default; }
+  .batch-info { font-size: 13px; color: #a0a0a0; }
+
+  /* ---------- Photo Grid ---------- */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--card-width, 420px), 1fr));
+    gap: 16px;
+    padding: 24px;
+  }
+
+  /* ---------- Photo Card ---------- */
+  .card {
+    background: #16213e;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #0f3460;
+    transition: opacity 0.25s, transform 0.15s;
+  }
+  .card:hover { transform: translateY(-2px); }
+  .card.accepted { opacity: 0.45; }
+  .card.skipped { opacity: 0.25; }
+  .card img {
+    width: 100%;
+    aspect-ratio: 3/2;
+    object-fit: cover;
+    display: block;
+    background: #0f3460;
+  }
+  .card-body { padding: 12px 14px; }
+  .card-filename {
+    font-size: 12px;
+    color: #777;
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Category badge */
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-transform: capitalize;
+  }
+  .badge-new { background: #4ecca3; color: #1a1a2e; }
+  .badge-refinement { background: #f0c040; color: #1a1a2e; }
+  .badge-disagreement { background: #e74c3c; color: #fff; }
+
+  /* Existing keywords */
+  .card-existing {
+    font-size: 13px;
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+  .card-existing .label-prefix { color: #777; }
+  .card-existing .label-value { color: #c0c0c0; }
+
+  /* Arrow for refinement */
+  .refinement-arrow {
+    color: #f0c040;
+    margin: 0 6px;
+    font-size: 14px;
+  }
+
+  /* Prediction */
+  .card-prediction {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #fff;
+  }
+
+  /* Confidence bar */
+  .confidence-bar {
+    height: 4px;
+    background: #0f3460;
+    border-radius: 2px;
+    margin-bottom: 4px;
+    overflow: hidden;
+  }
+  .confidence-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+  .card-confidence {
+    font-size: 12px;
+    color: #777;
+    margin-bottom: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Card action buttons */
+  .card-actions { display: flex; gap: 8px; }
+  .card-actions button {
+    flex: 1;
+    padding: 8px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  .btn-accept { background: #4ecca3; color: #1a1a2e; }
+  .btn-accept:hover { background: #3db890; }
+  .btn-skip { background: #2a2a3e; color: #a0a0a0; }
+  .btn-skip:hover { background: #3a3a4e; }
+  .btn-done {
+    background: #0f3460;
+    color: #4ecca3;
+    cursor: default;
+    text-transform: capitalize;
+  }
+  .btn-done.skipped-btn { color: #777; }
+
+  /* Empty state */
+  .empty {
+    text-align: center;
+    padding: 80px 24px;
+    color: #555;
+    font-size: 15px;
+  }
+
+  /* Loading spinner */
+  .loading {
+    text-align: center;
+    padding: 80px 24px;
+    color: #555;
+    font-size: 15px;
+  }
+
+  /* Keyboard shortcut hint */
+  .kbd-hint {
+    font-size: 11px;
+    color: #555;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+</style>
 </head>
 <body>
-<h1>Photo Review</h1>
-<p>Review UI placeholder — see Task 4 for full implementation.</p>
+
+<!-- Header -->
+<div class="header">
+  <h1 id="title">Photo Review</h1>
+  <div class="header-right">
+    <div class="stats" id="stats"></div>
+    <button class="gear-btn" onclick="toggleSettings()" title="Settings">&#9881;</button>
+  </div>
+</div>
+
+<!-- Settings Panel -->
+<div class="settings-panel" id="settingsPanel">
+  <div class="setting-group">
+    <label for="thumbSize">Thumbnail size:</label>
+    <input type="range" id="thumbSize" min="200" max="800" step="20" value="400"
+           oninput="updateThumbSize(this.value)">
+    <span class="value" id="thumbSizeVal">400px</span>
+  </div>
+  <div class="setting-group">
+    <label for="confThreshold">Min confidence:</label>
+    <input type="range" id="confThreshold" min="0" max="100" step="5" value="0"
+           oninput="updateConfThreshold(this.value)">
+    <span class="value" id="confThresholdVal">0%</span>
+  </div>
+</div>
+
+<!-- Category Tabs -->
+<div class="tabs" id="tabs"></div>
+
+<!-- Batch Actions -->
+<div class="batch-bar" id="batchBar">
+  <button class="btn-batch-accept" id="batchAcceptBtn" onclick="acceptAllVisible()">
+    Accept All Visible
+  </button>
+  <span class="batch-info" id="batchStatus"></span>
+  <span class="kbd-hint">Keyboard: A = accept focused, S = skip focused</span>
+</div>
+
+<!-- Photo Grid -->
+<div class="grid" id="grid"></div>
+<div class="empty" id="empty" style="display:none;">No photos to review in this category.</div>
+<div class="loading" id="loading">Loading photos...</div>
+
+<script>
+/* ---------- State ---------- */
+let allData = { photos: [], stats: {}, folder: '', settings: {} };
+let currentTab = 'new';
+let thumbSize = 400;
+let confThreshold = 0; // 0-100 scale for display, 0-1 for filtering
+
+/* ---------- Bootstrap ---------- */
+loadPhotos();
+
+/* ---------- Data Loading ---------- */
+async function loadPhotos() {
+  try {
+    const resp = await fetch('/api/photos');
+    if (!resp.ok) throw new Error('Failed to load photos');
+    allData = await resp.json();
+
+    // Set page title from folder name
+    const folderName = (allData.folder || '').split('/').filter(Boolean).pop() || 'Photos';
+    document.getElementById('title').textContent = 'Review: ' + folderName;
+    document.title = 'Review: ' + folderName;
+
+    document.getElementById('loading').style.display = 'none';
+    renderAll();
+  } catch (err) {
+    document.getElementById('loading').textContent = 'Error loading photos: ' + err.message;
+  }
+}
+
+/* ---------- Render Helpers ---------- */
+function renderAll() {
+  renderStats();
+  renderTabs();
+  renderBatchBar();
+  renderGrid();
+}
+
+function countByCategory(cat) {
+  return allData.photos.filter(p => p.category === cat && p.status === 'pending').length;
+}
+
+function countPending() {
+  return allData.photos.filter(p => p.status === 'pending').length;
+}
+
+function countAccepted() {
+  return allData.photos.filter(p => p.status === 'accepted').length;
+}
+
+function renderStats() {
+  const el = document.getElementById('stats');
+  const nNew = countByCategory('new');
+  const nRef = countByCategory('refinement');
+  const nDis = countByCategory('disagreement');
+  const nAcc = countAccepted();
+  el.innerHTML =
+    '<span class="stat new-count">' + nNew + ' New</span>' +
+    '<span class="stat ref-count">' + nRef + ' Refinements</span>' +
+    '<span class="stat dis-count">' + nDis + ' Disagreements</span>' +
+    '<span class="stat accepted-count">' + nAcc + ' Accepted</span>';
+}
+
+function renderTabs() {
+  const tabs = [
+    { id: 'new', label: 'New' },
+    { id: 'refinement', label: 'Refinement' },
+    { id: 'disagreement', label: 'Disagreement' },
+    { id: 'accepted', label: 'Accepted' },
+    { id: 'all', label: 'All' },
+  ];
+  const el = document.getElementById('tabs');
+  el.innerHTML = tabs.map(function(t) {
+    var count;
+    if (t.id === 'accepted') {
+      count = countAccepted();
+    } else if (t.id === 'all') {
+      count = allData.photos.length;
+    } else {
+      count = countByCategory(t.id);
+    }
+    var cls = currentTab === t.id ? 'tab active' : 'tab';
+    return '<div class="' + cls + '" onclick="switchTab(\'' + t.id + '\')">' +
+      t.label + '<span class="count">' + count + '</span></div>';
+  }).join('');
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  renderTabs();
+  renderBatchBar();
+  renderGrid();
+}
+
+/* ---------- Filtering ---------- */
+function getVisiblePhotos() {
+  var threshold = confThreshold / 100;
+  return allData.photos.filter(function(p) {
+    // Tab filter
+    if (currentTab === 'accepted') return p.status === 'accepted';
+    if (currentTab === 'all') return true;
+    if (p.category !== currentTab) return false;
+    if (p.status !== 'pending') return false;
+    // Confidence threshold filter
+    if (p.confidence < threshold) return false;
+    return true;
+  });
+}
+
+function getPendingVisible() {
+  return getVisiblePhotos().filter(function(p) { return p.status === 'pending'; });
+}
+
+/* ---------- Batch Bar ---------- */
+function renderBatchBar() {
+  var pending = getPendingVisible();
+  var btn = document.getElementById('batchAcceptBtn');
+  var label;
+  if (currentTab === 'accepted') {
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = '';
+
+  if (currentTab === 'all') {
+    label = 'Accept All Visible (' + pending.length + ')';
+  } else {
+    // Capitalize category name
+    var catName = currentTab.charAt(0).toUpperCase() + currentTab.slice(1);
+    label = 'Accept All ' + catName + ' (' + pending.length + ')';
+  }
+  btn.textContent = label;
+  btn.disabled = pending.length === 0;
+}
+
+/* ---------- Grid Rendering ---------- */
+function renderGrid() {
+  var photos = getVisiblePhotos();
+  var grid = document.getElementById('grid');
+  var empty = document.getElementById('empty');
+
+  if (photos.length === 0) {
+    grid.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  grid.style.setProperty('--card-width', thumbSize + 20 + 'px');
+
+  grid.innerHTML = photos.map(function(p) {
+    var confPct = Math.round(p.confidence * 100);
+    var confColor = confPct >= 70 ? '#4ecca3' : confPct >= 50 ? '#f0c040' : '#e74c3c';
+    var cardClass = 'card';
+    if (p.status === 'accepted') cardClass += ' accepted';
+    if (p.status === 'skipped') cardClass += ' skipped';
+
+    // Thumbnail filename: stem + .jpg
+    var thumbName = p.filename.replace(/\.[^.]+$/, '.jpg');
+    var thumbUrl = '/thumbnails/' + encodeURIComponent(thumbName);
+
+    // Category badge
+    var badgeHtml = '<span class="badge badge-' + p.category + '">' + p.category + '</span>';
+
+    // Existing species display
+    var existingHtml = '';
+    if (p.existing_species && p.existing_species.length > 0) {
+      if (p.category === 'refinement') {
+        // For refinements, show existing -> suggested
+        existingHtml =
+          '<div class="card-existing">' +
+            '<span class="label-value">' + escapeHtml(p.existing_species.join(', ')) + '</span>' +
+            '<span class="refinement-arrow">&#x2192;</span>' +
+            '<span class="label-value" style="color:#f0c040;font-weight:600;">' + escapeHtml(p.prediction) + '</span>' +
+          '</div>';
+      } else {
+        existingHtml =
+          '<div class="card-existing">' +
+            '<span class="label-prefix">Current: </span>' +
+            '<span class="label-value">' + escapeHtml(p.existing_species.join(', ')) + '</span>' +
+          '</div>';
+      }
+    }
+
+    // Prediction line (always shown, but for refinements the arrow display above is the main view)
+    var predictionHtml;
+    if (p.category === 'refinement' && p.existing_species && p.existing_species.length > 0) {
+      // Already shown in the arrow display above, so show a simpler version
+      predictionHtml = '<div class="card-prediction">' + escapeHtml(p.prediction) + '</div>';
+    } else {
+      predictionHtml = '<div class="card-prediction">' + escapeHtml(p.prediction) + '</div>';
+    }
+
+    // Action buttons
+    var actionsHtml;
+    if (p.status === 'accepted') {
+      actionsHtml = '<div class="card-actions"><button class="btn-done">accepted</button></div>';
+    } else if (p.status === 'skipped') {
+      actionsHtml = '<div class="card-actions"><button class="btn-done skipped-btn">skipped</button></div>';
+    } else {
+      actionsHtml =
+        '<div class="card-actions">' +
+          '<button class="btn-accept" onclick="acceptPhoto(\'' + escapeAttr(p.filename) + '\')">Accept</button>' +
+          '<button class="btn-skip" onclick="skipPhoto(\'' + escapeAttr(p.filename) + '\')">Skip</button>' +
+        '</div>';
+    }
+
+    return '<div class="' + cardClass + '" data-filename="' + escapeAttr(p.filename) + '">' +
+      '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      '<div class="card-body">' +
+        '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
+        badgeHtml +
+        existingHtml +
+        predictionHtml +
+        '<div class="confidence-bar"><div class="confidence-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>' +
+        '<div class="card-confidence">' + confPct + '% confidence</div>' +
+        actionsHtml +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* ---------- Actions ---------- */
+async function acceptPhoto(filename) {
+  var resp = await fetch('/api/accept/' + encodeURIComponent(filename), { method: 'POST' });
+  if (!resp.ok) {
+    alert('Failed to accept: ' + filename);
+    return;
+  }
+  var photo = allData.photos.find(function(p) { return p.filename === filename; });
+  if (photo) photo.status = 'accepted';
+  renderAll();
+}
+
+async function skipPhoto(filename) {
+  var resp = await fetch('/api/skip/' + encodeURIComponent(filename), { method: 'POST' });
+  if (!resp.ok) {
+    alert('Failed to skip: ' + filename);
+    return;
+  }
+  var photo = allData.photos.find(function(p) { return p.filename === filename; });
+  if (photo) photo.status = 'skipped';
+  renderAll();
+}
+
+async function acceptAllVisible() {
+  var pending = getPendingVisible();
+  if (pending.length === 0) return;
+
+  var category = (currentTab !== 'all') ? currentTab : undefined;
+  var minConf = confThreshold / 100;
+
+  var btn = document.getElementById('batchAcceptBtn');
+  btn.disabled = true;
+  btn.textContent = 'Accepting...';
+  document.getElementById('batchStatus').textContent = '';
+
+  try {
+    var resp = await fetch('/api/accept-batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: category, min_confidence: minConf }),
+    });
+    if (!resp.ok) throw new Error('Batch accept failed');
+    var result = await resp.json();
+    document.getElementById('batchStatus').textContent =
+      'Accepted ' + result.accepted + ' photo' + (result.accepted !== 1 ? 's' : '');
+
+    // Reload to get fresh state from server
+    await loadPhotos();
+  } catch (err) {
+    document.getElementById('batchStatus').textContent = 'Error: ' + err.message;
+    btn.disabled = false;
+    renderBatchBar();
+  }
+}
+
+/* ---------- Settings ---------- */
+function toggleSettings() {
+  document.getElementById('settingsPanel').classList.toggle('open');
+}
+
+function updateThumbSize(val) {
+  thumbSize = parseInt(val, 10);
+  document.getElementById('thumbSizeVal').textContent = val + 'px';
+  renderGrid();
+}
+
+function updateConfThreshold(val) {
+  confThreshold = parseInt(val, 10);
+  document.getElementById('confThresholdVal').textContent = val + '%';
+  renderAll();
+}
+
+/* ---------- Keyboard Shortcuts ---------- */
+document.addEventListener('keydown', function(e) {
+  // Don't capture if user is in an input
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+  var pending = getPendingVisible();
+  if (pending.length === 0) return;
+
+  // A = accept first pending card, S = skip first pending card
+  if (e.key === 'a' || e.key === 'A') {
+    e.preventDefault();
+    acceptPhoto(pending[0].filename);
+  } else if (e.key === 's' || e.key === 'S') {
+    e.preventDefault();
+    skipPhoto(pending[0].filename);
+  }
+});
+
+/* ---------- Utilities ---------- */
+function escapeHtml(str) {
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  return str.replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
 </body>
 </html>
