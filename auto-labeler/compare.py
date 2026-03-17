@@ -67,7 +67,10 @@ def categorize(prediction, existing_keywords, taxonomy):
     for taxon_kw in existing_taxa:
         rel = taxonomy.relationship(taxon_kw, prediction)
 
-        if rel == 'same':
+        if rel is None:
+            log.warning("Prediction '%s' not found in taxonomy", prediction)
+            return 'disagreement'
+        elif rel == 'same':
             return 'match'
         elif rel == 'ancestor':
             # Existing is broader, prediction is more specific → refinement
@@ -75,6 +78,7 @@ def categorize(prediction, existing_keywords, taxonomy):
         elif rel == 'descendant':
             # Existing is more specific, prediction is broader — unusual but treat as match
             return 'match'
+        # 'sibling' and 'unrelated' fall through to check remaining taxa
 
-    # If we get here, existing taxa exist but none match/contain the prediction
+    # No existing taxon matched/contained the prediction
     return 'disagreement'
