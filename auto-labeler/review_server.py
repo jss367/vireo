@@ -160,10 +160,8 @@ def create_app(data_dir):
             if preds:
                 if model and model in preds:
                     pred = preds[model]
-                elif preds:
-                    pred = preds[next(iter(preds))]
                 else:
-                    continue
+                    pred = preds[next(iter(preds))]
 
                 if pred['confidence'] < min_confidence:
                     continue
@@ -184,10 +182,8 @@ def create_app(data_dir):
                 cons = photo['consensus']
                 if model and model in cons:
                     pred = cons[model]
-                elif cons:
-                    pred = cons[next(iter(cons))]
                 else:
-                    continue
+                    pred = cons[next(iter(cons))]
 
                 if pred['confidence'] < min_confidence:
                     continue
