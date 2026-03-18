@@ -142,6 +142,9 @@
       <option value="WARNING">WARNING+</option>
       <option value="ERROR">ERROR+</option>
     </select>
+    <label style="font-size:11px;color:#555;display:flex;align-items:center;gap:3px;cursor:pointer;">
+      <input type="checkbox" id="lpAutoScroll" checked style="accent-color:#4ecca3;"> Auto-scroll
+    </label>
     <span class="lp-count" id="lpCount">0</span>
   </div>
   <div class="log-panel-content" id="lpContent"></div>
@@ -160,6 +163,12 @@
   var lpMaxLines = 200;
 
   function initLogPanel() {
+    // Restore panel open/closed state from localStorage
+    if (localStorage.getItem('spotter_log_panel_open') === 'true') {
+      document.getElementById('logPanel').classList.add('open');
+      document.getElementById('logPanelToggle').classList.add('open');
+    }
+
     lpSource = new EventSource('/api/logs/stream');
     lpSource.addEventListener('log', function(e) {
       var record = JSON.parse(e.data);
@@ -195,7 +204,10 @@
       lpEscape(record.message || '');
     container.appendChild(div);
     if (!bulk) {
-      container.scrollTop = container.scrollHeight;
+      var autoScroll = document.getElementById('lpAutoScroll');
+      if (autoScroll && autoScroll.checked) {
+        container.scrollTop = container.scrollHeight;
+      }
       lpApplyFilter();
     }
     document.getElementById('lpCount').textContent = lpLines.length;
@@ -206,6 +218,7 @@
     var toggle = document.getElementById('logPanelToggle');
     panel.classList.toggle('open');
     toggle.classList.toggle('open');
+    localStorage.setItem('spotter_log_panel_open', panel.classList.contains('open'));
   };
 
   window.lpApplyFilter = function() {
