@@ -6,6 +6,7 @@ Usage:
 
 import argparse
 import logging
+import logging.handlers
 import os
 import sys
 import webbrowser
@@ -23,6 +24,20 @@ from jobs import JobRunner, LogBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+
+# File logging with rotation — persists across restarts
+_log_dir = os.path.expanduser("~/.spotter")
+os.makedirs(_log_dir, exist_ok=True)
+_file_handler = logging.handlers.RotatingFileHandler(
+    os.path.join(_log_dir, "spotter.log"),
+    maxBytes=5 * 1024 * 1024,  # 5 MB
+    backupCount=3,
+)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logging.getLogger().addHandler(_file_handler)
 
 
 def create_app(db_path, thumb_cache_dir=None):
