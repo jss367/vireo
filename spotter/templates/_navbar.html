@@ -260,14 +260,24 @@
     lpSource.addEventListener('log', function(e) {
       addLpLine(JSON.parse(e.data));
     });
+    // Track internal navigation so we don't warn on same-site clicks
+    var isInternalNav = false;
+    document.addEventListener('click', function(e) {
+      var link = e.target.closest('a[href]');
+      if (link && link.hostname === location.hostname) {
+        isInternalNav = true;
+      }
+    });
+
     window.addEventListener('beforeunload', function(e) {
-      // Warn if jobs are running
+      if (lpSource) { lpSource.close(); lpSource = null; }
+      // Only warn on actual tab close, not internal navigation
+      if (isInternalNav) { isInternalNav = false; return; }
       var running = activeJobs.filter(function(j) { return j.status === 'running'; });
       if (running.length > 0) {
         e.preventDefault();
         e.returnValue = '';
       }
-      if (lpSource) { lpSource.close(); lpSource = null; }
     });
 
     // Load recent logs
