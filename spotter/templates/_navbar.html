@@ -251,6 +251,7 @@
     if (localStorage.getItem('spotter_panel_open') === 'true') {
       document.getElementById('bottomPanel').classList.add('open');
       document.getElementById('bottomToggle').classList.add('open');
+      document.body.style.paddingBottom = '268px';
     }
     var savedTab = localStorage.getItem('spotter_panel_tab') || 'jobs';
     switchBpTab(savedTab);
@@ -310,7 +311,10 @@
     var toggle = document.getElementById('bottomToggle');
     panel.classList.toggle('open');
     toggle.classList.toggle('open');
-    localStorage.setItem('spotter_panel_open', panel.classList.contains('open'));
+    var isOpen = panel.classList.contains('open');
+    localStorage.setItem('spotter_panel_open', isOpen);
+    // Push page content up so panel doesn't overlap
+    document.body.style.paddingBottom = isOpen ? '268px' : '28px';
   };
 
   /* ---------- Jobs polling ---------- */
