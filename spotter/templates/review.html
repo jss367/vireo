@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Photo Review</title>
+<title>Spotter - Classify</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -351,15 +351,24 @@
 </head>
 <body>
 
-<!-- Header -->
+<!-- Nav Bar -->
+<nav class="navbar" style="background:#16213e;padding:0 24px;display:flex;align-items:center;border-bottom:1px solid #0f3460;position:sticky;top:0;z-index:200;height:48px;">
+  <a class="brand" href="/browse" style="font-size:16px;font-weight:700;color:#4ecca3;margin-right:32px;text-decoration:none;">Spotter</a>
+  <a href="/browse" style="color:#a0a0a0;text-decoration:none;padding:13px 14px;font-size:13px;border-bottom:2px solid transparent;">Browse</a>
+  <a href="/classify" style="color:#fff;text-decoration:none;padding:13px 14px;font-size:13px;border-bottom:2px solid #4ecca3;">Classify</a>
+  <a href="/import" style="color:#a0a0a0;text-decoration:none;padding:13px 14px;font-size:13px;border-bottom:2px solid transparent;">Import</a>
+  <a href="/audit" style="color:#a0a0a0;text-decoration:none;padding:13px 14px;font-size:13px;border-bottom:2px solid transparent;">Audit</a>
+  <a href="/settings" style="color:#a0a0a0;text-decoration:none;padding:13px 14px;font-size:13px;border-bottom:2px solid transparent;">Settings</a>
+</nav>
+
+<!-- Review Header -->
 <div class="header">
   <div class="header-left">
-    <h1 id="title">Photo Review</h1>
+    <h1 id="title">Classify</h1>
     <select class="model-selector" id="modelSelector" onchange="switchModel(this.value)" style="display:none;"></select>
   </div>
   <div class="header-right">
     <div class="stats" id="stats"></div>
-    <a class="gear-link" href="/settings" title="Settings">&#9881;</a>
   </div>
 </div>
 
@@ -416,8 +425,8 @@ async function loadPhotos() {
 
     // Set page title from folder name
     var folderName = (allData.folder || '').split('/').filter(Boolean).pop() || 'Photos';
-    document.getElementById('title').textContent = 'Review: ' + folderName;
-    document.title = 'Review: ' + folderName;
+    document.getElementById('title').textContent = 'Classify: ' + folderName;
+    document.title = 'Spotter - Classify: ' + folderName;
 
     // Initialize model selector
     initModelSelector();
