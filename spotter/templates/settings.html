@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Settings - Photo Review</title>
+<title>Spotter - Settings</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -13,33 +13,26 @@
     min-height: 100vh;
   }
 
-  /* ---------- Header ---------- */
-  .header {
+  /* ---------- Nav Bar ---------- */
+  .navbar {
     background: #16213e;
-    padding: 14px 24px;
+    padding: 0 24px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid #0f3460;
     position: sticky;
     top: 0;
-    z-index: 100;
+    z-index: 200;
+    height: 48px;
   }
-  .header-left { display: flex; align-items: center; gap: 16px; }
-  .header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
-  .back-link {
-    color: #4ecca3;
-    text-decoration: none;
-    font-size: 14px;
-    padding: 5px 12px;
-    border: 1px solid #4ecca3;
-    border-radius: 4px;
-    transition: background 0.15s, color 0.15s;
+  .navbar .brand { font-size: 16px; font-weight: 700; color: #4ecca3; margin-right: 32px; text-decoration: none; }
+  .navbar a {
+    color: #a0a0a0; text-decoration: none; padding: 13px 14px;
+    font-size: 13px; border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
   }
-  .back-link:hover {
-    background: #4ecca3;
-    color: #1a1a2e;
-  }
+  .navbar a:hover { color: #fff; }
+  .navbar a.active { color: #fff; border-bottom-color: #4ecca3; }
 
   /* ---------- Content ---------- */
   .content {
@@ -91,407 +84,260 @@
     gap: 10px;
     flex-shrink: 0;
   }
-  .setting-control input[type=range] {
-    width: 180px;
-    accent-color: #4ecca3;
-    cursor: pointer;
-  }
-  .setting-control .value {
-    font-size: 13px;
-    min-width: 48px;
-    color: #e0e0e0;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-  }
-  .setting-control input[type=number] {
-    width: 80px;
+
+  /* ---------- Input Styles ---------- */
+  .text-input {
     background: #0f3460;
     color: #e0e0e0;
     border: 1px solid #1a3a6e;
     border-radius: 4px;
-    padding: 5px 8px;
-    font-size: 13px;
-    text-align: right;
-  }
-  .setting-control input[type=number]:focus {
-    outline: none;
-    border-color: #4ecca3;
-  }
-
-  /* Toggle switch */
-  .toggle {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    cursor: pointer;
-  }
-  .toggle input {
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-  .toggle-slider {
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: #0f3460;
-    border-radius: 12px;
-    transition: background 0.2s;
-  }
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    left: 3px;
-    bottom: 3px;
-    background: #666;
-    border-radius: 50%;
-    transition: transform 0.2s, background 0.2s;
-  }
-  .toggle input:checked + .toggle-slider {
-    background: #2a5a4a;
-  }
-  .toggle input:checked + .toggle-slider::before {
-    transform: translateX(20px);
-    background: #4ecca3;
-  }
-
-  /* ---------- Model Table ---------- */
-  .model-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  .model-table th {
-    text-align: left;
     padding: 8px 12px;
-    color: #888;
-    font-weight: 500;
-    border-bottom: 1px solid #0f3460;
-  }
-  .model-table td {
-    padding: 10px 12px;
-    border-bottom: 1px solid #0a1a35;
-    color: #c0c0c0;
-  }
-  .model-table tr:last-child td { border-bottom: none; }
-  .model-name {
-    font-weight: 600;
-    color: #e0e0e0;
-  }
-
-  /* ---------- Status Indicators ---------- */
-  .status-ok {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #4ecca3;
-    margin-right: 6px;
-  }
-  .status-missing {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #e74c3c;
-    margin-right: 6px;
-  }
-  .status-text {
     font-size: 13px;
-    color: #c0c0c0;
+    outline: none;
+    width: 100%;
   }
+  .text-input:focus { border-color: #4ecca3; }
 
   /* ---------- Buttons ---------- */
-  .btn-save {
-    background: #4ecca3;
-    color: #1a1a2e;
+  .btn {
     border: none;
     border-radius: 4px;
-    padding: 10px 28px;
-    font-size: 14px;
-    font-weight: 600;
+    padding: 8px 20px;
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
     transition: background 0.15s;
   }
-  .btn-save:hover { background: #3db890; }
-  .btn-save:disabled { background: #2a5a4a; color: #555; cursor: default; }
+  .btn:disabled { cursor: default; }
+  .btn-primary { background: #4ecca3; color: #1a1a2e; }
+  .btn-primary:hover { background: #3db890; }
+  .btn-primary:disabled { background: #2a5a4a; color: #555; }
+  .btn-secondary { background: #0f3460; color: #c0c0c0; }
+  .btn-secondary:hover { background: #1a3a6e; }
 
-  .save-bar {
-    display: flex;
-    align-items: center;
-    gap: 16px;
+  /* ---------- Progress ---------- */
+  .progress-bar {
+    height: 6px;
+    background: #0f3460;
+    border-radius: 3px;
+    overflow: hidden;
+    margin: 12px 0;
+    display: none;
+  }
+  .progress-bar.active { display: block; }
+  .progress-fill {
+    height: 100%;
+    background: #4ecca3;
+    border-radius: 3px;
+    transition: width 0.3s;
+    width: 0;
+  }
+
+  .status-msg {
+    font-size: 13px;
+    color: #888;
     margin-top: 8px;
   }
-  .save-status {
-    font-size: 13px;
-    color: #4ecca3;
+  .status-msg.ok { color: #4ecca3; }
+  .status-msg.error { color: #e74c3c; }
+
+  /* ---------- Stats ---------- */
+  .scan-stats {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
   }
-  .save-status.error {
-    color: #e74c3c;
+  .stat-card {
+    background: #0f3460;
+    border-radius: 6px;
+    padding: 14px 20px;
+    flex: 1;
+    text-align: center;
+  }
+  .stat-number {
+    font-size: 28px;
+    font-weight: 700;
+    color: #4ecca3;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-label {
+    font-size: 12px;
+    color: #888;
+    margin-top: 4px;
   }
 
-  /* ---------- Loading ---------- */
-  .loading {
-    text-align: center;
-    padding: 80px 24px;
-    color: #555;
-    font-size: 15px;
+  /* ---------- Scan Input Group ---------- */
+  .scan-input-group {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
   }
+  .scan-input-group .text-input { flex: 1; }
 </style>
 </head>
 <body>
 
-<!-- Header -->
-<div class="header">
-  <div class="header-left">
-    <h1>Settings</h1>
-  </div>
-  <a class="back-link" href="/">Back to Review</a>
-</div>
+<!-- Nav Bar -->
+<nav class="navbar">
+  <a class="brand" href="/browse">Spotter</a>
+  <a href="/browse">Browse</a>
+  <a href="/classify">Classify</a>
+  <a href="/import">Import</a>
+  <a href="/audit">Audit</a>
+  <a href="/settings" class="active">Settings</a>
+</nav>
 
-<!-- Content -->
-<div class="content" id="content" style="display:none;">
+<div class="content">
 
-  <!-- Models Section -->
+  <!-- Scan Section -->
   <div class="section">
-    <div class="section-title">Models</div>
-    <div id="modelsContent">
-      <p style="color:#666; font-size:13px;">No models configured.</p>
+    <div class="section-title">Scan Photos</div>
+    <div class="scan-stats">
+      <div class="stat-card">
+        <div class="stat-number" id="photoCount">-</div>
+        <div class="stat-label">Photos</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" id="folderCount">-</div>
+        <div class="stat-label">Folders</div>
+      </div>
     </div>
+
+    <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
+      Enter the root path to your photos folder. The scanner will walk all subfolders,
+      read EXIF timestamps, import XMP keywords, and generate thumbnails.
+    </p>
+
+    <div class="scan-input-group">
+      <input type="text" class="text-input" id="scanRoot"
+             placeholder="/Volumes/Photography/Raw Files"
+             value="/Volumes/Photography/Raw Files">
+      <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan</button>
+      <button class="btn btn-secondary" id="rescanBtn" onclick="startScan(true)">Re-scan (incremental)</button>
+    </div>
+
+    <div class="progress-bar" id="scanProgress">
+      <div class="progress-fill" id="scanProgressFill"></div>
+    </div>
+    <div class="status-msg" id="scanStatus"></div>
   </div>
 
-  <!-- Taxonomy Section -->
+  <!-- Thumbnails Section -->
   <div class="section">
-    <div class="section-title">Taxonomy</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        iNaturalist Taxonomy
-        <small>Used for species comparison and categorization</small>
-      </div>
-      <div class="setting-control">
-        <span id="taxonomyStatus" class="status-text">Checking...</span>
-      </div>
-    </div>
+    <div class="section-title">Thumbnails</div>
+    <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
+      Generate local thumbnail cache for all photos in the database.
+      Thumbnails are stored locally so browsing works when the NAS is offline.
+    </p>
+    <button class="btn btn-primary" id="thumbBtn" onclick="generateThumbnails()">Generate Thumbnails</button>
+    <div class="status-msg" id="thumbStatus"></div>
   </div>
 
-  <!-- Grouping Section -->
+  <!-- Database Section -->
   <div class="section">
-    <div class="section-title">Photo Grouping</div>
+    <div class="section-title">Database</div>
     <div class="setting-row">
       <div class="setting-label">
-        Enable grouping
-        <small>Group sequential photos taken within a time window</small>
-      </div>
-      <div class="setting-control">
-        <label class="toggle">
-          <input type="checkbox" id="groupingEnabled" onchange="onSettingChange()">
-          <span class="toggle-slider"></span>
-        </label>
+        Database location
+        <small id="dbPath">~/.spotter/spotter.db</small>
       </div>
     </div>
     <div class="setting-row">
       <div class="setting-label">
-        Time window (seconds)
-        <small>Photos taken within this interval are grouped together</small>
-      </div>
-      <div class="setting-control">
-        <input type="range" id="groupWindow" min="1" max="120" step="1" value="10"
-               oninput="document.getElementById('groupWindowVal').textContent = this.value + 's'; onSettingChange();">
-        <span class="value" id="groupWindowVal">10s</span>
+        Thumbnail cache
+        <small id="thumbPath">~/.spotter/thumbnails/</small>
       </div>
     </div>
-  </div>
-
-  <!-- Defaults Section -->
-  <div class="section">
-    <div class="section-title">Defaults</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Confidence threshold
-        <small>Minimum confidence to show in review (0-100%)</small>
-      </div>
-      <div class="setting-control">
-        <input type="range" id="defaultThreshold" min="0" max="100" step="5" value="40"
-               oninput="document.getElementById('defaultThresholdVal').textContent = this.value + '%'; onSettingChange();">
-        <span class="value" id="defaultThresholdVal">40%</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Thumbnail size (px)
-        <small>Default thumbnail size for analysis output</small>
-      </div>
-      <div class="setting-control">
-        <input type="number" id="thumbnailSize" min="100" max="1200" step="50" value="400"
-               onchange="onSettingChange();">
-      </div>
-    </div>
-  </div>
-
-  <!-- Save -->
-  <div class="save-bar">
-    <button class="btn-save" id="saveBtn" onclick="saveSettings()">Save Settings</button>
-    <span class="save-status" id="saveStatus"></span>
   </div>
 
 </div>
-
-<div class="loading" id="loading">Loading settings...</div>
 
 <script>
-var currentSettings = {};
-var photosData = {};
-var dirty = false;
-
 /* ---------- Bootstrap ---------- */
-loadAll();
+loadScanStatus();
 
-async function loadAll() {
+/* ---------- Scan Status ---------- */
+async function loadScanStatus() {
   try {
-    var results = await Promise.all([
-      fetch('/api/settings'),
-      fetch('/api/photos'),
-    ]);
-    var settingsResp = results[0];
-    var photosResp = results[1];
-
-    if (!settingsResp.ok) throw new Error('Failed to load settings');
-    if (!photosResp.ok) throw new Error('Failed to load photos data');
-
-    currentSettings = await settingsResp.json();
-    photosData = await photosResp.json();
-
-    document.getElementById('loading').style.display = 'none';
-    document.getElementById('content').style.display = '';
-
-    renderModels();
-    renderTaxonomy();
-    populateForm();
-  } catch (err) {
-    document.getElementById('loading').textContent = 'Error: ' + err.message;
-  }
+    var resp = await fetch('/api/scan/status');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    document.getElementById('photoCount').textContent = data.photo_count.toLocaleString();
+    document.getElementById('folderCount').textContent = data.folder_count.toLocaleString();
+  } catch(e) {}
 }
 
-/* ---------- Models ---------- */
-function renderModels() {
-  var models = photosData.models || {};
-  var names = Object.keys(models);
-  var container = document.getElementById('modelsContent');
+/* ---------- Scan ---------- */
+async function startScan(incremental) {
+  var root = document.getElementById('scanRoot').value.trim();
+  if (!root) return;
 
-  if (names.length === 0) {
-    container.innerHTML = '<p style="color:#666; font-size:13px;">No models have been run yet. Use analyze.py to run a model.</p>';
-    return;
-  }
+  var status = document.getElementById('scanStatus');
+  var progress = document.getElementById('scanProgress');
+  var fill = document.getElementById('scanProgressFill');
+  var btn = document.getElementById('scanBtn');
+  var rescanBtn = document.getElementById('rescanBtn');
 
-  var html = '<table class="model-table">';
-  html += '<tr><th>Model</th><th>Architecture</th><th>Run Date</th><th>Threshold</th></tr>';
-
-  names.forEach(function(name) {
-    var m = models[name];
-    html += '<tr>';
-    html += '<td><span class="model-name">' + escapeHtml(name) + '</span></td>';
-    html += '<td>' + escapeHtml(m.model_str || '-') + '</td>';
-    html += '<td>' + escapeHtml(m.run_date || '-') + '</td>';
-    html += '<td>' + (m.threshold != null ? Math.round(m.threshold * 100) + '%' : '-') + '</td>';
-    html += '</tr>';
-  });
-
-  html += '</table>';
-  container.innerHTML = html;
-}
-
-/* ---------- Taxonomy ---------- */
-function renderTaxonomy() {
-  var el = document.getElementById('taxonomyStatus');
-  var settings = currentSettings;
-
-  if (settings.taxonomy_path || settings.taxonomy_loaded) {
-    el.innerHTML = '<span class="status-ok"></span>Loaded';
-    if (settings.taxonomy_taxa_count) {
-      el.innerHTML += ' (' + settings.taxonomy_taxa_count.toLocaleString() + ' taxa)';
-    }
-  } else {
-    el.innerHTML = '<span class="status-missing"></span>Not loaded - run: python taxonomy.py --download';
-  }
-}
-
-/* ---------- Form Population ---------- */
-function populateForm() {
-  var s = currentSettings;
-
-  // Grouping
-  var groupEnabled = s.group_window != null && s.group_window > 0;
-  document.getElementById('groupingEnabled').checked = groupEnabled;
-
-  var groupWindow = s.group_window || 10;
-  document.getElementById('groupWindow').value = groupWindow;
-  document.getElementById('groupWindowVal').textContent = groupWindow + 's';
-
-  // Defaults
-  var threshold = s.threshold != null ? Math.round(s.threshold * 100) : (s.default_threshold != null ? Math.round(s.default_threshold * 100) : 40);
-  document.getElementById('defaultThreshold').value = threshold;
-  document.getElementById('defaultThresholdVal').textContent = threshold + '%';
-
-  var thumbSize = s.thumbnail_size || 400;
-  document.getElementById('thumbnailSize').value = thumbSize;
-
-  dirty = false;
-}
-
-/* ---------- Setting Change Tracking ---------- */
-function onSettingChange() {
-  dirty = true;
-  document.getElementById('saveStatus').textContent = '';
-}
-
-/* ---------- Save ---------- */
-async function saveSettings() {
-  var btn = document.getElementById('saveBtn');
-  var status = document.getElementById('saveStatus');
   btn.disabled = true;
-  status.textContent = 'Saving...';
-  status.className = 'save-status';
-
-  var groupEnabled = document.getElementById('groupingEnabled').checked;
-  var groupWindow = parseInt(document.getElementById('groupWindow').value, 10);
-  var threshold = parseInt(document.getElementById('defaultThreshold').value, 10) / 100;
-  var thumbSize = parseInt(document.getElementById('thumbnailSize').value, 10);
-
-  var settings = {
-    group_window: groupEnabled ? groupWindow : 0,
-    threshold: threshold,
-    thumbnail_size: thumbSize,
-  };
+  rescanBtn.disabled = true;
+  status.textContent = 'Scanning... This may take a while for large photo libraries.';
+  status.className = 'status-msg';
+  progress.classList.add('active');
+  fill.style.width = '30%';
 
   try {
-    var resp = await fetch('/api/settings', {
+    var resp = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      body: JSON.stringify({ root: root, incremental: !!incremental }),
     });
 
-    if (!resp.ok) throw new Error('Save failed');
+    fill.style.width = '100%';
 
-    status.textContent = 'Settings saved';
-    status.className = 'save-status';
-    dirty = false;
-
-    Object.assign(currentSettings, settings);
-  } catch (err) {
-    status.textContent = 'Error: ' + err.message;
-    status.className = 'save-status error';
-  } finally {
-    btn.disabled = false;
+    if (!resp.ok) {
+      var err = await resp.json();
+      status.textContent = 'Error: ' + (err.error || 'scan failed');
+      status.className = 'status-msg error';
+    } else {
+      var data = await resp.json();
+      status.textContent = 'Scan complete! ' + data.photos_indexed + ' photos indexed.';
+      status.className = 'status-msg ok';
+      loadScanStatus();
+    }
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.className = 'status-msg error';
   }
+
+  btn.disabled = false;
+  rescanBtn.disabled = false;
+  setTimeout(function() { progress.classList.remove('active'); }, 2000);
 }
 
-/* ---------- Utilities ---------- */
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
+/* ---------- Thumbnails ---------- */
+async function generateThumbnails() {
+  var status = document.getElementById('thumbStatus');
+  var btn = document.getElementById('thumbBtn');
+
+  btn.disabled = true;
+  status.textContent = 'Generating thumbnails... This may take a while.';
+  status.className = 'status-msg';
+
+  try {
+    var resp = await fetch('/api/scan/thumbnails', { method: 'POST' });
+    if (!resp.ok) {
+      status.textContent = 'Error generating thumbnails';
+      status.className = 'status-msg error';
+    } else {
+      status.textContent = 'Thumbnails generated!';
+      status.className = 'status-msg ok';
+    }
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.className = 'status-msg error';
+  }
+
+  btn.disabled = false;
 }
 </script>
 </body>

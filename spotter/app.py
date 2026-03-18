@@ -323,6 +323,40 @@ def create_app(db_path, thumb_cache_dir=None):
         import_untracked(db, paths)
         return jsonify({'ok': True, 'imported': len(paths)})
 
+    # -- Scan API routes --
+
+    @app.route('/api/scan', methods=['POST'])
+    def api_scan():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        root = body.get('root', '')
+        incremental = body.get('incremental', False)
+        if not root:
+            return jsonify({'error': 'root path required'}), 400
+        if not os.path.isdir(root):
+            return jsonify({'error': f'directory not found: {root}'}), 400
+        from scanner import scan
+        scan(root, db, incremental=incremental)
+        photos = db.get_photos(per_page=999999)
+        return jsonify({'ok': True, 'photos_indexed': len(photos)})
+
+    @app.route('/api/scan/thumbnails', methods=['POST'])
+    def api_generate_thumbnails():
+        db = _get_db()
+        from thumbnails import generate_all
+        generate_all(db, app.config['THUMB_CACHE_DIR'])
+        return jsonify({'ok': True})
+
+    @app.route('/api/scan/status')
+    def api_scan_status():
+        db = _get_db()
+        photos = db.get_photos(per_page=999999)
+        folders = db.get_folder_tree()
+        return jsonify({
+            'photo_count': len(photos),
+            'folder_count': len(folders),
+        })
+
     # -- Thumbnail serving --
 
     @app.route('/thumbnails/<filename>')
