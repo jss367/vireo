@@ -36,6 +36,20 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config['DB_PATH'] = db_path
     app.config['THUMB_CACHE_DIR'] = thumb_cache_dir or os.path.expanduser("~/.spotter/thumbnails")
 
+    # Request timing middleware — logs slow requests
+    @app.before_request
+    def _start_timer():
+        request._start_time = time.time()
+
+    @app.after_request
+    def _log_slow_requests(response):
+        if hasattr(request, '_start_time'):
+            elapsed = time.time() - request._start_time
+            if elapsed > 0.5:
+                log.warning("Slow request: %s %s took %.1fs",
+                            request.method, request.path, elapsed)
+        return response
+
     def _get_db():
         """Get a Database instance. Creates a new connection per request."""
         if not hasattr(app, '_db') or app._db is None:
@@ -520,18 +534,29 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route('/api/logs/stream')
     def api_log_stream():
-        """SSE stream of all server log output."""
+        """SSE stream of all server log output.
+
+        Auto-closes after 30s of inactivity to prevent stale connections
+        from exhausting Flask's thread pool during page navigation.
+        The browser's EventSource will auto-reconnect.
+        """
         broadcaster = app._log_broadcaster
         q = broadcaster.subscribe()
 
         def generate():
+            idle_count = 0
             try:
                 while True:
                     try:
                         record = q.get(timeout=2)
                         yield f"event: log\ndata: {json.dumps(record)}\n\n"
+                        idle_count = 0
                     except queue.Empty:
+                        idle_count += 1
                         yield ": keepalive\n\n"
+                        # Close after ~30s idle to free the thread
+                        if idle_count >= 15:
+                            return
             except GeneratorExit:
                 pass
             finally:
@@ -581,7 +606,7 @@ def main():
     if not args.no_browser:
         webbrowser.open(f"http://localhost:{args.port}")
 
-    app.run(host='127.0.0.1', port=args.port, debug=False)
+    app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

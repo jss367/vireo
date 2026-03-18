@@ -174,6 +174,11 @@
       var record = JSON.parse(e.data);
       addLpLine(record);
     });
+
+    // Close SSE on page unload to free server threads immediately
+    window.addEventListener('beforeunload', function() {
+      if (lpSource) { lpSource.close(); lpSource = null; }
+    });
     // Load recent
     fetch('/api/logs/recent?count=50')
       .then(function(r) { return r.json(); })
