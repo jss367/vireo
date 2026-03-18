@@ -295,25 +295,6 @@ body {
 }
 
 
-/* ---------- Sync Status ---------- */
-.sync-bar {
-  background: #16213e;
-  padding: 6px 20px;
-  border-top: 1px solid #0f3460;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 12px;
-  color: #666;
-  flex-shrink: 0;
-}
-.sync-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #4ecca3;
-}
-.sync-dot.pending { background: #f0c040; }
 
 /* ---------- Empty / Loading ---------- */
 .empty-state {
@@ -509,11 +490,6 @@ body {
   </div>
 </div>
 
-<!-- Sync Status -->
-<div class="sync-bar" id="syncBar">
-  <span class="sync-dot" id="syncDot"></span>
-  <span id="syncText">Ready</span>
-</div>
 
 <script>
 /* ---------- State ---------- */
@@ -530,11 +506,39 @@ var activeFolderId = null;
 var activeKeyword = null;
 
 /* ---------- Bootstrap ---------- */
-loadFolders();
-loadKeywords();
-loadCollections();
-loadPhotos();
-checkSyncStatus();
+bootstrapBrowse();
+
+async function bootstrapBrowse() {
+  try {
+    var resp = await fetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
+    var data = await resp.json();
+
+    // Populate everything from a single response
+    photos = data.photos || [];
+    totalPhotos = data.total || 0;
+    currentPage = 2; // next page to load
+    if (photos.length >= totalPhotos) allLoaded = true;
+
+    renderFolderTree(data.folders || []);
+    renderKeywordTree(data.keywords || []);
+    renderCollectionList(data.collections || []);
+    renderGrid();
+    updateFilterSummary();
+
+    document.getElementById('loadingState').style.display = 'none';
+  } catch(e) {
+    document.getElementById('loadingState').textContent = 'Error loading.';
+  }
+}
+
+function renderCollectionList(collections) {
+  var html = '';
+  collections.forEach(function(c) {
+    html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
+      '<span>' + escapeHtml(c.name) + '</span></div>';
+  });
+  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:#555;padding:4px 8px;">No collections</div>';
+}
 
 /* ---------- Folder Tree ---------- */
 async function loadFolders() {
@@ -657,13 +661,7 @@ async function loadCollections() {
     var resp = await fetch('/api/collections');
     if (!resp.ok) return;
     var data = await resp.json();
-    var html = '';
-    data.forEach(function(c) {
-      html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
-        '<span>' + escapeHtml(c.name) + '</span>' +
-      '</div>';
-    });
-    document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:#555;padding:4px 8px;">No collections</div>';
+    renderCollectionList(data);
   } catch(e) {}
 }
 
@@ -1064,23 +1062,6 @@ async function removeKeyword(photoId, keywordId) {
 }
 
 
-/* ---------- Sync Status ---------- */
-async function checkSyncStatus() {
-  try {
-    var resp = await fetch('/api/sync/status');
-    if (!resp.ok) return;
-    var data = await resp.json();
-    var dot = document.getElementById('syncDot');
-    var text = document.getElementById('syncText');
-    if (data.pending_count > 0) {
-      dot.classList.add('pending');
-      text.textContent = data.pending_count + ' pending changes';
-    } else {
-      dot.classList.remove('pending');
-      text.textContent = 'All synced';
-    }
-  } catch(e) {}
-}
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {

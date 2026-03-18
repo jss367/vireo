@@ -109,6 +109,30 @@ def create_app(db_path, thumb_cache_dir=None):
 
     # -- API routes --
 
+    @app.route('/api/browse/init')
+    def api_browse_init():
+        """Combined endpoint for browse page initial load — one request instead of five."""
+        db = _get_db()
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        sort = request.args.get('sort', 'date')
+
+        photos = db.get_photos(page=page, per_page=per_page, sort=sort)
+        total = db.count_photos()
+        folders = db.get_folder_tree()
+        keywords = db.get_keyword_tree()
+        collections = db.get_collections()
+
+        return jsonify({
+            'photos': [dict(p) for p in photos],
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'folders': [dict(f) for f in folders],
+            'keywords': [dict(k) for k in keywords],
+            'collections': [dict(c) for c in collections],
+        })
+
     @app.route('/api/folders')
     def api_folders():
         db = _get_db()
