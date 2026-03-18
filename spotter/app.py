@@ -779,8 +779,22 @@ def main():
 
     app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
 
+    # Open browser after server is ready, not before
     if not args.no_browser:
-        webbrowser.open(f"http://localhost:{args.port}")
+        import threading
+        import urllib.request
+
+        def _open_browser():
+            url = f"http://localhost:{args.port}"
+            for _ in range(50):  # try for up to 5 seconds
+                try:
+                    urllib.request.urlopen(url, timeout=0.1)
+                    webbrowser.open(url)
+                    return
+                except Exception:
+                    time.sleep(0.1)
+
+        threading.Thread(target=_open_browser, daemon=True).start()
 
     app.run(host='127.0.0.1', port=args.port, debug=False, threaded=True)
 
