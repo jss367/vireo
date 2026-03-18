@@ -29,38 +29,8 @@
   .setting-row:last-child { border-bottom: none; }
   .setting-label { font-size: 14px; color: #c0c0c0; flex: 1; }
   .setting-label small { display: block; font-size: 12px; color: #666; margin-top: 2px; }
-  .text-input {
-    background: #0f3460; color: #e0e0e0; border: 1px solid #1a3a6e;
-    border-radius: 4px; padding: 8px 12px; font-size: 13px; outline: none; width: 100%;
-  }
-  .text-input:focus { border-color: #4ecca3; }
-  .btn {
-    border: none; border-radius: 4px; padding: 8px 20px;
-    font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s;
-  }
-  .btn:disabled { cursor: default; }
-  .btn-primary { background: #4ecca3; color: #1a1a2e; }
-  .btn-primary:hover { background: #3db890; }
-  .btn-primary:disabled { background: #2a5a4a; color: #555; }
-  .btn-secondary { background: #0f3460; color: #c0c0c0; }
-  .btn-secondary:hover { background: #1a3a6e; }
-  .btn-danger { background: #e74c3c; color: #fff; }
-  .btn-danger:hover { background: #c0392b; }
+  .setting-value { font-size: 13px; color: #888; font-variant-numeric: tabular-nums; }
 
-  .progress-bar {
-    height: 6px; background: #0f3460; border-radius: 3px;
-    overflow: hidden; margin: 12px 0; display: none;
-  }
-  .progress-bar.active { display: block; }
-  .progress-fill {
-    height: 100%; background: #4ecca3; border-radius: 3px;
-    transition: width 0.3s; width: 0;
-  }
-  .status-msg { font-size: 13px; color: #888; margin-top: 8px; }
-  .status-msg.ok { color: #4ecca3; }
-  .status-msg.error { color: #e74c3c; }
-
-  /* Stats grid */
   .stats-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 12px; margin-bottom: 16px;
@@ -73,21 +43,6 @@
   }
   .stat-label { font-size: 11px; color: #888; margin-top: 4px; }
 
-  .scan-input-group { display: flex; gap: 8px; margin-bottom: 12px; }
-  .scan-input-group .text-input { flex: 1; }
-
-  /* Progress detail */
-  .progress-detail {
-    font-family: 'SF Mono', 'Menlo', monospace; font-size: 12px;
-    color: #888; margin-top: 6px; display: none;
-  }
-  .progress-detail.active { display: block; }
-  .progress-detail .current-file {
-    color: #c0c0c0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .progress-detail .rate { color: #4ecca3; }
-
-  /* Job history table */
   .history-table {
     width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px;
   }
@@ -109,7 +64,7 @@
 
 <div class="content">
 
-  <!-- Dashboard Stats -->
+  <!-- Dashboard -->
   <div class="section">
     <div class="section-title">Dashboard</div>
     <div class="stats-grid">
@@ -140,46 +95,6 @@
     </div>
   </div>
 
-  <!-- Scan Section -->
-  <div class="section">
-    <div class="section-title">Scan Photos</div>
-    <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
-      Enter the root path to your photos folder. The scanner will walk all subfolders,
-      read EXIF timestamps, import XMP keywords, and generate thumbnails.
-    </p>
-    <div class="scan-input-group">
-      <input type="text" class="text-input" id="scanRoot"
-             placeholder="/Volumes/Photography/Raw Files"
-             value="/Volumes/Photography/Raw Files">
-      <button class="btn btn-primary" id="scanBtn" onclick="startJob('scan')">Scan</button>
-      <button class="btn btn-secondary" id="rescanBtn" onclick="startJob('scan', true)">Incremental</button>
-    </div>
-    <div class="progress-bar" id="scanProgress">
-      <div class="progress-fill" id="scanProgressFill"></div>
-    </div>
-    <div class="progress-detail" id="scanDetail">
-      <span class="current-file" id="scanFile"></span>
-      <span class="rate" id="scanRate"></span>
-    </div>
-    <div class="status-msg" id="scanStatus"></div>
-  </div>
-
-  <!-- Thumbnails Section -->
-  <div class="section">
-    <div class="section-title">Thumbnails</div>
-    <p style="font-size: 13px; color: #888; margin-bottom: 12px;">
-      Generate local thumbnail cache for browsing when the NAS is offline.
-    </p>
-    <button class="btn btn-primary" id="thumbBtn" onclick="startJob('thumbnails')">Generate Thumbnails</button>
-    <div class="progress-bar" id="thumbProgress">
-      <div class="progress-fill" id="thumbProgressFill"></div>
-    </div>
-    <div class="progress-detail" id="thumbDetail">
-      <span class="rate" id="thumbRate"></span>
-    </div>
-    <div class="status-msg" id="thumbStatus"></div>
-  </div>
-
   <!-- Recent Jobs -->
   <div class="section">
     <div class="section-title">Recent Jobs</div>
@@ -188,29 +103,29 @@
 
   <!-- Database Info -->
   <div class="section">
-    <div class="section-title">Database</div>
+    <div class="section-title">Storage</div>
     <div class="setting-row">
       <div class="setting-label">
-        Database location
+        Database
         <small>~/.spotter/spotter.db</small>
       </div>
+      <span class="setting-value" id="dbSizeDetail">-</span>
     </div>
     <div class="setting-row">
       <div class="setting-label">
         Thumbnail cache
         <small>~/.spotter/thumbnails/</small>
       </div>
+      <span class="setting-value" id="thumbSizeDetail">-</span>
     </div>
   </div>
 
 </div>
 
 <script>
-/* ---------- Bootstrap ---------- */
 loadDashboard();
 loadHistory();
 
-/* ---------- Dashboard ---------- */
 async function loadDashboard() {
   try {
     var resp = await fetch('/api/scan/status');
@@ -222,6 +137,8 @@ async function loadDashboard() {
     document.getElementById('pendingCount').textContent = d.pending_changes.toLocaleString();
     document.getElementById('dbSize').textContent = formatBytes(d.db_size);
     document.getElementById('thumbSize').textContent = formatBytes(d.thumb_cache_size);
+    document.getElementById('dbSizeDetail').textContent = formatBytes(d.db_size);
+    document.getElementById('thumbSizeDetail').textContent = formatBytes(d.thumb_cache_size);
   } catch(e) {}
 }
 
@@ -233,7 +150,6 @@ function formatBytes(b) {
   return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
-/* ---------- Job History ---------- */
 async function loadHistory() {
   try {
     var resp = await fetch('/api/jobs/history?limit=10');
@@ -244,7 +160,7 @@ async function loadHistory() {
     }
     var html = '<table class="history-table"><thead><tr><th>Type</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
     rows.forEach(function(r) {
-      var statusClass = r.status === 'completed' ? 'status-completed' : r.status === 'failed' ? 'status-failed' : '';
+      var cls = r.status === 'completed' ? 'status-completed' : r.status === 'failed' ? 'status-failed' : '';
       var started = r.started_at ? new Date(r.started_at).toLocaleString() : '-';
       var duration = r.duration != null ? r.duration.toFixed(1) + 's' : '-';
       var result = '-';
@@ -252,137 +168,18 @@ async function loadHistory() {
         try {
           var parsed = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
           var parts = [];
-          for (var k in parsed) { parts.push(k + ': ' + parsed[k]); }
+          for (var k in parsed) parts.push(k + ': ' + parsed[k]);
           result = parts.join(', ');
         } catch(e) { result = String(r.result); }
       }
       if (r.error_count > 0) result += ' (' + r.error_count + ' errors)';
-      html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + statusClass + '">' + r.status + '</td>' +
+      html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + cls + '">' + r.status + '</td>' +
         '<td>' + started + '</td><td>' + duration + '</td><td>' + escapeHtml(result) + '</td></tr>';
     });
     html += '</tbody></table>';
     document.getElementById('historyContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('historyContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load history</span>';
-  }
-}
-
-/* ---------- Start Job ---------- */
-async function startJob(type, incremental) {
-  var url, body;
-  var progressId, fillId, detailId, statusId, fileId, rateId;
-
-  if (type === 'scan') {
-    var root = document.getElementById('scanRoot').value.trim();
-    if (!root) return;
-    url = '/api/jobs/scan';
-    body = { root: root, incremental: !!incremental };
-    progressId = 'scanProgress'; fillId = 'scanProgressFill';
-    detailId = 'scanDetail'; statusId = 'scanStatus';
-    fileId = 'scanFile'; rateId = 'scanRate';
-    document.getElementById('scanBtn').disabled = true;
-    document.getElementById('rescanBtn').disabled = true;
-  } else if (type === 'thumbnails') {
-    url = '/api/jobs/thumbnails';
-    body = {};
-    progressId = 'thumbProgress'; fillId = 'thumbProgressFill';
-    detailId = 'thumbDetail'; statusId = 'thumbStatus';
-    fileId = null; rateId = 'thumbRate';
-    document.getElementById('thumbBtn').disabled = true;
-  }
-
-  var status = document.getElementById(statusId);
-  var progress = document.getElementById(progressId);
-  var fill = document.getElementById(fillId);
-  var detail = document.getElementById(detailId);
-
-  status.textContent = 'Starting...';
-  status.className = 'status-msg';
-  progress.classList.add('active');
-  detail.classList.add('active');
-  fill.style.width = '0%';
-
-  try {
-    var resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.textContent = 'Error: ' + (err.error || 'failed to start');
-      status.className = 'status-msg error';
-      resetButtons(type);
-      return;
-    }
-    var data = await resp.json();
-    var jobId = data.job_id;
-    status.textContent = 'Running...';
-
-    // Connect to SSE stream
-    var source = new EventSource('/api/jobs/' + jobId + '/stream');
-
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.total > 0) {
-        var pct = Math.round((p.current / p.total) * 100);
-        fill.style.width = pct + '%';
-        status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString();
-      }
-      if (fileId && p.current_file) {
-        document.getElementById(fileId).textContent = p.current_file;
-      }
-      if (rateId && p.rate) {
-        document.getElementById(rateId).textContent = p.rate.toFixed(0) + '/sec';
-      }
-    });
-
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      fill.style.width = '100%';
-      if (result.status === 'completed') {
-        var parts = [];
-        if (result.result) {
-          for (var k in result.result) parts.push(k + ': ' + result.result[k]);
-        }
-        status.textContent = 'Complete! ' + parts.join(', ') +
-          (result.duration ? ' (' + result.duration + 's)' : '');
-        status.className = 'status-msg ok';
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        status.className = 'status-msg error';
-      }
-      resetButtons(type);
-      loadDashboard();
-      loadHistory();
-      setTimeout(function() {
-        progress.classList.remove('active');
-        detail.classList.remove('active');
-      }, 3000);
-    });
-
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost. Check job status in Recent Jobs.';
-      status.className = 'status-msg error';
-      resetButtons(type);
-      loadHistory();
-    };
-
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    status.className = 'status-msg error';
-    resetButtons(type);
-  }
-}
-
-function resetButtons(type) {
-  if (type === 'scan') {
-    document.getElementById('scanBtn').disabled = false;
-    document.getElementById('rescanBtn').disabled = false;
-  } else if (type === 'thumbnails') {
-    document.getElementById('thumbBtn').disabled = false;
+    document.getElementById('historyContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
   }
 }
 
