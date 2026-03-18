@@ -293,31 +293,23 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_prediction_status(pred_id, 'rejected')
         return jsonify({'ok': True})
 
+    # Cache classify config at startup (avoid re-parsing taxonomy on every request)
+    _taxonomy_path = os.path.join(os.path.dirname(__file__), 'taxonomy.json')
+    _weights_path = '/tmp/bioclip_model/open_clip_pytorch_model.bin'
+    _classify_config = {
+        'model_name': 'BioCLIP',
+        'model_str': 'ViT-B-16',
+        'weights_path': _weights_path,
+        'weights_available': os.path.exists(_weights_path),
+        'taxonomy_available': os.path.exists(_taxonomy_path),
+        'taxonomy_species_count': init_db.count_keywords(),  # fast DB count
+        'default_threshold': 0.4,
+    }
+
     @app.route('/api/classify/config')
     def api_classify_config():
-        """Return current classifier configuration."""
-        taxonomy_path = os.path.join(os.path.dirname(__file__), 'taxonomy.json')
-        has_taxonomy = os.path.exists(taxonomy_path)
-        taxonomy_count = 0
-        if has_taxonomy:
-            try:
-                import json as json_mod
-                with open(taxonomy_path) as f:
-                    tax_data = json_mod.load(f)
-                taxonomy_count = len(tax_data.get('taxa_by_common', {}))
-            except Exception:
-                pass
-
-        weights_path = '/tmp/bioclip_model/open_clip_pytorch_model.bin'
-        return jsonify({
-            'model_name': 'BioCLIP',
-            'model_str': 'ViT-B-16',
-            'weights_path': weights_path,
-            'weights_available': os.path.exists(weights_path),
-            'taxonomy_available': has_taxonomy,
-            'taxonomy_species_count': taxonomy_count,
-            'default_threshold': 0.4,
-        })
+        """Return cached classifier configuration."""
+        return jsonify(_classify_config)
 
     # -- Import API routes --
 
