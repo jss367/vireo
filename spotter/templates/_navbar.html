@@ -51,15 +51,14 @@
   50% { opacity: 0.3; }
 }
 
-/* ---------- Log Panel (slide-out) ---------- */
-.log-panel-toggle {
+/* ---------- Bottom Panel ---------- */
+.bottom-toggle {
   background: #0d1b2a;
   border-top: 1px solid #0f3460;
   padding: 4px 16px;
   display: flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
   position: fixed;
   bottom: 0;
   left: 0;
@@ -68,12 +67,19 @@
   height: 28px;
   user-select: none;
 }
-.log-panel-toggle span { font-size: 11px; color: #555; }
-.log-panel-toggle:hover span { color: #888; }
-.log-panel-toggle .toggle-arrow { font-size: 10px; color: #555; transition: transform 0.2s; }
-.log-panel-toggle.open .toggle-arrow { transform: rotate(180deg); }
+.bottom-toggle span { font-size: 11px; color: #555; }
+.bottom-toggle:hover span { color: #888; }
+.bottom-toggle .toggle-arrow {
+  font-size: 10px; color: #555; transition: transform 0.2s; cursor: pointer;
+}
+.bottom-toggle.open .toggle-arrow { transform: rotate(180deg); }
+.bottom-toggle .job-summary {
+  font-size: 11px; color: #4ecca3; margin-left: 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.bottom-toggle .job-summary.idle { color: #444; }
 
-.log-panel {
+.bottom-panel {
   position: fixed;
   bottom: 28px;
   left: 0;
@@ -87,27 +93,88 @@
   display: flex;
   flex-direction: column;
 }
-.log-panel.open { height: 220px; }
-.log-panel-toolbar {
-  padding: 4px 12px;
+.bottom-panel.open { height: 240px; }
+
+/* Tabs */
+.bp-tabs {
   display: flex;
-  gap: 8px;
-  align-items: center;
   border-bottom: 1px solid #0f3460;
   flex-shrink: 0;
 }
-.log-panel-toolbar select {
+.bp-tab {
+  padding: 5px 16px;
+  font-size: 11px;
+  color: #666;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.bp-tab:hover { color: #ccc; }
+.bp-tab.active { color: #e0e0e0; border-bottom-color: #4ecca3; }
+.bp-tab .bp-tab-badge {
+  margin-left: 5px; font-size: 10px; background: #0f3460;
+  padding: 1px 5px; border-radius: 8px; font-variant-numeric: tabular-nums;
+}
+
+/* Tab content */
+.bp-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.bp-pane { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+.bp-pane.active { display: flex; }
+
+/* Jobs tab */
+.bp-jobs-toolbar {
+  padding: 4px 12px; display: flex; gap: 8px; align-items: center;
+  flex-shrink: 0;
+}
+.bp-jobs-toolbar span { font-size: 11px; color: #444; }
+.bp-jobs-list {
+  flex: 1; overflow-y: auto; padding: 4px 12px;
+}
+.bp-job {
+  padding: 6px 0; border-bottom: 1px solid #0a1a35; font-size: 12px;
+}
+.bp-job:last-child { border-bottom: none; }
+.bp-job-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.bp-job-type { color: #c0c0c0; font-weight: 600; text-transform: capitalize; }
+.bp-job-status { font-size: 11px; }
+.bp-job-status.running { color: #4ecca3; }
+.bp-job-status.completed { color: #555; }
+.bp-job-status.failed { color: #e74c3c; }
+.bp-job-elapsed { font-size: 11px; color: #444; margin-left: auto; font-variant-numeric: tabular-nums; }
+.bp-job-progress {
+  height: 3px; background: #0f3460; border-radius: 2px; overflow: hidden; margin-bottom: 3px;
+}
+.bp-job-progress-fill {
+  height: 100%; background: #4ecca3; border-radius: 2px; transition: width 0.3s;
+}
+.bp-job-detail {
+  font-size: 11px; color: #666;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bp-job-detail .rate { color: #4ecca3; margin-left: 8px; }
+.bp-jobs-empty { font-size: 12px; color: #444; padding: 16px 0; text-align: center; }
+
+/* Logs tab */
+.bp-logs-toolbar {
+  padding: 4px 12px; display: flex; gap: 8px; align-items: center;
+  border-bottom: 1px solid #0f3460; flex-shrink: 0;
+}
+.bp-logs-toolbar select {
   background: #0f3460; color: #c0c0c0; border: 1px solid #1a3a6e;
   border-radius: 3px; padding: 2px 6px; font-size: 11px; outline: none;
 }
-.log-panel-toolbar .lp-count { font-size: 11px; color: #444; margin-left: auto; }
-.log-panel-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 4px 12px;
+.bp-logs-toolbar label {
+  font-size: 11px; color: #555; display: flex; align-items: center; gap: 3px; cursor: pointer;
+}
+.bp-logs-toolbar .lp-count { font-size: 11px; color: #444; margin-left: auto; }
+.bp-logs-content {
+  flex: 1; overflow-y: auto; padding: 4px 12px;
   font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 11px; line-height: 1.5;
 }
 .lp-line { white-space: pre-wrap; word-break: break-all; padding: 0; }
 .lp-line .lp-time { color: #444; margin-right: 6px; }
@@ -126,71 +193,215 @@
   <a href="/audit" {% if active_page == 'audit' %}class="active"{% endif %}>Audit</a>
   <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
   <span class="nav-spacer"></span>
-  <span class="nav-icon" onclick="toggleLogPanel()" title="Toggle log panel">
+  <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
     &#9638;
     <span class="activity-dot" id="navActivityDot"></span>
   </span>
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
 
-<!-- Log Panel -->
-<div class="log-panel" id="logPanel">
-  <div class="log-panel-toolbar">
-    <select id="lpLevelFilter" onchange="lpApplyFilter()">
-      <option value="DEBUG">DEBUG+</option>
-      <option value="INFO" selected>INFO+</option>
-      <option value="WARNING">WARNING+</option>
-      <option value="ERROR">ERROR+</option>
-    </select>
-    <label style="font-size:11px;color:#555;display:flex;align-items:center;gap:3px;cursor:pointer;">
-      <input type="checkbox" id="lpAutoScroll" checked style="accent-color:#4ecca3;"> Auto-scroll
-    </label>
-    <span class="lp-count" id="lpCount">0</span>
+<!-- Bottom Panel -->
+<div class="bottom-panel" id="bottomPanel">
+  <div class="bp-tabs">
+    <div class="bp-tab active" onclick="switchBpTab('jobs')">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
+    <div class="bp-tab" onclick="switchBpTab('logs')">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
   </div>
-  <div class="log-panel-content" id="lpContent"></div>
+  <div class="bp-content">
+    <!-- Jobs Pane -->
+    <div class="bp-pane active" id="bpJobs">
+      <div class="bp-jobs-list" id="bpJobsList">
+        <div class="bp-jobs-empty">No jobs running</div>
+      </div>
+    </div>
+    <!-- Logs Pane -->
+    <div class="bp-pane" id="bpLogs">
+      <div class="bp-logs-toolbar">
+        <select id="lpLevelFilter" onchange="lpApplyFilter()">
+          <option value="DEBUG">DEBUG+</option>
+          <option value="INFO" selected>INFO+</option>
+          <option value="WARNING">WARNING+</option>
+          <option value="ERROR">ERROR+</option>
+        </select>
+        <label>
+          <input type="checkbox" id="lpAutoScroll" checked style="accent-color:#4ecca3;"> Auto-scroll
+        </label>
+        <span class="lp-count" id="lpCount">0</span>
+      </div>
+      <div class="bp-logs-content" id="lpContent"></div>
+    </div>
+  </div>
 </div>
-<div class="log-panel-toggle" id="logPanelToggle" onclick="toggleLogPanel()">
-  <span class="toggle-arrow" id="lpArrow">&#9650;</span>
-  <span id="lpToggleLabel">Logs</span>
+<div class="bottom-toggle" id="bottomToggle">
+  <span class="toggle-arrow" id="bpArrow" onclick="toggleBottomPanel()">&#9650;</span>
+  <span class="job-summary idle" id="jobSummary">No active jobs</span>
 </div>
 
 <script>
-/* ---------- Log Panel ---------- */
+/* ---------- Bottom Panel ---------- */
 (function() {
   var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
   var lpLines = [];
   var lpSource = null;
   var lpMaxLines = 200;
+  var activeJobs = [];
+  var currentBpTab = 'jobs';
 
-  function initLogPanel() {
-    // Restore panel open/closed state from localStorage
-    if (localStorage.getItem('spotter_log_panel_open') === 'true') {
-      document.getElementById('logPanel').classList.add('open');
-      document.getElementById('logPanelToggle').classList.add('open');
+  function init() {
+    // Restore panel state
+    if (localStorage.getItem('spotter_panel_open') === 'true') {
+      document.getElementById('bottomPanel').classList.add('open');
+      document.getElementById('bottomToggle').classList.add('open');
     }
+    var savedTab = localStorage.getItem('spotter_panel_tab') || 'jobs';
+    switchBpTab(savedTab);
 
+    // SSE for logs
     lpSource = new EventSource('/api/logs/stream');
     lpSource.addEventListener('log', function(e) {
-      var record = JSON.parse(e.data);
-      addLpLine(record);
+      addLpLine(JSON.parse(e.data));
     });
-
-    // Close SSE on page unload to free server threads immediately
     window.addEventListener('beforeunload', function() {
       if (lpSource) { lpSource.close(); lpSource = null; }
     });
-    // Load recent
+
+    // Load recent logs
     fetch('/api/logs/recent?count=50')
       .then(function(r) { return r.json(); })
       .then(function(logs) {
         logs.forEach(function(l) { addLpLine(l, true); });
         lpApplyFilter();
       });
-    // Poll for active jobs to show activity dot
-    checkActivity();
-    setInterval(checkActivity, 3000);
+
+    // Poll jobs
+    pollJobs();
+    setInterval(pollJobs, 2000);
   }
 
+  /* ---------- Tab switching ---------- */
+  window.switchBpTab = function(tab) {
+    currentBpTab = tab;
+    document.querySelectorAll('.bp-tab').forEach(function(t, i) {
+      t.classList.toggle('active', ['jobs', 'logs'][i] === tab);
+    });
+    document.querySelectorAll('.bp-pane').forEach(function(p) {
+      p.classList.toggle('active', p.id === (tab === 'jobs' ? 'bpJobs' : 'bpLogs'));
+    });
+    localStorage.setItem('spotter_panel_tab', tab);
+  };
+
+  window.toggleBottomPanel = function() {
+    var panel = document.getElementById('bottomPanel');
+    var toggle = document.getElementById('bottomToggle');
+    panel.classList.toggle('open');
+    toggle.classList.toggle('open');
+    localStorage.setItem('spotter_panel_open', panel.classList.contains('open'));
+  };
+
+  /* ---------- Jobs polling ---------- */
+  function pollJobs() {
+    fetch('/api/jobs')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        activeJobs = data.active || [];
+        renderJobs();
+        updateSummary();
+        updateActivityDot();
+      })
+      .catch(function() {});
+  }
+
+  function renderJobs() {
+    var container = document.getElementById('bpJobsList');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var recent = activeJobs.filter(function(j) { return j.status !== 'running'; }).slice(0, 5);
+    var all = running.concat(recent);
+
+    document.getElementById('jobsBadge').textContent = running.length;
+
+    if (all.length === 0) {
+      container.innerHTML = '<div class="bp-jobs-empty">No jobs running</div>';
+      return;
+    }
+
+    var html = '';
+    all.forEach(function(j) {
+      var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
+      var statusClass = j.status;
+      var elapsed = '';
+      if (j.started_at) {
+        var secs = (Date.now() - new Date(j.started_at).getTime()) / 1000;
+        if (j.finished_at) secs = (new Date(j.finished_at).getTime() - new Date(j.started_at).getTime()) / 1000;
+        elapsed = formatElapsed(secs);
+      }
+
+      html += '<div class="bp-job">';
+      html += '<div class="bp-job-header">';
+      html += '<span class="bp-job-type">' + bpEscape(j.type) + '</span>';
+      html += '<span class="bp-job-status ' + statusClass + '">' + j.status + '</span>';
+      html += '<span class="bp-job-elapsed">' + elapsed + '</span>';
+      html += '</div>';
+
+      if (j.status === 'running') {
+        html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
+        var detail = '';
+        if (j.progress && j.progress.current > 0) {
+          detail = j.progress.current.toLocaleString();
+          if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
+        }
+        if (j.progress && j.progress.current_file) {
+          detail += ' ' + bpEscape(j.progress.current_file);
+        }
+        html += '<div class="bp-job-detail">' + detail + '</div>';
+      } else if (j.status === 'completed' && j.result) {
+        var parts = [];
+        for (var k in j.result) parts.push(k + ': ' + j.result[k]);
+        html += '<div class="bp-job-detail">' + bpEscape(parts.join(', ')) + '</div>';
+      } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
+        html += '<div class="bp-job-detail" style="color:#e74c3c;">' + bpEscape(j.errors[0]) + '</div>';
+      }
+
+      html += '</div>';
+    });
+    container.innerHTML = html;
+  }
+
+  function updateSummary() {
+    var summary = document.getElementById('jobSummary');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+
+    if (running.length === 0) {
+      summary.textContent = 'No active jobs';
+      summary.classList.add('idle');
+      summary.classList.remove('active');
+      return;
+    }
+
+    summary.classList.remove('idle');
+    var j = running[0];
+    var text = j.type;
+    if (j.progress && j.progress.total > 0) {
+      var pct = Math.round((j.progress.current / j.progress.total) * 100);
+      text += ' ' + j.progress.current.toLocaleString() + ' / ' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+    }
+    if (running.length > 1) {
+      text += ' + ' + (running.length - 1) + ' more';
+    }
+    summary.textContent = text;
+  }
+
+  function updateActivityDot() {
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var dot = document.getElementById('navActivityDot');
+    if (dot) dot.classList.toggle('active', running.length > 0);
+  }
+
+  function formatElapsed(secs) {
+    if (secs < 60) return Math.round(secs) + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.round(secs % 60) + 's';
+    return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  }
+
+  /* ---------- Log lines ---------- */
   window.addLpLine = function(record, bulk) {
     if (lpLines.length >= lpMaxLines) {
       lpLines.shift();
@@ -206,7 +417,7 @@
     div.dataset.level = record.level;
     div.innerHTML = '<span class="lp-time">' + timeStr + '</span>' +
       '<span class="lp-level">' + record.level + '</span>' +
-      lpEscape(record.message || '');
+      bpEscape(record.message || '');
     container.appendChild(div);
     if (!bulk) {
       var autoScroll = document.getElementById('lpAutoScroll');
@@ -216,14 +427,7 @@
       lpApplyFilter();
     }
     document.getElementById('lpCount').textContent = lpLines.length;
-  };
-
-  window.toggleLogPanel = function() {
-    var panel = document.getElementById('logPanel');
-    var toggle = document.getElementById('logPanelToggle');
-    panel.classList.toggle('open');
-    toggle.classList.toggle('open');
-    localStorage.setItem('spotter_log_panel_open', panel.classList.contains('open'));
+    document.getElementById('logsBadge').textContent = lpLines.length;
   };
 
   window.lpApplyFilter = function() {
@@ -235,24 +439,7 @@
     });
   };
 
-  window.checkActivity = function() {
-    fetch('/api/jobs')
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var running = (data.active || []).filter(function(j) { return j.status === 'running'; });
-        var dot = document.getElementById('navActivityDot');
-        if (dot) {
-          dot.classList.toggle('active', running.length > 0);
-        }
-        var label = document.getElementById('lpToggleLabel');
-        if (label) {
-          label.textContent = running.length > 0 ? 'Logs (' + running.length + ' running)' : 'Logs';
-        }
-      })
-      .catch(function() {});
-  };
-
-  function lpEscape(str) {
+  function bpEscape(str) {
     if (str == null) return '';
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(String(str)));
@@ -260,9 +447,9 @@
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initLogPanel);
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    initLogPanel();
+    init();
   }
 })();
 </script>
