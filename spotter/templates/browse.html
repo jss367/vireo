@@ -4,9 +4,962 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Spotter - Browse</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- Nav Bar ---------- */
+.navbar {
+  background: #16213e;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid #0f3460;
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  height: 48px;
+  flex-shrink: 0;
+}
+.navbar .brand { font-size: 16px; font-weight: 700; color: #4ecca3; margin-right: 32px; text-decoration: none; }
+.navbar a {
+  color: #a0a0a0;
+  text-decoration: none;
+  padding: 13px 14px;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.navbar a:hover { color: #fff; }
+.navbar a.active { color: #fff; border-bottom-color: #4ecca3; }
+
+/* ---------- Layout ---------- */
+.main-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  width: 260px;
+  min-width: 260px;
+  background: #16213e;
+  border-right: 1px solid #0f3460;
+  overflow-y: auto;
+  padding: 12px 0;
+  flex-shrink: 0;
+}
+.sidebar-section { padding: 0 14px; margin-bottom: 16px; }
+.sidebar-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #666;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #0f3460;
+}
+.tree-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: #c0c0c0;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s;
+  user-select: none;
+}
+.tree-item:hover { background: #0f3460; }
+.tree-item.active { background: #0f3460; color: #4ecca3; }
+.tree-item .count {
+  margin-left: auto;
+  font-size: 11px;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+.tree-indent { width: 16px; flex-shrink: 0; }
+.tree-toggle {
+  width: 16px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #555;
+  cursor: pointer;
+  text-align: center;
+}
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+
+/* ---------- Content Area ---------- */
+.content-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- Filter Bar ---------- */
+.filter-bar {
+  background: #1a1a2e;
+  padding: 10px 20px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.filter-bar input[type=text], .filter-bar input[type=date] {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.filter-bar input:focus { border-color: #4ecca3; }
+.filter-bar select {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+.filter-bar label { font-size: 12px; color: #888; }
+
+/* Rating filter */
+.rating-filter { display: flex; align-items: center; gap: 2px; }
+.rating-star {
+  font-size: 18px;
+  cursor: pointer;
+  color: #333;
+  transition: color 0.1s;
+  user-select: none;
+}
+.rating-star.active { color: #f0c040; }
+.rating-star:hover { color: #f0c040; }
+
+.filter-summary { font-size: 12px; color: #666; margin-left: auto; }
+
+/* ---------- Photo Grid ---------- */
+.grid-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.grid-card {
+  background: #16213e;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #0f3460;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.15s;
+}
+.grid-card:hover { transform: translateY(-1px); border-color: #4ecca3; }
+.grid-card.selected { border-color: #4ecca3; box-shadow: 0 0 0 1px #4ecca3; }
+.grid-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+  background: #0f3460;
+}
+.grid-card-info {
+  padding: 8px 10px;
+}
+.grid-card-name {
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grid-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.grid-card-rating { font-size: 12px; color: #f0c040; }
+.grid-card-flag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.flag-flagged { background: #4ecca3; color: #1a1a2e; }
+.flag-rejected { background: #e74c3c; color: #fff; }
+
+/* ---------- Detail Panel ---------- */
+.detail-panel {
+  width: 340px;
+  min-width: 340px;
+  background: #16213e;
+  border-left: 1px solid #0f3460;
+  overflow-y: auto;
+  padding: 16px;
+  display: none;
+  flex-shrink: 0;
+}
+.detail-panel.open { display: block; }
+.detail-close {
+  float: right;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.detail-close:hover { color: #fff; }
+.detail-preview {
+  width: 100%;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.detail-filename {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.detail-section {
+  margin-bottom: 14px;
+}
+.detail-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #666;
+  margin-bottom: 6px;
+}
+.detail-rating {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.detail-star {
+  font-size: 22px;
+  cursor: pointer;
+  color: #333;
+  transition: color 0.1s;
+  user-select: none;
+}
+.detail-star.active { color: #f0c040; }
+.detail-star:hover { color: #f0c040; }
+.detail-flags { display: flex; gap: 6px; margin-bottom: 8px; }
+.detail-flag-btn {
+  padding: 5px 14px;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  background: #0f3460;
+  color: #c0c0c0;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.detail-flag-btn:hover { border-color: #4ecca3; }
+.detail-flag-btn.active-flag { background: #4ecca3; color: #1a1a2e; border-color: #4ecca3; }
+.detail-flag-btn.active-reject { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+.keyword-tag {
+  display: inline-block;
+  background: #0f3460;
+  color: #c0c0c0;
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  margin: 2px;
+}
+.keyword-tag .remove-kw {
+  margin-left: 4px;
+  color: #666;
+  cursor: pointer;
+  font-weight: bold;
+}
+.keyword-tag .remove-kw:hover { color: #e74c3c; }
+.add-kw-input {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 100%;
+  margin-top: 6px;
+  outline: none;
+}
+.add-kw-input:focus { border-color: #4ecca3; }
+.detail-exif {
+  font-size: 12px;
+  color: #999;
+  line-height: 1.6;
+}
+.detail-path {
+  font-size: 11px;
+  color: #555;
+  word-break: break-all;
+  margin-top: 6px;
+}
+.btn-darktable {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  background: #0f3460;
+  color: #7ec8e3;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  margin-top: 12px;
+  transition: background 0.15s;
+}
+.btn-darktable:hover { background: #1a3a6e; }
+
+/* ---------- Sync Status ---------- */
+.sync-bar {
+  background: #16213e;
+  padding: 6px 20px;
+  border-top: 1px solid #0f3460;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: #666;
+  flex-shrink: 0;
+}
+.sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ecca3;
+}
+.sync-dot.pending { background: #f0c040; }
+
+/* ---------- Empty / Loading ---------- */
+.empty-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: #555;
+  font-size: 15px;
+}
+.loading-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: #555;
+  font-size: 15px;
+}
+
+/* Sentinel for infinite scroll */
+.scroll-sentinel { height: 1px; }
+</style>
 </head>
 <body>
-<h1>Browse</h1>
-<!-- Full UI implemented in Task 6 -->
+
+<!-- Nav Bar -->
+<nav class="navbar">
+  <a class="brand" href="/browse">Spotter</a>
+  <a href="/browse" class="active">Browse</a>
+  <a href="/classify">Classify</a>
+  <a href="/import">Import</a>
+  <a href="/audit">Audit</a>
+  <a href="/settings">Settings</a>
+</nav>
+
+<div class="main-layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">Folders</div>
+      <div id="folderTree"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Keywords</div>
+      <div id="keywordTree"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Collections</div>
+      <div id="collectionList"></div>
+    </div>
+  </aside>
+
+  <!-- Content -->
+  <div class="content-area">
+
+    <!-- Filter Bar -->
+    <div class="filter-bar">
+      <input type="text" id="searchInput" placeholder="Search keywords..." onkeydown="if(event.key==='Enter')applyFilters()">
+      <label>From</label>
+      <input type="date" id="dateFrom" onchange="applyFilters()">
+      <label>To</label>
+      <input type="date" id="dateTo" onchange="applyFilters()">
+      <div class="rating-filter">
+        <label>Min:</label>
+        <span class="rating-star" data-val="1" onclick="setFilterRating(1)">&#9733;</span>
+        <span class="rating-star" data-val="2" onclick="setFilterRating(2)">&#9733;</span>
+        <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
+        <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
+        <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
+      </div>
+      <select id="sortSelect" onchange="applyFilters()">
+        <option value="date">Date (oldest)</option>
+        <option value="date_desc">Date (newest)</option>
+        <option value="name">Name (A-Z)</option>
+        <option value="name_desc">Name (Z-A)</option>
+        <option value="rating">Rating (highest)</option>
+      </select>
+      <span class="filter-summary" id="filterSummary"></span>
+    </div>
+
+    <!-- Grid -->
+    <div class="grid-container" id="gridContainer">
+      <div class="grid" id="grid"></div>
+      <div class="scroll-sentinel" id="scrollSentinel"></div>
+      <div class="empty-state" id="emptyState" style="display:none;">No photos found.</div>
+      <div class="loading-state" id="loadingState">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Detail Panel -->
+  <div class="detail-panel" id="detailPanel">
+    <button class="detail-close" onclick="closeDetail()">&times;</button>
+    <img class="detail-preview" id="detailImg" src="" alt="">
+    <div class="detail-filename" id="detailFilename"></div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Rating</div>
+      <div class="detail-rating" id="detailRating"></div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Flag</div>
+      <div class="detail-flags" id="detailFlags">
+        <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
+        <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
+        <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Keywords</div>
+      <div id="detailKeywords"></div>
+      <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Info</div>
+      <div class="detail-exif" id="detailExif"></div>
+      <div class="detail-path" id="detailPath"></div>
+    </div>
+
+    <button class="btn-darktable" onclick="openInDarktable()">Open in darktable</button>
+  </div>
+</div>
+
+<!-- Sync Status -->
+<div class="sync-bar" id="syncBar">
+  <span class="sync-dot" id="syncDot"></span>
+  <span id="syncText">Ready</span>
+</div>
+
+<script>
+/* ---------- State ---------- */
+var photos = [];
+var totalPhotos = 0;
+var currentPage = 1;
+var perPage = 50;
+var loading = false;
+var allLoaded = false;
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var filterRating = 0;
+var activeFolderId = null;
+var activeKeyword = null;
+
+/* ---------- Bootstrap ---------- */
+loadFolders();
+loadKeywords();
+loadCollections();
+loadPhotos();
+checkSyncStatus();
+
+/* ---------- Folder Tree ---------- */
+async function loadFolders() {
+  try {
+    var resp = await fetch('/api/folders');
+    var data = await resp.json();
+    renderFolderTree(data);
+  } catch(e) {}
+}
+
+function renderFolderTree(folders) {
+  var byParent = {};
+  folders.forEach(function(f) {
+    var pid = f.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(f);
+  });
+
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(f) {
+      var hasChildren = byParent[f.id] && byParent[f.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeFolderId === f.id ? ' active' : '';
+      html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '">' +
+        indent + toggle +
+        '<span>' + escapeHtml(f.name) + '</span>' +
+        '<span class="count">' + f.photo_count + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(f.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  document.getElementById('folderTree').innerHTML = buildTree('root', 0);
+}
+
+function toggleTree(e, el) {
+  e.stopPropagation();
+  var next = el.closest('.tree-item').nextElementSibling;
+  if (next && next.classList.contains('tree-children')) {
+    next.classList.toggle('open');
+    el.innerHTML = next.classList.contains('open') ? '&#9660;' : '&#9654;';
+  }
+}
+
+function filterByFolder(folderId) {
+  if (activeFolderId === folderId) {
+    activeFolderId = null;
+  } else {
+    activeFolderId = folderId;
+  }
+  activeKeyword = null;
+  resetAndLoad();
+  // Update active state
+  document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+  });
+}
+
+/* ---------- Keyword Tree ---------- */
+async function loadKeywords() {
+  try {
+    var resp = await fetch('/api/keywords');
+    var data = await resp.json();
+    renderKeywordTree(data);
+  } catch(e) {}
+}
+
+function renderKeywordTree(keywords) {
+  var byParent = {};
+  keywords.forEach(function(k) {
+    var pid = k.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(k);
+  });
+
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(k) {
+      var hasChildren = byParent[k.id] && byParent[k.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeKeyword === k.name ? ' active' : '';
+      html += '<div class="tree-item' + activeClass + '" onclick="filterByKeyword(\'' + escapeAttr(k.name) + '\')">' +
+        indent + toggle +
+        '<span>' + escapeHtml(k.name) + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(k.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  document.getElementById('keywordTree').innerHTML = buildTree('root', 0);
+}
+
+function filterByKeyword(name) {
+  if (activeKeyword === name) {
+    activeKeyword = null;
+  } else {
+    activeKeyword = name;
+  }
+  activeFolderId = null;
+  document.getElementById('searchInput').value = activeKeyword || '';
+  resetAndLoad();
+}
+
+/* ---------- Collections ---------- */
+async function loadCollections() {
+  try {
+    var resp = await fetch('/api/collections');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    var html = '';
+    data.forEach(function(c) {
+      html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
+        '<span>' + escapeHtml(c.name) + '</span>' +
+      '</div>';
+    });
+    document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:#555;padding:4px 8px;">No collections</div>';
+  } catch(e) {}
+}
+
+function filterByCollection(id) {
+  // TODO: load collection photos via /api/collections/<id>/photos
+}
+
+/* ---------- Photo Loading ---------- */
+function resetAndLoad() {
+  photos = [];
+  currentPage = 1;
+  allLoaded = false;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+  document.getElementById('grid').innerHTML = '';
+  loadPhotos();
+}
+
+async function loadPhotos() {
+  if (loading || allLoaded) return;
+  loading = true;
+  document.getElementById('loadingState').style.display = 'block';
+
+  var params = new URLSearchParams();
+  params.set('page', currentPage);
+  params.set('per_page', perPage);
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+
+  try {
+    var resp = await fetch('/api/photos?' + params.toString());
+    var data = await resp.json();
+    totalPhotos = data.total;
+
+    if (data.photos.length === 0) {
+      allLoaded = true;
+    } else {
+      photos = photos.concat(data.photos);
+      currentPage++;
+      if (photos.length >= totalPhotos) allLoaded = true;
+    }
+
+    renderGrid();
+    updateFilterSummary();
+  } catch(e) {
+    document.getElementById('loadingState').textContent = 'Error loading photos.';
+  }
+
+  loading = false;
+  document.getElementById('loadingState').style.display = 'none';
+}
+
+function applyFilters() {
+  resetAndLoad();
+}
+
+function setFilterRating(val) {
+  if (filterRating === val) {
+    filterRating = 0;
+  } else {
+    filterRating = val;
+  }
+  document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
+  });
+  resetAndLoad();
+}
+
+function updateFilterSummary() {
+  document.getElementById('filterSummary').textContent = totalPhotos + ' photos';
+}
+
+/* ---------- Grid Rendering ---------- */
+function renderGrid() {
+  var grid = document.getElementById('grid');
+  var empty = document.getElementById('emptyState');
+
+  if (photos.length === 0) {
+    grid.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  var html = '';
+  photos.forEach(function(p, idx) {
+    var selectedClass = p.id === selectedPhotoId ? ' selected' : '';
+    var stars = '';
+    if (p.rating > 0) {
+      for (var i = 0; i < p.rating; i++) stars += '&#9733;';
+    }
+    var flagHtml = '';
+    if (p.flag === 'flagged') flagHtml = '<span class="grid-card-flag flag-flagged">P</span>';
+    else if (p.flag === 'rejected') flagHtml = '<span class="grid-card-flag flag-rejected">X</span>';
+
+    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(' + p.id + ',' + idx + ')">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+      '<div class="grid-card-info">' +
+        '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
+        '<div class="grid-card-meta">' +
+          (stars ? '<span class="grid-card-rating">' + stars + '</span>' : '') +
+          flagHtml +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  });
+  grid.innerHTML = html;
+}
+
+/* ---------- Infinite Scroll ---------- */
+var observer = new IntersectionObserver(function(entries) {
+  if (entries[0].isIntersecting) loadPhotos();
+}, { rootMargin: '200px' });
+observer.observe(document.getElementById('scrollSentinel'));
+
+/* ---------- Photo Selection & Detail ---------- */
+function selectPhoto(id, idx) {
+  selectedPhotoId = id;
+  selectedIndex = idx;
+
+  // Highlight in grid
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    el.classList.toggle('selected', parseInt(el.dataset.id) === id);
+  });
+
+  loadDetail(id);
+}
+
+async function loadDetail(id) {
+  var panel = document.getElementById('detailPanel');
+  panel.classList.add('open');
+
+  try {
+    var resp = await fetch('/api/photos/' + id);
+    var photo = await resp.json();
+    renderDetail(photo);
+  } catch(e) {}
+}
+
+function renderDetail(photo) {
+  document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailFilename').textContent = photo.filename;
+
+  // Rating stars
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    var cls = i <= photo.rating ? 'detail-star active' : 'detail-star';
+    ratingHtml += '<span class="' + cls + '" onclick="setRating(' + photo.id + ',' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+
+  // Flags
+  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+    btn.className = 'detail-flag-btn';
+  });
+  var flagBtns = document.querySelectorAll('.detail-flag-btn');
+  if (photo.flag === 'flagged') flagBtns[1].classList.add('active-flag');
+  else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
+
+  // Keywords
+  var kwHtml = '';
+  (photo.keywords || []).forEach(function(k) {
+    kwHtml += '<span class="keyword-tag">' + escapeHtml(k.name) +
+      '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
+  });
+  document.getElementById('detailKeywords').innerHTML = kwHtml;
+
+  // EXIF info
+  var exif = '';
+  if (photo.timestamp) exif += 'Date: ' + photo.timestamp + '<br>';
+  if (photo.width && photo.height) exif += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
+  if (photo.file_size) exif += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
+  document.getElementById('detailExif').innerHTML = exif;
+
+  // Path
+  document.getElementById('detailPath').textContent = photo.filename;
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+}
+
+/* ---------- Edit Actions ---------- */
+async function setRating(photoId, rating) {
+  try {
+    await fetch('/api/photos/' + photoId + '/rating', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: rating }),
+    });
+    // Update local state
+    var p = photos.find(function(x) { return x.id === photoId; });
+    if (p) p.rating = rating;
+    renderGrid();
+    loadDetail(photoId);
+  } catch(e) {}
+}
+
+async function setFlag(flag) {
+  if (!selectedPhotoId) return;
+  try {
+    await fetch('/api/photos/' + selectedPhotoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: flag }),
+    });
+    var p = photos.find(function(x) { return x.id === selectedPhotoId; });
+    if (p) p.flag = flag;
+    renderGrid();
+    loadDetail(selectedPhotoId);
+  } catch(e) {}
+}
+
+async function addKeyword() {
+  if (!selectedPhotoId) return;
+  var input = document.getElementById('addKeywordInput');
+  var name = input.value.trim();
+  if (!name) return;
+  try {
+    await fetch('/api/photos/' + selectedPhotoId + '/keywords', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    input.value = '';
+    loadDetail(selectedPhotoId);
+    loadKeywords();
+  } catch(e) {}
+}
+
+async function removeKeyword(photoId, keywordId) {
+  try {
+    await fetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
+      method: 'DELETE',
+    });
+    loadDetail(photoId);
+  } catch(e) {}
+}
+
+function openInDarktable() {
+  // Note: this would need a backend route to shell out; placeholder for now
+}
+
+/* ---------- Sync Status ---------- */
+async function checkSyncStatus() {
+  try {
+    var resp = await fetch('/api/sync/status');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    var dot = document.getElementById('syncDot');
+    var text = document.getElementById('syncText');
+    if (data.pending_count > 0) {
+      dot.classList.add('pending');
+      text.textContent = data.pending_count + ' pending changes';
+    } else {
+      dot.classList.remove('pending');
+      text.textContent = 'All synced';
+    }
+  } catch(e) {}
+}
+
+/* ---------- Keyboard Shortcuts ---------- */
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  if (e.key === 'Escape') {
+    closeDetail();
+    return;
+  }
+
+  // Arrow keys: navigate grid
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (selectedIndex < photos.length - 1) {
+      selectPhoto(photos[selectedIndex + 1].id, selectedIndex + 1);
+      scrollToCard(selectedIndex);
+    }
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (selectedIndex > 0) {
+      selectPhoto(photos[selectedIndex - 1].id, selectedIndex - 1);
+      scrollToCard(selectedIndex);
+    }
+  }
+
+  // Rating: 0-5
+  if (selectedPhotoId && e.key >= '0' && e.key <= '5') {
+    setRating(selectedPhotoId, parseInt(e.key));
+  }
+
+  // P = flag, X = reject, U = unflag
+  if (selectedPhotoId) {
+    if (e.key === 'p' || e.key === 'P') setFlag('flagged');
+    else if (e.key === 'x' || e.key === 'X') setFlag('rejected');
+    else if (e.key === 'u' || e.key === 'U') setFlag('none');
+  }
+});
+
+function scrollToCard(idx) {
+  var cards = document.querySelectorAll('.grid-card');
+  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/* ---------- Utilities ---------- */
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
 </body>
 </html>
