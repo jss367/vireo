@@ -138,7 +138,7 @@ body {
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size, 220px), 1fr));
   gap: 12px;
 }
 .grid-card {
@@ -448,6 +448,11 @@ body {
         <option value="name_desc">Name (Z-A)</option>
         <option value="rating">Rating (highest)</option>
       </select>
+      <label style="display:flex;align-items:center;gap:4px;">
+        <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
+               style="width:80px;accent-color:#4ecca3;"
+               oninput="updateThumbSize(this.value)">
+      </label>
       <span class="filter-summary" id="filterSummary"></span>
     </div>
 
@@ -847,6 +852,10 @@ function setFilterRating(val) {
 
 function updateFilterSummary() {
   updateScrollPosition();
+}
+
+function updateThumbSize(val) {
+  document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
 }
 
 function updateScrollPosition() {
