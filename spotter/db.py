@@ -332,10 +332,6 @@ class Database:
                 elif op == 'equals':
                     conditions.append("k.name = ?")
                     params.append(value)
-            elif field == 'timestamp':
-                if op == 'between' and isinstance(value, list) and len(value) == 2:
-                    conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
-                    params.extend(value)
             elif field == 'folder':
                 if op == 'under':
                     conditions.append("f.path LIKE ?")
@@ -344,6 +340,22 @@ class Database:
                 if op == 'equals':
                     conditions.append("p.flag = ?")
                     params.append(value)
+            elif field == 'keyword_count':
+                if op == 'equals':
+                    conditions.append("""(SELECT COUNT(*) FROM photo_keywords pk2
+                                         WHERE pk2.photo_id = p.id) = ?""")
+                    params.append(value)
+                elif op == '>=':
+                    conditions.append("""(SELECT COUNT(*) FROM photo_keywords pk2
+                                         WHERE pk2.photo_id = p.id) >= ?""")
+                    params.append(value)
+            elif field == 'timestamp':
+                if op == 'between' and isinstance(value, list) and len(value) == 2:
+                    conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
+                    params.extend(value)
+                elif op == 'recent_days':
+                    conditions.append("p.timestamp >= datetime('now', ?)")
+                    params.append(f"-{value} days")
             elif field == 'extension':
                 if op == 'equals':
                     conditions.append("p.extension = ?")
@@ -382,3 +394,17 @@ class Database:
             )
         """)
         self.conn.commit()
+
+    def create_default_collections(self):
+        """Create default smart collections if none exist."""
+        existing = self.get_collections()
+        if existing:
+            return
+
+        defaults = [
+            ('Untagged', [{"field": "keyword_count", "op": "equals", "value": 0}]),
+            ('Flagged', [{"field": "flag", "op": "equals", "value": "flagged"}]),
+            ('Recent Import', [{"field": "timestamp", "op": "recent_days", "value": 30}]),
+        ]
+        for name, rules in defaults:
+            self.add_collection(name, json.dumps(rules))

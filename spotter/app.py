@@ -56,8 +56,9 @@ def create_app(db_path, thumb_cache_dir=None):
             app._db = Database(db_path)
         return app._db
 
-    # Initialize job runner and log broadcaster
+    # Initialize job runner, log broadcaster, and default collections
     init_db = Database(db_path)
+    init_db.create_default_collections()
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()

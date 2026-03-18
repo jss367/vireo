@@ -307,3 +307,70 @@ def test_collection_photos_keyword_rule(tmp_path):
     photos = db.get_collection_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'hawk.jpg'
+
+
+def test_collection_untagged_rule(tmp_path):
+    """get_collection_photos filters by keyword_count equals 0."""
+    from db import Database
+    import json
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    kid = db.add_keyword('Bird')
+    db.tag_photo(p1, kid)
+
+    rules = [{"field": "keyword_count", "op": "equals", "value": 0}]
+    cid = db.add_collection('Untagged', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert len(photos) == 1
+    assert photos[0]['filename'] == 'untagged.jpg'
+
+
+def test_collection_recent_days_rule(tmp_path):
+    """get_collection_photos filters by timestamp recent_days."""
+    from db import Database
+    from datetime import datetime, timedelta
+    import json
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+
+    recent_ts = (datetime.now() - timedelta(days=5)).isoformat()
+    old_ts = (datetime.now() - timedelta(days=60)).isoformat()
+
+    db.add_photo(folder_id=fid, filename='recent.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp=recent_ts)
+    db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp=old_ts)
+
+    rules = [{"field": "timestamp", "op": "recent_days", "value": 30}]
+    cid = db.add_collection('Recent', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert len(photos) == 1
+    assert photos[0]['filename'] == 'recent.jpg'
+
+
+def test_default_collections_created(tmp_path):
+    """create_default_collections creates Untagged, Flagged, Recent Import."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.create_default_collections()
+
+    colls = db.get_collections()
+    names = {c['name'] for c in colls}
+    assert 'Untagged' in names
+    assert 'Flagged' in names
+    assert 'Recent Import' in names
+
+
+def test_default_collections_idempotent(tmp_path):
+    """create_default_collections doesn't duplicate if called twice."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.create_default_collections()
+    db.create_default_collections()
+
+    colls = db.get_collections()
+    assert len(colls) == 3
