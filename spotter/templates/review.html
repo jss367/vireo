@@ -368,7 +368,7 @@
 </div>
 
 <!-- Classify Config Panel -->
-<div class="settings-panel" id="classifyConfig" style="display:none;">
+<div class="settings-panel" id="classifyConfig">
   <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; width:100%;">
     <div style="flex:1; min-width:200px;">
       <div style="font-size:11px; color:#666; text-transform:uppercase; margin-bottom:6px;">Model</div>
@@ -627,11 +627,11 @@ function renderButtons() {
   var kbdHint = document.getElementById('kbdHint');
 
   if (currentCollectionId && mode === 'browse') {
-    configPanel.style.display = '';
+    configPanel.classList.add('open');
     acceptAllBtn.style.display = 'none';
     kbdHint.style.display = 'none';
   } else if (mode === 'review') {
-    configPanel.style.display = '';
+    configPanel.classList.add('open');
     var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
     if (pending > 0) {
       acceptAllBtn.style.display = '';
@@ -642,7 +642,7 @@ function renderButtons() {
       kbdHint.style.display = 'none';
     }
   } else {
-    configPanel.style.display = 'none';
+    configPanel.classList.remove('open');
     acceptAllBtn.style.display = 'none';
     kbdHint.style.display = 'none';
   }
