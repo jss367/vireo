@@ -582,14 +582,17 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db = Database(db_path)
             job['_start_time'] = time.time()
 
-            # Load taxonomy for categorization and label fallback
+            # Phase 1: Load taxonomy
+            runner.push_event(job['id'], 'progress', {
+                'current': 0, 'total': 0, 'current_file': 'Loading taxonomy...', 'rate': 0,
+            })
             taxonomy_path = os.path.join(os.path.dirname(__file__), 'taxonomy.json')
             tax = None
             if os.path.exists(taxonomy_path):
                 from taxonomy import Taxonomy
                 tax = Taxonomy(taxonomy_path)
 
-            # Load labels — use provided file, or fall back to taxonomy species names
+            # Phase 2: Load labels
             labels = None
             if labels_file and os.path.exists(labels_file):
                 with open(labels_file) as f:
@@ -598,7 +601,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 labels = list(tax._by_common.keys())[:1000]
                 log.info("Using %d taxonomy species as classifier labels", len(labels))
 
-            # Get photos from collection
+            # Phase 3: Get photos from collection
+            runner.push_event(job['id'], 'progress', {
+                'current': 0, 'total': 0, 'current_file': 'Loading collection photos...', 'rate': 0,
+            })
             photos = thread_db.get_collection_photos(collection_id, per_page=999999)
             folders = {f['id']: f['path'] for f in thread_db.get_folder_tree()}
             total = len(photos)
@@ -606,7 +612,12 @@ def create_app(db_path, thumb_cache_dir=None):
 
             log.info("Classifying %d photos with model '%s'", total, model_name)
 
-            # Initialize classifier
+            # Phase 4: Initialize classifier (this is the slow part ~30s)
+            runner.push_event(job['id'], 'progress', {
+                'current': 0, 'total': total,
+                'current_file': 'Loading BioCLIP model and computing label embeddings...',
+                'rate': 0,
+            })
             clf = Classifier(labels=labels)
             classified = 0
             failed = 0

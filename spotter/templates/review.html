@@ -542,8 +542,10 @@ async function runClassification() {
     var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
     source.addEventListener('progress', function(e) {
       var p = JSON.parse(e.data);
-      if (p.total > 0) {
+      if (p.total > 0 && p.current > 0) {
         status.textContent = p.current + ' / ' + p.total + (p.current_file ? ' - ' + p.current_file : '');
+      } else if (p.current_file) {
+        status.textContent = p.current_file;
       }
     });
     source.addEventListener('complete', function(e) {
