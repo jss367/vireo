@@ -424,3 +424,20 @@ def test_default_collections_idempotent(tmp_path):
 
     colls = db.get_collections()
     assert len(colls) == 4
+
+
+def test_default_collections_adds_missing(tmp_path):
+    """create_default_collections adds new defaults alongside existing collections."""
+    from db import Database
+    import json
+    db = Database(str(tmp_path / "test.db"))
+    # Create just one collection manually
+    db.add_collection('Flagged', json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]))
+    db.create_default_collections()
+
+    colls = db.get_collections()
+    names = {c['name'] for c in colls}
+    assert 'Needs Classification' in names
+    assert 'Untagged' in names
+    assert 'Recent Import' in names
+    assert len(colls) == 4  # no duplicate Flagged

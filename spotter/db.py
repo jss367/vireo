@@ -436,10 +436,8 @@ class Database:
         return updated
 
     def create_default_collections(self):
-        """Create default smart collections if none exist."""
-        existing = self.get_collections()
-        if existing:
-            return
+        """Create default smart collections, skipping any that already exist by name."""
+        existing_names = {c['name'] for c in self.get_collections()}
 
         defaults = [
             ('Needs Classification', [{"field": "has_species", "op": "equals", "value": 0}]),
@@ -448,4 +446,5 @@ class Database:
             ('Recent Import', [{"field": "timestamp", "op": "recent_days", "value": 30}]),
         ]
         for name, rules in defaults:
-            self.add_collection(name, json.dumps(rules))
+            if name not in existing_names:
+                self.add_collection(name, json.dumps(rules))
