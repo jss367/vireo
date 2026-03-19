@@ -195,11 +195,12 @@ class Database:
         join_clause = ""
         if keyword is not None:
             join_clause = """
-                JOIN photo_keywords pk ON pk.photo_id = p.id
-                JOIN keywords k ON k.id = pk.keyword_id
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
-            conditions.append("k.name = ?")
-            params.append(keyword)
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
 
         where = ""
         if conditions:
