@@ -598,10 +598,17 @@ def create_app(db_path, thumb_cache_dir=None):
 
         def work(job):
             from labels import fetch_species_list, save_labels, set_active_labels
-            def progress_cb(msg):
+            def progress_cb(msg, current=None, total=None):
                 job['progress']['current_file'] = msg
+                if current is not None:
+                    job['progress']['current'] = current
+                if total is not None:
+                    job['progress']['total'] = total
                 runner.push_event(job['id'], 'progress', {
-                    'current': 0, 'total': 0, 'current_file': msg, 'rate': 0,
+                    'current': current or 0,
+                    'total': total or 0,
+                    'current_file': msg,
+                    'rate': 0,
                 })
             species = fetch_species_list(place_id, taxon_groups, progress_callback=progress_cb)
             if not species:

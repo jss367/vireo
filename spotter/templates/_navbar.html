@@ -89,11 +89,31 @@
   border-top: 1px solid #0f3460;
   z-index: 299;
   overflow: hidden;
-  transition: height 0.2s ease;
   display: flex;
   flex-direction: column;
 }
 .bottom-panel.open { height: 240px; }
+.bottom-panel.animating { transition: height 0.2s ease; }
+
+/* Drag handle */
+.bp-drag-handle {
+  height: 4px;
+  cursor: ns-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+}
+.bp-drag-handle:hover, .bp-drag-handle.dragging {
+  background: #4ecca3;
+}
+.bp-drag-handle::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 0;
+  right: 0;
+}
 
 /* Tabs */
 .bp-tabs {
@@ -202,6 +222,7 @@
 
 <!-- Bottom Panel -->
 <div class="bottom-panel" id="bottomPanel">
+  <div class="bp-drag-handle" id="bpDragHandle"></div>
   <div class="bp-tabs">
     <div class="bp-tab active" onclick="switchBpTab('jobs')">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
     <div class="bp-tab" onclick="switchBpTab('logs')">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
@@ -247,11 +268,14 @@
   var currentBpTab = 'jobs';
 
   function init() {
-    // Restore panel state
+    // Restore panel state and height
     if (localStorage.getItem('spotter_panel_open') === 'true') {
-      document.getElementById('bottomPanel').classList.add('open');
+      var savedH = parseInt(localStorage.getItem('spotter_panel_height')) || 240;
+      var panel = document.getElementById('bottomPanel');
+      panel.classList.add('open');
+      panel.style.height = savedH + 'px';
       document.getElementById('bottomToggle').classList.add('open');
-      document.body.style.paddingBottom = '268px';
+      document.body.style.paddingBottom = (savedH + 28) + 'px';
     }
     var savedTab = localStorage.getItem('spotter_panel_tab') || 'jobs';
     switchBpTab(savedTab);
@@ -333,13 +357,48 @@
   window.toggleBottomPanel = function() {
     var panel = document.getElementById('bottomPanel');
     var toggle = document.getElementById('bottomToggle');
+    panel.classList.add('animating');
     panel.classList.toggle('open');
     toggle.classList.toggle('open');
     var isOpen = panel.classList.contains('open');
     localStorage.setItem('spotter_panel_open', isOpen);
-    // Push page content up so panel doesn't overlap
-    document.body.style.paddingBottom = isOpen ? '268px' : '28px';
+    var h = isOpen ? (parseInt(localStorage.getItem('spotter_panel_height')) || 240) : 0;
+    if (isOpen) panel.style.height = h + 'px';
+    document.body.style.paddingBottom = isOpen ? (h + 28) + 'px' : '28px';
+    setTimeout(function() { panel.classList.remove('animating'); }, 200);
   };
+
+  /* ---------- Panel drag resize ---------- */
+  (function() {
+    var handle = document.getElementById('bpDragHandle');
+    var panel = document.getElementById('bottomPanel');
+    var dragging = false;
+    var startY, startH;
+
+    handle.addEventListener('mousedown', function(e) {
+      dragging = true;
+      startY = e.clientY;
+      startH = panel.offsetHeight;
+      handle.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
+      panel.style.height = newH + 'px';
+      document.body.style.paddingBottom = (newH + 28) + 'px';
+    });
+
+    document.addEventListener('mouseup', function() {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      localStorage.setItem('spotter_panel_height', panel.offsetHeight);
+    });
+  })();
 
   /* ---------- Jobs polling ---------- */
   function pollJobs() {

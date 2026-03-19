@@ -62,28 +62,29 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
     Args:
         place_id: iNaturalist place ID (e.g., 14 for California)
         taxon_groups: list of group keys from TAXON_GROUPS (e.g., ['birds', 'mammals'])
-        progress_callback: optional callable(message)
+        progress_callback: optional callable(message, current=None, total=None)
 
     Returns:
         list of species common names
     """
     all_species = []
 
-    for group_key in taxon_groups:
+    for gi, group_key in enumerate(taxon_groups):
         group = TAXON_GROUPS.get(group_key)
         if not group:
             continue
 
         taxon_id = group['id']
         group_name = group['name']
+        group_prefix = f"[{gi + 1}/{len(taxon_groups)}] {group_name}"
 
         if progress_callback:
-            progress_callback(f"Fetching {group_name} for place {place_id}...")
+            progress_callback(f"{group_prefix}: starting...", 0, 0)
 
-        # Paginate through results (max 500 per page)
         page = 1
         per_page = 500
         group_species = []
+        group_total = 0
 
         while True:
             params = urllib.parse.urlencode({
@@ -94,39 +95,57 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
             })
             url = f"{INAT_API}/observations/species_counts?{params}"
 
-            try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Spotter/1.0'})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read())
-            except Exception:
-                log.warning("Failed to fetch page %d of %s", page, group_name, exc_info=True)
+            data = None
+            for attempt in range(3):
+                try:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Spotter/1.0'})
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = json.loads(resp.read())
+                    break
+                except Exception:
+                    log.warning("Fetch attempt %d failed for page %d of %s",
+                                attempt + 1, page, group_name, exc_info=True)
+                    if attempt < 2:
+                        import time
+                        time.sleep(2)
+                    else:
+                        if progress_callback:
+                            progress_callback(f"{group_prefix}: failed after 3 attempts on page {page}", 0, 0)
+
+            if data is None:
                 break
 
             results = data.get('results', [])
             if not results:
                 break
 
+            group_total = data.get('total_results', 0)
+
             for r in results:
                 taxon = r.get('taxon', {})
                 common_name = taxon.get('preferred_common_name', '')
                 scientific_name = taxon.get('name', '')
-                # Use common name if available, fall back to scientific
                 name = common_name or scientific_name
                 if name:
                     group_species.append(name)
 
-            total = data.get('total_results', 0)
             fetched = (page - 1) * per_page + len(results)
 
             if progress_callback:
-                progress_callback(f"Fetching {group_name}... {fetched}/{total}")
+                progress_callback(
+                    f"{group_prefix}: {fetched}/{group_total} species",
+                    fetched, group_total,
+                )
 
-            if fetched >= total:
+            if fetched >= group_total:
                 break
             page += 1
 
         log.info("Fetched %d %s species for place %d", len(group_species), group_name, place_id)
         all_species.extend(group_species)
+
+    if progress_callback:
+        progress_callback(f"Done — {len(all_species)} total species", len(all_species), len(all_species))
 
     return all_species
 
