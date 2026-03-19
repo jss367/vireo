@@ -486,24 +486,46 @@ class Database:
                 elif op == '<=':
                     conditions.append("p.rating <= ?")
                     params.append(value)
-                elif op == 'equals':
+                elif op in ('equals', 'is'):
                     conditions.append("p.rating = ?")
                     params.append(value)
+                elif op == 'is not':
+                    conditions.append("p.rating != ?")
+                    params.append(value)
             elif field == 'keyword':
-                need_keyword_join = True
                 if op == 'contains':
+                    need_keyword_join = True
                     conditions.append("k.name LIKE ?")
                     params.append(f"%{value}%")
-                elif op == 'equals':
+                elif op == 'not_contains':
+                    conditions.append("""NOT EXISTS (
+                        SELECT 1 FROM photo_keywords pk4
+                        JOIN keywords k4 ON k4.id = pk4.keyword_id
+                        WHERE pk4.photo_id = p.id AND k4.name LIKE ?)""")
+                    params.append(f"%{value}%")
+                elif op in ('equals', 'is'):
+                    need_keyword_join = True
                     conditions.append("k.name = ?")
+                    params.append(value)
+                elif op == 'is not':
+                    conditions.append("""NOT EXISTS (
+                        SELECT 1 FROM photo_keywords pk4
+                        JOIN keywords k4 ON k4.id = pk4.keyword_id
+                        WHERE pk4.photo_id = p.id AND k4.name = ?)""")
                     params.append(value)
             elif field == 'folder':
                 if op == 'under':
                     conditions.append("f.path LIKE ?")
                     params.append(f"{value}%")
+                elif op == 'not_under':
+                    conditions.append("(f.path IS NULL OR f.path NOT LIKE ?)")
+                    params.append(f"{value}%")
             elif field == 'flag':
-                if op == 'equals':
+                if op in ('equals', 'is'):
                     conditions.append("p.flag = ?")
+                    params.append(value)
+                elif op == 'is not':
+                    conditions.append("p.flag != ?")
                     params.append(value)
             elif field == 'has_species':
                 if op == 'equals' and value is False or value == 0:
@@ -533,8 +555,11 @@ class Database:
                     conditions.append("p.timestamp >= datetime('now', ?)")
                     params.append(f"-{value} days")
             elif field == 'extension':
-                if op == 'equals':
+                if op in ('equals', 'is'):
                     conditions.append("p.extension = ?")
+                    params.append(value)
+                elif op == 'is not':
+                    conditions.append("p.extension != ?")
                     params.append(value)
 
         join_clause = ""

@@ -743,11 +743,14 @@ function renderRules() {
         '<option value="timestamp"' + (r.field==='timestamp'?' selected':'') + '>Date</option>' +
       '</select>' +
       '<select onchange="updateRule(' + i + ',\'op\',this.value)">' +
+        '<option value="is"' + (r.op==='is'?' selected':'') + '>is</option>' +
+        '<option value="is not"' + (r.op==='is not'?' selected':'') + '>is not</option>' +
         '<option value="contains"' + (r.op==='contains'?' selected':'') + '>contains</option>' +
-        '<option value="equals"' + (r.op==='equals'?' selected':'') + '>equals</option>' +
+        '<option value="not_contains"' + (r.op==='not_contains'?' selected':'') + '>does not contain</option>' +
         '<option value=">="' + (r.op==='>='?' selected':'') + '>&gt;=</option>' +
         '<option value="<="' + (r.op==='<='?' selected':'') + '>&lt;=</option>' +
         '<option value="under"' + (r.op==='under'?' selected':'') + '>under</option>' +
+        '<option value="not_under"' + (r.op==='not_under'?' selected':'') + '>not under</option>' +
       '</select>' +
       '<input type="text" value="' + escapeAttr(String(r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">' +
       '<span class="remove-rule" onclick="removeRule(' + i + ')">&times;</span>' +
