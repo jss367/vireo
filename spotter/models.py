@@ -135,17 +135,25 @@ def register_model(model_id, name, model_str, weights_path, description=''):
     _save_config(config)
 
 
-def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None, max_retries=3):
-    """Download from HuggingFace with retry on connection failures."""
+def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None, max_retries=5):
+    """Download from HuggingFace with retry on connection failures.
+
+    hf_hub_download automatically resumes partial downloads from cache,
+    so retries pick up where they left off rather than starting over.
+    """
     from huggingface_hub import hf_hub_download
+    import time as _time
+
+    # Increase HF timeout for large files
+    os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '120')
 
     for attempt in range(max_retries):
         try:
             if progress_callback:
-                size_hint = ''
-                if attempt > 0:
-                    size_hint = f' (retry {attempt}/{max_retries - 1})'
-                progress_callback(f'Downloading {filename} from {repo_id}...{size_hint}')
+                if attempt == 0:
+                    progress_callback(f'Downloading {filename} from {repo_id}...')
+                else:
+                    progress_callback(f'Resuming download ({attempt + 1}/{max_retries})...')
 
             log.info("Downloading %s from %s (attempt %d/%d)",
                      filename, repo_id, attempt + 1, max_retries)
@@ -164,12 +172,11 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
             if attempt == max_retries - 1:
                 raise RuntimeError(
                     f"Download failed after {max_retries} attempts: {e}\n"
-                    f"This is a 1.7GB file — check your network connection and try again."
+                    f"The download will resume from where it left off if you try again."
                 ) from e
             if progress_callback:
-                progress_callback(f'Download interrupted, retrying ({attempt + 2}/{max_retries})...')
-            import time
-            time.sleep(2)
+                progress_callback(f'Connection lost, resuming in {5 * (attempt + 1)}s...')
+            _time.sleep(5 * (attempt + 1))  # increasing backoff: 5s, 10s, 15s, 20s
 
 
 def download_model(model_id, progress_callback=None):
