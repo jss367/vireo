@@ -331,7 +331,7 @@ class Database:
             params.append(status)
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         return self.conn.execute(
-            f"""SELECT pr.*, p.filename FROM predictions pr
+            f"""SELECT pr.*, p.filename, p.timestamp FROM predictions pr
                 JOIN photos p ON p.id = pr.photo_id
                 {where} ORDER BY pr.confidence DESC""", params
         ).fetchall()

@@ -370,6 +370,14 @@
     <select class="model-selector" id="modelFilter" onchange="switchModel(this.value)" style="display:none;">
       <option value="all">All models</option>
     </select>
+    <select class="model-selector" id="sortSelect" onchange="changeSort(this.value)">
+      <option value="confidence_desc">Confidence (highest)</option>
+      <option value="confidence_asc">Confidence (lowest)</option>
+      <option value="species">Species (A-Z)</option>
+      <option value="filename">Filename (A-Z)</option>
+      <option value="date">Date (oldest)</option>
+      <option value="date_desc">Date (newest)</option>
+    </select>
     <button class="btn-batch-accept" id="acceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept All</button>
   </div>
   <span class="kbd-hint">Keyboard: A = accept, S = skip</span>
@@ -392,7 +400,8 @@
 /* ---------- State ---------- */
 var predictions = [];
 var currentTab = 'all';
-var currentModel = 'all';  // model filter
+var currentModel = 'all';
+var currentSort = 'confidence_desc';
 var availableModels = [];
 var thumbSize = 400;
 var mode = 'review';
@@ -458,6 +467,11 @@ function switchModel(model) {
   renderAll();
 }
 
+function changeSort(sort) {
+  currentSort = sort;
+  renderAll();
+}
+
 function renderStats() {
   var el = document.getElementById('stats');
   if (mode === 'review') {
@@ -514,7 +528,7 @@ function renderButtons() {
 
 /* ---------- Grid Rendering ---------- */
 function getVisibleItems() {
-  var filtered = predictions;
+  var filtered = predictions.slice(); // copy for sorting
 
   // Filter by model
   if (currentModel !== 'all') {
@@ -525,6 +539,19 @@ function getVisibleItems() {
   if (currentTab !== 'all') {
     filtered = filtered.filter(function(p) { return p.status === currentTab; });
   }
+
+  // Sort
+  filtered.sort(function(a, b) {
+    switch (currentSort) {
+      case 'confidence_desc': return (b.confidence || 0) - (a.confidence || 0);
+      case 'confidence_asc': return (a.confidence || 0) - (b.confidence || 0);
+      case 'species': return (a.species || '').localeCompare(b.species || '');
+      case 'filename': return (a.filename || '').localeCompare(b.filename || '');
+      case 'date': return (a.timestamp || '').localeCompare(b.timestamp || '');
+      case 'date_desc': return (b.timestamp || '').localeCompare(a.timestamp || '');
+      default: return 0;
+    }
+  });
 
   // Deduplicate groups — show only the first photo per group
   var seenGroups = {};
