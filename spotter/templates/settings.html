@@ -321,7 +321,7 @@ async function searchPlaces() {
     var places = await resp.json();
     if (places.length === 0) {
       dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#555;">No places found</div>';
-      dropdown.style.display = '';
+      dropdown.style.display = 'block';
       return;
     }
     var html = '';
@@ -332,7 +332,7 @@ async function searchPlaces() {
         escapeHtml(p.display_name) + '</div>';
     });
     dropdown.innerHTML = html;
-    dropdown.style.display = '';
+    dropdown.style.display = 'block';
   } catch(e) {
     dropdown.style.display = 'none';
   }
