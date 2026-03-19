@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spotter - Classify</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  padding-bottom: 36px;
+}
+.content { max-width: 800px; margin: 0 auto; padding: 32px 24px; }
+.section {
+  background: #16213e; border: 1px solid #0f3460;
+  border-radius: 8px; padding: 24px; margin-bottom: 24px;
+}
+.section-title {
+  font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #fff;
+  padding-bottom: 8px; border-bottom: 1px solid #0f3460;
+}
+.config-row {
+  display: flex; align-items: flex-start; gap: 24px; flex-wrap: wrap; margin-bottom: 16px;
+}
+.config-item { flex: 1; min-width: 200px; }
+.config-label {
+  font-size: 11px; color: #666; text-transform: uppercase; margin-bottom: 6px;
+}
+.config-value { font-size: 13px; color: #e0e0e0; margin-bottom: 4px; }
+.config-detail { font-size: 11px; color: #555; }
+
+select.picker {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a3a6e;
+  border-radius: 4px; padding: 8px 12px; font-size: 13px; width: 100%;
+  cursor: pointer; outline: none;
+}
+select.picker:focus { border-color: #4ecca3; }
+
+.btn {
+  border: none; border-radius: 4px; padding: 10px 24px;
+  font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s;
+}
+.btn:disabled { cursor: default; }
+.btn-primary { background: #4ecca3; color: #1a1a2e; }
+.btn-primary:hover { background: #3db890; }
+.btn-primary:disabled { background: #2a5a4a; color: #555; }
+.btn-secondary { background: #0f3460; color: #c0c0c0; }
+.btn-secondary:hover { background: #1a3a6e; }
+
+.status-msg { font-size: 13px; color: #888; margin-top: 12px; }
+.status-msg.ok { color: #4ecca3; }
+
+/* Past runs */
+.run-table {
+  width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px;
+}
+.run-table th {
+  text-align: left; padding: 6px 10px; color: #666;
+  font-weight: 500; border-bottom: 1px solid #0f3460;
+}
+.run-table td {
+  padding: 6px 10px; border-bottom: 1px solid #0a1a35; color: #999;
+}
+.run-table .status-completed { color: #4ecca3; }
+.run-table .status-failed { color: #e74c3c; }
+
+.pending-banner {
+  background: #0f3460; border-radius: 6px; padding: 14px 20px;
+  display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+}
+.pending-count {
+  font-size: 24px; font-weight: 700; color: #f0c040; font-variant-numeric: tabular-nums;
+}
+.pending-text { font-size: 13px; color: #c0c0c0; flex: 1; }
+</style>
+</head>
+<body>
+
+{% set active_page = 'classify' %}
+{% include '_navbar.html' %}
+
+<div class="content">
+  <h2 style="margin-bottom:20px;font-size:20px;">Classify</h2>
+
+  <!-- Pending predictions banner -->
+  <div class="pending-banner" id="pendingBanner" style="display:none;">
+    <span class="pending-count" id="pendingCount">0</span>
+    <span class="pending-text" id="pendingText">predictions waiting for review</span>
+    <a href="/review" class="btn btn-primary" style="text-decoration:none;">Review Predictions</a>
+  </div>
+
+  <!-- Configure -->
+  <div class="section">
+    <div class="section-title">Run Classification</div>
+
+    <div class="config-row">
+      <div class="config-item">
+        <div class="config-label">Collection</div>
+        <select class="picker" id="collectionPicker" onchange="updateRunButton()">
+          <option value="">Select a collection...</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="config-row">
+      <div class="config-item">
+        <div class="config-label">Model</div>
+        <div class="config-value" id="cfgModelName">-</div>
+        <div class="config-detail" id="cfgModelDetail">-</div>
+      </div>
+      <div class="config-item">
+        <div class="config-label">Labels</div>
+        <div class="config-value" id="cfgLabelsName">-</div>
+        <div class="config-detail" id="cfgLabelsDetail">-</div>
+      </div>
+      <div class="config-item">
+        <div class="config-label" title="Minimum confidence to include a prediction. Photos below this threshold are skipped.">Threshold</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgThreshold" min="10" max="90" step="5" value="40"
+                 style="width:120px;accent-color:#4ecca3;"
+                 oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'">
+          <span style="font-size:13px;color:#e0e0e0;" id="cfgThresholdVal">40%</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;align-items:center;">
+      <button class="btn btn-primary" id="runBtn" onclick="runClassification()" disabled>Run Classification</button>
+      <span class="status-msg" id="runStatus"></span>
+    </div>
+  </div>
+
+  <!-- Past classification runs -->
+  <div class="section">
+    <div class="section-title">Past Runs</div>
+    <div id="pastRuns"><span style="color:#555;font-size:13px;">Loading...</span></div>
+  </div>
+</div>
+
+<script>
+loadCollections();
+loadConfig();
+loadPendingCount();
+loadPastRuns();
+
+async function loadCollections() {
+  try {
+    var resp = await fetch('/api/collections');
+    var collections = await resp.json();
+    var sel = document.getElementById('collectionPicker');
+    collections.forEach(function(c) {
+      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+    });
+  } catch(e) {}
+}
+
+async function loadConfig() {
+  try {
+    var resp = await fetch('/api/classify/config');
+    var cfg = await resp.json();
+    document.getElementById('cfgModelName').textContent = cfg.model_name + ' ' + cfg.model_str;
+    document.getElementById('cfgModelDetail').textContent = cfg.weights_available ? 'Ready' : 'Not downloaded — go to Settings';
+    document.getElementById('cfgModelDetail').style.color = cfg.weights_available ? '#4ecca3' : '#e74c3c';
+
+    // Labels
+    var labelsResp = await fetch('/api/labels');
+    var labelsData = await labelsResp.json();
+    if (labelsData.active && labelsData.active.name) {
+      document.getElementById('cfgLabelsName').textContent = labelsData.active.name;
+      document.getElementById('cfgLabelsDetail').textContent = (labelsData.active.species_count || 0) + ' species';
+      document.getElementById('cfgLabelsDetail').style.color = '#4ecca3';
+    } else {
+      document.getElementById('cfgLabelsName').textContent = 'No labels set';
+      document.getElementById('cfgLabelsDetail').textContent = 'Go to Settings > Labels to download';
+      document.getElementById('cfgLabelsDetail').style.color = '#f0c040';
+    }
+
+    if (cfg.default_threshold) {
+      var pct = Math.round(cfg.default_threshold * 100);
+      document.getElementById('cfgThreshold').value = pct;
+      document.getElementById('cfgThresholdVal').textContent = pct + '%';
+    }
+  } catch(e) {}
+}
+
+async function loadPendingCount() {
+  try {
+    var resp = await fetch('/api/predictions?status=pending');
+    var preds = await resp.json();
+    if (preds.length > 0) {
+      document.getElementById('pendingBanner').style.display = 'flex';
+      document.getElementById('pendingCount').textContent = preds.length;
+      document.getElementById('pendingText').textContent =
+        preds.length === 1 ? 'prediction waiting for review' : 'predictions waiting for review';
+    }
+  } catch(e) {}
+}
+
+async function loadPastRuns() {
+  try {
+    var resp = await fetch('/api/jobs/history?limit=10');
+    var rows = await resp.json();
+    var classifyRuns = rows.filter(function(r) { return r.type === 'classify'; });
+    if (classifyRuns.length === 0) {
+      document.getElementById('pastRuns').innerHTML = '<span style="color:#555;font-size:13px;">No classification runs yet.</span>';
+      return;
+    }
+    var html = '<table class="run-table"><thead><tr><th>Date</th><th>Status</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
+    classifyRuns.forEach(function(r) {
+      var cls = r.status === 'completed' ? 'status-completed' : r.status === 'failed' ? 'status-failed' : '';
+      var started = r.started_at ? new Date(r.started_at).toLocaleString() : '-';
+      var duration = r.duration != null ? r.duration.toFixed(1) + 's' : '-';
+      var result = '-';
+      if (r.result) {
+        try {
+          var parsed = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
+          if (parsed.error) { result = parsed.error.split('\n')[0]; }
+          else {
+            var parts = [];
+            for (var k in parsed) parts.push(k + ': ' + parsed[k]);
+            result = parts.join(', ');
+          }
+        } catch(e) {}
+      }
+      html += '<tr><td>' + started + '</td><td class="' + cls + '">' + r.status + '</td>' +
+        '<td>' + duration + '</td><td>' + escapeHtml(result) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('pastRuns').innerHTML = html;
+  } catch(e) {}
+}
+
+function updateRunButton() {
+  var collId = document.getElementById('collectionPicker').value;
+  document.getElementById('runBtn').disabled = !collId;
+}
+
+async function runClassification() {
+  var collId = document.getElementById('collectionPicker').value;
+  if (!collId) return;
+
+  var btn = document.getElementById('runBtn');
+  var status = document.getElementById('runStatus');
+  var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
+
+  btn.disabled = true;
+  status.textContent = 'Starting...';
+  status.className = 'status-msg';
+
+  try {
+    var resp = await fetch('/api/jobs/classify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({collection_id: parseInt(collId), threshold: threshold}),
+    });
+    if (!resp.ok) {
+      var err = await resp.json();
+      status.textContent = 'Error: ' + (err.error || 'failed');
+      btn.disabled = false;
+      return;
+    }
+    var data = await resp.json();
+    status.textContent = 'Classifying...';
+
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      if (p.total > 0 && p.current > 0) {
+        status.textContent = p.current + ' / ' + p.total + (p.current_file ? ' — ' + p.current_file : '');
+      } else if (p.current_file) {
+        status.textContent = p.current_file;
+      }
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      if (result.status === 'completed' && result.result) {
+        var r = result.result;
+        status.textContent = 'Done! ' + (r.classified || 0) + ' classified' +
+          (r.groups ? ', ' + r.groups + ' groups' : '') +
+          (r.failed ? ', ' + r.failed + ' failed' : '') +
+          (result.duration ? ' (' + result.duration + 's)' : '');
+        status.className = 'status-msg ok';
+        // Show the review banner
+        loadPendingCount();
+        loadPastRuns();
+      } else {
+        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+      }
+      btn.disabled = false;
+    });
+    source.onerror = function() { source.close(); status.textContent = 'Connection lost'; btn.disabled = false; };
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>

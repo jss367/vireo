@@ -132,6 +132,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route('/classify')
     def classify():
+        return render_template('classify.html')
+
+    @app.route('/review')
+    def review():
         return render_template('review.html')
 
     @app.route('/import')

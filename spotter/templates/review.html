@@ -351,62 +351,27 @@
 </head>
 <body>
 
-{% set active_page = 'classify' %}
+{% set active_page = 'review' %}
 {% include '_navbar.html' %}
 
 <!-- Review Header -->
 <div class="header">
   <div class="header-left">
-    <h1 id="title">Classify</h1>
-    <select class="model-selector" id="collectionSelector" onchange="switchCollection(this.value)">
-      <option value="">Select a collection...</option>
-    </select>
+    <h1 id="title">Review Predictions</h1>
   </div>
   <div class="header-right">
     <div class="stats" id="stats"></div>
   </div>
 </div>
 
-<!-- Classify Config Panel -->
-<div class="settings-panel" id="classifyConfig">
-  <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; width:100%;">
-    <div style="flex:1; min-width:200px;">
-      <div style="font-size:11px; color:#666; text-transform:uppercase; margin-bottom:6px;">Model</div>
-      <div style="font-size:13px; color:#e0e0e0; margin-bottom:4px;" id="cfgModelName">BioCLIP ViT-B-16</div>
-      <div style="font-size:11px; color:#555;" id="cfgModelPath">/tmp/bioclip_model/open_clip_pytorch_model.bin</div>
-    </div>
-    <div style="flex:1; min-width:200px;">
-      <div style="font-size:11px; color:#666; text-transform:uppercase; margin-bottom:6px;">Labels</div>
-      <div style="font-size:13px; color:#e0e0e0; margin-bottom:4px;" id="cfgLabelsInfo">Using taxonomy species</div>
-      <div style="display:flex; gap:6px; align-items:center;">
-        <input type="text" class="model-selector" id="cfgLabelsFile" placeholder="Custom labels file (optional)"
-               style="flex:1; padding:4px 8px; font-size:12px;">
-      </div>
-    </div>
-    <div>
-      <div style="font-size:11px; color:#666; text-transform:uppercase; margin-bottom:6px;" title="Minimum confidence to include a prediction. Photos below this threshold are skipped entirely.">Threshold</div>
-      <div style="display:flex; align-items:center; gap:8px;">
-        <input type="range" id="cfgThreshold" min="10" max="90" step="5" value="40"
-               style="width:120px; accent-color:#4ecca3;"
-               oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'">
-        <span style="font-size:13px; color:#e0e0e0; min-width:36px;" id="cfgThresholdVal">40%</span>
-      </div>
-    </div>
-    <div style="display:flex; align-items:flex-end;">
-      <button class="btn-batch-accept" id="classifyBtn" onclick="runClassification()">Run Classification</button>
-    </div>
-  </div>
-</div>
-
-<!-- Action Bar (visible during review) -->
-<div class="settings-panel" id="reviewBar">
+<!-- Action Bar -->
+<div class="settings-panel open" id="reviewBar">
   <div class="setting-group">
     <button class="btn-batch-accept" id="acceptAllBtn" onclick="acceptAllPending()" style="display:none;">Accept All</button>
-    <span class="batch-info" id="classifyStatus"></span>
   </div>
-  <span class="kbd-hint" id="kbdHint" style="display:none;">Keyboard: A = accept, S = skip</span>
+  <span class="kbd-hint">Keyboard: A = accept, S = skip</span>
   <span style="margin-left:auto;">
-    <button onclick="showConfig()" style="background:none;border:none;color:#555;font-size:12px;cursor:pointer;">Re-classify</button>
+    <a href="/classify" style="color:#555;font-size:12px;text-decoration:none;">Back to Classify</a>
   </span>
 </div>
 
@@ -422,161 +387,36 @@
 
 <script>
 /* ---------- State ---------- */
-var allData = { photos: [] };
 var predictions = [];
-var currentCollectionId = null;
 var currentTab = 'all';
 var thumbSize = 400;
-var mode = 'browse'; // 'browse' or 'review'
-
-var classifyConfig = {};
+var mode = 'review';
 
 /* ---------- Bootstrap ---------- */
-loadCollections();
-loadClassifyConfig();
+loadPredictions();
 
-/* ---------- Collection Loading ---------- */
-async function loadClassifyConfig() {
-  try {
-    var resp = await fetch('/api/classify/config');
-    classifyConfig = await resp.json();
-    document.getElementById('cfgModelName').textContent =
-      classifyConfig.model_name + ' ' + classifyConfig.model_str;
-    document.getElementById('cfgModelPath').textContent = classifyConfig.weights_path +
-      (classifyConfig.weights_available ? '' : ' (not found)');
-    // Load active labels info
-    fetch('/api/labels').then(function(r) { return r.json(); }).then(function(data) {
-      var el = document.getElementById('cfgLabelsInfo');
-      if (data.active && data.active.name) {
-        el.textContent = data.active.species_count + ' species — ' + data.active.name;
-        el.style.color = '#4ecca3';
-      } else {
-        el.textContent = 'No labels set — go to Settings > Labels to download';
-        el.style.color = '#f0c040';
-      }
-    }).catch(function() {});
-    if (classifyConfig.default_threshold) {
-      var pct = Math.round(classifyConfig.default_threshold * 100);
-      document.getElementById('cfgThreshold').value = pct;
-      document.getElementById('cfgThresholdVal').textContent = pct + '%';
-    }
-  } catch(e) {}
-}
-
-async function loadCollections() {
-  try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
-    var sel = document.getElementById('collectionSelector');
-    sel.innerHTML = '<option value="">Select a collection...</option>';
-    collections.forEach(function(c) {
-      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
-    });
-    document.getElementById('empty').style.display = 'block';
-  } catch(e) {}
-}
-
-function switchCollection(id) {
-  if (!id) {
-    allData.photos = [];
-    predictions = [];
-    mode = 'browse';
-    renderAll();
-    document.getElementById('empty').style.display = 'block';
-    document.getElementById('empty').textContent = 'Select a collection above to load photos.';
-    return;
-  }
-  currentCollectionId = parseInt(id);
-  loadCollectionPhotos(currentCollectionId);
-}
-
-async function loadCollectionPhotos(collectionId) {
+async function loadPredictions() {
   document.getElementById('loading').style.display = 'block';
   document.getElementById('empty').style.display = 'none';
-  document.getElementById('grid').innerHTML = '';
 
   try {
-    var resp = await fetch('/api/collections/' + collectionId + '/photos?per_page=500');
-    var data = await resp.json();
-    allData.photos = data.photos || [];
+    var resp = await fetch('/api/predictions?status=pending');
+    var pending = await resp.json();
 
-    var sel = document.getElementById('collectionSelector');
-    var name = sel.options[sel.selectedIndex].text;
-    document.getElementById('title').textContent = 'Classify: ' + name;
-    document.title = 'Spotter - Classify: ' + name;
-
-    // Check for existing predictions
-    var predResp = await fetch('/api/predictions?collection_id=' + collectionId);
-    predictions = await predResp.json();
+    // Also load accepted/rejected for tab counts
+    var allResp = await fetch('/api/predictions');
+    predictions = await allResp.json();
 
     mode = predictions.length > 0 ? 'review' : 'browse';
+
+    document.getElementById('title').textContent =
+      'Review Predictions (' + pending.length + ' pending)';
+    document.title = 'Spotter - Review (' + pending.length + ' pending)';
+
     document.getElementById('loading').style.display = 'none';
     renderAll();
-  } catch (err) {
+  } catch(err) {
     document.getElementById('loading').textContent = 'Error: ' + err.message;
-  }
-}
-
-/* ---------- Classification ---------- */
-async function runClassification() {
-  if (!currentCollectionId) return;
-  var btn = document.getElementById('classifyBtn');
-  var status = document.getElementById('classifyStatus');
-  btn.disabled = true;
-  status.textContent = 'Starting classification...';
-
-  var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
-  var labelsFile = document.getElementById('cfgLabelsFile').value.trim() || null;
-
-  try {
-    var resp = await fetch('/api/jobs/classify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        collection_id: currentCollectionId,
-        threshold: threshold,
-        labels_file: labelsFile,
-      }),
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.textContent = 'Error: ' + (err.error || 'failed');
-      btn.disabled = false;
-      return;
-    }
-    var data = await resp.json();
-    status.textContent = 'Classifying...';
-
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.total > 0 && p.current > 0) {
-        status.textContent = p.current + ' / ' + p.total + (p.current_file ? ' - ' + p.current_file : '');
-      } else if (p.current_file) {
-        status.textContent = p.current_file;
-      }
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed' && result.result) {
-        status.textContent = 'Done! ' + result.result.classified + ' classified' +
-          (result.result.failed > 0 ? ', ' + result.result.failed + ' failed' : '');
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-      }
-      btn.disabled = false;
-      // Reload predictions
-      loadCollectionPhotos(currentCollectionId);
-    });
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost.';
-      btn.disabled = false;
-    };
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
   }
 }
 
@@ -632,55 +472,30 @@ function switchTab(tab) {
 }
 
 function renderButtons() {
-  var configPanel = document.getElementById('classifyConfig');
-  var reviewBar = document.getElementById('reviewBar');
   var acceptAllBtn = document.getElementById('acceptAllBtn');
-  var kbdHint = document.getElementById('kbdHint');
-
-  if (currentCollectionId && mode === 'browse') {
-    // Show full config — no predictions yet
-    configPanel.classList.add('open');
-    reviewBar.classList.remove('open');
-    acceptAllBtn.style.display = 'none';
-    kbdHint.style.display = 'none';
-  } else if (mode === 'review') {
-    // Collapse config, show review bar
-    configPanel.classList.remove('open');
-    reviewBar.classList.add('open');
-    var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
-    if (pending > 0) {
-      acceptAllBtn.style.display = '';
-      acceptAllBtn.textContent = 'Accept All (' + pending + ')';
-      kbdHint.style.display = '';
-    } else {
-      acceptAllBtn.style.display = 'none';
-      kbdHint.style.display = 'none';
-    }
+  var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
+  if (pending > 0) {
+    acceptAllBtn.style.display = '';
+    acceptAllBtn.textContent = 'Accept All (' + pending + ')';
   } else {
-    configPanel.classList.remove('open');
-    reviewBar.classList.remove('open');
     acceptAllBtn.style.display = 'none';
-    kbdHint.style.display = 'none';
   }
 }
 
 /* ---------- Grid Rendering ---------- */
 function getVisibleItems() {
-  if (mode === 'review') {
-    var filtered = predictions;
-    if (currentTab !== 'all') {
-      filtered = predictions.filter(function(p) { return p.status === currentTab; });
-    }
-    // Deduplicate groups — show only the first photo per group
-    var seenGroups = {};
-    return filtered.filter(function(p) {
-      if (!p.group_id) return true;
-      if (seenGroups[p.group_id]) return false;
-      seenGroups[p.group_id] = true;
-      return true;
-    });
+  var filtered = predictions;
+  if (currentTab !== 'all') {
+    filtered = predictions.filter(function(p) { return p.status === currentTab; });
   }
-  return allData.photos;
+  // Deduplicate groups — show only the first photo per group
+  var seenGroups = {};
+  return filtered.filter(function(p) {
+    if (!p.group_id) return true;
+    if (seenGroups[p.group_id]) return false;
+    seenGroups[p.group_id] = true;
+    return true;
+  });
 }
 
 function renderGrid() {
@@ -690,12 +505,10 @@ function renderGrid() {
 
   if (items.length === 0) {
     grid.innerHTML = '';
-    if (!currentCollectionId) {
-      empty.textContent = 'Select a collection above to load photos.';
-    } else if (mode === 'review') {
-      empty.textContent = 'No predictions in this category.';
+    if (predictions.length === 0) {
+      empty.textContent = 'No predictions to review. Run classification on the Classify page first.';
     } else {
-      empty.textContent = 'No photos in this collection.';
+      empty.textContent = 'No predictions in this category.';
     }
     empty.style.display = 'block';
     return;
@@ -703,29 +516,7 @@ function renderGrid() {
   empty.style.display = 'none';
   grid.style.setProperty('--card-width', thumbSize + 20 + 'px');
 
-  if (mode === 'review') {
-    grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
-  } else {
-    grid.innerHTML = items.map(function(p) { return renderPhotoCard(p); }).join('');
-  }
-}
-
-function renderPhotoCard(p) {
-  var thumbUrl = '/thumbnails/' + p.id + '.jpg';
-  var stars = '';
-  if (p.rating > 0) { for (var i = 0; i < p.rating; i++) stars += '&#9733;'; }
-  var flagHtml = '';
-  if (p.flag === 'flagged') flagHtml = '<span class="badge badge-new">flagged</span>';
-  else if (p.flag === 'rejected') flagHtml = '<span class="badge badge-disagreement">rejected</span>';
-
-  return '<div class="card" data-id="' + p.id + '">' +
-    '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
-    '<div class="card-body">' +
-      '<div class="card-filename">' + escapeHtml(p.filename) + '</div>' +
-      flagHtml +
-      (stars ? '<div class="card-prediction" style="color:#f0c040;font-size:14px;">' + stars + '</div>' : '') +
-    '</div>' +
-  '</div>';
+  grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
 }
 
 function renderPredictionCard(pred) {
@@ -829,11 +620,6 @@ document.addEventListener('keydown', function(e) {
 });
 
 /* ---------- Settings ---------- */
-function showConfig() {
-  mode = 'browse';
-  renderAll();
-}
-
 function updateThumbSize(val) {
   thumbSize = parseInt(val, 10);
   document.getElementById('thumbSizeVal').textContent = val + 'px';
