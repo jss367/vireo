@@ -695,15 +695,17 @@ def create_app(db_path, thumb_cache_dir=None):
 
         def work(job):
             import tempfile
+            from datetime import datetime as dt
             from classifier import Classifier
             from compare import read_xmp_keywords, categorize
+            from grouping import group_by_timestamp, consensus_prediction
             from image_loader import load_image
 
             thread_db = Database(db_path)
             job['_start_time'] = time.time()
 
             # Resolve model from registry
-            from models import get_active_model, get_models
+            from models import get_active_model
             active_model = get_active_model()
             if not active_model:
                 raise RuntimeError("No model available. Download one in Settings.")
@@ -742,14 +744,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
             log.info("Classifying %d photos with '%s' (%s)", total, effective_name, model_str)
 
-            # Phase 4: Initialize classifier (this is the slow part ~30s)
+            # Phase 4: Initialize classifier
             runner.push_event(job['id'], 'progress', {
                 'current': 0, 'total': total,
                 'current_file': f'Loading {effective_name} model and computing label embeddings...',
                 'rate': 0,
             })
             clf = Classifier(labels=labels, model_str=model_str, pretrained_str=weights_path)
-            classified = 0
+
+            # Phase 5: Classify each photo individually
+            raw_results = []  # list of {photo, prediction, confidence}
             failed = 0
 
             for i, photo in enumerate(photos):
@@ -765,7 +769,6 @@ def create_app(db_path, thumb_cache_dir=None):
                     'rate': round((i + 1) / max(time.time() - job['_start_time'], 0.01), 1),
                 })
 
-                # Load and classify
                 img = load_image(image_path)
                 if img is None:
                     failed += 1
@@ -776,7 +779,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     img.save(tmp_path, quality=85)
 
                 try:
-                    predictions = clf.classify(tmp_path, threshold=threshold)
+                    preds = clf.classify(tmp_path, threshold=threshold)
                 except Exception:
                     log.warning("Classification failed for %s", photo['filename'], exc_info=True)
                     failed += 1
@@ -784,31 +787,111 @@ def create_app(db_path, thumb_cache_dir=None):
                 finally:
                     os.unlink(tmp_path)
 
-                if not predictions:
+                if not preds:
                     continue
 
-                top = predictions[0]
+                top = preds[0]
 
-                # Categorize against existing keywords
-                category = 'new'
-                if tax:
-                    xmp_path = os.path.join(folder_path, os.path.splitext(photo['filename'])[0] + '.xmp')
-                    existing = read_xmp_keywords(xmp_path)
-                    category = categorize(top['species'], existing, tax)
+                # Parse timestamp for grouping
+                timestamp = None
+                if photo['timestamp']:
+                    try:
+                        timestamp = dt.fromisoformat(photo['timestamp'])
+                    except Exception:
+                        pass
 
-                if category == 'match':
-                    continue
+                raw_results.append({
+                    'photo': photo,
+                    'folder_path': folder_path,
+                    'prediction': top['species'],
+                    'confidence': top['score'],
+                    'timestamp': timestamp,
+                    'filename': photo['filename'],
+                })
 
-                thread_db.add_prediction(
-                    photo_id=photo['id'],
-                    species=top['species'],
-                    confidence=round(top['score'], 4),
-                    model=model_name,
-                    category=category,
-                )
-                classified += 1
+            # Phase 6: Group by timestamp and compute consensus
+            runner.push_event(job['id'], 'progress', {
+                'current': total, 'total': total,
+                'current_file': 'Grouping and computing consensus...', 'rate': 0,
+            })
 
-            return {'classified': classified, 'failed': failed, 'total': total}
+            groups = group_by_timestamp(raw_results, window_seconds=10)
+            classified = 0
+            group_count = 0
+
+            for group in groups:
+                if len(group) == 1:
+                    # Single photo — store directly
+                    item = group[0]
+                    photo = item['photo']
+                    folder_path = item['folder_path']
+
+                    category = 'new'
+                    if tax:
+                        xmp_path = os.path.join(folder_path, os.path.splitext(photo['filename'])[0] + '.xmp')
+                        existing = read_xmp_keywords(xmp_path)
+                        category = categorize(item['prediction'], existing, tax)
+
+                    if category == 'match':
+                        continue
+
+                    thread_db.add_prediction(
+                        photo_id=photo['id'],
+                        species=item['prediction'],
+                        confidence=round(item['confidence'], 4),
+                        model=model_name,
+                        category=category,
+                    )
+                    classified += 1
+                else:
+                    # Group — compute consensus
+                    group_count += 1
+                    gid = f"g{group_count:04d}"
+                    cons_input = [
+                        {'prediction': item['prediction'], 'confidence': item['confidence']}
+                        for item in group
+                    ]
+                    cons = consensus_prediction(cons_input)
+                    if not cons:
+                        continue
+
+                    # Categorize using the consensus prediction
+                    representative = group[0]
+                    category = 'new'
+                    if tax:
+                        xmp_path = os.path.join(representative['folder_path'],
+                                                os.path.splitext(representative['photo']['filename'])[0] + '.xmp')
+                        existing = read_xmp_keywords(xmp_path)
+                        category = categorize(cons['prediction'], existing, tax)
+
+                    if category == 'match':
+                        continue
+
+                    individual_json = json.dumps(cons['individual_predictions'])
+
+                    # Store prediction for each photo in the group
+                    for item in group:
+                        thread_db.add_prediction(
+                            photo_id=item['photo']['id'],
+                            species=cons['prediction'],
+                            confidence=round(cons['confidence'], 4),
+                            model=model_name,
+                            category=category,
+                            group_id=gid,
+                            vote_count=cons['vote_count'],
+                            total_votes=cons['total_votes'],
+                            individual=individual_json,
+                        )
+                    classified += len(group)
+
+            log.info("Classification done: %d classified, %d groups, %d failed",
+                     classified, group_count, failed)
+            return {
+                'classified': classified,
+                'groups': group_count,
+                'failed': failed,
+                'total': total,
+            }
 
         job_id = runner.start('classify', work, config={
             'collection_id': collection_id, 'model_name': model_name,

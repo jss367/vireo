@@ -653,8 +653,18 @@ function renderButtons() {
 /* ---------- Grid Rendering ---------- */
 function getVisibleItems() {
   if (mode === 'review') {
-    if (currentTab === 'all') return predictions;
-    return predictions.filter(function(p) { return p.status === currentTab; });
+    var filtered = predictions;
+    if (currentTab !== 'all') {
+      filtered = predictions.filter(function(p) { return p.status === currentTab; });
+    }
+    // Deduplicate groups — show only the first photo per group
+    var seenGroups = {};
+    return filtered.filter(function(p) {
+      if (!p.group_id) return true;
+      if (seenGroups[p.group_id]) return false;
+      seenGroups[p.group_id] = true;
+      return true;
+    });
   }
   return allData.photos;
 }
@@ -719,8 +729,31 @@ function renderPredictionCard(pred) {
     badgeHtml = '<span class="badge ' + badgeClass + '">' + pred.category + '</span>';
   }
 
+  // Group badge
+  var groupHtml = '';
+  if (pred.group_id && pred.total_votes > 1) {
+    groupHtml = '<span class="badge-group">' + pred.vote_count + '/' + pred.total_votes + ' votes</span>';
+  }
+
+  // Individual vote breakdown
+  var voteHtml = '';
+  if (pred.individual) {
+    try {
+      var votes = typeof pred.individual === 'string' ? JSON.parse(pred.individual) : pred.individual;
+      var parts = [];
+      var keys = Object.keys(votes).sort(function(a, b) { return votes[b] - votes[a]; });
+      keys.forEach(function(k) {
+        parts.push('<span>' + escapeHtml(k) + ': ' + votes[k] + '</span>');
+      });
+      if (parts.length > 1) {
+        voteHtml = '<div class="individual-preds">' + parts.join('') + '</div>';
+      }
+    } catch(e) {}
+  }
+
   // Action buttons
   var actionsHtml;
+  var acceptLabel = pred.group_id ? 'Accept Group' : 'Accept';
   if (pred.status === 'accepted') {
     actionsHtml = '<div class="card-actions"><button class="btn-done">accepted</button></div>';
   } else if (pred.status === 'rejected') {
@@ -728,7 +761,7 @@ function renderPredictionCard(pred) {
   } else {
     actionsHtml =
       '<div class="card-actions">' +
-        '<button class="btn-accept" onclick="acceptPrediction(' + pred.id + ')">Accept</button>' +
+        '<button class="btn-accept" onclick="acceptPrediction(' + pred.id + ')">' + acceptLabel + '</button>' +
         '<button class="btn-skip" onclick="rejectPrediction(' + pred.id + ')">Reject</button>' +
       '</div>';
   }
@@ -737,10 +770,11 @@ function renderPredictionCard(pred) {
     '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') + '">' +
     '<div class="card-body">' +
       '<div class="card-filename">' + escapeHtml(pred.filename || '') + '</div>' +
-      badgeHtml +
+      badgeHtml + groupHtml +
       '<div class="card-prediction">' + escapeHtml(pred.species) + '</div>' +
+      voteHtml +
       '<div class="confidence-bar"><div class="confidence-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>' +
-      '<div class="card-confidence">' + confPct + '% confidence</div>' +
+      '<div class="card-confidence">' + confPct + '% confidence' + (pred.group_id ? ' (consensus)' : '') + '</div>' +
       actionsHtml +
     '</div>' +
   '</div>';

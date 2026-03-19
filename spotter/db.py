@@ -83,6 +83,10 @@ class Database:
                 model       TEXT,
                 category    TEXT,
                 status      TEXT DEFAULT 'pending',
+                group_id    TEXT,
+                vote_count  INTEGER,
+                total_votes INTEGER,
+                individual  TEXT,
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(photo_id, model)
             );
@@ -92,11 +96,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
         """)
-        # Migration: add is_species column if missing (existing databases)
+        # Migrations for existing databases
         try:
             self.conn.execute("SELECT is_species FROM keywords LIMIT 0")
         except Exception:
             self.conn.execute("ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0")
+        try:
+            self.conn.execute("SELECT group_id FROM predictions LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN group_id TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN vote_count INTEGER")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN total_votes INTEGER")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN individual TEXT")
 
     # -- Folders --
 
@@ -290,13 +301,16 @@ class Database:
 
     # -- Predictions --
 
-    def add_prediction(self, photo_id, species, confidence, model, category='new'):
+    def add_prediction(self, photo_id, species, confidence, model, category='new',
+                       group_id=None, vote_count=None, total_votes=None, individual=None):
         """Store a classification prediction for a photo."""
         self.conn.execute(
             """INSERT OR REPLACE INTO predictions
-               (photo_id, species, confidence, model, category, status)
-               VALUES (?, ?, ?, ?, ?, 'pending')""",
-            (photo_id, species, confidence, model, category),
+               (photo_id, species, confidence, model, category, status,
+                group_id, vote_count, total_votes, individual)
+               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (photo_id, species, confidence, model, category,
+             group_id, vote_count, total_votes, individual),
         )
         self.conn.commit()
 
@@ -329,16 +343,32 @@ class Database:
         self.conn.commit()
 
     def accept_prediction(self, prediction_id):
-        """Accept a prediction: mark as accepted and add species keyword to photo."""
+        """Accept a prediction: mark as accepted and add species keyword.
+
+        If the prediction belongs to a group, accepts all photos in the group.
+        """
         pred = self.conn.execute(
             "SELECT * FROM predictions WHERE id = ?", (prediction_id,)
         ).fetchone()
         if not pred:
             return
-        self.update_prediction_status(prediction_id, 'accepted')
+
         kid = self.add_keyword(pred['species'], is_species=True)
-        self.tag_photo(pred['photo_id'], kid)
-        self.queue_change(pred['photo_id'], 'keyword_add', pred['species'])
+
+        # If grouped, accept all predictions in the group
+        if pred['group_id']:
+            group_preds = self.conn.execute(
+                "SELECT * FROM predictions WHERE group_id = ? AND model = ?",
+                (pred['group_id'], pred['model']),
+            ).fetchall()
+            for gp in group_preds:
+                self.update_prediction_status(gp['id'], 'accepted')
+                self.tag_photo(gp['photo_id'], kid)
+                self.queue_change(gp['photo_id'], 'keyword_add', pred['species'])
+        else:
+            self.update_prediction_status(prediction_id, 'accepted')
+            self.tag_photo(pred['photo_id'], kid)
+            self.queue_change(pred['photo_id'], 'keyword_add', pred['species'])
 
     # -- Pending Changes --
 
