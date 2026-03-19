@@ -35,10 +35,23 @@ class Taxonomy:
         self._by_scientific = data.get('taxa_by_scientific', {})
         self.last_updated = data.get('last_updated')
         self.taxa_count = len(self._by_common) + len(self._by_scientific)
+        # Build normalized index for fuzzy lookups (handles hyphens, etc.)
+        self._by_common_normalized = {}
+        for key, val in self._by_common.items():
+            nk = self._normalize(key)
+            if nk not in self._by_common_normalized:
+                self._by_common_normalized[nk] = val
         log.info("Loaded taxonomy: %d entries (updated %s)", self.taxa_count, self.last_updated)
+
+    @staticmethod
+    def _normalize(name):
+        """Normalize a name for lookup: lowercase, strip hyphens and extra spaces."""
+        return name.lower().strip().replace('-', ' ').replace('  ', ' ')
 
     def lookup(self, name):
         """Look up a taxon by common name or scientific name.
+
+        Handles punctuation differences like "Scrub-Jay" vs "scrub jay".
 
         Args:
             name: common name (e.g., "Song Sparrow") or scientific name
@@ -51,7 +64,12 @@ class Taxonomy:
         result = self._by_common.get(key)
         if result:
             return result
-        return self._by_scientific.get(key)
+        result = self._by_scientific.get(key)
+        if result:
+            return result
+
+        # Fuzzy: try normalized lookup (handles hyphens, e.g. "scrub jay" vs "scrub-jay")
+        return self._by_common_normalized.get(self._normalize(name))
 
     def is_taxon(self, name):
         """Check if a name is a recognized taxon."""
