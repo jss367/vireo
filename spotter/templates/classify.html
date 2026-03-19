@@ -75,6 +75,24 @@ select.picker:focus { border-color: #4ecca3; }
   font-size: 24px; font-weight: 700; color: #f0c040; font-variant-numeric: tabular-nums;
 }
 .pending-text { font-size: 13px; color: #c0c0c0; flex: 1; }
+
+/* Photo preview grid */
+.preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+.preview-thumb {
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  width: 100%;
+  border-radius: 4px;
+  background: #0f3460;
+}
+.preview-summary {
+  font-size: 12px; color: #888; margin-top: 8px;
+}
 </style>
 </head>
 <body>
@@ -130,6 +148,12 @@ select.picker:focus { border-color: #4ecca3; }
     <div style="display:flex;gap:12px;align-items:center;">
       <button class="btn btn-primary" id="runBtn" onclick="runClassification()" disabled>Run Classification</button>
       <span class="status-msg" id="runStatus"></span>
+    </div>
+
+    <!-- Collection photo preview -->
+    <div id="collectionPreview" style="display:none;">
+      <div class="preview-summary" id="previewSummary"></div>
+      <div class="preview-grid" id="previewGrid"></div>
     </div>
   </div>
 
@@ -236,6 +260,38 @@ async function loadPastRuns() {
 function updateRunButton() {
   var collId = document.getElementById('collectionPicker').value;
   document.getElementById('runBtn').disabled = !collId;
+  if (collId) {
+    loadCollectionPreview(collId);
+  } else {
+    document.getElementById('collectionPreview').style.display = 'none';
+  }
+}
+
+async function loadCollectionPreview(collId) {
+  try {
+    var resp = await fetch('/api/collections/' + collId + '/photos?per_page=200');
+    var data = await resp.json();
+    var photos = data.photos || [];
+    var preview = document.getElementById('collectionPreview');
+    var grid = document.getElementById('previewGrid');
+    var summary = document.getElementById('previewSummary');
+
+    if (photos.length === 0) {
+      preview.style.display = 'none';
+      return;
+    }
+
+    summary.textContent = photos.length + (photos.length >= 200 ? '+' : '') + ' photos in this collection';
+    var html = '';
+    photos.slice(0, 50).forEach(function(p) {
+      html += '<img class="preview-thumb" src="/thumbnails/' + p.id + '.jpg" loading="lazy" title="' + escapeHtml(p.filename) + '">';
+    });
+    if (photos.length > 50) {
+      html += '<div style="display:flex;align-items:center;justify-content:center;background:#0f3460;border-radius:4px;font-size:12px;color:#888;">+' + (photos.length - 50) + ' more</div>';
+    }
+    grid.innerHTML = html;
+    preview.style.display = '';
+  } catch(e) {}
 }
 
 async function runClassification() {
