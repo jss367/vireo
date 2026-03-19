@@ -395,30 +395,31 @@ body {
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords..." onkeydown="if(event.key==='Enter')applyFilters()">
-      <label>From</label>
-      <input type="date" id="dateFrom" onchange="applyFilters()">
-      <label>To</label>
-      <input type="date" id="dateTo" onchange="applyFilters()">
+      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()">
+      <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
+      <input type="date" id="dateFrom" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
+      <label>to</label>
+      <input type="date" id="dateTo" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
       <div class="rating-filter">
-        <label>Min:</label>
+        <label title="Minimum star rating">Min:</label>
         <span class="rating-star" data-val="1" onclick="setFilterRating(1)">&#9733;</span>
         <span class="rating-star" data-val="2" onclick="setFilterRating(2)">&#9733;</span>
         <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
         <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
         <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
       </div>
-      <select id="sortSelect" onchange="applyFilters()">
-        <option value="date">Date (oldest)</option>
-        <option value="date_desc">Date (newest)</option>
-        <option value="name">Name (A-Z)</option>
-        <option value="name_desc">Name (Z-A)</option>
+      <select id="sortSelect" onchange="applyFilters()" title="Sort order">
+        <option value="date">Capture date (oldest)</option>
+        <option value="date_desc">Capture date (newest)</option>
+        <option value="name">Filename (A-Z)</option>
+        <option value="name_desc">Filename (Z-A)</option>
         <option value="rating">Rating (highest)</option>
       </select>
-      <label style="display:flex;align-items:center;gap:4px;">
+      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
         <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
-               style="width:80px;accent-color:#4ecca3;"
+               style="width:80px;accent-color:var(--accent, #4ecca3);"
                oninput="updateThumbSize(this.value)">
+        <span style="font-size:10px;color:var(--text-faint, #666);">&#9638;</span>
       </label>
       <span class="filter-summary" id="filterSummary"></span>
     </div>
