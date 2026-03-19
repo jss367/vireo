@@ -1,26 +1,106 @@
 <style>
+/* ---------- Theme Variables ---------- */
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --bg-input: #0f3460;
+  --bg-panel: #0d1b2a;
+  --border-primary: #0f3460;
+  --border-secondary: #1a3a6e;
+  --border-subtle: #0a1a35;
+  --text-primary: #e0e0e0;
+  --text-secondary: #c0c0c0;
+  --text-muted: #a0a0a0;
+  --text-dim: #888;
+  --text-faint: #666;
+  --text-ghost: #555;
+  --text-invisible: #444;
+  --accent: #4ecca3;
+  --accent-hover: #3db890;
+  --accent-dim: #2a5a4a;
+  --warning: #f0c040;
+  --danger: #e74c3c;
+  --info: #7ec8e3;
+}
+
+/* Global overrides — these apply theme variables to common patterns across all pages */
+body { background: var(--bg-primary) !important; color: var(--text-primary) !important; }
+.section, .card, .grid-card { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.section-title { color: var(--text-primary) !important; border-bottom-color: var(--border-primary) !important; }
+.sidebar { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.header { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.settings-panel { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.tabs { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.filter-bar { background: var(--bg-primary) !important; border-color: var(--border-primary) !important; }
+.stat-card { background: var(--bg-tertiary) !important; }
+.stat-number { color: var(--accent) !important; }
+.setting-row { border-color: var(--border-subtle) !important; }
+.setting-label { color: var(--text-secondary) !important; }
+.setting-label small { color: var(--text-faint) !important; }
+.btn-batch-accept { background: var(--accent) !important; }
+.btn-batch-accept:hover { background: var(--accent-hover) !important; }
+.badge-new { background: var(--accent) !important; }
+.badge-disagreement { background: var(--danger) !important; }
+.badge-refinement { background: var(--warning) !important; }
+.grid-card img { background: var(--bg-tertiary) !important; }
+.confidence-bar { background: var(--bg-tertiary) !important; }
+input[type=text], input[type=date], select, .path-input, .text-input, .model-selector {
+  background: var(--bg-input) !important; color: var(--text-primary) !important;
+  border-color: var(--border-secondary) !important;
+}
+.tree-item:hover { background: var(--bg-tertiary) !important; }
+.tree-item.active { background: var(--bg-tertiary) !important; color: var(--accent) !important; }
+.detail-panel { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.log-panel-content, .bp-logs-content, .log-container { background: var(--bg-panel) !important; }
+.bp-tabs { border-color: var(--border-primary) !important; }
+
+:root[data-theme="light"] {
+  --bg-primary: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8eaed;
+  --bg-input: #ffffff;
+  --bg-panel: #f0f0f2;
+  --border-primary: #d0d0d0;
+  --border-secondary: #c0c0c0;
+  --border-subtle: #e0e0e0;
+  --text-primary: #1a1a2e;
+  --text-secondary: #333;
+  --text-muted: #555;
+  --text-dim: #777;
+  --text-faint: #999;
+  --text-ghost: #aaa;
+  --text-invisible: #ccc;
+  --accent: #0d8a6a;
+  --accent-hover: #0a7058;
+  --accent-dim: #c8efe4;
+  --warning: #b8860b;
+  --danger: #c0392b;
+  --info: #2980b9;
+}
+
 .navbar {
-  background: #16213e;
+  background: var(--bg-secondary);
   padding: 0 24px;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid #0f3460;
+  border-bottom: 1px solid var(--border-primary);
   position: sticky;
   top: 0;
   z-index: 200;
   height: 48px;
 }
-.navbar .brand { font-size: 16px; font-weight: 700; color: #4ecca3; margin-right: 32px; text-decoration: none; }
+.navbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); margin-right: 32px; text-decoration: none; }
 .navbar a {
-  color: #a0a0a0;
+  color: var(--text-muted);
   text-decoration: none;
   padding: 13px 14px;
   font-size: 13px;
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
 }
-.navbar a:hover { color: #fff; }
-.navbar a.active { color: #fff; border-bottom-color: #4ecca3; }
+.navbar a:hover { color: var(--text-primary); }
+.navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
 .navbar .nav-spacer { flex: 1; }
 .navbar .nav-icon {
   color: #555;
@@ -53,8 +133,8 @@
 
 /* ---------- Bottom Panel ---------- */
 .bottom-toggle {
-  background: #0d1b2a;
-  border-top: 1px solid #0f3460;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-primary);
   padding: 4px 16px;
   display: flex;
   align-items: center;
@@ -85,8 +165,8 @@
   left: 0;
   right: 0;
   height: 0;
-  background: #0d1b2a;
-  border-top: 1px solid #0f3460;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-primary);
   z-index: 299;
   overflow: hidden;
   display: flex;
@@ -215,6 +295,7 @@
   <a href="/stats" {% if active_page == 'stats' %}class="active"{% endif %}>Stats</a>
   <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
   <span class="nav-spacer"></span>
+  <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
   <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
     &#9638;
     <span class="activity-dot" id="navActivityDot"></span>
@@ -268,6 +349,33 @@
   var lpMaxLines = 200;
   var activeJobs = [];
   var currentBpTab = 'jobs';
+
+  // Theme: restore on load (before init to avoid flash)
+  (function() {
+    var saved = localStorage.getItem('spotter_theme') || 'dark';
+    if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    updateThemeIcon();
+  })();
+
+  window.toggleTheme = function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var next = current === 'light' ? 'dark' : 'light';
+    if (next === 'dark') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    localStorage.setItem('spotter_theme', next);
+    updateThemeIcon();
+  };
+
+  function updateThemeIcon() {
+    var btn = document.getElementById('themeToggle');
+    if (!btn) return;
+    var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    btn.textContent = isLight ? '\u263D' : '\u2600';
+    btn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+  }
 
   function init() {
     // Restore panel state and height
