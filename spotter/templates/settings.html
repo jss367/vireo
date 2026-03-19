@@ -773,9 +773,21 @@ async function loadHistory() {
           result = parts.join(', ');
         } catch(e) { result = String(r.result); }
       }
-      if (r.error_count > 0) result += ' (' + r.error_count + ' errors)';
+      if (r.error_count > 0 && result === '-') result = '';
+      // For failed jobs, show the error message
+      if (r.result) {
+        try {
+          var parsed2 = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
+          if (parsed2 && parsed2.error) {
+            // Truncate long errors to first line
+            var errMsg = String(parsed2.error).split('\n')[0];
+            if (errMsg.length > 100) errMsg = errMsg.substring(0, 100) + '...';
+            result = errMsg;
+          }
+        } catch(e2) {}
+      }
       html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + cls + '">' + r.status + '</td>' +
-        '<td>' + started + '</td><td>' + duration + '</td><td>' + escapeHtml(result) + '</td></tr>';
+        '<td>' + started + '</td><td>' + duration + '</td><td style="' + (r.status === 'failed' ? 'color:#e74c3c;' : '') + '">' + escapeHtml(result) + '</td></tr>';
     });
     html += '</tbody></table>';
     document.getElementById('historyContent').innerHTML = html;

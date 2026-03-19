@@ -115,9 +115,14 @@ class JobRunner:
                    (id, type, status, started_at, finished_at, duration,
                     result, error_count, config)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                # For failed jobs, store the error message in result
+                result_data = job['result']
+                if job['status'] == 'failed' and job['errors']:
+                    result_data = {'error': job['errors'][0]}
+
                 (job['id'], job['type'], job['status'],
                  job['started_at'], job['finished_at'], round(duration, 1),
-                 json.dumps(job['result']),
+                 json.dumps(result_data),
                  len(job['errors']),
                  json.dumps(job['config'])),
             )
