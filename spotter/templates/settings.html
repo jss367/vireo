@@ -100,15 +100,22 @@
     <div class="section-title">Models</div>
     <div id="modelsContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
     <div style="margin-top:12px; border-top:1px solid #0f3460; padding-top:12px;">
-      <div style="font-size:12px; color:#888; margin-bottom:8px;">Add custom model weights:</div>
-      <div style="display:flex; gap:8px;">
-        <input type="text" class="setting-value" id="customModelName" placeholder="Model name"
+      <div style="font-size:12px; color:#888; margin-bottom:8px;">Add from HuggingFace:</div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input type="text" id="hfRepoId" placeholder="e.g. imageomics/bioclip-2.5-vith14"
                style="background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
-        <input type="text" class="setting-value" id="customModelPath" placeholder="/path/to/weights.bin"
+        <button onclick="addHfModel()" style="background:#4ecca3;color:#1a1a2e;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Download</button>
+      </div>
+      <div style="font-size:12px; color:#888; margin-bottom:8px;">Or add local weights file:</div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="customModelName" placeholder="Model name"
+               style="background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
+        <input type="text" id="customModelPath" placeholder="/path/to/weights.bin"
                style="background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:6px 10px;font-size:12px;flex:2;">
         <button onclick="addCustomModel()" style="background:#0f3460;color:#c0c0c0;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Add</button>
       </div>
     </div>
+    <span id="modelActionStatus" style="font-size:12px;color:#888;margin-top:6px;display:block;"></span>
   </div>
 
   <!-- Taxonomy -->
@@ -482,6 +489,56 @@ async function setActiveModel(modelId) {
     body: JSON.stringify({model_id: modelId}),
   });
   loadModels();
+}
+
+async function addHfModel() {
+  var repoId = document.getElementById('hfRepoId').value.trim();
+  if (!repoId) return;
+  // Clean up input — handle full URLs or repo IDs
+  repoId = repoId.replace('https://huggingface.co/', '').replace(/\/$/, '');
+
+  var status = document.getElementById('modelActionStatus');
+  status.textContent = 'Starting download from HuggingFace...';
+  status.style.color = '#888';
+
+  try {
+    var resp = await fetch('/api/jobs/download-hf-model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({repo_id: repoId}),
+    });
+    if (!resp.ok) {
+      var err = await resp.json();
+      status.textContent = 'Error: ' + (err.error || 'failed');
+      status.style.color = '#e74c3c';
+      return;
+    }
+    var data = await resp.json();
+    status.textContent = 'Downloading...';
+
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      if (p.current_file) status.textContent = p.current_file;
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      if (result.status === 'completed') {
+        status.textContent = 'Downloaded! Model ready to use.';
+        status.style.color = '#4ecca3';
+        document.getElementById('hfRepoId').value = '';
+      } else {
+        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+        status.style.color = '#e74c3c';
+      }
+      loadModels();
+    });
+    source.onerror = function() { source.close(); status.textContent = 'Connection lost'; };
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = '#e74c3c';
+  }
 }
 
 async function addCustomModel() {

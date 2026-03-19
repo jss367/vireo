@@ -215,6 +215,84 @@ def download_model(model_id, progress_callback=None):
     raise ValueError(f"No download handler for {model_id}")
 
 
+def download_hf_model(repo_id, progress_callback=None):
+    """Download a model from any HuggingFace repo.
+
+    Args:
+        repo_id: HuggingFace repo ID (e.g., 'imageomics/bioclip-2.5-vith14')
+        progress_callback: optional callable(message)
+
+    Returns:
+        dict with model_id, weights_path, name
+    """
+    try:
+        from huggingface_hub import hf_hub_download, list_repo_files
+    except ImportError:
+        raise RuntimeError("huggingface_hub not installed. Run: pip install huggingface_hub")
+
+    os.makedirs(DEFAULT_MODELS_DIR, exist_ok=True)
+
+    # Generate a model ID from the repo
+    model_id = 'hf-' + repo_id.replace('/', '-').lower()
+    slug = repo_id.split('/')[-1]
+    local_dir = os.path.join(DEFAULT_MODELS_DIR, slug)
+
+    # Find the weights file in the repo
+    if progress_callback:
+        progress_callback(f'Scanning {repo_id} for model files...')
+
+    log.info("Listing files in HuggingFace repo: %s", repo_id)
+    try:
+        files = list_repo_files(repo_id)
+    except Exception as e:
+        raise RuntimeError(f"Could not access HuggingFace repo '{repo_id}': {e}")
+
+    # Look for common weight file names
+    weight_candidates = [
+        'open_clip_pytorch_model.bin',
+        'pytorch_model.bin',
+        'model.safetensors',
+        'open_clip_model.safetensors',
+    ]
+    weight_file = None
+    for candidate in weight_candidates:
+        if candidate in files:
+            weight_file = candidate
+            break
+
+    if not weight_file:
+        # Try any .bin or .safetensors file
+        for f in files:
+            if f.endswith('.bin') or f.endswith('.safetensors'):
+                weight_file = f
+                break
+
+    if not weight_file:
+        raise RuntimeError(
+            f"No model weights found in {repo_id}. "
+            f"Files: {', '.join(files[:10])}"
+        )
+
+    log.info("Found weights file: %s in %s", weight_file, repo_id)
+
+    # Download the weights
+    path = _hf_download_with_retry(
+        repo_id, weight_file, local_dir,
+        progress_callback=progress_callback,
+    )
+
+    # Determine model_str — use hf-hub: prefix for open_clip compatibility
+    model_str = f'hf-hub:{repo_id}'
+
+    # Register the model
+    name = slug.replace('-', ' ').title()
+    register_model(model_id, name, model_str, path,
+                   f'Downloaded from HuggingFace: {repo_id}')
+
+    log.info("Model registered: %s (%s)", name, path)
+    return {'model_id': model_id, 'weights_path': path, 'name': name}
+
+
 def get_taxonomy_info():
     """Return taxonomy status info."""
     taxonomy_path = os.path.join(os.path.dirname(__file__), 'taxonomy.json')

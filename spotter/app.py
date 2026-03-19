@@ -500,6 +500,28 @@ def create_app(db_path, thumb_cache_dir=None):
         job_id = runner.start('download-model', work, config={'model_id': model_id})
         return jsonify({'job_id': job_id})
 
+    @app.route('/api/jobs/download-hf-model', methods=['POST'])
+    def api_job_download_hf_model():
+        body = request.get_json(silent=True) or {}
+        repo_id = body.get('repo_id', '').strip()
+        if not repo_id:
+            return jsonify({'error': 'repo_id required'}), 400
+
+        runner = app._job_runner
+
+        def work(job):
+            from models import download_hf_model
+            def progress_cb(msg):
+                job['progress']['current_file'] = msg
+                runner.push_event(job['id'], 'progress', {
+                    'current': 0, 'total': 0, 'current_file': msg, 'rate': 0,
+                })
+            result = download_hf_model(repo_id, progress_callback=progress_cb)
+            return result
+
+        job_id = runner.start('download-model', work, config={'repo_id': repo_id})
+        return jsonify({'job_id': job_id})
+
     @app.route('/api/taxonomy/info')
     def api_taxonomy_info():
         from models import get_taxonomy_info
