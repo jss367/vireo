@@ -89,6 +89,12 @@ def create_app(db_path, thumb_cache_dir=None):
             app._db = Database(db_path)
         return app._db
 
+    # Load user config (e.g. HF token) on startup
+    import config as cfg
+    startup_cfg = cfg.load()
+    if startup_cfg.get('hf_token'):
+        os.environ['HF_TOKEN'] = startup_cfg['hf_token']
+
     # Initialize job runner, log broadcaster, and default collections
     init_db = Database(db_path)
     init_db.create_default_collections()
@@ -353,9 +359,11 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route('/api/classify/config')
     def api_classify_config():
         """Return classifier configuration from model registry."""
+        import config as cfg
         from models import get_active_model, get_taxonomy_info
         active = get_active_model()
         tax = get_taxonomy_info()
+        user_cfg = cfg.load()
         return jsonify({
             'model_name': active['name'] if active else 'No model',
             'model_str': active['model_str'] if active else '',
@@ -363,8 +371,61 @@ def create_app(db_path, thumb_cache_dir=None):
             'weights_available': active['downloaded'] if active else False,
             'taxonomy_available': tax['available'],
             'taxonomy_species_count': init_db.count_keywords(),
-            'default_threshold': 0.4,
+            'default_threshold': user_cfg['classification_threshold'],
+            'default_grouping_window': user_cfg['grouping_window_seconds'],
         })
+
+    @app.route('/api/config')
+    def api_config_get():
+        import config as cfg
+        return jsonify(cfg.load())
+
+    @app.route('/api/config', methods=['POST'])
+    def api_config_set():
+        import config as cfg
+        body = request.get_json(silent=True) or {}
+        current = cfg.load()
+        for key in body:
+            if key in cfg.DEFAULTS:
+                current[key] = body[key]
+        # Apply HF token to environment immediately
+        hf_token = current.get('hf_token', '')
+        if hf_token:
+            os.environ['HF_TOKEN'] = hf_token
+        elif 'HF_TOKEN' in os.environ:
+            del os.environ['HF_TOKEN']
+        cfg.save(current)
+        return jsonify({'ok': True})
+
+    @app.route('/api/embedding-cache')
+    def api_embedding_cache():
+        """Return info about cached label embeddings."""
+        from classifier import CACHE_DIR
+        if not os.path.isdir(CACHE_DIR):
+            return jsonify({'entries': [], 'total_size': 0})
+        entries = []
+        total_size = 0
+        for f in sorted(os.listdir(CACHE_DIR)):
+            if f.endswith('.pt'):
+                fp = os.path.join(CACHE_DIR, f)
+                size = os.path.getsize(fp)
+                total_size += size
+                entries.append({'file': f, 'size': size})
+        return jsonify({'entries': entries, 'total_size': total_size})
+
+    @app.route('/api/embedding-cache', methods=['DELETE'])
+    def api_embedding_cache_clear():
+        """Clear all cached label embeddings."""
+        import shutil
+        from classifier import CACHE_DIR
+        if os.path.isdir(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+            log.info("Embedding cache cleared")
+        return jsonify({'ok': True})
+
+    @app.route('/api/version')
+    def api_version():
+        return jsonify({'version': '26.3.1'})
 
     # -- Import API routes --
 
@@ -690,6 +751,15 @@ def create_app(db_path, thumb_cache_dir=None):
         if not os.path.isdir(root):
             return jsonify({'error': f'directory not found: {root}'}), 400
 
+        # Remember this scan root
+        import config as cfg
+        user_cfg = cfg.load()
+        roots = user_cfg.get('scan_roots', [])
+        if root not in roots:
+            roots.insert(0, root)
+            user_cfg['scan_roots'] = roots
+            cfg.save(user_cfg)
+
         runner = app._job_runner
 
         def work(job):
@@ -799,11 +869,14 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route('/api/jobs/classify', methods=['POST'])
     def api_job_classify():
+        import config as cfg
+        user_cfg = cfg.load()
         body = request.get_json(silent=True) or {}
         collection_id = body.get('collection_id')
         labels_file = body.get('labels_file')
         model_name = body.get('model_name', 'bioclip')
-        threshold = body.get('threshold', 0.4)
+        threshold = body.get('threshold', user_cfg['classification_threshold'])
+        grouping_window = body.get('grouping_window', user_cfg['grouping_window_seconds'])
 
         if not collection_id:
             return jsonify({'error': 'collection_id required'}), 400
@@ -909,7 +982,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     img.save(tmp_path, quality=85)
 
                 try:
-                    preds = clf.classify(tmp_path, threshold=threshold)
+                    all_preds = clf.classify(tmp_path, threshold=0)
                 except Exception:
                     log.warning("Classification failed for %s", photo['filename'], exc_info=True)
                     failed += 1
@@ -917,7 +990,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 finally:
                     os.unlink(tmp_path)
 
+                if not all_preds:
+                    continue
+
+                top_pred = all_preds[0]
+                preds = [p for p in all_preds if p['score'] >= threshold]
+
                 if not preds:
+                    log.info("%s: top prediction \"%s\" at %.2f (below threshold %.2f)",
+                             photo['filename'], top_pred['species'], top_pred['score'], threshold)
                     continue
 
                 top = preds[0]
@@ -945,7 +1026,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 'current_file': 'Grouping and computing consensus...', 'rate': 0,
             })
 
-            groups = group_by_timestamp(raw_results, window_seconds=10)
+            groups = group_by_timestamp(raw_results, window_seconds=grouping_window)
             classified = 0
             group_count = 0
 

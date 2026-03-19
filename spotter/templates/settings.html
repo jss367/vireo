@@ -160,6 +160,51 @@
     </div>
   </div>
 
+  <!-- Classification Defaults -->
+  <div class="section">
+    <div class="section-title">Classification Defaults</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Confidence threshold
+        <small>Predictions below this are discarded. Can be overridden per-run.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgThreshold" min="10" max="90" step="5" value="40"
+               style="width:120px;accent-color:#4ecca3;"
+               oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'; saveConfig()">
+        <span style="font-size:13px;color:#e0e0e0;min-width:36px;" id="cfgThresholdVal">40%</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Grouping window
+        <small>Photos taken within this many seconds are grouped and given a consensus prediction.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgGroupingWindow" min="1" max="120" value="10"
+               style="width:60px;background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+        <span style="font-size:13px;color:#888;">seconds</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HuggingFace -->
+  <div class="section">
+    <div class="section-title">HuggingFace</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Access token
+        <small>Optional. Enables faster downloads and access to gated models. Get one at <span style="color:#4ecca3;">huggingface.co/settings/tokens</span></small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="password" id="cfgHfToken" placeholder="hf_..."
+               style="width:220px;background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig()">
+      </div>
+    </div>
+  </div>
+
   <!-- Recent Jobs -->
   <div class="section">
     <div class="section-title">Recent Jobs</div>
@@ -209,6 +254,54 @@
       </div>
       <span class="setting-value" id="thumbSizeDetail">-</span>
     </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Embedding cache
+        <small>~/.spotter/embedding_cache/</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="setting-value" id="embeddingCacheSize">-</span>
+        <span style="font-size:11px;color:#666;" id="embeddingCacheCount"></span>
+        <button onclick="clearEmbeddingCache()" id="clearCacheBtn"
+                style="background:#0f3460;color:#c0c0c0;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scan Roots -->
+  <div class="section">
+    <div class="section-title">Saved Scan Roots</div>
+    <p style="font-size:12px;color:#888;margin-bottom:10px;">
+      Directories you've scanned before. These appear as suggestions on the Import page.
+    </p>
+    <div id="scanRootsContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+  </div>
+
+  <!-- Keyboard Shortcuts -->
+  <div class="section">
+    <div class="section-title">Keyboard Shortcuts</div>
+    <p style="font-size:12px;color:#888;margin-bottom:10px;">Available on the Classify page when reviewing predictions.</p>
+    <div class="setting-row">
+      <div class="setting-label">Accept prediction</div>
+      <span class="setting-value" style="color:#4ecca3;font-family:monospace;font-size:14px;">A</span>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">Skip / reject prediction</div>
+      <span class="setting-value" style="color:#f0c040;font-family:monospace;font-size:14px;">S</span>
+    </div>
+  </div>
+
+  <!-- About -->
+  <div class="section">
+    <div class="section-title">About</div>
+    <div class="setting-row">
+      <div class="setting-label">Spotter</div>
+      <span class="setting-value" id="appVersion">-</span>
+    </div>
+    <div style="font-size:12px;color:#666;margin-top:8px;">
+      AI-powered wildlife photo organizer.
+      <a href="https://github.com/julius/photo-tools" style="color:#4ecca3;text-decoration:none;">GitHub</a>
+    </div>
   </div>
 
 </div>
@@ -219,6 +312,44 @@ loadModels();
 loadTaxonomy();
 loadHistory();
 loadSystemInfo();
+loadConfig();
+loadEmbeddingCache();
+loadScanRoots();
+loadVersion();
+
+var _saveTimer = null;
+async function loadConfig() {
+  try {
+    var resp = await fetch('/api/config');
+    if (!resp.ok) return;
+    var cfg = await resp.json();
+    var pct = Math.round((cfg.classification_threshold || 0.4) * 100);
+    document.getElementById('cfgThreshold').value = pct;
+    document.getElementById('cfgThresholdVal').textContent = pct + '%';
+    document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds || 10;
+    document.getElementById('cfgHfToken').value = cfg.hf_token || '';
+  } catch(e) {}
+}
+
+function saveConfig() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async function() {
+    var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
+    var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10) || 10;
+    var hfToken = document.getElementById('cfgHfToken').value.trim();
+    try {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          classification_threshold: threshold,
+          grouping_window_seconds: grouping,
+          hf_token: hfToken,
+        }),
+      });
+    } catch(e) {}
+  }, 500);
+}
 
 async function loadSystemInfo() {
   try {
@@ -652,6 +783,71 @@ function escapeHtml(str) {
 function escapeAttr(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/* ---------- Embedding Cache ---------- */
+async function loadEmbeddingCache() {
+  try {
+    var resp = await fetch('/api/embedding-cache');
+    var d = await resp.json();
+    document.getElementById('embeddingCacheSize').textContent = formatBytes(d.total_size);
+    var count = (d.entries || []).length;
+    document.getElementById('embeddingCacheCount').textContent = count > 0 ? count + ' cached label ' + (count === 1 ? 'set' : 'sets') : 'empty';
+    document.getElementById('clearCacheBtn').style.display = count > 0 ? '' : 'none';
+  } catch(e) {}
+}
+
+async function clearEmbeddingCache() {
+  if (!confirm('Clear all cached label embeddings? The next classification run will recompute them (slow on CPU).')) return;
+  await fetch('/api/embedding-cache', { method: 'DELETE' });
+  loadEmbeddingCache();
+}
+
+/* ---------- Scan Roots ---------- */
+async function loadScanRoots() {
+  try {
+    var resp = await fetch('/api/config');
+    var cfg = await resp.json();
+    var roots = cfg.scan_roots || [];
+    if (roots.length === 0) {
+      document.getElementById('scanRootsContent').innerHTML = '<span style="color:#666;font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
+      return;
+    }
+    var html = '';
+    roots.forEach(function(r, i) {
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #0a1a35;">';
+      html += '<span style="font-size:13px;color:#c0c0c0;flex:1;font-family:monospace;">' + escapeHtml(r) + '</span>';
+      html += '<button onclick="removeScanRoot(' + i + ')" style="background:none;border:none;color:#666;font-size:14px;cursor:pointer;padding:2px 6px;" title="Remove">&times;</button>';
+      html += '</div>';
+    });
+    document.getElementById('scanRootsContent').innerHTML = html;
+  } catch(e) {
+    document.getElementById('scanRootsContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+  }
+}
+
+async function removeScanRoot(index) {
+  try {
+    var resp = await fetch('/api/config');
+    var cfg = await resp.json();
+    var roots = cfg.scan_roots || [];
+    roots.splice(index, 1);
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scan_roots: roots }),
+    });
+    loadScanRoots();
+  } catch(e) {}
+}
+
+/* ---------- Version ---------- */
+async function loadVersion() {
+  try {
+    var resp = await fetch('/api/version');
+    var d = await resp.json();
+    document.getElementById('appVersion').textContent = 'v' + d.version;
+  } catch(e) {}
 }
 </script>
 </body>

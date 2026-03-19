@@ -135,9 +135,9 @@ body {
       import any existing XMP sidecar keywords, and generate thumbnails for browsing.
     </p>
     <div class="input-group">
-      <input type="text" class="path-input" id="scanRoot"
-             placeholder="/Volumes/Photography/Raw Files"
-             value="/Volumes/Photography/Raw Files">
+      <input type="text" class="path-input" id="scanRoot" list="scanRootList"
+             placeholder="/Volumes/Photography/Raw Files">
+      <datalist id="scanRootList"></datalist>
       <button class="btn btn-primary" id="scanBtn" onclick="startScanJob()">Scan</button>
       <button class="btn btn-secondary" id="rescanBtn" onclick="startScanJob(true)">Scan for changes</button>
     </div>
@@ -237,6 +237,25 @@ body {
 </div>
 
 <script>
+/* ==================== Load saved scan roots ==================== */
+(async function() {
+  try {
+    var resp = await fetch('/api/config');
+    if (!resp.ok) return;
+    var cfg = await resp.json();
+    var roots = cfg.scan_roots || [];
+    var list = document.getElementById('scanRootList');
+    roots.forEach(function(r) {
+      var opt = document.createElement('option');
+      opt.value = r;
+      list.appendChild(opt);
+    });
+    if (roots.length > 0) {
+      document.getElementById('scanRoot').value = roots[0];
+    }
+  } catch(e) {}
+})();
+
 /* ==================== Scan Job ==================== */
 async function startScanJob(incremental) {
   var root = document.getElementById('scanRoot').value.trim();

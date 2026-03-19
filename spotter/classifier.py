@@ -16,6 +16,35 @@ def _embedding_cache_path(labels, model_str):
     return os.path.join(CACHE_DIR, f"{digest}.pt")
 
 
+def _compute_embeddings_with_progress(classifier, labels):
+    """Compute text embeddings for labels with progress logging.
+
+    Replicates CustomLabelsClassifier._get_txt_embeddings but logs progress.
+    """
+    import torch
+    import torch.nn.functional as F
+    from bioclip.predict import OPENA_AI_IMAGENET_TEMPLATE
+
+    total = len(labels)
+    log.info("Computing label embeddings: 0/%d", total)
+
+    all_features = []
+    with torch.no_grad():
+        for i, classname in enumerate(labels):
+            txts = [template(classname) for template in OPENA_AI_IMAGENET_TEMPLATE]
+            txts = classifier.tokenizer(txts).to(classifier.device)
+            txt_features = classifier.model.encode_text(txts)
+            txt_features = F.normalize(txt_features, dim=-1).mean(dim=0)
+            txt_features /= txt_features.norm()
+            all_features.append(txt_features)
+
+            done = i + 1
+            if done % 100 == 0 or done == total:
+                log.info("Computing label embeddings: %d/%d", done, total)
+
+    return torch.stack(all_features, dim=1)
+
+
 class Classifier:
     """Wraps BioCLIP for species classification.
 
@@ -33,12 +62,12 @@ class Classifier:
                 raise ValueError("labels list must not be empty")
 
             from bioclip import CustomLabelsClassifier
+            import torch
 
             cache_path = _embedding_cache_path(labels, model_str)
 
             if os.path.exists(cache_path):
                 log.info("Loading cached label embeddings for %d labels...", len(labels))
-                import torch
                 self._classifier = CustomLabelsClassifier(
                     cls_ary=["_placeholder"],
                     model_str=model_str,
@@ -48,14 +77,19 @@ class Classifier:
                 self._classifier.txt_embeddings = torch.load(cache_path, weights_only=True)
                 log.info("Label embeddings loaded from cache")
             else:
-                log.info("Computing label embeddings for %d labels (this may take a while on CPU)...", len(labels))
+                log.info("Computing label embeddings for %d labels (first run — will be cached for next time)...", len(labels))
+                # Init with placeholder to get the model loaded without computing all embeddings
                 self._classifier = CustomLabelsClassifier(
-                    cls_ary=labels,
+                    cls_ary=["_placeholder"],
                     model_str=model_str,
                     pretrained_str=pretrained_str,
                 )
+                # Now compute embeddings ourselves with progress logging
+                self._classifier.classes = [cls.strip() for cls in labels]
+                self._classifier.txt_embeddings = _compute_embeddings_with_progress(
+                    self._classifier, self._classifier.classes,
+                )
                 os.makedirs(CACHE_DIR, exist_ok=True)
-                import torch
                 torch.save(self._classifier.txt_embeddings, cache_path)
                 log.info("Label embeddings computed and cached to disk")
 
