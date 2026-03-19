@@ -135,32 +135,55 @@ def register_model(model_id, name, model_str, weights_path, description=''):
     _save_config(config)
 
 
-def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None, max_retries=50):
+def _get_cache_file_size(repo_id, filename):
+    """Check how much of a file has been downloaded in the HF cache."""
+    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    # HF cache uses a specific directory structure
+    repo_dir = os.path.join(cache_dir, 'models--' + repo_id.replace('/', '--'))
+    if not os.path.isdir(repo_dir):
+        return 0
+    # Look for incomplete download files
+    blobs_dir = os.path.join(repo_dir, 'blobs')
+    if not os.path.isdir(blobs_dir):
+        return 0
+    # Find the largest file (likely the partial download)
+    max_size = 0
+    for f in os.listdir(blobs_dir):
+        fp = os.path.join(blobs_dir, f)
+        if os.path.isfile(fp):
+            max_size = max(max_size, os.path.getsize(fp))
+    return max_size
+
+
+def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None):
     """Download from HuggingFace with retry on connection failures.
 
-    Uses the HF cache (not local_dir) for reliable resume on large files,
-    then copies the result to local_dir.
+    Uses the HF cache for reliable resume. Keeps retrying as long as
+    progress is being made. Stops after 3 consecutive failures with
+    no progress.
     """
     from huggingface_hub import hf_hub_download
     import shutil
     import time as _time
 
-    # Increase HF timeout for large files
     os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '300')
 
-    for attempt in range(max_retries):
+    attempt = 0
+    stalled_count = 0
+    last_progress = 0
+    max_stalled = 3  # give up after 3 consecutive failures with no progress
+
+    while True:
+        attempt += 1
         try:
             if progress_callback:
-                if attempt == 0:
+                if attempt == 1:
                     progress_callback(f'Downloading {filename} from {repo_id}...')
                 else:
-                    progress_callback(f'Resuming download (attempt {attempt + 1}/{max_retries})...')
+                    progress_callback(f'Resuming download (attempt {attempt})...')
 
-            log.info("Downloading %s from %s (attempt %d/%d)",
-                     filename, repo_id, attempt + 1, max_retries)
+            log.info("Downloading %s from %s (attempt %d)", filename, repo_id, attempt)
 
-            # Use default HF cache for reliable resume, not local_dir
-            # The cache handles partial downloads properly
             cached_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
@@ -176,15 +199,29 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
             return dest_path
 
         except Exception as e:
-            log.warning("Download attempt %d failed: %s", attempt + 1, e)
-            if attempt == max_retries - 1:
+            # Check if we made progress since last attempt
+            current_size = _get_cache_file_size(repo_id, filename)
+            if current_size > last_progress:
+                log.info("Download progress: %d MB downloaded so far",
+                         current_size // (1024 * 1024))
+                stalled_count = 0
+                last_progress = current_size
+            else:
+                stalled_count += 1
+                log.warning("Download attempt %d failed with no progress (%d/%d stalled): %s",
+                            attempt, stalled_count, max_stalled, e)
+
+            if stalled_count >= max_stalled:
                 raise RuntimeError(
-                    f"Download failed after {max_retries} attempts: {e}\n"
-                    f"Try again — the download will resume from where it left off."
+                    f"Download stalled after {attempt} attempts with no progress. "
+                    f"Downloaded {last_progress // (1024 * 1024)} MB so far. "
+                    f"Try again later — the download will resume from where it left off."
                 ) from e
-            wait = min(5, 2 * (attempt + 1))  # 2s, 4s, 5s, 5s, ...
+
+            wait = 3
             if progress_callback:
-                progress_callback(f'Connection lost, retrying in {wait}s (attempt {attempt + 2})...')
+                mb = current_size // (1024 * 1024)
+                progress_callback(f'Connection lost at {mb} MB, retrying in {wait}s...')
             _time.sleep(wait)
 
 
