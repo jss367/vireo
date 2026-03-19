@@ -319,21 +319,23 @@ async function searchPlaces() {
   try {
     var resp = await fetch('/api/labels/search-places?q=' + encodeURIComponent(q));
     var places = await resp.json();
+    console.log('Place search results for "' + q + '":', places.length, 'places');
     if (places.length === 0) {
       dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#555;">No places found</div>';
-      dropdown.style.display = 'block';
-      return;
+    } else {
+      var html = '';
+      places.slice(0, 8).forEach(function(p) {
+        html += '<div onclick="selectPlace(' + p.id + ',\'' + escapeAttr(p.display_name) + '\')" ' +
+          'style="padding:8px 10px;font-size:13px;color:#c0c0c0;cursor:pointer;border-bottom:1px solid #1a3a6e;" ' +
+          'onmouseover="this.style.background=\'#16213e\'" onmouseout="this.style.background=\'\'">' +
+          escapeHtml(p.display_name) + '</div>';
+      });
+      dropdown.innerHTML = html;
     }
-    var html = '';
-    places.slice(0, 8).forEach(function(p) {
-      html += '<div onclick="selectPlace(' + p.id + ',\'' + escapeAttr(p.display_name) + '\')" ' +
-        'style="padding:8px 10px;font-size:13px;color:#c0c0c0;cursor:pointer;border-bottom:1px solid #1a3a6e;" ' +
-        'onmouseover="this.style.background=\'#16213e\'" onmouseout="this.style.background=\'\'">' +
-        escapeHtml(p.display_name) + '</div>';
-    });
-    dropdown.innerHTML = html;
-    dropdown.style.display = 'block';
+    dropdown.style.cssText = 'display:block;position:absolute;left:0;right:0;top:100%;background:#0f3460;border:1px solid #1a3a6e;border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;z-index:10;';
+    console.log('Dropdown visible:', dropdown.style.display, 'children:', dropdown.children.length);
   } catch(e) {
+    console.error('Place search error:', e);
     dropdown.style.display = 'none';
   }
 }
