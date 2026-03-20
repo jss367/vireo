@@ -37,11 +37,11 @@ body {
   cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.15s;
 }
 .btn:disabled { cursor: default; }
-.btn-primary { background: #4ecca3; color: #1a1a2e; }
-.btn-primary:hover { background: #3db890; }
-.btn-primary:disabled { background: #2a5a4a; color: #555; }
-.btn-secondary { background: #0f3460; color: #c0c0c0; }
-.btn-secondary:hover { background: #1a3a6e; }
+.btn-primary { background: var(--accent, #4ecca3); color: var(--bg-primary, #1a1a2e); }
+.btn-primary:hover { background: var(--accent-hover, #3db890); }
+.btn-primary:disabled { background: var(--accent-dim, #2a5a4a); color: var(--text-ghost, #555); }
+.btn-secondary { background: var(--bg-tertiary, #0f3460); color: var(--text-secondary, #c0c0c0); }
+.btn-secondary:hover { background: var(--border-secondary, #1a3a6e); }
 
 .progress-bar {
   height: 6px; background: #0f3460; border-radius: 3px;

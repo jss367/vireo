@@ -11,6 +11,8 @@ CONFIG_PATH = os.path.expanduser("~/.spotter/config.json")
 DEFAULTS = {
     'classification_threshold': 0.4,
     'grouping_window_seconds': 10,
+    'similarity_threshold': 0.85,
+    'preview_max_size': 1920,
     'hf_token': '',
     'scan_roots': [],
 }

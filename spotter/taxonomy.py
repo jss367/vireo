@@ -75,6 +75,27 @@ class Taxonomy:
         """Check if a name is a recognized taxon."""
         return self.lookup(name) is not None
 
+    def get_hierarchy(self, name):
+        """Look up a species and return its full hierarchy as a flat dict.
+
+        Returns:
+            dict with keys: kingdom, phylum, class, order, family, genus,
+            scientific_name — or empty dict if not found
+        """
+        taxon = self.lookup(name)
+        if not taxon:
+            return {}
+
+        hierarchy = {'scientific_name': taxon.get('scientific_name', '')}
+        lineage_names = taxon.get('lineage_names', [])
+        lineage_ranks = taxon.get('lineage_ranks', [])
+
+        for rank_name, sci_name in zip(lineage_ranks, lineage_names):
+            if rank_name in ('kingdom', 'phylum', 'class', 'order', 'family', 'genus'):
+                hierarchy[rank_name] = sci_name
+
+        return hierarchy
+
     def relationship(self, name_a, name_b):
         """Determine the taxonomic relationship between two names.
 
@@ -120,18 +141,26 @@ class Taxonomy:
         return 'unrelated'
 
 
-def download_taxonomy(output_path):
+def download_taxonomy(output_path, progress_callback=None):
     """Download iNaturalist DWCA taxonomy and build taxonomy.json.
 
     Downloads the zip, parses taxa.csv and VernacularNames.csv,
     and writes a JSON file keyed by common name and scientific name.
+
+    Args:
+        progress_callback: optional callable(message) for status updates
     """
     import urllib.request
 
-    log.info("Downloading iNaturalist taxonomy from %s ...", DWCA_URL)
+    def _status(msg):
+        log.info(msg)
+        if progress_callback:
+            progress_callback(msg)
+
+    _status("Downloading iNaturalist taxonomy archive...")
     response = urllib.request.urlopen(DWCA_URL)
     zip_data = response.read()
-    log.info("Downloaded %d MB", len(zip_data) // (1024 * 1024))
+    _status(f"Downloaded {len(zip_data) // (1024 * 1024)} MB — parsing...")
 
     # Parse the DWCA zip
     taxa_by_id = {}
@@ -170,7 +199,7 @@ def download_taxonomy(output_path):
                     'rank': (row.get('taxonRank') or '').lower(),
                     'parent_id': parent_id,
                 }
-        log.info("Parsed %d taxa", len(taxa_by_id))
+        _status(f"Parsed {len(taxa_by_id):,} taxa")
 
         # Parse VernacularNames (English common names)
         # Prefer VernacularNames-english.csv, fall back to VernacularNames.csv
@@ -197,7 +226,7 @@ def download_taxonomy(output_path):
                     taxon_id = row.get('id') or row.get('taxonID')
                     if taxon_id and taxon_id in taxa_by_id and taxon_id not in common_names:
                         common_names[taxon_id] = row.get('vernacularName', '')
-            log.info("Found %d English common names", len(common_names))
+            _status(f"Found {len(common_names):,} English common names")
         else:
             log.warning("No VernacularNames file found in archive")
 
@@ -219,6 +248,7 @@ def download_taxonomy(output_path):
         return lineage_names, lineage_ranks
 
     # Build the lookup dictionaries
+    _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
     taxa_by_common = {}
     taxa_by_scientific = {}
 
@@ -255,11 +285,10 @@ def download_taxonomy(output_path):
         'taxa_by_scientific': taxa_by_scientific,
     }
 
+    _status(f"Writing taxonomy ({len(taxa_by_common):,} common + {len(taxa_by_scientific):,} scientific names)...")
     with open(output_path, 'w') as f:
         json.dump(result, f)
-
-    log.info("Wrote taxonomy to %s (%d common names, %d scientific names)",
-             output_path, len(taxa_by_common), len(taxa_by_scientific))
+    _status(f"Taxonomy complete: {len(taxa_by_common):,} common names, {len(taxa_by_scientific):,} scientific names")
     return result
 
 

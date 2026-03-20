@@ -1,0 +1,398 @@
+{% set active_page = 'variants' %}
+{% include '_navbar.html' %}
+
+<style>
+.variants-layout {
+  display: flex;
+  height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+/* Species list sidebar */
+.species-sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-secondary, #16213e);
+  border-right: 1px solid var(--border-primary, #0f3460);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.species-search {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-primary, #0f3460);
+}
+.species-search input {
+  width: 100%;
+  background: var(--bg-input, #0f3460);
+  color: var(--text-primary, #e0e0e0);
+  border: 1px solid var(--border-secondary, #1a3a6e);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+  box-sizing: border-box;
+}
+.species-search input:focus { border-color: var(--accent, #4ecca3); }
+.species-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.species-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary, #c0c0c0);
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+.species-item:hover { background: var(--bg-tertiary, #0f3460); }
+.species-item.active {
+  background: var(--bg-tertiary, #0f3460);
+  border-left-color: var(--accent, #4ecca3);
+  color: var(--text-primary, #e0e0e0);
+}
+.species-item-count {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  float: right;
+}
+.species-item-tax {
+  font-size: 10px;
+  color: var(--text-ghost, #555);
+  font-style: italic;
+}
+
+/* Cluster area */
+.cluster-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+.cluster-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-dim, #888);
+  font-size: 14px;
+}
+.cluster-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.cluster-header h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text-primary, #e0e0e0);
+}
+.cluster-header .cluster-meta {
+  font-size: 12px;
+  color: var(--text-dim, #888);
+}
+.cluster-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-muted, #a0a0a0);
+}
+.cluster-controls input[type="range"] {
+  width: 120px;
+  accent-color: var(--accent, #4ecca3);
+}
+
+/* Individual cluster groups */
+.cluster-group {
+  background: var(--bg-secondary, #16213e);
+  border: 1px solid var(--border-primary, #0f3460);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.cluster-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-tertiary, #0f3460);
+  border-bottom: 1px solid var(--border-primary, #0f3460);
+}
+.cluster-group-num {
+  background: var(--accent, #4ecca3);
+  color: #000;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.cluster-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+}
+.cluster-group-count {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+}
+.cluster-label-input {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cluster-label-input input {
+  background: var(--bg-primary, #1a1a2e);
+  color: var(--text-primary, #e0e0e0);
+  border: 1px solid var(--border-secondary, #1a3a6e);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 120px;
+  outline: none;
+}
+.cluster-label-input input:focus { border-color: var(--accent, #4ecca3); }
+.cluster-label-btn {
+  background: var(--accent, #4ecca3);
+  color: var(--bg-primary, #1a1a2e);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cluster-label-btn:hover { background: var(--accent-hover, #3db890); }
+.cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 6px;
+  padding: 10px;
+}
+.cluster-thumb {
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  width: 100%;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.cluster-thumb:hover { transform: scale(1.03); }
+.cluster-labeled {
+  font-size: 11px;
+  color: var(--accent, #4ecca3);
+  padding: 6px 14px;
+  font-style: italic;
+}
+</style>
+
+<div class="variants-layout">
+  <!-- Species sidebar -->
+  <div class="species-sidebar">
+    <div class="species-search">
+      <input type="text" id="speciesSearch" placeholder="Search species..." oninput="filterSpecies()">
+    </div>
+    <div class="species-list" id="speciesList">
+      <div style="padding:20px;color:var(--text-dim,#888);font-size:13px;">Loading species...</div>
+    </div>
+  </div>
+
+  <!-- Cluster display -->
+  <div class="cluster-area" id="clusterArea">
+    <div class="cluster-empty">
+      Select a species from the left to discover visual variants.<br>
+      <span style="font-size:12px;margin-top:8px;display:block;">
+        The AI will cluster photos by visual similarity to find<br>
+        potential male/female, juvenile/adult, or seasonal plumage differences.
+      </span>
+    </div>
+  </div>
+</div>
+
+<script>
+var allSpecies = [];
+var activeSpecies = null;
+
+async function loadSpecies() {
+  try {
+    var resp = await fetch('/api/species');
+    allSpecies = await resp.json();
+    renderSpeciesList(allSpecies);
+  } catch(e) {
+    document.getElementById('speciesList').innerHTML =
+      '<div style="padding:20px;color:var(--danger,#e74c3c);font-size:13px;">Failed to load species</div>';
+  }
+}
+
+function renderSpeciesList(species) {
+  var list = document.getElementById('speciesList');
+  if (species.length === 0) {
+    list.innerHTML = '<div style="padding:20px;color:var(--text-dim,#888);font-size:13px;">No classified species yet. Run classification first.</div>';
+    return;
+  }
+  var html = '';
+  species.forEach(function(s) {
+    var activeClass = (activeSpecies === s.species) ? ' active' : '';
+    var taxLine = '';
+    if (s.taxonomy_family) taxLine = s.taxonomy_family;
+    if (s.taxonomy_order) taxLine = s.taxonomy_order + (taxLine ? ' / ' + taxLine : '');
+    html += '<div class="species-item' + activeClass + '" onclick="selectSpecies(\'' + escapeAttr(s.species) + '\')">' +
+      '<span class="species-item-count">' + s.photo_count + '</span>' +
+      escapeHtml(s.species) +
+      (taxLine ? '<div class="species-item-tax">' + escapeHtml(taxLine) + '</div>' : '') +
+    '</div>';
+  });
+  list.innerHTML = html;
+}
+
+function filterSpecies() {
+  var q = document.getElementById('speciesSearch').value.toLowerCase();
+  if (!q) {
+    renderSpeciesList(allSpecies);
+    return;
+  }
+  var filtered = allSpecies.filter(function(s) {
+    return s.species.toLowerCase().indexOf(q) !== -1 ||
+           (s.taxonomy_family || '').toLowerCase().indexOf(q) !== -1 ||
+           (s.taxonomy_order || '').toLowerCase().indexOf(q) !== -1;
+  });
+  renderSpeciesList(filtered);
+}
+
+function escapeHtml(s) {
+  var d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+function escapeAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+async function selectSpecies(name) {
+  activeSpecies = name;
+  // Re-render sidebar to update active state
+  filterSpecies();
+
+  var area = document.getElementById('clusterArea');
+  area.innerHTML = '<div class="cluster-empty">Analyzing visual variants of ' + escapeHtml(name) + '...</div>';
+
+  try {
+    var threshold = 0.4;
+    var resp = await fetch('/api/species/' + encodeURIComponent(name) + '/clusters?threshold=' + threshold);
+    var data = await resp.json();
+    renderClusters(data);
+  } catch(e) {
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed to analyze: ' + e.message + '</div>';
+  }
+}
+
+function renderClusters(data) {
+  var area = document.getElementById('clusterArea');
+  var html = '';
+
+  // Header
+  html += '<div class="cluster-header">' +
+    '<h2>' + escapeHtml(data.species) + '</h2>' +
+    '<span class="cluster-meta">' + data.total_photos + ' photos, ' + data.num_clusters + ' visual group' + (data.num_clusters !== 1 ? 's' : '') + '</span>' +
+  '</div>';
+
+  // Sensitivity slider
+  html += '<div class="cluster-controls">' +
+    '<span>Sensitivity:</span>' +
+    '<input type="range" id="clusterThreshold" min="10" max="80" value="' + Math.round(data.distance_threshold * 100) + '" ' +
+      'oninput="document.getElementById(\'threshVal\').textContent=this.value+\'%\'" ' +
+      'onchange="recluster(\'' + escapeAttr(data.species) + '\', this.value/100)">' +
+    '<span id="threshVal">' + Math.round(data.distance_threshold * 100) + '%</span>' +
+    '<span style="color:var(--text-ghost,#555);margin-left:8px;">(lower = more groups)</span>' +
+  '</div>';
+
+  if (data.num_clusters <= 1) {
+    html += '<div class="cluster-empty">All photos of this species look visually similar — no distinct variants found.<br>' +
+      '<span style="font-size:12px;">Try lowering the sensitivity to look for subtler differences.</span></div>';
+    area.innerHTML = html;
+    return;
+  }
+
+  // Render each cluster
+  data.clusters.forEach(function(cluster, ci) {
+    var photoIds = cluster.photos.map(function(p) { return p.photo.id; });
+
+    html += '<div class="cluster-group">';
+    html += '<div class="cluster-group-header">' +
+      '<span class="cluster-group-num">' + (ci + 1) + '</span>' +
+      '<span class="cluster-group-title">Variant ' + (ci + 1) + '</span>' +
+      '<span class="cluster-group-count">' + cluster.count + ' photo' + (cluster.count !== 1 ? 's' : '') + '</span>' +
+      '<div class="cluster-label-input">' +
+        '<input type="text" id="clusterLabel' + ci + '" placeholder="e.g. male, juvenile...">' +
+        '<button class="cluster-label-btn" onclick="labelCluster(' + ci + ', ' + JSON.stringify(photoIds) + ')">Label</button>' +
+      '</div>' +
+    '</div>';
+
+    html += '<div class="cluster-grid">';
+    cluster.photos.forEach(function(item) {
+      var p = item.photo;
+      html += '<img class="cluster-thumb" src="/thumbnails/' + p.id + '.jpg" loading="lazy" ' +
+        'title="' + escapeAttr(p.filename) + '" ' +
+        'onclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/'/g, "\\'") + '\')">';
+    });
+    html += '</div>';
+
+    html += '</div>';
+  });
+
+  area.innerHTML = html;
+}
+
+async function recluster(species, threshold) {
+  var area = document.getElementById('clusterArea');
+  try {
+    var resp = await fetch('/api/species/' + encodeURIComponent(species) + '/clusters?threshold=' + threshold);
+    var data = await resp.json();
+    renderClusters(data);
+  } catch(e) {
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</div>';
+  }
+}
+
+async function labelCluster(clusterIndex, photoIds) {
+  var input = document.getElementById('clusterLabel' + clusterIndex);
+  var label = input.value.trim();
+  if (!label) { input.focus(); return; }
+
+  try {
+    var resp = await fetch('/api/species/label-cluster', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds, label: label}),
+    });
+    var data = await resp.json();
+    if (data.ok) {
+      input.value = '';
+      input.placeholder = 'Labeled!';
+      // Show confirmation
+      var group = input.closest('.cluster-group');
+      var existing = group.querySelector('.cluster-labeled');
+      if (!existing) {
+        var msg = document.createElement('div');
+        msg.className = 'cluster-labeled';
+        msg.textContent = 'Tagged ' + data.updated + ' photos as "' + label + '"';
+        group.appendChild(msg);
+      } else {
+        existing.textContent += ', "' + label + '"';
+      }
+    }
+  } catch(e) {
+    alert('Failed to label: ' + e.message);
+  }
+}
+
+// Init
+loadSpecies();
+</script>

@@ -157,6 +157,9 @@
         Download Species List
       </button>
       <span id="fetchLabelsStatus" style="font-size:12px;color:#888;margin-left:8px;"></span>
+      <div id="fetchLabelsProgress" style="display:none;margin-top:6px;">
+        <div style="height:4px;background:#0f3460;border-radius:2px;overflow:hidden;"><div id="fetchLabelsFill" style="height:100%;background:#4ecca3;border-radius:2px;width:0%;transition:width 0.3s;"></div></div>
+      </div>
     </div>
   </div>
 
@@ -185,6 +188,19 @@
                style="width:60px;background:#0f3460;color:#e0e0e0;border:1px solid #1a3a6e;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
         <span style="font-size:13px;color:#888;">seconds</span>
+      </div>
+    </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label">
+        Similarity threshold
+        <small>Photos in a burst must be this visually similar (cosine similarity of AI embeddings) to stay grouped. Lower = more lenient grouping.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgSimilarity" min="50" max="99" value="85"
+               style="width:100px;"
+               oninput="document.getElementById('cfgSimilarityVal').textContent=this.value+'%'"
+               onchange="saveConfig()">
+        <span id="cfgSimilarityVal" style="font-size:13px;color:#e0e0e0;min-width:30px;">85%</span>
       </div>
     </div>
   </div>
@@ -237,33 +253,41 @@
     </div>
   </div>
 
-  <!-- Database Info -->
+  <!-- Storage Management -->
   <div class="section">
-    <div class="section-title">Storage</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Database
-        <small>~/.spotter/spotter.db</small>
-      </div>
-      <span class="setting-value" id="dbSizeDetail">-</span>
+    <div class="section-title">Storage Management</div>
+
+    <!-- Usage bar chart -->
+    <div id="storageChart" style="margin-bottom:16px;"></div>
+    <div style="font-size:12px;color:var(--text-dim,#888);margin-bottom:16px;">
+      Total: <b id="storageTotalSize" style="color:var(--text-primary,#e0e0e0);">-</b>
     </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Thumbnail cache
-        <small>~/.spotter/thumbnails/</small>
+
+    <!-- Storage rows -->
+    <div id="storageRows"></div>
+
+    <!-- Preview settings -->
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-primary,#0f3460);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div>
+          <span style="font-size:13px;color:var(--text-primary,#e0e0e0);font-weight:500;">Preview Quality</span>
+          <div style="font-size:11px;color:var(--text-dim,#888);">Controls the resolution of cached preview images for the lightbox viewer.</div>
+        </div>
+        <select id="cfgPreviewSize" onchange="saveConfig()"
+                style="background:var(--bg-input,#0f3460);color:var(--text-primary,#e0e0e0);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:4px 8px;font-size:12px;">
+          <option value="1280">1280px (fast, small)</option>
+          <option value="1920" selected>1920px (default)</option>
+          <option value="2560">2560px (high quality)</option>
+          <option value="3840">3840px (4K)</option>
+          <option value="0">Full resolution (1:1)</option>
+        </select>
       </div>
-      <span class="setting-value" id="thumbSizeDetail">-</span>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Embedding cache
-        <small>~/.spotter/embedding_cache/</small>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button onclick="generatePreviews()" style="background:var(--accent,#4ecca3);color:var(--bg-primary,#1a1a2e);border:none;border-radius:4px;padding:6px 16px;font-size:12px;cursor:pointer;font-weight:500;">Generate Previews</button>
+        <span id="previewJobStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span class="setting-value" id="embeddingCacheSize">-</span>
-        <span style="font-size:11px;color:#666;" id="embeddingCacheCount"></span>
-        <button onclick="clearEmbeddingCache()" id="clearCacheBtn"
-                style="background:#0f3460;color:#c0c0c0;border:none;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;">Clear</button>
+      <div id="previewProgress" style="display:none;margin-top:6px;">
+        <div style="height:4px;background:var(--border-primary,#0f3460);border-radius:2px;overflow:hidden;"><div id="previewProgressFill" style="height:100%;background:var(--accent,#4ecca3);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>
       </div>
     </div>
   </div>
@@ -310,7 +334,7 @@
     </div>
     <div style="font-size:12px;color:#666;margin-top:8px;">
       AI-powered wildlife photo organizer.
-      <a href="https://github.com/julius/photo-tools" style="color:#4ecca3;text-decoration:none;">GitHub</a>
+      <a href="https://github.com/jss367/photo-tools" style="color:#4ecca3;text-decoration:none;">GitHub</a>
     </div>
   </div>
 
@@ -323,7 +347,6 @@ loadTaxonomy();
 loadHistory();
 loadSystemInfo();
 loadConfig();
-loadEmbeddingCache();
 loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
@@ -338,7 +361,11 @@ async function loadConfig() {
     document.getElementById('cfgThreshold').value = pct;
     document.getElementById('cfgThresholdVal').textContent = pct + '%';
     document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds || 10;
+    var simPct = Math.round((cfg.similarity_threshold || 0.85) * 100);
+    document.getElementById('cfgSimilarity').value = simPct;
+    document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
     document.getElementById('cfgHfToken').value = cfg.hf_token || '';
+    document.getElementById('cfgPreviewSize').value = cfg.preview_max_size || 1920;
   } catch(e) {}
 }
 
@@ -347,7 +374,9 @@ function saveConfig() {
   _saveTimer = setTimeout(async function() {
     var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
     var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10) || 10;
+    var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
     var hfToken = document.getElementById('cfgHfToken').value.trim();
+    var previewSize = parseInt(document.getElementById('cfgPreviewSize').value, 10) || 1920;
     try {
       await fetch('/api/config', {
         method: 'POST',
@@ -355,6 +384,8 @@ function saveConfig() {
         body: JSON.stringify({
           classification_threshold: threshold,
           grouping_window_seconds: grouping,
+          similarity_threshold: similarity,
+          preview_max_size: previewSize,
           hf_token: hfToken,
         }),
       });
@@ -517,10 +548,17 @@ async function fetchLabels() {
     var data = await resp.json();
     status.textContent = 'Fetching species...';
 
+    var progressDiv = document.getElementById('fetchLabelsProgress');
+    var progressFill = document.getElementById('fetchLabelsFill');
+    progressDiv.style.display = '';
+
     var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
     source.addEventListener('progress', function(e) {
       var p = JSON.parse(e.data);
       if (p.current_file) status.textContent = p.current_file;
+      if (p.total > 0 && p.current > 0) {
+        progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+      }
     });
     source.addEventListener('complete', function(e) {
       source.close();
@@ -528,12 +566,14 @@ async function fetchLabels() {
       if (result.status === 'completed' && result.result) {
         status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
         status.style.color = '#4ecca3';
+        progressFill.style.width = '100%';
       } else {
         status.textContent = 'Failed: ' + (result.errors || []).join(', ');
         status.style.color = '#e74c3c';
       }
       btn.disabled = false;
       loadLabels();
+      setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
     });
     source.onerror = function() { source.close(); status.textContent = 'Connection lost'; btn.disabled = false; };
   } catch(e) {
@@ -585,8 +625,17 @@ async function loadModels() {
       if (m.downloaded && !isActive) {
         html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:#0f3460;color:#c0c0c0;border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
+      if (m.downloaded) {
+        html += '<button onclick="removeModel(\'' + m.id + '\')" style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
+      }
       html += '</span>';
-      html += '</div></div>';
+      html += '</div>';
+      // Progress bar (hidden until download starts)
+      html += '<div id="modelProgress-' + m.id + '" style="display:none;margin-top:6px;">';
+      html += '<div style="height:4px;background:#0f3460;border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + m.id + '" style="height:100%;background:#4ecca3;border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
+      html += '<div id="modelProgressText-' + m.id + '" style="font-size:11px;color:#888;"></div>';
+      html += '</div>';
+      html += '</div>';
     });
     document.getElementById('modelsContent').innerHTML = html;
   } catch(e) {
@@ -602,13 +651,48 @@ async function downloadModel(modelId) {
       body: JSON.stringify({model_id: modelId}),
     });
     var data = await resp.json();
-    // The job status will show in the Jobs panel at the bottom
-    // Reload models when done
+
+    // Show inline progress
+    var progressDiv = document.getElementById('modelProgress-' + modelId);
+    var progressFill = document.getElementById('modelProgressFill-' + modelId);
+    var progressText = document.getElementById('modelProgressText-' + modelId);
+    if (progressDiv) progressDiv.style.display = '';
+
     var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('complete', function() {
-      source.close();
-      loadModels();
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      if (progressFill && p.total > 0 && p.current > 0) {
+        var pct = Math.round((p.current / p.total) * 100);
+        progressFill.style.width = pct + '%';
+      }
+      if (progressText && p.current_file) {
+        progressText.textContent = p.current_file;
+      }
     });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      if (result.status === 'completed') {
+        if (progressText) progressText.textContent = 'Download complete!';
+        if (progressFill) progressFill.style.width = '100%';
+      } else {
+        if (progressText) {
+          progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          progressText.style.color = '#e74c3c';
+        }
+      }
+      setTimeout(loadModels, 1000);
+    });
+  } catch(e) {}
+}
+
+async function removeModel(modelId) {
+  if (!confirm('Remove this model and delete its weights from disk?')) return;
+  try {
+    await fetch('/api/models/' + encodeURIComponent(modelId), {
+      method: 'DELETE',
+    });
+    loadModels();
   } catch(e) {}
 }
 
@@ -738,9 +822,10 @@ async function loadDashboard() {
     document.getElementById('pendingCount').textContent = d.pending_changes.toLocaleString();
     document.getElementById('dbSize').textContent = formatBytes(d.db_size);
     document.getElementById('thumbSize').textContent = formatBytes(d.thumb_cache_size);
-    document.getElementById('dbSizeDetail').textContent = formatBytes(d.db_size);
-    document.getElementById('thumbSizeDetail').textContent = formatBytes(d.thumb_cache_size);
   } catch(e) {}
+
+  // Load storage management panel
+  loadStoragePanel();
 }
 
 function formatBytes(b) {
@@ -892,6 +977,133 @@ async function clearEmbeddingCache() {
   if (!confirm('Clear all cached label embeddings? The next classification run will recompute them (slow on CPU).')) return;
   await fetch('/api/embedding-cache', { method: 'DELETE' });
   loadEmbeddingCache();
+}
+
+/* ---------- Preview Cache ---------- */
+async function loadPreviewCache() {
+  try {
+    var resp = await fetch('/api/preview-cache');
+    var d = await resp.json();
+    document.getElementById('previewCacheSize').textContent = formatBytes(d.total_size);
+    document.getElementById('previewCacheCount').textContent = d.count + ' previews';
+  } catch(e) {}
+}
+
+async function generatePreviews() {
+  var status = document.getElementById('previewJobStatus');
+  var progressDiv = document.getElementById('previewProgress');
+  var progressFill = document.getElementById('previewProgressFill');
+  status.textContent = 'Starting...';
+  progressDiv.style.display = '';
+  progressFill.style.width = '0%';
+
+  try {
+    var resp = await fetch('/api/jobs/previews', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    var data = await resp.json();
+
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      if (p.total > 0 && p.current > 0) {
+        progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        status.textContent = p.current + ' / ' + p.total + (p.current_file ? ' — ' + p.current_file : '');
+      }
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      if (result.status === 'completed' && result.result) {
+        var r = result.result;
+        status.textContent = 'Done! ' + r.generated + ' generated, ' + r.skipped + ' already cached';
+        status.style.color = '#4ecca3';
+        progressFill.style.width = '100%';
+      } else {
+        status.textContent = 'Failed';
+        status.style.color = '#e74c3c';
+      }
+      loadPreviewCache();
+      setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+/* ---------- Storage Management ---------- */
+async function loadStoragePanel() {
+  try {
+    var resp = await fetch('/api/storage');
+    var s = await resp.json();
+
+    document.getElementById('storageTotalSize').textContent = formatBytes(s.total);
+
+    // Build bar chart
+    var categories = [
+      {name: 'Database', size: s.database.size, color: '#4ecca3', type: null},
+      {name: 'Thumbnails', size: s.thumbnails.size, color: '#7ec8e3', count: s.thumbnails.count, type: 'thumbnails'},
+      {name: 'Previews', size: s.previews.size, color: '#f0c040', count: s.previews.count, type: 'previews'},
+      {name: 'Embeddings', size: s.embeddings.size, color: '#e74c3c', count: s.embeddings.count, type: 'embeddings'},
+      {name: 'Models', size: s.models.size, color: '#9b59b6', type: null},
+      {name: 'HF Cache', size: s.hf_cache.size, color: '#3498db', type: null},
+    ];
+
+    // Bar chart
+    var maxSize = Math.max.apply(null, categories.map(function(c) { return c.size; })) || 1;
+    var chartHtml = '';
+    categories.forEach(function(c) {
+      if (c.size === 0 && !c.type) return; // Skip empty non-clearable items
+      var pct = Math.max(1, Math.round((c.size / maxSize) * 100));
+      chartHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;">' +
+        '<span style="width:80px;color:var(--text-muted,#a0a0a0);text-align:right;">' + c.name + '</span>' +
+        '<div style="flex:1;height:16px;background:var(--bg-primary,#1a1a2e);border-radius:3px;overflow:hidden;">' +
+          '<div style="height:100%;width:' + pct + '%;background:' + c.color + ';border-radius:3px;transition:width 0.3s;"></div>' +
+        '</div>' +
+        '<span style="width:70px;color:var(--text-secondary,#c0c0c0);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>' +
+      '</div>';
+    });
+    document.getElementById('storageChart').innerHTML = chartHtml;
+
+    // Detail rows with actions
+    var rowsHtml = '';
+    categories.forEach(function(c) {
+      if (c.size === 0 && !c.type) return;
+      rowsHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle,#0a1a35);font-size:12px;">' +
+        '<div>' +
+          '<span style="color:var(--text-primary,#e0e0e0);">' + c.name + '</span>' +
+          (c.count != null ? ' <span style="color:var(--text-dim,#888);">(' + c.count.toLocaleString() + ' files)</span>' : '') +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:8px;">' +
+          '<span style="color:var(--text-secondary,#c0c0c0);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>';
+
+      if (c.type) {
+        rowsHtml += '<button onclick="clearStorageCache(\'' + c.type + '\')" ' +
+          'style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;"' +
+          (c.size === 0 ? ' disabled style="opacity:0.3;"' : '') + '>Clear</button>';
+      }
+
+      rowsHtml += '</div></div>';
+    });
+    document.getElementById('storageRows').innerHTML = rowsHtml;
+  } catch(e) {
+    document.getElementById('storageChart').innerHTML = '<span style="color:var(--danger,#e74c3c);font-size:12px;">Failed to load storage info</span>';
+  }
+}
+
+async function clearStorageCache(type) {
+  var labels = {thumbnails: 'thumbnails', previews: 'previews', embeddings: 'label embeddings'};
+  if (!confirm('Clear all cached ' + (labels[type] || type) + '? They will be regenerated as needed.')) return;
+  try {
+    await fetch('/api/storage/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: type}),
+    });
+    loadStoragePanel();
+  } catch(e) {}
 }
 
 /* ---------- Scan Roots ---------- */

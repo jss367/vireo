@@ -109,7 +109,7 @@ class JobRunner:
             return
         try:
             import sqlite3
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(self._db_path, timeout=10)
 
             # For failed jobs, store the error message in result
             result_data = job['result']

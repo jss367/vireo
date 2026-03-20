@@ -283,6 +283,228 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lp-line.lp-INFO .lp-level { color: #888; }
 .lp-line.lp-WARNING .lp-level { color: #f0c040; }
 .lp-line.lp-ERROR .lp-level { color: #e74c3c; }
+
+/* ---------- Lightbox ---------- */
+.lightbox-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.92);
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.lightbox-overlay.active { display: flex; }
+.lightbox-overlay img {
+  max-width: 95vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: default;
+}
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  font-size: 28px;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.7;
+  z-index: 10000;
+}
+.lightbox-close:hover { opacity: 1; }
+.lightbox-filename {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #aaa;
+  font-size: 13px;
+  background: rgba(0,0,0,0.6);
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+
+/* ---------- Pipeline Inspector ---------- */
+.pipeline-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  background: rgba(0,0,0,0.85);
+  overflow-y: auto;
+}
+.pipeline-overlay.active { display: block; }
+.pipeline-panel {
+  max-width: 900px;
+  margin: 40px auto;
+  background: var(--bg-secondary, #16213e);
+  border-radius: 8px;
+  padding: 24px;
+  color: var(--text-primary, #e0e0e0);
+}
+.pipeline-panel h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: var(--accent, #4ecca3);
+}
+.pipeline-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.pipeline-step {
+  background: var(--bg-primary, #1a1a2e);
+  border-radius: 6px;
+  padding: 16px;
+  border: 1px solid var(--border-primary, #0f3460);
+}
+.pipeline-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.pipeline-step-num {
+  background: var(--accent, #4ecca3);
+  color: #000;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.pipeline-step-title { font-weight: 600; font-size: 14px; }
+.pipeline-images {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.pipeline-img-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+}
+.pipeline-img-wrap img {
+  width: 100%;
+  border-radius: 4px;
+  display: block;
+}
+.pipeline-img-label {
+  font-size: 11px;
+  color: var(--text-muted, #a0a0a0);
+  margin-top: 4px;
+  text-align: center;
+}
+.pipeline-det-box {
+  position: absolute;
+  border: 2px solid #4ecca3;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.pipeline-crop-box {
+  position: absolute;
+  border: 2px dashed #f0c040;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.pipeline-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.pipeline-table td, .pipeline-table th {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary, #0f3460);
+}
+.pipeline-table th { color: var(--text-muted, #a0a0a0); font-weight: 500; }
+.pipeline-conf-bar {
+  display: inline-block;
+  height: 10px;
+  background: var(--accent, #4ecca3);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.pipeline-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-size: 24px;
+  color: var(--text-muted, #a0a0a0);
+  cursor: pointer;
+  background: none;
+  border: none;
+}
+.pipeline-close:hover { color: var(--text-primary, #e0e0e0); }
+.pipeline-stat { display: inline-block; margin-right: 16px; font-size: 12px; color: var(--text-dim, #888); }
+.pipeline-stat b { color: var(--text-primary, #e0e0e0); }
+
+/* ---------- Similar Photos ---------- */
+.similar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9997;
+  background: rgba(0,0,0,0.85);
+  overflow-y: auto;
+}
+.similar-overlay.active { display: block; }
+.similar-panel {
+  max-width: 1000px;
+  margin: 40px auto;
+  background: var(--bg-secondary, #16213e);
+  border-radius: 8px;
+  padding: 24px;
+  color: var(--text-primary, #e0e0e0);
+  position: relative;
+}
+.similar-panel h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: var(--accent, #4ecca3);
+}
+.similar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.similar-card {
+  background: var(--bg-primary, #1a1a2e);
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-primary, #0f3460);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.similar-card:hover { border-color: var(--accent, #4ecca3); }
+.similar-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.similar-card-info {
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.similar-card-name {
+  color: var(--text-muted, #a0a0a0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.similar-card-score {
+  color: var(--accent, #4ecca3);
+  font-weight: 600;
+}
 </style>
 
 <nav class="navbar">
@@ -292,6 +514,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
   <a href="/import" {% if active_page == 'import' %}class="active"{% endif %}>Import</a>
   <a href="/audit" {% if active_page == 'audit' %}class="active"{% endif %}>Audit</a>
+  <a href="/variants" {% if active_page == 'variants' %}class="active"{% endif %}>Variants</a>
   <a href="/stats" {% if active_page == 'stats' %}class="active"{% endif %}>Stats</a>
   <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
   <span class="nav-spacer"></span>
@@ -302,6 +525,251 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
+
+<!-- Lightbox -->
+<div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
+  <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
+  <img id="lightboxImg" src="" alt="">
+  <div class="lightbox-filename" id="lightboxFilename"></div>
+  <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
+    <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:#7ec8e3;border:1px solid #7ec8e3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Find Similar
+    </button>
+    <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:#4ecca3;border:1px solid #4ecca3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Inspect Pipeline
+    </button>
+  </div>
+</div>
+
+<script>
+function openLightbox(photoId, filename) {
+  var overlay = document.getElementById('lightboxOverlay');
+  var img = document.getElementById('lightboxImg');
+  var label = document.getElementById('lightboxFilename');
+  var inspectBtn = document.getElementById('lightboxInspect');
+  var similarBtn = document.getElementById('lightboxSimilar');
+  img.src = '/photos/' + photoId + '/full';
+  label.textContent = filename || '';
+  inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
+  similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+function closeLightbox(e) {
+  if (e && e.target && e.target.tagName === 'IMG') return;
+  document.getElementById('lightboxOverlay').classList.remove('active');
+  document.getElementById('lightboxImg').src = '';
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); }
+});
+</script>
+
+<!-- Pipeline Inspector -->
+<div class="pipeline-overlay" id="pipelineOverlay">
+  <div class="pipeline-panel" style="position:relative;">
+    <button class="pipeline-close" onclick="closePipeline()">&times;</button>
+    <h2>Pipeline Inspector</h2>
+    <div id="pipelineContent">Loading...</div>
+  </div>
+</div>
+
+<script>
+function openPipeline(photoId) {
+  var overlay = document.getElementById('pipelineOverlay');
+  var content = document.getElementById('pipelineContent');
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  content.innerHTML = '<p style="color:#888;">Loading pipeline data...</p>';
+
+  fetch('/api/photos/' + photoId + '/pipeline')
+    .then(function(r) { return r.json(); })
+    .then(function(data) { renderPipeline(data, photoId); })
+    .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + e.message + '</p>'; });
+}
+
+function closePipeline() {
+  document.getElementById('pipelineOverlay').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderPipeline(data, photoId) {
+  var c = document.getElementById('pipelineContent');
+  var html = '<div class="pipeline-steps">';
+
+  // Step 1: Original image
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
+    '<div class="pipeline-stat"><b>' + data.filename + '</b></div>' +
+    (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
+    (data.timestamp ? '<div class="pipeline-stat">' + data.timestamp + '</div>' : '') +
+    '</div>';
+
+  // Step 2: Detection
+  var hasDetection = data.detection_box && data.detection_box.x != null;
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
+
+  if (hasDetection) {
+    var db = data.detection_box;
+    var cropBox = data.crop_box || {};
+    html += '<div class="pipeline-images">' +
+      '<div class="pipeline-img-wrap">' +
+        '<img src="/photos/' + photoId + '/full" alt="Detection">' +
+        '<div class="pipeline-det-box" style="left:' + (db.x*100) + '%;top:' + (db.y*100) + '%;width:' + (db.w*100) + '%;height:' + (db.h*100) + '%;"></div>' +
+        (cropBox.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
+        '<div class="pipeline-img-label">Green = detection box, Yellow dashed = crop sent to classifier</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="margin-top:8px;">' +
+      '<div class="pipeline-stat">Confidence: <b>' + Math.round(data.detection_conf * 100) + '%</b></div>' +
+      '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
+    '</div>';
+  } else {
+    html += '<p style="color:#888;font-size:13px;">No subject detected — full image sent to classifier</p>';
+  }
+  html += '</div>';
+
+  // Step 3: Classification crop
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Classification Input (BioCLIP)</span></div>' +
+    '<div class="pipeline-images">' +
+      '<div class="pipeline-img-wrap" style="max-width:300px;">' +
+        '<img src="/photos/' + photoId + '/crop" alt="Crop">' +
+        '<div class="pipeline-img-label">' + (hasDetection ? 'Cropped + padded region' : 'Full image (no detection)') + '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+
+  // Step 4: Predictions
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Classification Results</span></div>';
+
+  if (data.predictions && data.predictions.length > 0) {
+    html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Model</th><th>Status</th><th>Category</th></tr>';
+    data.predictions.forEach(function(p) {
+      var pct = Math.round(p.confidence * 100);
+      var statusColor = p.status === 'accepted' ? '#4ecca3' : p.status === 'rejected' ? '#e74c3c' : '#888';
+      html += '<tr>' +
+        '<td>' + p.species + (p.scientific_name ? '<br><span style="font-size:11px;color:#888;font-style:italic;">' + p.scientific_name + '</span>' : '') + '</td>' +
+        '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
+        '<td style="color:#888;">' + p.model + '</td>' +
+        '<td style="color:' + statusColor + ';">' + p.status + '</td>' +
+        '<td style="color:#888;">' + p.category + '</td>' +
+      '</tr>';
+    });
+    html += '</table>';
+
+    // Taxonomy hierarchy
+    var withTax = data.predictions.find(function(p) { return p.taxonomy_order; });
+    if (withTax) {
+      var parts = [];
+      if (withTax.taxonomy_kingdom) parts.push(withTax.taxonomy_kingdom);
+      if (withTax.taxonomy_phylum) parts.push(withTax.taxonomy_phylum);
+      if (withTax.taxonomy_class) parts.push(withTax.taxonomy_class);
+      if (withTax.taxonomy_order) parts.push(withTax.taxonomy_order);
+      if (withTax.taxonomy_family) parts.push(withTax.taxonomy_family);
+      if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
+      html += '<div style="margin-top:8px;font-size:12px;color:#888;">' +
+        '<span style="color:var(--text-muted,#a0a0a0);">Taxonomy:</span> ' +
+        parts.join(' &rsaquo; ') +
+      '</div>';
+    }
+
+    // Group info
+    var grouped = data.predictions.find(function(p) { return p.group_id; });
+    if (grouped) {
+      html += '<div style="margin-top:8px;">' +
+        '<div class="pipeline-stat">Burst group: <b>' + grouped.group_id + '</b></div>' +
+        '<div class="pipeline-stat">Votes: <b>' + grouped.vote_count + '/' + grouped.total_votes + '</b></div>' +
+      '</div>';
+    }
+  } else {
+    html += '<p style="color:#888;font-size:13px;">No predictions yet — run classification first</p>';
+  }
+  html += '</div>';
+
+  // Step 5: Quality scoring
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Quality Scoring</span></div>' +
+    '<div class="pipeline-stat">Overall sharpness: <b>' + (data.sharpness != null ? Math.round(data.sharpness) : 'N/A') + '</b></div>' +
+    '<div class="pipeline-stat">Subject sharpness: <b>' + (data.subject_sharpness != null ? Math.round(data.subject_sharpness) : 'N/A') + '</b></div>' +
+    '<div class="pipeline-stat">Quality score: <b>' + (data.quality_score != null ? data.quality_score : 'N/A') + '</b></div>' +
+  '</div>';
+
+  // Step 6: Keywords
+  if (data.keywords && data.keywords.length > 0) {
+    html += '<div class="pipeline-step">' +
+      '<div class="pipeline-step-header"><span class="pipeline-step-num">6</span><span class="pipeline-step-title">Current Keywords</span></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    data.keywords.forEach(function(k) {
+      html += '<span style="background:var(--bg-tertiary,#0f3460);padding:3px 8px;border-radius:4px;font-size:12px;">' + k.name + '</span>';
+    });
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  c.innerHTML = html;
+}
+</script>
+
+<!-- Similar Photos -->
+<div class="similar-overlay" id="similarOverlay">
+  <div class="similar-panel">
+    <button class="pipeline-close" onclick="closeSimilar()">&times;</button>
+    <h2>Similar Photos</h2>
+    <div id="similarContent">Loading...</div>
+  </div>
+</div>
+
+<script>
+function findSimilar(photoId) {
+  var overlay = document.getElementById('similarOverlay');
+  var content = document.getElementById('similarContent');
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  content.innerHTML = '<p style="color:#888;">Searching for similar photos...</p>';
+
+  fetch('/api/photos/' + photoId + '/similar?limit=40')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + data.error + '</p>';
+        return;
+      }
+      var html = '<p style="font-size:12px;color:var(--text-dim,#888);margin-bottom:12px;">Compared against ' +
+        data.total_compared.toLocaleString() + ' photos with embeddings</p>';
+
+      if (data.similar.length === 0) {
+        html += '<p style="color:#888;">No similar photos found.</p>';
+      } else {
+        html += '<div class="similar-grid">';
+        data.similar.forEach(function(item) {
+          var p = item.photo;
+          var pct = Math.round(item.similarity * 100);
+          html += '<div class="similar-card" onclick="closeSimilar(); openLightbox(' + p.id + ',\'' + (p.filename || '').replace(/'/g, "\\'") + '\')">' +
+            '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">' +
+            '<div class="similar-card-info">' +
+              '<div class="similar-card-name" title="' + (p.filename || '') + '">' + (p.filename || '') + '</div>' +
+              '<div class="similar-card-score">' + pct + '% similar</div>' +
+            '</div>' +
+          '</div>';
+        });
+        html += '</div>';
+      }
+      content.innerHTML = html;
+    })
+    .catch(function(e) {
+      content.innerHTML = '<p style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</p>';
+    });
+}
+
+function closeSimilar() {
+  document.getElementById('similarOverlay').classList.remove('active');
+  document.body.style.overflow = '';
+}
+</script>
 
 <!-- Bottom Panel -->
 <div class="bottom-panel" id="bottomPanel">
@@ -555,6 +1023,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       html += '</div>';
 
       if (j.status === 'running') {
+        if (j.progress && j.progress.phase) {
+          html += '<div class="bp-job-detail" style="color:var(--accent,#4ecca3);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
+        }
         html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
         var detail = '';
         if (j.progress && j.progress.current > 0) {
@@ -601,11 +1072,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     summary.classList.remove('idle');
     var j = running[0];
     var text = j.type;
+    if (j.progress && j.progress.phase) {
+      text += ' — ' + j.progress.phase;
+    }
     if (j.progress && j.progress.total > 0) {
       var pct = Math.round((j.progress.current / j.progress.total) * 100);
-      text += ' ' + j.progress.current.toLocaleString() + ' / ' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+      text += ' ' + j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
     } else if (j.progress && j.progress.current_file) {
-      text += ' — ' + j.progress.current_file;
+      text += ' ' + j.progress.current_file;
     }
     if (running.length > 1) {
       text += ' + ' + (running.length - 1) + ' more';

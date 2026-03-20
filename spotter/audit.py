@@ -13,11 +13,13 @@ log = logging.getLogger(__name__)
 def check_drift(db):
     """Find photos where DB and XMP sidecar disagree.
 
-    Compares xmp_mtime in DB against actual file mtime. If file is newer,
-    re-reads XMP and diffs against DB keywords.
+    Checks both directions:
+    - XMP modified externally (keywords in XMP not in DB)
+    - DB modified by Spotter (keywords in DB not in XMP, pending sync)
 
     Returns:
-        list of {photo_id, filename, folder_path, field, db_value, xmp_value}
+        list of {photo_id, filename, folder_path, field, db_value, xmp_value,
+                 added_in_xmp, removed_in_xmp, direction}
     """
     photos = db.get_photos(per_page=999999)
     folders = {f['id']: f['path'] for f in db.get_folder_tree()}
@@ -28,22 +30,37 @@ def check_drift(db):
         base = os.path.splitext(photo['filename'])[0]
         xmp_path = os.path.join(folder_path, base + '.xmp')
 
-        if not os.path.exists(xmp_path):
-            continue
-
-        actual_mtime = os.path.getmtime(xmp_path)
-        db_mtime = photo['xmp_mtime']
-
-        if db_mtime is not None and actual_mtime == db_mtime:
-            continue
-
-        # XMP has been modified since last scan — check for differences
-        xmp_keywords = read_xmp_keywords(xmp_path)
         db_keywords = {k['name'] for k in db.get_photo_keywords(photo['id'])}
+
+        if not os.path.exists(xmp_path):
+            # No XMP file — if DB has keywords, that's a pending sync
+            if db_keywords:
+                drifts.append({
+                    'photo_id': photo['id'],
+                    'filename': photo['filename'],
+                    'folder_path': folder_path,
+                    'field': 'keywords',
+                    'db_value': sorted(db_keywords),
+                    'xmp_value': [],
+                    'added_in_xmp': [],
+                    'removed_in_xmp': sorted(db_keywords),
+                    'direction': 'db_ahead',
+                })
+            continue
+
+        xmp_keywords = read_xmp_keywords(xmp_path)
 
         if xmp_keywords != db_keywords:
             added_in_xmp = xmp_keywords - db_keywords
             removed_in_xmp = db_keywords - xmp_keywords
+
+            # Determine direction
+            if added_in_xmp and not removed_in_xmp:
+                direction = 'xmp_ahead'
+            elif removed_in_xmp and not added_in_xmp:
+                direction = 'db_ahead'
+            else:
+                direction = 'both'
 
             drifts.append({
                 'photo_id': photo['id'],
@@ -54,16 +71,7 @@ def check_drift(db):
                 'xmp_value': sorted(xmp_keywords),
                 'added_in_xmp': sorted(added_in_xmp),
                 'removed_in_xmp': sorted(removed_in_xmp),
-            })
-        elif db_mtime is not None and actual_mtime != db_mtime:
-            # Mtime changed but content is the same — just update mtime
-            drifts.append({
-                'photo_id': photo['id'],
-                'filename': photo['filename'],
-                'folder_path': folder_path,
-                'field': 'mtime',
-                'db_value': str(db_mtime),
-                'xmp_value': str(actual_mtime),
+                'direction': direction,
             })
 
     log.info("Drift check: %d discrepancies found", len(drifts))

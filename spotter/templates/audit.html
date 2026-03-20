@@ -37,12 +37,12 @@ body {
   padding: 6px 16px; border: none; border-radius: 4px;
   cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s;
 }
-.btn-primary { background: #4ecca3; color: #1a1a2e; }
-.btn-primary:hover { background: #3db890; }
-.btn-primary:disabled { background: #2a5a4a; color: #555; cursor: default; }
-.btn-secondary { background: #0f3460; color: #c0c0c0; }
-.btn-secondary:hover { background: #1a3a6e; }
-.btn-danger { background: #e74c3c; color: #fff; }
+.btn-primary { background: var(--accent, #4ecca3); color: var(--bg-primary, #1a1a2e); }
+.btn-primary:hover { background: var(--accent-hover, #3db890); }
+.btn-primary:disabled { background: var(--accent-dim, #2a5a4a); color: var(--text-ghost, #555); cursor: default; }
+.btn-secondary { background: var(--bg-tertiary, #0f3460); color: var(--text-secondary, #c0c0c0); }
+.btn-secondary:hover { background: var(--border-secondary, #1a3a6e); }
+.btn-danger { background: var(--danger, #e74c3c); color: #fff; }
 .btn-danger:hover { background: #c0392b; }
 
 .audit-table {
@@ -136,16 +136,29 @@ function switchTab(name) {
 
 /* ---------- Drift ---------- */
 async function runDriftCheck() {
-  document.getElementById('driftStatus').textContent = 'Checking...';
+  var status = document.getElementById('driftStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Scanning all photos for drift between database and XMP files...';
+  status.style.color = '';
+
+  // Use setTimeout to let the UI update before the blocking fetch
+  await new Promise(function(r) { setTimeout(r, 50); });
+
   try {
     var resp = await fetch('/api/audit/drift');
     driftData = await resp.json();
     document.getElementById('driftBadge').textContent = driftData.length;
     renderDrift();
-    document.getElementById('driftStatus').textContent = '';
+    status.textContent = driftData.length > 0
+      ? driftData.length + ' drift(s) found'
+      : 'No drift — everything in sync';
+    status.style.color = driftData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
   } catch(e) {
-    document.getElementById('driftStatus').textContent = 'Error: ' + e.message;
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
   }
+  btn.disabled = false;
 }
 
 function renderDrift() {
@@ -187,16 +200,26 @@ async function resolveAll(direction) {
 
 /* ---------- Orphans ---------- */
 async function runOrphanCheck() {
-  document.getElementById('orphanStatus').textContent = 'Checking...';
+  var status = document.getElementById('orphanStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Checking for database entries with missing files...';
+  status.style.color = '';
+  await new Promise(function(r) { setTimeout(r, 50); });
   try {
     var resp = await fetch('/api/audit/orphans');
     orphanData = await resp.json();
     document.getElementById('orphanBadge').textContent = orphanData.length;
     renderOrphans();
-    document.getElementById('orphanStatus').textContent = '';
+    status.textContent = orphanData.length > 0
+      ? orphanData.length + ' orphan(s) found'
+      : 'No orphans — all entries have files';
+    status.style.color = orphanData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
   } catch(e) {
-    document.getElementById('orphanStatus').textContent = 'Error: ' + e.message;
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
   }
+  btn.disabled = false;
 }
 
 function renderOrphans() {
@@ -235,9 +258,13 @@ async function removeAllOrphans() {
 
 /* ---------- Untracked ---------- */
 async function runUntrackedCheck() {
-  document.getElementById('untrackedStatus').textContent = 'Checking...';
+  var status = document.getElementById('untrackedStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Scanning folders for untracked files...';
+  status.style.color = '';
+  await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    // Use root paths from folders
     var fResp = await fetch('/api/folders');
     var folders = await fResp.json();
     var roots = [];
@@ -248,10 +275,15 @@ async function runUntrackedCheck() {
     untrackedData = await resp.json();
     document.getElementById('untrackedBadge').textContent = untrackedData.length;
     renderUntracked();
-    document.getElementById('untrackedStatus').textContent = '';
+    status.textContent = untrackedData.length > 0
+      ? untrackedData.length + ' untracked file(s) found'
+      : 'No untracked files';
+    status.style.color = untrackedData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
   } catch(e) {
-    document.getElementById('untrackedStatus').textContent = 'Error: ' + e.message;
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
   }
+  btn.disabled = false;
 }
 
 function renderUntracked() {

@@ -151,12 +151,35 @@ body {
 }
 .grid-card:hover { transform: translateY(-1px); border-color: #4ecca3; }
 .grid-card.selected { border-color: #4ecca3; box-shadow: 0 0 0 1px #4ecca3; }
-.grid-card img {
+.grid-card-img-wrap {
+  position: relative;
   width: 100%;
   aspect-ratio: 3/2;
+}
+.grid-card-img-wrap img {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   display: block;
   background: #0f3460;
+}
+.det-box {
+  position: absolute;
+  border: 2px solid #4ecca3;
+  border-radius: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(78, 204, 163, 0.4);
+}
+.det-box-label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  font-size: 9px;
+  background: rgba(78, 204, 163, 0.85);
+  color: #000;
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
 }
 .grid-card-info {
   padding: 8px 10px;
@@ -424,6 +447,10 @@ body {
                oninput="updateThumbSize(this.value)">
         <span style="font-size:10px;color:var(--text-faint, #666);">&#9638;</span>
       </label>
+      <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
+              style="background:var(--bg-tertiary,#0f3460);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+        &#9634; Boxes
+      </button>
       <span class="filter-summary" id="filterSummary"></span>
     </div>
 
@@ -460,7 +487,7 @@ body {
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
     <button class="detail-close" onclick="closeDetail()">&times;</button>
-    <img class="detail-preview" id="detailImg" src="" alt="">
+    <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
     <div class="detail-filename" id="detailFilename"></div>
 
     <div class="detail-section">
@@ -484,9 +511,23 @@ body {
     </div>
 
     <div class="detail-section">
+      <div class="detail-section-title">XMP Sidecar</div>
+      <div id="detailXmp" style="font-size:12px;color:var(--text-dim,#888);">—</div>
+    </div>
+
+    <div class="detail-section">
       <div class="detail-section-title">Info</div>
       <div class="detail-exif" id="detailExif"></div>
       <div class="detail-path" id="detailPath"></div>
+    </div>
+
+    <div class="detail-section" style="display:flex;gap:8px;">
+      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#0f3460);color:var(--info,#7ec8e3);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        Find Similar
+      </button>
+      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#0f3460);color:var(--accent,#4ecca3);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        Inspect Pipeline
+      </button>
     </div>
 
   </div>
@@ -519,6 +560,7 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
+var showDetectionBoxes = false;
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
@@ -862,6 +904,14 @@ function updateThumbSize(val) {
   document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
 }
 
+function toggleDetectionBoxes() {
+  showDetectionBoxes = !showDetectionBoxes;
+  var btn = document.getElementById('detBoxToggle');
+  btn.style.color = showDetectionBoxes ? 'var(--accent, #4ecca3)' : 'var(--text-muted, #a0a0a0)';
+  btn.style.borderColor = showDetectionBoxes ? 'var(--accent, #4ecca3)' : 'var(--border-secondary, #1a3a6e)';
+  renderGrid();
+}
+
 function updateScrollPosition() {
   var el = document.getElementById('filterSummary');
   if (photos.length === 0) {
@@ -926,8 +976,23 @@ function renderGrid() {
     if (p.flag === 'flagged') flagHtml = '<span class="grid-card-flag flag-flagged">P</span>';
     else if (p.flag === 'rejected') flagHtml = '<span class="grid-card-flag flag-rejected">X</span>';
 
-    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+    // Detection box overlay
+    var boxHtml = '';
+    if (showDetectionBoxes && p.detection_box) {
+      var db = typeof p.detection_box === 'string' ? JSON.parse(p.detection_box) : p.detection_box;
+      if (db && db.x != null) {
+        var conf = p.detection_conf ? Math.round(p.detection_conf * 100) + '%' : '';
+        boxHtml = '<div class="det-box" style="left:' + (db.x * 100) + '%;top:' + (db.y * 100) + '%;width:' + (db.w * 100) + '%;height:' + (db.h * 100) + '%;">' +
+          (conf ? '<span class="det-box-label">' + conf + '</span>' : '') +
+        '</div>';
+      }
+    }
+
+    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
+      '<div class="grid-card-img-wrap">' +
+        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+        boxHtml +
+      '</div>' +
       '<div class="grid-card-info">' +
         '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
         '<div class="grid-card-meta">' +
@@ -1119,6 +1184,7 @@ async function loadDetail(id) {
 }
 
 function renderDetail(photo) {
+  window._detailPhotoId = photo.id;
   document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailFilename').textContent = photo.filename;
 
@@ -1145,6 +1211,35 @@ function renderDetail(photo) {
       '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
   });
   document.getElementById('detailKeywords').innerHTML = kwHtml;
+
+  // XMP sidecar
+  var xmpEl = document.getElementById('detailXmp');
+  if (photo.xmp_exists === false) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">No .xmp sidecar file</span>';
+  } else if (photo.xmp_keywords && photo.xmp_keywords.length > 0) {
+    var dbKwNames = (photo.keywords || []).map(function(k) { return k.name.toLowerCase(); });
+    var xmpHtml = '';
+    photo.xmp_keywords.forEach(function(kw) {
+      var inDb = dbKwNames.indexOf(kw.toLowerCase()) !== -1;
+      var color = inDb ? 'var(--accent,#4ecca3)' : 'var(--warning,#f0c040)';
+      var title = inDb ? 'In sync with database' : 'In XMP but not in database';
+      xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#0f3460);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid ' + color + ';color:' + color + ';" title="' + title + '">' + escapeHtml(kw) + '</span>';
+    });
+    // Check for DB keywords not in XMP
+    var xmpLower = photo.xmp_keywords.map(function(k) { return k.toLowerCase(); });
+    (photo.keywords || []).forEach(function(k) {
+      if (xmpLower.indexOf(k.name.toLowerCase()) === -1) {
+        xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#0f3460);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid var(--info,#7ec8e3);color:var(--info,#7ec8e3);" title="In database but not in XMP (pending sync)">+ ' + escapeHtml(k.name) + '</span>';
+      }
+    });
+    xmpHtml += '<div style="margin-top:4px;font-size:10px;color:var(--text-ghost,#555);">' +
+      '<span style="color:var(--accent,#4ecca3);">&#9632;</span> synced ' +
+      '<span style="color:var(--warning,#f0c040);">&#9632;</span> XMP only ' +
+      '<span style="color:var(--info,#7ec8e3);">&#9632;</span> DB only (pending sync)</div>';
+    xmpEl.innerHTML = xmpHtml;
+  } else if (photo.xmp_exists) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">XMP file exists but has no keywords</span>';
+  }
 
   // EXIF info
   var exif = '';

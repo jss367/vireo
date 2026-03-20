@@ -50,6 +50,7 @@ class Database:
                 subject_sharpness REAL,
                 subject_size REAL,
                 quality_score REAL,
+                embedding BLOB,
                 UNIQUE(folder_id, filename)
             );
 
@@ -93,6 +94,13 @@ class Database:
                 vote_count  INTEGER,
                 total_votes INTEGER,
                 individual  TEXT,
+                taxonomy_kingdom TEXT,
+                taxonomy_phylum TEXT,
+                taxonomy_class TEXT,
+                taxonomy_order TEXT,
+                taxonomy_family TEXT,
+                taxonomy_genus TEXT,
+                scientific_name TEXT,
                 created_at  TEXT DEFAULT (datetime('now')),
                 UNIQUE(photo_id, model)
             );
@@ -126,6 +134,20 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN subject_sharpness REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN subject_size REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN quality_score REAL")
+        try:
+            self.conn.execute("SELECT embedding FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
+        try:
+            self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_phylum TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_class TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_order TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_family TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_genus TEXT")
+            self.conn.execute("ALTER TABLE predictions ADD COLUMN scientific_name TEXT")
 
     # -- Folders --
 
@@ -169,10 +191,15 @@ class Database:
         ).fetchone()
         return row['id']
 
+    # Columns to return in photo queries (excludes large binary fields like embedding)
+    PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
+                    timestamp, width, height, rating, flag, thumb_path, sharpness,
+                    detection_box, detection_conf, subject_sharpness, subject_size, quality_score"""
+
     def get_photo(self, photo_id):
         """Return a single photo by id."""
         return self.conn.execute(
-            "SELECT * FROM photos WHERE id = ?", (photo_id,)
+            f"SELECT {self.PHOTO_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
 
     def count_photos(self):
@@ -239,8 +266,9 @@ class Database:
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
+        pcols = ', '.join(f'p.{c.strip()}' for c in self.PHOTO_COLS.split(','))
         query = f"""
-            SELECT p.* FROM photos p
+            SELECT {pcols} FROM photos p
             {join_clause}
             {where}
             ORDER BY {order}
@@ -344,16 +372,47 @@ class Database:
     # -- Predictions --
 
     def add_prediction(self, photo_id, species, confidence, model, category='new',
-                       group_id=None, vote_count=None, total_votes=None, individual=None):
-        """Store a classification prediction for a photo."""
+                       group_id=None, vote_count=None, total_votes=None, individual=None,
+                       taxonomy=None):
+        """Store a classification prediction for a photo.
+
+        Uses INSERT OR IGNORE so re-running classification doesn't destroy
+        existing predictions that the user may have already reviewed.
+        Use clear_predictions() first if you want a fresh start.
+
+        Args:
+            taxonomy: optional dict with keys kingdom, phylum, class, order,
+                      family, genus, scientific_name from taxonomy lookup
+        """
+        tax = taxonomy or {}
         self.conn.execute(
-            """INSERT OR REPLACE INTO predictions
+            """INSERT OR IGNORE INTO predictions
                (photo_id, species, confidence, model, category, status,
-                group_id, vote_count, total_votes, individual)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+                group_id, vote_count, total_votes, individual,
+                taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
+               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (photo_id, species, confidence, model, category,
-             group_id, vote_count, total_votes, individual),
+             group_id, vote_count, total_votes, individual,
+             tax.get('kingdom'), tax.get('phylum'), tax.get('class'),
+             tax.get('order'), tax.get('family'), tax.get('genus'),
+             tax.get('scientific_name')),
         )
+        self.conn.commit()
+
+    def clear_predictions(self, model=None, collection_photo_ids=None):
+        """Clear predictions, optionally filtered by model and/or photo set."""
+        conditions = []
+        params = []
+        if model:
+            conditions.append("model = ?")
+            params.append(model)
+        if collection_photo_ids is not None:
+            placeholders = ','.join('?' for _ in collection_photo_ids)
+            conditions.append(f"photo_id IN ({placeholders})")
+            params.extend(collection_photo_ids)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        self.conn.execute(f"DELETE FROM predictions {where}", params)
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):
@@ -473,6 +532,7 @@ class Database:
         conditions = []
         params = []
         need_keyword_join = False
+        need_prediction_join = False
 
         for rule in rules:
             field = rule['field']
@@ -561,11 +621,26 @@ class Database:
                 elif op == 'is not':
                     conditions.append("p.extension != ?")
                     params.append(value)
+            elif field in ('taxonomy_kingdom', 'taxonomy_phylum', 'taxonomy_class',
+                           'taxonomy_order', 'taxonomy_family', 'taxonomy_genus'):
+                need_prediction_join = True
+                col = f'pred.{field}'
+                if op in ('equals', 'is'):
+                    conditions.append(f"{col} = ?")
+                    params.append(value)
+                elif op == 'is not':
+                    conditions.append(f"({col} IS NULL OR {col} != ?)")
+                    params.append(value)
+                elif op == 'contains':
+                    conditions.append(f"{col} LIKE ?")
+                    params.append(f"%{value}%")
 
         join_clause = ""
         if need_keyword_join:
             join_clause += " JOIN photo_keywords pk ON pk.photo_id = p.id"
             join_clause += " JOIN keywords k ON k.id = pk.keyword_id"
+        if need_prediction_join:
+            join_clause += " JOIN predictions pred ON pred.photo_id = p.id"
 
         # Always join folders for folder-under rules
         folder_join = " LEFT JOIN folders f ON f.id = p.folder_id"
@@ -577,8 +652,9 @@ class Database:
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
+        pcols = ', '.join(f'p.{c.strip()}' for c in self.PHOTO_COLS.split(','))
         query = f"""
-            SELECT DISTINCT p.* FROM photos p
+            SELECT DISTINCT {pcols} FROM photos p
             {folder_join}
             {join_clause}
             {where}

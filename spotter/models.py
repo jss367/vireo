@@ -123,6 +123,56 @@ def set_active_model(model_id):
     _save_config(config)
 
 
+def remove_model(model_id):
+    """Remove a model's weights from disk and unregister it.
+
+    Deletes local weights (both our managed copy and the HF cache entry),
+    and removes it from models.json. Returns True if found.
+    """
+    config = _load_config()
+    models = config.get('models', [])
+
+    found = None
+    for m in models:
+        if m['id'] == model_id:
+            found = m
+            break
+
+    if not found:
+        # Check if it's a known model with a legacy path
+        known = {km['id']: km for km in KNOWN_MODELS}
+        if model_id in known:
+            # Known model, not registered — check default paths
+            path = os.path.join(DEFAULT_MODELS_DIR, model_id)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+                return True
+        return False
+
+    # Delete local weights
+    weights_path = found.get('weights_path', '')
+    if weights_path and os.path.exists(weights_path):
+        if os.path.isdir(weights_path):
+            shutil.rmtree(weights_path)
+        else:
+            # Delete the file and its parent dir if it's inside our models dir
+            os.unlink(weights_path)
+            parent = os.path.dirname(weights_path)
+            if parent.startswith(DEFAULT_MODELS_DIR) and os.path.isdir(parent):
+                remaining = os.listdir(parent)
+                if not remaining:
+                    os.rmdir(parent)
+
+    # Remove from config
+    config['models'] = [m for m in models if m['id'] != model_id]
+    if config.get('active_model') == model_id:
+        config['active_model'] = None
+    _save_config(config)
+
+    log.info("Removed model %s (weights: %s)", model_id, weights_path)
+    return True
+
+
 def register_model(model_id, name, model_str, weights_path, description=''):
     """Register a model (custom or after download)."""
     config = _load_config()
@@ -261,34 +311,53 @@ def download_model(model_id, progress_callback=None):
     except ImportError:
         raise RuntimeError("huggingface_hub not installed. Run: pip install huggingface_hub")
 
-    if model_id == 'bioclip-vit-b-16':
+    source = km.get('source', '')
+
+    if source.startswith('hf-hub:'):
+        # For hf-hub models, open_clip manages its own cache. We download
+        # each file individually so we can report progress.
+        repo_id = source.replace('hf-hub:', '')
+        log.info("Pre-warming HF cache for %s (%s)", km['name'], repo_id)
+
+        from huggingface_hub import hf_hub_download, list_repo_files
+
+        files = list_repo_files(repo_id)
+        total_files = len(files)
+        cache_dir = None
+
+        for fi, filename in enumerate(files):
+            if progress_callback:
+                size_hint = ''
+                if filename.endswith(('.safetensors', '.bin')):
+                    size_hint = f' ({km.get("size_mb", "?")} MB)'
+                progress_callback(
+                    f'Downloading {fi + 1}/{total_files}: {filename}{size_hint}',
+                    current=fi,
+                    total=total_files,
+                )
+
+            log.info("Downloading %s/%s (%d/%d)", repo_id, filename, fi + 1, total_files)
+            path = hf_hub_download(repo_id, filename)
+
+            # The first file's parent directory is the cache dir
+            if cache_dir is None:
+                cache_dir = os.path.dirname(path)
+
+        if progress_callback:
+            progress_callback(f'{km["name"]} download complete!', current=total_files, total=total_files)
+        log.info("Model cached at: %s", cache_dir)
+
+        register_model(model_id, km['name'], source, cache_dir, km['description'])
+        return cache_dir
+
+    elif model_id == 'bioclip-vit-b-16':
+        # BioCLIP v1 uses a direct weights file, not hf-hub scheme
         path = _hf_download_with_retry(
             'imageomics/bioclip', 'open_clip_pytorch_model.bin',
             os.path.join(DEFAULT_MODELS_DIR, 'bioclip'),
             progress_callback=progress_callback,
         )
         register_model(model_id, km['name'], km['model_str'], path, km['description'])
-        return path
-
-    elif model_id == 'bioclip-2':
-        path = _hf_download_with_retry(
-            'imageomics/bioclip-2', 'open_clip_pytorch_model.bin',
-            os.path.join(DEFAULT_MODELS_DIR, 'bioclip-2'),
-            progress_callback=progress_callback,
-        )
-        register_model(model_id, km['name'], 'hf-hub:imageomics/bioclip-2',
-                       path, km['description'])
-        return path
-
-    elif model_id == 'bioclip-2.5-vith14':
-        # BioCLIP-2.5 uses safetensors format
-        path = _hf_download_with_retry(
-            'imageomics/bioclip-2.5-vith14', 'open_clip_model.safetensors',
-            os.path.join(DEFAULT_MODELS_DIR, 'bioclip-2.5-vith14'),
-            progress_callback=progress_callback,
-        )
-        register_model(model_id, km['name'], 'hf-hub:imageomics/bioclip-2.5-vith14',
-                       path, km['description'])
         return path
 
     raise ValueError(f"No download handler for {model_id}")

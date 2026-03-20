@@ -474,6 +474,13 @@
   </span>
 </div>
 
+<!-- Sync reminder -->
+<div id="syncBanner" style="display:none;background:var(--bg-tertiary,#0f3460);padding:10px 20px;border-bottom:1px solid var(--border-primary,#0f3460);font-size:13px;align-items:center;gap:12px;">
+  <span id="syncBannerText" style="color:var(--warning,#f0c040);"></span>
+  <button onclick="runSync()" style="background:var(--accent,#4ecca3);color:var(--bg-primary,#1a1a2e);border:none;border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
+  <span id="syncStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
+</div>
+
 <!-- Category Tabs -->
 <div class="tabs" id="tabs"></div>
 
@@ -533,6 +540,54 @@ function renderAll() {
   renderTabs();
   renderButtons();
   renderGrid();
+  checkPendingSync();
+}
+
+async function checkPendingSync() {
+  try {
+    var resp = await fetch('/api/sync/status');
+    var data = await resp.json();
+    var banner = document.getElementById('syncBanner');
+    if (data.pending_count > 0) {
+      document.getElementById('syncBannerText').textContent =
+        data.pending_count + ' change' + (data.pending_count !== 1 ? 's' : '') +
+        ' pending — keywords have been added to the database but not written to XMP sidecar files yet.';
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+async function runSync() {
+  var status = document.getElementById('syncStatus');
+  status.textContent = 'Syncing...';
+  try {
+    var resp = await fetch('/api/jobs/sync', {method: 'POST'});
+    var data = await resp.json();
+
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      if (p.total > 0) {
+        status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+      }
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      if (result.status === 'completed') {
+        status.textContent = 'Synced!';
+        status.style.color = 'var(--accent,#4ecca3)';
+        setTimeout(checkPendingSync, 1000);
+      } else {
+        status.textContent = 'Failed';
+        status.style.color = 'var(--danger,#e74c3c)';
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
 }
 
 function renderModelFilter() {
@@ -711,16 +766,19 @@ function renderPredictionCard(pred) {
 
   // Action buttons
   var actionsHtml;
-  var acceptLabel = pred.group_id ? 'Accept Group' : 'Accept';
+  var species = escapeHtml(pred.species || '');
   if (pred.status === 'accepted') {
-    actionsHtml = '<div class="card-actions"><button class="btn-done">accepted</button></div>';
+    actionsHtml = '<div class="card-actions"><button class="btn-done">Accepted as ' + species + '</button></div>';
   } else if (pred.status === 'rejected') {
-    actionsHtml = '<div class="card-actions"><button class="btn-done skipped-btn">rejected</button></div>';
+    actionsHtml = '<div class="card-actions"><button class="btn-done skipped-btn">Rejected</button></div>';
   } else {
+    var acceptLabel = pred.group_id
+      ? 'Tag ' + pred.total_votes + ' photos as "' + species + '"'
+      : 'Tag as "' + species + '"';
     actionsHtml =
       '<div class="card-actions">' +
         '<button class="btn-accept" onclick="acceptPrediction(' + pred.id + ')">' + acceptLabel + '</button>' +
-        '<button class="btn-skip" onclick="rejectPrediction(' + pred.id + ')">Reject</button>' +
+        '<button class="btn-skip" onclick="rejectPrediction(' + pred.id + ')">Not ' + species + '</button>' +
       '</div>';
   }
 
@@ -745,7 +803,7 @@ function renderPredictionCard(pred) {
   }
 
   return '<div class="' + cardClass + '" data-pred-id="' + pred.id + '">' +
-    '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') + '">' +
+    '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') + '" style="cursor:pointer;" onclick="openLightbox(' + pred.photo_id + ',\'' + escapeAttr(pred.filename || '').replace(/'/g, "\\'") + '\')">' +
     '<div class="card-body">' +
       '<div class="card-filename">' + escapeHtml(pred.filename || '') + modelHtml + '</div>' +
       badgeHtml + groupHtml +
@@ -771,14 +829,6 @@ function groupMembersHtml(pred) {
   return '<button onclick="openGroupReview(\'' + escapeAttr(pred.group_id) + '\',\'' + escapeAttr(pred.model || '') + '\')" ' +
     'style="background:var(--bg-tertiary,#0f3460);color:var(--info,#7ec8e3);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-top:4px;width:100%;">' +
     'Review ' + members.length + ' photos in group</button>';
-}
-  el.style.display = isOpen ? 'block' : 'none';
-  // Update button text
-  var btn = el.previousElementSibling;
-  if (btn) {
-    var count = el.querySelectorAll('img').length;
-    btn.textContent = count + ' photos in group — ' + (isOpen ? 'hide' : 'show');
-  }
 }
 
 /* ---------- Actions ---------- */
@@ -927,6 +977,40 @@ function grmSelect(photoId) {
   renderGroupModal();
 }
 
+function _grmGetZone(photoId) {
+  if (grmState.picks.has(photoId)) return 'picks';
+  if (grmState.rejects.has(photoId)) return 'rejects';
+  return 'candidates';
+}
+
+function grmMoveUp() {
+  if (!grmState.selected) return;
+  var zone = _grmGetZone(grmState.selected);
+  if (zone === 'rejects') {
+    // rejects → candidates
+    grmState.rejects.delete(grmState.selected);
+  } else if (zone === 'candidates') {
+    // candidates → picks
+    grmState.picks.add(grmState.selected);
+  }
+  // already in picks — do nothing
+  renderGroupModal();
+}
+
+function grmMoveDown() {
+  if (!grmState.selected) return;
+  var zone = _grmGetZone(grmState.selected);
+  if (zone === 'picks') {
+    // picks → candidates
+    grmState.picks.delete(grmState.selected);
+  } else if (zone === 'candidates') {
+    // candidates → rejects
+    grmState.rejects.add(grmState.selected);
+  }
+  // already in rejects — do nothing
+  renderGroupModal();
+}
+
 function grmMovePick() {
   if (!grmState.selected) return;
   grmState.rejects.delete(grmState.selected);
@@ -985,8 +1069,8 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT') return;
 
   if (e.key === 'Escape') { closeGroupReview(); e.preventDefault(); return; }
-  if (e.key === 'ArrowUp') { grmMovePick(); e.preventDefault(); return; }
-  if (e.key === 'ArrowDown') { grmMoveReject(); e.preventDefault(); return; }
+  if (e.key === 'ArrowUp') { grmMoveUp(); e.preventDefault(); return; }
+  if (e.key === 'ArrowDown') { grmMoveDown(); e.preventDefault(); return; }
   if (e.key === 'ArrowLeft') {
     // Select previous card
     var items = grmState.items.filter(function(it) { return !grmState.removed.has(it.id); });
@@ -1013,15 +1097,15 @@ document.addEventListener('keydown', function(e) {
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
   <div class="grm-zone grm-picks">
-    <div class="grm-zone-label">PICKS (↑)</div>
+    <div class="grm-zone-label">PICKS ↑</div>
     <div class="grm-strip" id="grmPicks"></div>
   </div>
   <div class="grm-zone grm-candidates">
-    <div class="grm-zone-label">CANDIDATES</div>
+    <div class="grm-zone-label">CANDIDATES ↑↓</div>
     <div class="grm-strip" id="grmCandidates"></div>
   </div>
   <div class="grm-zone grm-rejects">
-    <div class="grm-zone-label">REJECTS (↓)</div>
+    <div class="grm-zone-label">REJECTS ↓</div>
     <div class="grm-strip" id="grmRejects"></div>
   </div>
   <div class="grm-footer">

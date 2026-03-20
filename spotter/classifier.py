@@ -16,10 +16,13 @@ def _embedding_cache_path(labels, model_str):
     return os.path.join(CACHE_DIR, f"{digest}.pt")
 
 
-def _compute_embeddings_with_progress(classifier, labels):
+def _compute_embeddings_with_progress(classifier, labels, progress_callback=None):
     """Compute text embeddings for labels with progress logging.
 
     Replicates CustomLabelsClassifier._get_txt_embeddings but logs progress.
+
+    Args:
+        progress_callback: optional callable(current, total) for UI progress
     """
     import torch
     import torch.nn.functional as F
@@ -27,6 +30,8 @@ def _compute_embeddings_with_progress(classifier, labels):
 
     total = len(labels)
     log.info("Computing label embeddings: 0/%d", total)
+    if progress_callback:
+        progress_callback(0, total)
 
     all_features = []
     with torch.no_grad():
@@ -39,8 +44,10 @@ def _compute_embeddings_with_progress(classifier, labels):
             all_features.append(txt_features)
 
             done = i + 1
-            if done % 100 == 0 or done == total:
+            if done % 50 == 0 or done == total:
                 log.info("Computing label embeddings: %d/%d", done, total)
+                if progress_callback:
+                    progress_callback(done, total)
 
     return torch.stack(all_features, dim=1)
 
@@ -56,7 +63,8 @@ class Classifier:
     """
 
     def __init__(self, labels=None, model_str='ViT-B-16',
-                 pretrained_str='/tmp/bioclip_model/open_clip_pytorch_model.bin'):
+                 pretrained_str='/tmp/bioclip_model/open_clip_pytorch_model.bin',
+                 embedding_progress_callback=None):
         if labels is not None:
             if not labels:
                 raise ValueError("labels list must not be empty")
@@ -78,16 +86,15 @@ class Classifier:
                 log.info("Label embeddings loaded from cache")
             else:
                 log.info("Computing label embeddings for %d labels (first run — will be cached for next time)...", len(labels))
-                # Init with placeholder to get the model loaded without computing all embeddings
                 self._classifier = CustomLabelsClassifier(
                     cls_ary=["_placeholder"],
                     model_str=model_str,
                     pretrained_str=pretrained_str,
                 )
-                # Now compute embeddings ourselves with progress logging
                 self._classifier.classes = [cls.strip() for cls in labels]
                 self._classifier.txt_embeddings = _compute_embeddings_with_progress(
                     self._classifier, self._classifier.classes,
+                    progress_callback=embedding_progress_callback,
                 )
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 torch.save(self._classifier.txt_embeddings, cache_path)
@@ -108,38 +115,75 @@ class Classifier:
     def classify(self, image_path, threshold=0.4):
         """Classify an image and return predictions above threshold.
 
-        Args:
-            image_path: path to an image file
-            threshold: minimum confidence score (0-1) to include
+        Returns:
+            list of dicts with species, score, auto_tag, confidence_tag
+        """
+        preds, _ = self.classify_with_embedding(image_path, threshold)
+        return preds
+
+    def classify_with_embedding(self, image_path, threshold=0.4):
+        """Classify an image and return both predictions and the image embedding.
+
+        Single forward pass — computes the image embedding once, uses it for
+        classification, and returns it for downstream use (e.g. similarity grouping).
 
         Returns:
-            list of dicts, each with:
-                - species: the predicted species name
-                - score: confidence score (0-1)
-                - auto_tag: prefixed tag like "auto:Bald eagle"
-                - confidence_tag: like "auto:confidence:0.95"
+            (predictions, embedding) where:
+                predictions: list of dicts with species, score, auto_tag, confidence_tag
+                embedding: numpy float32 array (the normalized image embedding vector)
         """
+        import numpy as np
+        import torch
+        import torch.nn.functional as F
+
+        clf = self._classifier
+
+        # Compute image embedding (single forward pass)
+        img_features = clf.create_image_features_for_image(image_path, normalize=True)
+        embedding = img_features.cpu().numpy().astype(np.float32).flatten()
+
         if self._mode == 'custom':
-            raw_preds = self._classifier.predict(image_path)
+            # Dot product with text embeddings to get probabilities (same as predict())
+            probs = (100.0 * img_features @ clf.txt_embeddings).softmax(dim=-1)
+            probs = probs.cpu().numpy().flatten()
+
+            # Build sorted predictions
+            ranked = sorted(zip(clf.classes, probs), key=lambda x: x[1], reverse=True)
+            results = []
+            for species, score in ranked:
+                score = float(score)
+                if score < threshold:
+                    continue
+                results.append({
+                    'species': species,
+                    'score': score,
+                    'auto_tag': f"auto:{species}",
+                    'confidence_tag': f"auto:confidence:{score:.2f}",
+                })
+            return results, embedding
         else:
-            raw_preds = self._classifier.predict(image_path, self._rank)
-
-        results = []
-        for pred in raw_preds:
-            if self._mode == 'custom':
-                species = pred['classification']
-            else:
+            # TreeOfLife mode — predictions include full taxonomy
+            raw_preds = clf.predict(image_path, self._rank)
+            results = []
+            for pred in raw_preds:
                 species = pred.get('common_name') or pred.get('species', '')
-
-            score = pred['score']
-            if score < threshold:
-                continue
-
-            results.append({
-                'species': species,
-                'score': score,
-                'auto_tag': f"auto:{species}",
-                'confidence_tag': f"auto:confidence:{score:.2f}",
-            })
-
-        return results
+                score = pred['score']
+                if score < threshold:
+                    continue
+                result = {
+                    'species': species,
+                    'score': score,
+                    'auto_tag': f"auto:{species}",
+                    'confidence_tag': f"auto:confidence:{score:.2f}",
+                }
+                # TreeOfLife predictions include taxonomy fields
+                taxonomy = {}
+                for rank in ('kingdom', 'phylum', 'class', 'order', 'family', 'genus'):
+                    if rank in pred and pred[rank]:
+                        taxonomy[rank] = pred[rank]
+                if pred.get('species'):
+                    taxonomy['scientific_name'] = pred['species']
+                if taxonomy:
+                    result['taxonomy'] = taxonomy
+                results.append(result)
+            return results, embedding

@@ -1,7 +1,9 @@
-"""Group sequential photos by EXIF timestamp proximity."""
+"""Group sequential photos by EXIF timestamp proximity and visual similarity."""
 
 import logging
 from collections import Counter
+
+import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +43,74 @@ def group_by_timestamp(photos, window_seconds=10):
 
     groups.append(current_group)
     return groups
+
+
+def refine_groups_by_similarity(groups, similarity_threshold=0.85):
+    """Split time-based groups using cosine similarity of image embeddings.
+
+    For each photo in a time-based group, checks if it's similar to ANY photo
+    already in the current subgroup (not just the previous one). This handles
+    cases where you briefly pan away and come back to the same subject —
+    the returning photos still match the earlier ones in the group.
+
+    Photos without embeddings are kept with their neighbors (benefit of the doubt).
+
+    Args:
+        groups: list of groups from group_by_timestamp. Each photo dict
+                must have an 'embedding' key (numpy array or None).
+        similarity_threshold: minimum cosine similarity to stay in same group (0-1)
+
+    Returns:
+        list of refined groups
+    """
+    refined = []
+
+    for group in groups:
+        if len(group) < 2:
+            refined.append(group)
+            continue
+
+        # Build subgroups: each photo joins the first subgroup it's similar to,
+        # or starts a new subgroup if it doesn't match any
+        subgroups = [[group[0]]]
+
+        for i in range(1, len(group)):
+            curr_emb = group[i].get('embedding')
+            placed = False
+
+            if curr_emb is not None:
+                # Check against each existing subgroup
+                for sg in subgroups:
+                    # Check if similar to any member of this subgroup
+                    for member in sg:
+                        mem_emb = member.get('embedding')
+                        if mem_emb is not None:
+                            sim = float(np.dot(curr_emb, mem_emb))
+                            if sim >= similarity_threshold:
+                                sg.append(group[i])
+                                placed = True
+                                break
+                    if placed:
+                        break
+
+            if not placed:
+                if curr_emb is None:
+                    # No embedding — keep with the last subgroup (benefit of the doubt)
+                    subgroups[-1].append(group[i])
+                else:
+                    # Doesn't match any existing subgroup — start a new one
+                    log.debug("New subgroup at %s (no match >= %.3f)",
+                              group[i]['filename'], similarity_threshold)
+                    subgroups.append([group[i]])
+
+        refined.extend(subgroups)
+
+    split_count = len(refined) - len(groups)
+    if split_count > 0:
+        log.info("Similarity refinement: %d time-based groups → %d groups (%d splits)",
+                 len(groups), len(refined), split_count)
+
+    return refined
 
 
 def consensus_prediction(predictions):

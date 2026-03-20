@@ -95,7 +95,7 @@ def score_collection_photos(db, collection_id, progress_callback=None):
         dict with scored_count, group_count, results (list of scored photos)
     """
     from datetime import datetime
-    from grouping import group_by_timestamp
+    from grouping import group_by_timestamp, refine_groups_by_similarity
 
     if collection_id:
         photos = db.get_collection_photos(collection_id, per_page=999999)
@@ -105,7 +105,7 @@ def score_collection_photos(db, collection_id, progress_callback=None):
     folders = {f['id']: f['path'] for f in db.get_folder_tree()}
     total = len(photos)
 
-    # Build photo list with timestamps for grouping
+    # Build photo list with timestamps and stored embeddings for grouping
     photo_list = []
     for p in photos:
         folder_path = folders.get(p['folder_id'], '')
@@ -116,15 +116,22 @@ def score_collection_photos(db, collection_id, progress_callback=None):
                 timestamp = datetime.fromisoformat(p['timestamp'])
             except Exception:
                 pass
+        # Load stored embedding if available
+        embedding = None
+        emb_blob = p['embedding'] if 'embedding' in p.keys() else None
+        if emb_blob:
+            embedding = np.frombuffer(emb_blob, dtype=np.float32)
         photo_list.append({
             'photo_id': p['id'],
             'path': image_path,
             'filename': p['filename'],
             'timestamp': timestamp,
+            'embedding': embedding,
         })
 
-    # Group by timestamp
+    # Group by timestamp, then refine using visual similarity
     groups = group_by_timestamp(photo_list, window_seconds=10)
+    groups = refine_groups_by_similarity(groups)
 
     all_results = []
     scored = 0
