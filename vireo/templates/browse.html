@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vireo - Browse</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 28px; /* space for bottom panel toggle */
+}
+
+/* ---------- Layout ---------- */
+.main-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  width: 260px;
+  min-width: 260px;
+  background: #16213e;
+  border-right: 1px solid #0f3460;
+  overflow-y: auto;
+  padding: 12px 0;
+  flex-shrink: 0;
+}
+.sidebar-section { padding: 0 14px; margin-bottom: 16px; }
+.sidebar-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #666;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #0f3460;
+}
+.tree-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: #c0c0c0;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s;
+  user-select: none;
+}
+.tree-item:hover { background: #0f3460; }
+.tree-item.active { background: #0f3460; color: #4ecca3; }
+.tree-item .count {
+  margin-left: auto;
+  font-size: 11px;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+.tree-indent { width: 16px; flex-shrink: 0; }
+.tree-toggle {
+  width: 16px;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #555;
+  cursor: pointer;
+  text-align: center;
+}
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+
+/* ---------- Content Area ---------- */
+.content-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- Filter Bar ---------- */
+.filter-bar {
+  background: #1a1a2e;
+  padding: 10px 20px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.filter-bar input[type=text], .filter-bar input[type=date] {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.filter-bar input:focus { border-color: #4ecca3; }
+.filter-bar select {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+.filter-bar label { font-size: 12px; color: #888; }
+
+/* Rating filter */
+.rating-filter { display: flex; align-items: center; gap: 2px; }
+.rating-star {
+  font-size: 18px;
+  cursor: pointer;
+  color: #333;
+  transition: color 0.1s;
+  user-select: none;
+}
+.rating-star.active { color: #f0c040; }
+.rating-star:hover { color: #f0c040; }
+
+.filter-summary { font-size: 12px; color: #666; margin-left: auto; }
+
+/* ---------- Photo Grid ---------- */
+.grid-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size, 220px), 1fr));
+  gap: 12px;
+}
+.grid-card {
+  background: #16213e;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #0f3460;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.15s;
+}
+.grid-card:hover { transform: translateY(-1px); border-color: #4ecca3; }
+.grid-card.selected { border-color: #4ecca3; box-shadow: 0 0 0 1px #4ecca3; }
+.grid-card-img-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3/2;
+}
+.grid-card-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #0f3460;
+}
+.det-box {
+  position: absolute;
+  border: 2px solid #4ecca3;
+  border-radius: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(78, 204, 163, 0.4);
+}
+.det-box-label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  font-size: 9px;
+  background: rgba(78, 204, 163, 0.85);
+  color: #000;
+  padding: 1px 4px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.grid-card-info {
+  padding: 8px 10px;
+}
+.grid-card-name {
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grid-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.grid-card-rating { font-size: 12px; color: #f0c040; }
+.grid-card-flag {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+.flag-flagged { background: #4ecca3; color: #1a1a2e; }
+.flag-rejected { background: #e74c3c; color: #fff; }
+
+/* ---------- Detail Panel ---------- */
+.detail-panel {
+  width: 340px;
+  min-width: 340px;
+  background: #16213e;
+  border-left: 1px solid #0f3460;
+  overflow-y: auto;
+  padding: 16px;
+  display: none;
+  flex-shrink: 0;
+}
+.detail-panel.open { display: block; }
+.detail-close {
+  float: right;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.detail-close:hover { color: #fff; }
+.detail-preview {
+  width: 100%;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.detail-filename {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.detail-section {
+  margin-bottom: 14px;
+}
+.detail-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #666;
+  margin-bottom: 6px;
+}
+.detail-rating {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.detail-star {
+  font-size: 22px;
+  cursor: pointer;
+  color: #333;
+  transition: color 0.1s;
+  user-select: none;
+}
+.detail-star.active { color: #f0c040; }
+.detail-star:hover { color: #f0c040; }
+.detail-flags { display: flex; gap: 6px; margin-bottom: 8px; }
+.detail-flag-btn {
+  padding: 5px 14px;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  background: #0f3460;
+  color: #c0c0c0;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.detail-flag-btn:hover { border-color: #4ecca3; }
+.detail-flag-btn.active-flag { background: #4ecca3; color: #1a1a2e; border-color: #4ecca3; }
+.detail-flag-btn.active-reject { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+.keyword-tag {
+  display: inline-block;
+  background: #0f3460;
+  color: #c0c0c0;
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  margin: 2px;
+}
+.keyword-tag .remove-kw {
+  margin-left: 4px;
+  color: #666;
+  cursor: pointer;
+  font-weight: bold;
+}
+.keyword-tag .remove-kw:hover { color: #e74c3c; }
+.add-kw-input {
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 100%;
+  margin-top: 6px;
+  outline: none;
+}
+.add-kw-input:focus { border-color: #4ecca3; }
+.detail-exif {
+  font-size: 12px;
+  color: #999;
+  line-height: 1.6;
+}
+.detail-path {
+  font-size: 11px;
+  color: #555;
+  word-break: break-all;
+  margin-top: 6px;
+}
+
+
+
+/* ---------- Empty / Loading ---------- */
+.empty-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: #555;
+  font-size: 15px;
+}
+.loading-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: #555;
+  font-size: 15px;
+}
+
+/* Sentinel for infinite scroll */
+.scroll-sentinel { height: 1px; }
+
+/* ---------- Modal ---------- */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 500;
+  justify-content: center;
+  align-items: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+  padding: 24px;
+  width: 460px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.modal h3 { font-size: 16px; margin-bottom: 16px; }
+.modal-input {
+  width: 100%;
+  background: #0f3460;
+  color: #e0e0e0;
+  border: 1px solid #1a3a6e;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  outline: none;
+}
+.modal-input:focus { border-color: #4ecca3; }
+.rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.rule-row select, .rule-row input {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a3a6e;
+  border-radius: 4px; padding: 5px 8px; font-size: 12px; outline: none;
+}
+.rule-row select:focus, .rule-row input:focus { border-color: #4ecca3; }
+.rule-row .remove-rule { color: #666; cursor: pointer; font-size: 16px; }
+.rule-row .remove-rule:hover { color: #e74c3c; }
+.modal-actions { display: flex; gap: 8px; margin-top: 16px; }
+.modal-btn {
+  padding: 7px 18px; border: none; border-radius: 4px;
+  cursor: pointer; font-size: 13px; font-weight: 500;
+}
+.modal-btn-primary { background: #4ecca3; color: #1a1a2e; }
+.modal-btn-cancel { background: #0f3460; color: #c0c0c0; }
+.modal-preview { font-size: 12px; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+{% set active_page = 'browse' %}
+{% include '_navbar.html' %}
+
+<div class="main-layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-title">Folders</div>
+      <div id="folderTree"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Keywords</div>
+      <div id="keywordTree"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-title">Collections</div>
+      <div id="collectionList"></div>
+      <div style="margin-top:6px;">
+        <button onclick="showCollectionModal()" style="background:#0f3460;color:#7ec8e3;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Content -->
+  <div class="content-area">
+
+    <!-- Filter Bar -->
+    <div class="filter-bar">
+      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()">
+      <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
+      <input type="date" id="dateFrom" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
+      <label>to</label>
+      <input type="date" id="dateTo" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
+      <div class="rating-filter">
+        <label title="Minimum star rating">Min:</label>
+        <span class="rating-star" data-val="1" onclick="setFilterRating(1)">&#9733;</span>
+        <span class="rating-star" data-val="2" onclick="setFilterRating(2)">&#9733;</span>
+        <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
+        <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
+        <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
+      </div>
+      <select id="sortSelect" onchange="applyFilters()" title="Sort order">
+        <option value="date">Capture date (oldest)</option>
+        <option value="date_desc">Capture date (newest)</option>
+        <option value="name">Filename (A-Z)</option>
+        <option value="name_desc">Filename (Z-A)</option>
+        <option value="rating">Rating (highest)</option>
+        <option value="quality">Quality (best)</option>
+        <option value="sharpness">Sharpness (sharpest)</option>
+        <option value="sharpness_asc">Sharpness (softest)</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
+        <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
+               style="width:80px;accent-color:var(--accent, #4ecca3);"
+               oninput="updateThumbSize(this.value)">
+        <span style="font-size:10px;color:var(--text-faint, #666);">&#9638;</span>
+      </label>
+      <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
+              style="background:var(--bg-tertiary,#0f3460);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+        &#9634; Boxes
+      </button>
+      <span class="filter-summary" id="filterSummary"></span>
+    </div>
+
+    <!-- Batch Action Bar -->
+    <div id="batchBar" style="display:none;background:#16213e;padding:8px 20px;border-bottom:1px solid #0f3460;align-items:center;gap:10px;flex-shrink:0;">
+      <span id="batchCount" style="font-size:12px;color:#4ecca3;font-weight:600;"></span>
+      <button onclick="batchSetRating(1)" style="background:#0f3460;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
+      <button onclick="batchSetRating(3)" style="background:#0f3460;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
+      <button onclick="batchSetRating(5)" style="background:#0f3460;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;5</button>
+      <button onclick="batchSetFlag('flagged')" style="background:#0f3460;color:#4ecca3;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
+      <button onclick="batchSetFlag('rejected')" style="background:#0f3460;color:#e74c3c;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
+      <button onclick="batchAddKeyword()" style="background:#0f3460;color:#c0c0c0;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button onclick="addToCollection()" style="background:#0f3460;color:#7ec8e3;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button onclick="clearSelection()" style="background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
+    </div>
+
+    <!-- Grid -->
+    <div class="grid-container" id="gridContainer">
+      <div class="grid" id="grid"></div>
+      <div class="scroll-sentinel" id="scrollSentinel"></div>
+      <div class="empty-state" id="emptyState" style="display:none;">No photos match the current filters.</div>
+      <div class="empty-state" id="welcomeState" style="display:none;">
+        <div style="margin-bottom:16px;font-size:18px;color:#fff;font-weight:600;">Welcome to Vireo</div>
+        <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:#999;">
+          To get started, import your photos. You can scan a folder of images
+          (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
+        </p>
+        <a href="/import" style="display:inline-block;background:#4ecca3;color:#1a1a2e;padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
+      </div>
+      <div class="loading-state" id="loadingState">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Detail Panel -->
+  <div class="detail-panel" id="detailPanel">
+    <button class="detail-close" onclick="closeDetail()">&times;</button>
+    <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
+    <div class="detail-filename" id="detailFilename"></div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Rating</div>
+      <div class="detail-rating" id="detailRating"></div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Flag</div>
+      <div class="detail-flags" id="detailFlags">
+        <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
+        <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
+        <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Keywords</div>
+      <div id="detailKeywords"></div>
+      <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">XMP Sidecar</div>
+      <div id="detailXmp" style="font-size:12px;color:var(--text-dim,#888);">—</div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Info</div>
+      <div class="detail-exif" id="detailExif"></div>
+      <div class="detail-path" id="detailPath"></div>
+    </div>
+
+    <div class="detail-section" style="display:flex;gap:8px;">
+      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#0f3460);color:var(--info,#7ec8e3);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        Find Similar
+      </button>
+      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#0f3460);color:var(--accent,#4ecca3);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        Inspect Pipeline
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<!-- Collection Modal -->
+<div class="modal-overlay" id="collectionModal">
+  <div class="modal">
+    <h3>New Smart Collection</h3>
+    <input class="modal-input" id="collectionName" placeholder="Collection name">
+    <div id="ruleRows"></div>
+    <button onclick="addRuleRow()" style="background:#0f3460;color:#7ec8e3;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
+    <div class="modal-preview" id="rulePreview"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="saveCollection()">Save</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<script>
+/* ---------- State ---------- */
+var photos = [];
+var totalPhotos = 0;
+var currentPage = 1;
+var perPage = 50;
+var loading = false;
+var allLoaded = false;
+var selectedPhotoId = null;
+var selectedIndex = -1;
+var selectedPhotos = new Set(); // multi-select
+var showDetectionBoxes = false;
+var filterRating = 0;
+var activeFolderId = null;
+var activeKeyword = null;
+
+/* ---------- Bootstrap ---------- */
+bootstrapBrowse();
+
+async function bootstrapBrowse() {
+  try {
+    var resp = await fetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
+    var data = await resp.json();
+
+    // Populate everything from a single response
+    photos = data.photos || [];
+    totalPhotos = data.total || 0;
+    currentPage = 2; // next page to load
+    if (photos.length >= totalPhotos) allLoaded = true;
+
+    renderFolderTree(data.folders || []);
+    renderKeywordTree(data.keywords || []);
+    renderCollectionList(data.collections || []);
+    renderGrid();
+    updateFilterSummary();
+
+    document.getElementById('loadingState').style.display = 'none';
+  } catch(e) {
+    document.getElementById('loadingState').textContent = 'Error loading.';
+  }
+}
+
+function renderCollectionList(collections) {
+  var html = '';
+  collections.forEach(function(c) {
+    html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
+      '<span>' + escapeHtml(c.name) + '</span></div>';
+  });
+  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:#555;padding:4px 8px;">No collections</div>';
+}
+
+/* ---------- Folder Tree ---------- */
+async function loadFolders() {
+  try {
+    var resp = await fetch('/api/folders');
+    var data = await resp.json();
+    renderFolderTree(data);
+  } catch(e) {}
+}
+
+function renderFolderTree(folders) {
+  var byParent = {};
+  folders.forEach(function(f) {
+    var pid = f.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(f);
+  });
+
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(f) {
+      var hasChildren = byParent[f.id] && byParent[f.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeFolderId === f.id ? ' active' : '';
+      html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '">' +
+        indent + toggle +
+        '<span>' + escapeHtml(f.name) + '</span>' +
+        '<span class="count">' + f.photo_count + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(f.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  document.getElementById('folderTree').innerHTML = buildTree('root', 0);
+}
+
+function toggleTree(e, el) {
+  e.stopPropagation();
+  var next = el.closest('.tree-item').nextElementSibling;
+  if (next && next.classList.contains('tree-children')) {
+    next.classList.toggle('open');
+    el.innerHTML = next.classList.contains('open') ? '&#9660;' : '&#9654;';
+  }
+}
+
+function filterByFolder(folderId) {
+  if (activeFolderId === folderId) {
+    activeFolderId = null;
+  } else {
+    activeFolderId = folderId;
+  }
+  activeKeyword = null;
+  resetAndLoad();
+  // Update active state
+  document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
+  });
+}
+
+/* ---------- Keyword Tree ---------- */
+async function loadKeywords() {
+  try {
+    var resp = await fetch('/api/keywords');
+    var data = await resp.json();
+    renderKeywordTree(data);
+  } catch(e) {}
+}
+
+function renderKeywordTree(keywords) {
+  var byParent = {};
+  keywords.forEach(function(k) {
+    var pid = k.parent_id || 'root';
+    if (!byParent[pid]) byParent[pid] = [];
+    byParent[pid].push(k);
+  });
+
+  function buildTree(parentId, depth) {
+    var children = byParent[parentId] || [];
+    var html = '';
+    children.forEach(function(k) {
+      var hasChildren = byParent[k.id] && byParent[k.id].length > 0;
+      var indent = '';
+      for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
+      var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
+      var activeClass = activeKeyword === k.name ? ' active' : '';
+      html += '<div class="tree-item' + activeClass + '" onclick="filterByKeyword(\'' + escapeAttr(k.name) + '\')">' +
+        indent + toggle +
+        '<span>' + escapeHtml(k.name) + '</span>' +
+      '</div>';
+      if (hasChildren) {
+        html += '<div class="tree-children">' + buildTree(k.id, depth + 1) + '</div>';
+      }
+    });
+    return html;
+  }
+
+  document.getElementById('keywordTree').innerHTML = buildTree('root', 0);
+}
+
+function filterByKeyword(name) {
+  if (activeKeyword === name) {
+    activeKeyword = null;
+  } else {
+    activeKeyword = name;
+  }
+  activeFolderId = null;
+  document.getElementById('searchInput').value = activeKeyword || '';
+  resetAndLoad();
+}
+
+/* ---------- Collections ---------- */
+async function loadCollections() {
+  try {
+    var resp = await fetch('/api/collections');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    renderCollectionList(data);
+  } catch(e) {}
+}
+
+async function filterByCollection(id) {
+  activeFolderId = null;
+  activeKeyword = null;
+  photos = [];
+  currentPage = 1;
+  allLoaded = true;  // collections handle their own pagination
+  document.getElementById('grid').innerHTML = '';
+
+  try {
+    var resp = await fetch('/api/collections/' + id + '/photos?per_page=200');
+    var data = await resp.json();
+    photos = data.photos;
+    totalPhotos = photos.length;
+    renderGrid();
+    updateFilterSummary();
+  } catch(e) {}
+}
+
+/* ---------- Collection Modal ---------- */
+var collectionRules = [];
+
+function showCollectionModal() {
+  collectionRules = [];
+  addRuleRow();
+  document.getElementById('collectionName').value = '';
+  document.getElementById('collectionModal').classList.add('open');
+}
+
+function hideCollectionModal() {
+  document.getElementById('collectionModal').classList.remove('open');
+}
+
+function addRuleRow() {
+  var idx = collectionRules.length;
+  collectionRules.push({field: 'keyword', op: 'contains', value: ''});
+  renderRules();
+}
+
+function removeRule(idx) {
+  collectionRules.splice(idx, 1);
+  renderRules();
+}
+
+function updateRule(idx, key, val) {
+  collectionRules[idx][key] = val;
+}
+
+function renderRules() {
+  var html = '';
+  collectionRules.forEach(function(r, i) {
+    html += '<div class="rule-row">' +
+      '<select onchange="updateRule(' + i + ',\'field\',this.value)">' +
+        '<option value="keyword"' + (r.field==='keyword'?' selected':'') + '>Keyword</option>' +
+        '<option value="rating"' + (r.field==='rating'?' selected':'') + '>Rating</option>' +
+        '<option value="flag"' + (r.field==='flag'?' selected':'') + '>Flag</option>' +
+        '<option value="extension"' + (r.field==='extension'?' selected':'') + '>Extension</option>' +
+        '<option value="folder"' + (r.field==='folder'?' selected':'') + '>Folder</option>' +
+        '<option value="timestamp"' + (r.field==='timestamp'?' selected':'') + '>Date</option>' +
+      '</select>' +
+      '<select onchange="updateRule(' + i + ',\'op\',this.value)">' +
+        '<option value="is"' + (r.op==='is'?' selected':'') + '>is</option>' +
+        '<option value="is not"' + (r.op==='is not'?' selected':'') + '>is not</option>' +
+        '<option value="contains"' + (r.op==='contains'?' selected':'') + '>contains</option>' +
+        '<option value="not_contains"' + (r.op==='not_contains'?' selected':'') + '>does not contain</option>' +
+        '<option value=">="' + (r.op==='>='?' selected':'') + '>&gt;=</option>' +
+        '<option value="<="' + (r.op==='<='?' selected':'') + '>&lt;=</option>' +
+        '<option value="under"' + (r.op==='under'?' selected':'') + '>under</option>' +
+        '<option value="not_under"' + (r.op==='not_under'?' selected':'') + '>not under</option>' +
+      '</select>' +
+      '<input type="text" value="' + escapeAttr(String(r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">' +
+      '<span class="remove-rule" onclick="removeRule(' + i + ')">&times;</span>' +
+    '</div>';
+  });
+  document.getElementById('ruleRows').innerHTML = html;
+}
+
+async function saveCollection() {
+  var name = document.getElementById('collectionName').value.trim();
+  if (!name) return;
+
+  // Convert string values to numbers where appropriate
+  var rules = collectionRules.map(function(r) {
+    var val = r.value;
+    if (r.field === 'rating') val = parseInt(val, 10) || 0;
+    return {field: r.field, op: r.op, value: val};
+  });
+
+  try {
+    await fetch('/api/collections', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, rules: rules}),
+    });
+    hideCollectionModal();
+    loadCollections();
+  } catch(e) {}
+}
+
+/* ---------- Photo Loading ---------- */
+function resetAndLoad() {
+  photos = [];
+  currentPage = 1;
+  allLoaded = false;
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+  document.getElementById('grid').innerHTML = '';
+  loadPhotos();
+}
+
+async function loadPhotos() {
+  if (loading || allLoaded) return;
+  loading = true;
+  document.getElementById('loadingState').style.display = 'block';
+
+  var params = new URLSearchParams();
+  params.set('page', currentPage);
+  params.set('per_page', perPage);
+  params.set('sort', document.getElementById('sortSelect').value);
+
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+
+  try {
+    var resp = await fetch('/api/photos?' + params.toString());
+    var data = await resp.json();
+    totalPhotos = data.total;
+
+    if (data.photos.length === 0) {
+      allLoaded = true;
+    } else {
+      photos = photos.concat(data.photos);
+      currentPage++;
+      if (photos.length >= totalPhotos) allLoaded = true;
+    }
+
+    renderGrid();
+    updateFilterSummary();
+  } catch(e) {
+    document.getElementById('loadingState').textContent = 'Error loading photos.';
+  }
+
+  loading = false;
+  document.getElementById('loadingState').style.display = 'none';
+}
+
+function applyFilters() {
+  resetAndLoad();
+}
+
+function setFilterRating(val) {
+  if (filterRating === val) {
+    filterRating = 0;
+  } else {
+    filterRating = val;
+  }
+  document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
+    el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
+  });
+  resetAndLoad();
+}
+
+function updateFilterSummary() {
+  updateScrollPosition();
+}
+
+function updateThumbSize(val) {
+  document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
+}
+
+function toggleDetectionBoxes() {
+  showDetectionBoxes = !showDetectionBoxes;
+  var btn = document.getElementById('detBoxToggle');
+  btn.style.color = showDetectionBoxes ? 'var(--accent, #4ecca3)' : 'var(--text-muted, #a0a0a0)';
+  btn.style.borderColor = showDetectionBoxes ? 'var(--accent, #4ecca3)' : 'var(--border-secondary, #1a3a6e)';
+  renderGrid();
+}
+
+function updateScrollPosition() {
+  var el = document.getElementById('filterSummary');
+  if (photos.length === 0) {
+    el.textContent = totalPhotos + ' photos';
+    return;
+  }
+  // Find which cards are visible in the viewport
+  var cards = document.querySelectorAll('.grid-card');
+  if (cards.length === 0) {
+    el.textContent = totalPhotos + ' photos';
+    return;
+  }
+  var container = document.getElementById('gridContainer');
+  var scrollTop = container.scrollTop;
+  var viewHeight = container.clientHeight;
+  var first = 1;
+  var last = cards.length;
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].offsetTop + cards[i].offsetHeight > scrollTop) {
+      first = i + 1;
+      break;
+    }
+  }
+  for (var i = cards.length - 1; i >= 0; i--) {
+    if (cards[i].offsetTop < scrollTop + viewHeight) {
+      last = i + 1;
+      break;
+    }
+  }
+  el.textContent = first + '–' + last + ' of ' + totalPhotos.toLocaleString();
+}
+
+/* ---------- Grid Rendering ---------- */
+function renderGrid() {
+  var grid = document.getElementById('grid');
+  var empty = document.getElementById('emptyState');
+  var welcome = document.getElementById('welcomeState');
+
+  if (photos.length === 0) {
+    grid.innerHTML = '';
+    // Show welcome if DB is completely empty, otherwise show filter-empty message
+    if (totalPhotos === 0 && !activeFolderId && !activeKeyword && filterRating === 0) {
+      welcome.style.display = 'block';
+      empty.style.display = 'none';
+    } else {
+      welcome.style.display = 'none';
+      empty.style.display = 'block';
+    }
+    return;
+  }
+  welcome.style.display = 'none';
+  empty.style.display = 'none';
+
+  var html = '';
+  photos.forEach(function(p, idx) {
+    var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+    var stars = '';
+    if (p.rating > 0) {
+      for (var i = 0; i < p.rating; i++) stars += '&#9733;';
+    }
+    var flagHtml = '';
+    if (p.flag === 'flagged') flagHtml = '<span class="grid-card-flag flag-flagged">P</span>';
+    else if (p.flag === 'rejected') flagHtml = '<span class="grid-card-flag flag-rejected">X</span>';
+
+    // Detection box overlay
+    var boxHtml = '';
+    if (showDetectionBoxes && p.detection_box) {
+      var db = typeof p.detection_box === 'string' ? JSON.parse(p.detection_box) : p.detection_box;
+      if (db && db.x != null) {
+        var conf = p.detection_conf ? Math.round(p.detection_conf * 100) + '%' : '';
+        boxHtml = '<div class="det-box" style="left:' + (db.x * 100) + '%;top:' + (db.y * 100) + '%;width:' + (db.w * 100) + '%;height:' + (db.h * 100) + '%;">' +
+          (conf ? '<span class="det-box-label">' + conf + '</span>' : '') +
+        '</div>';
+      }
+    }
+
+    html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
+      '<div class="grid-card-img-wrap">' +
+        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+        boxHtml +
+      '</div>' +
+      '<div class="grid-card-info">' +
+        '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
+        '<div class="grid-card-meta">' +
+          (stars ? '<span class="grid-card-rating">' + stars + '</span>' : '') +
+          flagHtml +
+          (p.sharpness != null ? '<span style="font-size:10px;color:var(--text-ghost,#555);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  });
+  grid.innerHTML = html;
+}
+
+/* ---------- Infinite Scroll ---------- */
+var observer = new IntersectionObserver(function(entries) {
+  if (entries[0].isIntersecting) loadPhotos();
+}, { rootMargin: '200px' });
+observer.observe(document.getElementById('scrollSentinel'));
+
+/* ---------- Scroll Position Tracking ---------- */
+var scrollTimer = null;
+document.getElementById('gridContainer').addEventListener('scroll', function() {
+  if (scrollTimer) clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(updateScrollPosition, 50);
+});
+
+/* ---------- Photo Selection & Detail ---------- */
+function selectPhoto(e, id, idx) {
+  if (e.shiftKey && selectedIndex >= 0) {
+    // Shift-click: range select
+    var start = Math.min(selectedIndex, idx);
+    var end = Math.max(selectedIndex, idx);
+    for (var i = start; i <= end; i++) {
+      if (photos[i]) selectedPhotos.add(photos[i].id);
+    }
+  } else if (e.metaKey || e.ctrlKey) {
+    // Cmd/Ctrl-click: toggle in selection
+    if (selectedPhotos.has(id)) {
+      selectedPhotos.delete(id);
+    } else {
+      selectedPhotos.add(id);
+    }
+  } else {
+    // Normal click: single select
+    selectedPhotos.clear();
+    selectedPhotoId = id;
+    selectedIndex = idx;
+    loadDetail(id);
+  }
+
+  // Update highlights
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    var cardId = parseInt(el.dataset.id);
+    el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
+  });
+
+  updateBatchBar();
+}
+
+function updateBatchBar() {
+  var bar = document.getElementById('batchBar');
+  if (!bar) return;
+  if (selectedPhotos.size > 1) {
+    bar.style.display = 'flex';
+    document.getElementById('batchCount').textContent = selectedPhotos.size + ' selected';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function batchSetRating(rating) {
+  var ids = Array.from(selectedPhotos);
+  await fetch('/api/batch/rating', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, rating: rating}),
+  });
+  ids.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p) p.rating = rating;
+  });
+  renderGrid();
+  showUndoToast();
+}
+
+async function batchSetFlag(flag) {
+  var ids = Array.from(selectedPhotos);
+  await fetch('/api/batch/flag', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, flag: flag}),
+  });
+  ids.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p) p.flag = flag;
+  });
+  renderGrid();
+  showUndoToast();
+}
+
+async function batchAddKeyword() {
+  var name = prompt('Keyword to add to ' + selectedPhotos.size + ' photos:');
+  if (!name) return;
+  var ids = Array.from(selectedPhotos);
+  await fetch('/api/batch/keyword', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, name: name.trim()}),
+  });
+  showUndoToast();
+}
+
+async function addToCollection() {
+  if (selectedPhotos.size === 0) return;
+  var name = prompt('Collection name for ' + selectedPhotos.size + ' photos:\n\n(This tags all selected photos with this name and creates a matching collection.)');
+  if (!name) return;
+  name = name.trim();
+  if (!name) return;
+
+  var ids = Array.from(selectedPhotos);
+
+  // Tag all selected photos with this keyword
+  await fetch('/api/batch/keyword', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, name: name}),
+  });
+
+  // Create a collection that matches this keyword
+  await fetch('/api/collections', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      name: name,
+      rules: [{"field": "keyword", "op": "contains", "value": name}],
+    }),
+  });
+
+  showToast('Created collection "' + name + '" with ' + ids.length + ' photos');
+  loadCollections();
+  clearSelection();
+}
+
+function clearSelection() {
+  selectedPhotos.clear();
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+  updateBatchBar();
+}
+
+/* ---------- Undo ---------- */
+async function undoLast() {
+  try {
+    var resp = await fetch('/api/undo', { method: 'POST' });
+    if (!resp.ok) return;
+    var data = await resp.json();
+    showToast('Undone: ' + data.undone);
+    // Refresh grid
+    resetAndLoad();
+  } catch(e) {}
+}
+
+function showUndoToast() {
+  fetch('/api/undo/status').then(function(r) { return r.json(); }).then(function(data) {
+    if (data.available) showToast(data.description + ' — Ctrl+Z to undo');
+  });
+}
+
+function showToast(msg) {
+  var toast = document.getElementById('undoToast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.style.display = 'block';
+  toast.style.opacity = '1';
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(function() {
+    toast.style.opacity = '0';
+    setTimeout(function() { toast.style.display = 'none'; }, 300);
+  }, 4000);
+}
+
+async function loadDetail(id) {
+  var panel = document.getElementById('detailPanel');
+  panel.classList.add('open');
+
+  try {
+    var resp = await fetch('/api/photos/' + id);
+    var photo = await resp.json();
+    renderDetail(photo);
+  } catch(e) {}
+}
+
+function renderDetail(photo) {
+  window._detailPhotoId = photo.id;
+  document.getElementById('detailImg').src = '/thumbnails/' + photo.id + '.jpg';
+  document.getElementById('detailFilename').textContent = photo.filename;
+
+  // Rating stars
+  var ratingHtml = '';
+  for (var i = 1; i <= 5; i++) {
+    var cls = i <= photo.rating ? 'detail-star active' : 'detail-star';
+    ratingHtml += '<span class="' + cls + '" onclick="setRating(' + photo.id + ',' + i + ')">&#9733;</span>';
+  }
+  document.getElementById('detailRating').innerHTML = ratingHtml;
+
+  // Flags
+  document.querySelectorAll('.detail-flag-btn').forEach(function(btn) {
+    btn.className = 'detail-flag-btn';
+  });
+  var flagBtns = document.querySelectorAll('.detail-flag-btn');
+  if (photo.flag === 'flagged') flagBtns[1].classList.add('active-flag');
+  else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
+
+  // Keywords
+  var kwHtml = '';
+  (photo.keywords || []).forEach(function(k) {
+    kwHtml += '<span class="keyword-tag">' + escapeHtml(k.name) +
+      '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
+  });
+  document.getElementById('detailKeywords').innerHTML = kwHtml;
+
+  // XMP sidecar
+  var xmpEl = document.getElementById('detailXmp');
+  if (photo.xmp_exists === false) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">No .xmp sidecar file</span>';
+  } else if (photo.xmp_keywords && photo.xmp_keywords.length > 0) {
+    var dbKwNames = (photo.keywords || []).map(function(k) { return k.name.toLowerCase(); });
+    var xmpHtml = '';
+    photo.xmp_keywords.forEach(function(kw) {
+      var inDb = dbKwNames.indexOf(kw.toLowerCase()) !== -1;
+      var color = inDb ? 'var(--accent,#4ecca3)' : 'var(--warning,#f0c040)';
+      var title = inDb ? 'In sync with database' : 'In XMP but not in database';
+      xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#0f3460);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid ' + color + ';color:' + color + ';" title="' + title + '">' + escapeHtml(kw) + '</span>';
+    });
+    // Check for DB keywords not in XMP
+    var xmpLower = photo.xmp_keywords.map(function(k) { return k.toLowerCase(); });
+    (photo.keywords || []).forEach(function(k) {
+      if (xmpLower.indexOf(k.name.toLowerCase()) === -1) {
+        xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#0f3460);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid var(--info,#7ec8e3);color:var(--info,#7ec8e3);" title="In database but not in XMP (pending sync)">+ ' + escapeHtml(k.name) + '</span>';
+      }
+    });
+    xmpHtml += '<div style="margin-top:4px;font-size:10px;color:var(--text-ghost,#555);">' +
+      '<span style="color:var(--accent,#4ecca3);">&#9632;</span> synced ' +
+      '<span style="color:var(--warning,#f0c040);">&#9632;</span> XMP only ' +
+      '<span style="color:var(--info,#7ec8e3);">&#9632;</span> DB only (pending sync)</div>';
+    xmpEl.innerHTML = xmpHtml;
+  } else if (photo.xmp_exists) {
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">XMP file exists but has no keywords</span>';
+  }
+
+  // EXIF info
+  var exif = '';
+  if (photo.timestamp) exif += 'Date: ' + photo.timestamp + '<br>';
+  if (photo.width && photo.height) exif += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
+  if (photo.file_size) exif += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
+  document.getElementById('detailExif').innerHTML = exif;
+
+  // Path
+  document.getElementById('detailPath').textContent = photo.filename;
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+}
+
+/* ---------- Edit Actions ---------- */
+async function setRating(photoId, rating) {
+  try {
+    await fetch('/api/photos/' + photoId + '/rating', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating: rating }),
+    });
+    // Update local state
+    var p = photos.find(function(x) { return x.id === photoId; });
+    if (p) p.rating = rating;
+    renderGrid();
+    loadDetail(photoId);
+  } catch(e) {}
+}
+
+async function setFlag(flag) {
+  if (!selectedPhotoId) return;
+  try {
+    await fetch('/api/photos/' + selectedPhotoId + '/flag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag: flag }),
+    });
+    var p = photos.find(function(x) { return x.id === selectedPhotoId; });
+    if (p) p.flag = flag;
+    renderGrid();
+    loadDetail(selectedPhotoId);
+  } catch(e) {}
+}
+
+async function addKeyword() {
+  if (!selectedPhotoId) return;
+  var input = document.getElementById('addKeywordInput');
+  var name = input.value.trim();
+  if (!name) return;
+  try {
+    await fetch('/api/photos/' + selectedPhotoId + '/keywords', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    input.value = '';
+    loadDetail(selectedPhotoId);
+    loadKeywords();
+  } catch(e) {}
+}
+
+async function removeKeyword(photoId, keywordId) {
+  try {
+    await fetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
+      method: 'DELETE',
+    });
+    loadDetail(photoId);
+  } catch(e) {}
+}
+
+
+
+/* ---------- Keyboard Shortcuts ---------- */
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  // Ctrl+Z / Cmd+Z: undo
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    e.preventDefault();
+    undoLast();
+    return;
+  }
+
+  // Ctrl+A / Cmd+A: select all visible photos
+  if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+    e.preventDefault();
+    photos.forEach(function(p) { selectedPhotos.add(p.id); });
+    renderGrid();
+    updateBatchBar();
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    closeDetail();
+    clearSelection();
+    return;
+  }
+
+  // Arrow keys: navigate grid
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (selectedIndex < photos.length - 1) {
+      selectPhoto(e, photos[selectedIndex + 1].id, selectedIndex + 1);
+      scrollToCard(selectedIndex);
+    }
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (selectedIndex > 0) {
+      selectPhoto(e, photos[selectedIndex - 1].id, selectedIndex - 1);
+      scrollToCard(selectedIndex);
+    }
+  }
+
+  // Rating: 0-5
+  if (selectedPhotoId && e.key >= '0' && e.key <= '5') {
+    setRating(selectedPhotoId, parseInt(e.key));
+  }
+
+  // P = flag, X = reject, U = unflag
+  if (selectedPhotoId) {
+    if (e.key === 'p' || e.key === 'P') setFlag('flagged');
+    else if (e.key === 'x' || e.key === 'X') setFlag('rejected');
+    else if (e.key === 'u' || e.key === 'U') setFlag('none');
+  }
+});
+
+function scrollToCard(idx) {
+  var cards = document.querySelectorAll('.grid-card');
+  if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/* ---------- Utilities ---------- */
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
+
+<!-- Undo Toast -->
+<div id="undoToast" style="display:none;position:fixed;bottom:40px;left:50%;transform:translateX(-50%);
+  background:#16213e;color:#e0e0e0;border:1px solid #0f3460;border-radius:6px;padding:10px 20px;
+  font-size:13px;z-index:400;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.3);"></div>
+
+</body>
+</html>

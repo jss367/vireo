@@ -1,4 +1,4 @@
-# Spotter Observability Design
+# Vireo Observability Design
 
 **Goal:** Make long-running operations transparent with live progress, streaming logs, and job history. No more black-box waits.
 
@@ -13,7 +13,7 @@
 
 ## Job System
 
-A `spotter/jobs.py` module with a `JobRunner` class. Holds a dict of active jobs in memory and runs work in background threads.
+A `vireo/jobs.py` module with a `JobRunner` class. Holds a dict of active jobs in memory and runs work in background threads.
 
 Each job is a dict:
 ```python
@@ -92,7 +92,7 @@ This is separate from the per-job log stream — the global stream shows everyth
 
 **Import page** — Same pattern. Phase 3 (execute) connects to the job stream instead of waiting for a single response.
 
-**Nav bar** — A small activity indicator appears next to "Spotter" when any job is running. Clicking it opens the log panel. This way you can navigate away from settings, browse photos, and still see that the scan is running.
+**Nav bar** — A small activity indicator appears next to "Vireo" when any job is running. Clicking it opens the log panel. This way you can navigate away from settings, browse photos, and still see that the scan is running.
 
 **Status dashboard** — Expand the settings page stats section to show: DB file size, thumbnail cache size, total keywords, pending sync changes, and a "Recent Jobs" table showing the last 10 jobs with type, status, duration, and result summary. Reads from the `job_history` table.
 

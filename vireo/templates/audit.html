@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vireo - Audit</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+.content { max-width: 1000px; margin: 0 auto; padding: 32px 24px; }
+
+.tabs { display: flex; gap: 0; margin-bottom: 24px; }
+.tab {
+  padding: 10px 20px; cursor: pointer; font-size: 13px; color: #a0a0a0;
+  border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.tab:hover { color: #fff; }
+.tab.active { color: #fff; border-bottom-color: #4ecca3; }
+.tab .badge {
+  margin-left: 6px; font-size: 11px; background: #0f3460;
+  padding: 2px 7px; border-radius: 10px; font-variant-numeric: tabular-nums;
+}
+
+.section {
+  background: #16213e; border: 1px solid #0f3460;
+  border-radius: 8px; padding: 24px;
+}
+
+.action-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.btn {
+  padding: 6px 16px; border: none; border-radius: 4px;
+  cursor: pointer; font-size: 12px; font-weight: 500; transition: background 0.15s;
+}
+.btn-primary { background: var(--accent, #4ecca3); color: var(--bg-primary, #1a1a2e); }
+.btn-primary:hover { background: var(--accent-hover, #3db890); }
+.btn-primary:disabled { background: var(--accent-dim, #2a5a4a); color: var(--text-ghost, #555); cursor: default; }
+.btn-secondary { background: var(--bg-tertiary, #0f3460); color: var(--text-secondary, #c0c0c0); }
+.btn-secondary:hover { background: var(--border-secondary, #1a3a6e); }
+.btn-danger { background: var(--danger, #e74c3c); color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+
+.audit-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.audit-table th {
+  text-align: left; padding: 8px 12px; color: #888;
+  font-weight: 500; border-bottom: 1px solid #0f3460;
+}
+.audit-table td {
+  padding: 8px 12px; border-bottom: 1px solid #0a1a35; color: #c0c0c0;
+}
+.audit-table tr:hover { background: #0f3460; }
+
+.kw-added { color: #4ecca3; }
+.kw-removed { color: #e74c3c; }
+
+.empty-msg { text-align: center; padding: 40px; color: #555; font-size: 14px; }
+.loading-msg { text-align: center; padding: 40px; color: #555; font-size: 14px; }
+.status-msg { font-size: 12px; color: #888; margin-left: 8px; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+</style>
+</head>
+<body>
+
+{% set active_page = 'audit' %}
+{% include '_navbar.html' %}
+
+<div class="content">
+  <h2 style="margin-bottom: 20px; font-size: 20px;">Audit</h2>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('drift')">Drift <span class="badge" id="driftBadge">-</span></div>
+    <div class="tab" onclick="switchTab('orphans')">Orphans <span class="badge" id="orphanBadge">-</span></div>
+    <div class="tab" onclick="switchTab('untracked')">Untracked <span class="badge" id="untrackedBadge">-</span></div>
+  </div>
+
+  <!-- Drift Tab -->
+  <div class="tab-panel active" id="panel-drift">
+    <div class="section">
+      <div class="action-bar">
+        <button class="btn btn-primary" onclick="runDriftCheck()">Check for Drift</button>
+        <button class="btn btn-secondary" onclick="resolveAll('use_xmp')">Sync All from XMP</button>
+        <button class="btn btn-secondary" onclick="resolveAll('use_db')">Sync All to XMP</button>
+        <span class="status-msg" id="driftStatus"></span>
+      </div>
+      <div id="driftContent"><div class="empty-msg">Click "Check for Drift" to scan.</div></div>
+    </div>
+  </div>
+
+  <!-- Orphans Tab -->
+  <div class="tab-panel" id="panel-orphans">
+    <div class="section">
+      <div class="action-bar">
+        <button class="btn btn-primary" onclick="runOrphanCheck()">Check for Orphans</button>
+        <button class="btn btn-danger" onclick="removeAllOrphans()">Remove All Orphans</button>
+        <span class="status-msg" id="orphanStatus"></span>
+      </div>
+      <div id="orphanContent"><div class="empty-msg">Click "Check for Orphans" to scan.</div></div>
+    </div>
+  </div>
+
+  <!-- Untracked Tab -->
+  <div class="tab-panel" id="panel-untracked">
+    <div class="section">
+      <div class="action-bar">
+        <button class="btn btn-primary" onclick="runUntrackedCheck()">Check for Untracked</button>
+        <button class="btn btn-secondary" onclick="importAllUntracked()">Import All</button>
+        <span class="status-msg" id="untrackedStatus"></span>
+      </div>
+      <div id="untrackedContent"><div class="empty-msg">Click "Check for Untracked" to scan.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var driftData = [];
+var orphanData = [];
+var untrackedData = [];
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(function(t, i) {
+    t.classList.toggle('active', ['drift','orphans','untracked'][i] === name);
+  });
+  document.querySelectorAll('.tab-panel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'panel-' + name);
+  });
+}
+
+/* ---------- Drift ---------- */
+async function runDriftCheck() {
+  var status = document.getElementById('driftStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Scanning all photos for drift between database and XMP files...';
+  status.style.color = '';
+
+  // Use setTimeout to let the UI update before the blocking fetch
+  await new Promise(function(r) { setTimeout(r, 50); });
+
+  try {
+    var resp = await fetch('/api/audit/drift');
+    driftData = await resp.json();
+    document.getElementById('driftBadge').textContent = driftData.length;
+    renderDrift();
+    status.textContent = driftData.length > 0
+      ? driftData.length + ' drift(s) found'
+      : 'No drift — everything in sync';
+    status.style.color = driftData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
+  }
+  btn.disabled = false;
+}
+
+function renderDrift() {
+  if (driftData.length === 0) {
+    document.getElementById('driftContent').innerHTML = '<div class="empty-msg">No drift detected. Database and XMP files are in sync.</div>';
+    return;
+  }
+  var html = '<table class="audit-table"><thead><tr><th>File</th><th>Field</th><th>Database</th><th>XMP</th><th>Actions</th></tr></thead><tbody>';
+  driftData.forEach(function(d) {
+    var dbVal = Array.isArray(d.db_value) ? d.db_value.join(', ') : d.db_value;
+    var xmpVal = Array.isArray(d.xmp_value) ? d.xmp_value.join(', ') : d.xmp_value;
+    html += '<tr><td>' + escapeHtml(d.filename) + '</td><td>' + d.field + '</td>' +
+      '<td>' + escapeHtml(dbVal) + '</td><td>' + escapeHtml(xmpVal) + '</td>' +
+      '<td><button class="btn btn-secondary" onclick="resolveDrift(' + d.photo_id + ',\'use_db\')">Use DB</button> ' +
+      '<button class="btn btn-secondary" onclick="resolveDrift(' + d.photo_id + ',\'use_xmp\')">Use XMP</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('driftContent').innerHTML = html;
+}
+
+async function resolveDrift(photoId, direction) {
+  await fetch('/api/audit/resolve', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_id: photoId, direction: direction}),
+  });
+  runDriftCheck();
+}
+
+async function resolveAll(direction) {
+  document.getElementById('driftStatus').textContent = 'Resolving...';
+  await fetch('/api/audit/resolve-all', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({direction: direction}),
+  });
+  runDriftCheck();
+}
+
+/* ---------- Orphans ---------- */
+async function runOrphanCheck() {
+  var status = document.getElementById('orphanStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Checking for database entries with missing files...';
+  status.style.color = '';
+  await new Promise(function(r) { setTimeout(r, 50); });
+  try {
+    var resp = await fetch('/api/audit/orphans');
+    orphanData = await resp.json();
+    document.getElementById('orphanBadge').textContent = orphanData.length;
+    renderOrphans();
+    status.textContent = orphanData.length > 0
+      ? orphanData.length + ' orphan(s) found'
+      : 'No orphans — all entries have files';
+    status.style.color = orphanData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
+  }
+  btn.disabled = false;
+}
+
+function renderOrphans() {
+  if (orphanData.length === 0) {
+    document.getElementById('orphanContent').innerHTML = '<div class="empty-msg">No orphan entries found. All database entries have files on disk.</div>';
+    return;
+  }
+  var html = '<table class="audit-table"><thead><tr><th>File</th><th>Last Known Path</th><th>Actions</th></tr></thead><tbody>';
+  orphanData.forEach(function(o) {
+    html += '<tr><td>' + escapeHtml(o.filename) + '</td><td>' + escapeHtml(o.folder_path) + '</td>' +
+      '<td><button class="btn btn-danger" onclick="removeOrphan(' + o.photo_id + ')">Remove</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('orphanContent').innerHTML = html;
+}
+
+async function removeOrphan(photoId) {
+  await fetch('/api/audit/remove-orphans', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: [photoId]}),
+  });
+  runOrphanCheck();
+}
+
+async function removeAllOrphans() {
+  if (orphanData.length === 0) return;
+  var ids = orphanData.map(function(o) { return o.photo_id; });
+  await fetch('/api/audit/remove-orphans', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids}),
+  });
+  runOrphanCheck();
+}
+
+/* ---------- Untracked ---------- */
+async function runUntrackedCheck() {
+  var status = document.getElementById('untrackedStatus');
+  var btn = event.target;
+  btn.disabled = true;
+  status.textContent = 'Scanning folders for untracked files...';
+  status.style.color = '';
+  await new Promise(function(r) { setTimeout(r, 50); });
+  try {
+    var fResp = await fetch('/api/folders');
+    var folders = await fResp.json();
+    var roots = [];
+    folders.forEach(function(f) { if (!f.parent_id) roots.push(f.path); });
+
+    var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
+    var resp = await fetch('/api/audit/untracked?' + params);
+    untrackedData = await resp.json();
+    document.getElementById('untrackedBadge').textContent = untrackedData.length;
+    renderUntracked();
+    status.textContent = untrackedData.length > 0
+      ? untrackedData.length + ' untracked file(s) found'
+      : 'No untracked files';
+    status.style.color = untrackedData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#4ecca3)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
+  }
+  btn.disabled = false;
+}
+
+function renderUntracked() {
+  if (untrackedData.length === 0) {
+    document.getElementById('untrackedContent').innerHTML = '<div class="empty-msg">No untracked files. All files on disk are in the database.</div>';
+    return;
+  }
+  var html = '<table class="audit-table"><thead><tr><th>File</th><th>Folder</th><th>Actions</th></tr></thead><tbody>';
+  untrackedData.forEach(function(u) {
+    var fname = u.path.split('/').pop();
+    html += '<tr><td>' + escapeHtml(fname) + '</td><td>' + escapeHtml(u.folder) + '</td>' +
+      '<td><button class="btn btn-secondary" onclick="importFile(\'' + escapeAttr(u.path) + '\')">Import</button></td></tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('untrackedContent').innerHTML = html;
+}
+
+async function importFile(path) {
+  await fetch('/api/audit/import-untracked', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({paths: [path]}),
+  });
+  runUntrackedCheck();
+}
+
+async function importAllUntracked() {
+  if (untrackedData.length === 0) return;
+  var paths = untrackedData.map(function(u) { return u.path; });
+  await fetch('/api/audit/import-untracked', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({paths: paths}),
+  });
+  runUntrackedCheck();
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+function escapeAttr(str) {
+  if (str == null) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

@@ -13,15 +13,15 @@
 ### Task 1: Taxonomy Download and Lookup
 
 **Files:**
-- Create: `spotter/taxonomy.py`
-- Create: `spotter/tests/test_taxonomy.py`
+- Create: `vireo/taxonomy.py`
+- Create: `vireo/tests/test_taxonomy.py`
 
 **Step 1: Write the failing tests**
 
-Create `spotter/tests/test_taxonomy.py`:
+Create `vireo/tests/test_taxonomy.py`:
 
 ```python
-# spotter/tests/test_taxonomy.py
+# vireo/tests/test_taxonomy.py
 import json
 import os
 import sys
@@ -249,18 +249,18 @@ def test_relationship_same_family_different_genus():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `pytest spotter/tests/test_taxonomy.py -v`
+Run: `pytest vireo/tests/test_taxonomy.py -v`
 Expected: FAIL with "ModuleNotFoundError: No module named 'taxonomy'"
 
 **Step 3: Write the implementation**
 
-Create `spotter/taxonomy.py`:
+Create `vireo/taxonomy.py`:
 
 ```python
 """iNaturalist taxonomy: download, parse, and lookup.
 
 Usage:
-    python spotter/taxonomy.py --download [--output taxonomy.json]
+    python vireo/taxonomy.py --download [--output taxonomy.json]
 """
 
 import argparse
@@ -509,13 +509,13 @@ if __name__ == "__main__":
 
 **Step 4: Run tests to verify they pass**
 
-Run: `pytest spotter/tests/test_taxonomy.py -v`
+Run: `pytest vireo/tests/test_taxonomy.py -v`
 Expected: all 11 tests PASS
 
 **Step 5: Commit**
 
 ```bash
-git add spotter/taxonomy.py spotter/tests/test_taxonomy.py
+git add vireo/taxonomy.py vireo/tests/test_taxonomy.py
 git commit -m "feat: add taxonomy download and lookup from iNaturalist DWCA"
 ```
 
@@ -524,15 +524,15 @@ git commit -m "feat: add taxonomy download and lookup from iNaturalist DWCA"
 ### Task 2: Taxonomy-Based Comparison Logic
 
 **Files:**
-- Modify: `spotter/compare.py`
-- Modify: `spotter/tests/test_compare.py`
+- Modify: `vireo/compare.py`
+- Modify: `vireo/tests/test_compare.py`
 
 **Step 1: Rewrite tests for taxonomy-based categorization**
 
-Replace the contents of `spotter/tests/test_compare.py`:
+Replace the contents of `vireo/tests/test_compare.py`:
 
 ```python
-# spotter/tests/test_compare.py
+# vireo/tests/test_compare.py
 import json
 import os
 import sys
@@ -699,12 +699,12 @@ def test_categorize_ignores_non_taxa():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `pytest spotter/tests/test_compare.py -v`
+Run: `pytest vireo/tests/test_compare.py -v`
 Expected: FAIL — `categorize` still expects `labels_vocab` not `Taxonomy`
 
 **Step 3: Update compare.py**
 
-Replace the `categorize` function in `spotter/compare.py`:
+Replace the `categorize` function in `vireo/compare.py`:
 
 ```python
 """Read XMP keywords and compare against model predictions."""
@@ -791,13 +791,13 @@ def categorize(prediction, existing_keywords, taxonomy):
 
 **Step 4: Run tests to verify they pass**
 
-Run: `pytest spotter/tests/test_compare.py -v`
+Run: `pytest vireo/tests/test_compare.py -v`
 Expected: all 8 tests PASS
 
 **Step 5: Commit**
 
 ```bash
-git add spotter/compare.py spotter/tests/test_compare.py
+git add vireo/compare.py vireo/tests/test_compare.py
 git commit -m "feat: replace heuristic comparison with taxonomy-based categorization"
 ```
 
@@ -806,15 +806,15 @@ git commit -m "feat: replace heuristic comparison with taxonomy-based categoriza
 ### Task 3: Neighbor Photo Grouping
 
 **Files:**
-- Create: `spotter/grouping.py`
-- Create: `spotter/tests/test_grouping.py`
+- Create: `vireo/grouping.py`
+- Create: `vireo/tests/test_grouping.py`
 
 **Step 1: Write the failing tests**
 
-Create `spotter/tests/test_grouping.py`:
+Create `vireo/tests/test_grouping.py`:
 
 ```python
-# spotter/tests/test_grouping.py
+# vireo/tests/test_grouping.py
 import os
 import sys
 from datetime import datetime
@@ -916,12 +916,12 @@ def test_consensus_prediction_single():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `pytest spotter/tests/test_grouping.py -v`
+Run: `pytest vireo/tests/test_grouping.py -v`
 Expected: FAIL with "ModuleNotFoundError: No module named 'grouping'"
 
 **Step 3: Write the implementation**
 
-Create `spotter/grouping.py`:
+Create `vireo/grouping.py`:
 
 ```python
 """Group sequential photos by EXIF timestamp proximity."""
@@ -1039,13 +1039,13 @@ def read_exif_timestamp(image_path):
 
 **Step 4: Run tests to verify they pass**
 
-Run: `pytest spotter/tests/test_grouping.py -v`
+Run: `pytest vireo/tests/test_grouping.py -v`
 Expected: all 6 tests PASS
 
 **Step 5: Commit**
 
 ```bash
-git add spotter/grouping.py spotter/tests/test_grouping.py
+git add vireo/grouping.py vireo/tests/test_grouping.py
 git commit -m "feat: add neighbor photo grouping by EXIF timestamp"
 ```
 
@@ -1054,15 +1054,15 @@ git commit -m "feat: add neighbor photo grouping by EXIF timestamp"
 ### Task 4: Multi-Model Analyze Script
 
 **Files:**
-- Modify: `spotter/analyze.py`
-- Modify: `spotter/tests/test_analyze.py`
+- Modify: `vireo/analyze.py`
+- Modify: `vireo/tests/test_analyze.py`
 
 **Step 1: Rewrite tests for multi-model and grouping**
 
-Replace the contents of `spotter/tests/test_analyze.py`:
+Replace the contents of `vireo/tests/test_analyze.py`:
 
 ```python
-# spotter/tests/test_analyze.py
+# vireo/tests/test_analyze.py
 import json
 import os
 import sys
@@ -1235,18 +1235,18 @@ def test_analyze_merges_models():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `pytest spotter/tests/test_analyze.py -v`
+Run: `pytest vireo/tests/test_analyze.py -v`
 Expected: FAIL — `analyze()` doesn't accept `taxonomy_path` parameter
 
 **Step 3: Rewrite analyze.py**
 
-Replace the full contents of `spotter/analyze.py`:
+Replace the full contents of `vireo/analyze.py`:
 
 ```python
 """Scan photos, classify, compare to existing XMP keywords, generate review data.
 
 Usage:
-    python spotter/analyze.py --folder /path/to/photos --labels-file labels.txt
+    python vireo/analyze.py --folder /path/to/photos --labels-file labels.txt
 """
 
 import argparse
@@ -1587,13 +1587,13 @@ if __name__ == "__main__":
 
 **Step 4: Run tests to verify they pass**
 
-Run: `pytest spotter/tests/test_analyze.py -v`
+Run: `pytest vireo/tests/test_analyze.py -v`
 Expected: all 3 tests PASS
 
 **Step 5: Commit**
 
 ```bash
-git add spotter/analyze.py spotter/tests/test_analyze.py
+git add vireo/analyze.py vireo/tests/test_analyze.py
 git commit -m "feat: multi-model analyze with taxonomy and neighbor grouping"
 ```
 
@@ -1602,15 +1602,15 @@ git commit -m "feat: multi-model analyze with taxonomy and neighbor grouping"
 ### Task 5: Update Review Server for Multi-Model and Groups
 
 **Files:**
-- Modify: `spotter/review_server.py`
-- Modify: `spotter/tests/test_review_server.py`
+- Modify: `vireo/review_server.py`
+- Modify: `vireo/tests/test_review_server.py`
 
 **Step 1: Update test fixtures and add new tests**
 
-Add to `spotter/tests/test_review_server.py` — update `_create_test_review_data` and `_create_multi_photo_data` to use the new multi-model `predictions` format, and add tests for group accept and settings. The full replacement file:
+Add to `vireo/tests/test_review_server.py` — update `_create_test_review_data` and `_create_multi_photo_data` to use the new multi-model `predictions` format, and add tests for group accept and settings. The full replacement file:
 
 ```python
-# spotter/tests/test_review_server.py
+# vireo/tests/test_review_server.py
 import json
 import os
 import sys
@@ -1833,18 +1833,18 @@ def test_settings_page_route():
 
 **Step 2: Run tests to verify they fail**
 
-Run: `pytest spotter/tests/test_review_server.py -v`
+Run: `pytest vireo/tests/test_review_server.py -v`
 Expected: FAIL — accept endpoint doesn't accept model param, no accept-group or settings endpoints
 
 **Step 3: Update review_server.py**
 
-Replace the full contents of `spotter/review_server.py`:
+Replace the full contents of `vireo/review_server.py`:
 
 ```python
-"""Flask server for reviewing spotter predictions.
+"""Flask server for reviewing vireo predictions.
 
 Usage:
-    python spotter/review_server.py [--data-dir /tmp/photo-review] [--port 8080]
+    python vireo/review_server.py [--data-dir /tmp/photo-review] [--port 8080]
 """
 
 import argparse
@@ -2067,7 +2067,7 @@ def create_app(data_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Review spotter predictions.")
+    parser = argparse.ArgumentParser(description="Review vireo predictions.")
     parser.add_argument("--data-dir", default="/tmp/photo-review", help="Directory with results.json")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
@@ -2083,7 +2083,7 @@ if __name__ == "__main__":
 
 **Step 4: Create placeholder settings.html**
 
-Create `spotter/templates/settings.html`:
+Create `vireo/templates/settings.html`:
 
 ```html
 <!DOCTYPE html>
@@ -2107,13 +2107,13 @@ Create `spotter/templates/settings.html`:
 
 **Step 5: Run tests to verify they pass**
 
-Run: `pytest spotter/tests/test_review_server.py -v`
+Run: `pytest vireo/tests/test_review_server.py -v`
 Expected: all 7 tests PASS
 
 **Step 6: Commit**
 
 ```bash
-git add spotter/review_server.py spotter/tests/test_review_server.py spotter/templates/settings.html
+git add vireo/review_server.py vireo/tests/test_review_server.py vireo/templates/settings.html
 git commit -m "feat: update review server for multi-model, groups, and settings API"
 ```
 
@@ -2122,19 +2122,19 @@ git commit -m "feat: update review server for multi-model, groups, and settings 
 ### Task 6: Update Review UI and Settings Page
 
 **Files:**
-- Modify: `spotter/templates/review.html`
-- Modify: `spotter/templates/settings.html`
+- Modify: `vireo/templates/review.html`
+- Modify: `vireo/templates/settings.html`
 
 **Step 1: Update review.html**
 
-Replace the full contents of `spotter/templates/review.html` to support:
+Replace the full contents of `vireo/templates/review.html` to support:
 - Model selector dropdown in header (when multiple models exist)
 - Group cards with collapse/expand and "(N photos)" badge
 - Link to settings page (gear icon goes to `/settings` instead of toggling inline panel)
 - Keep thumbnail size slider inline
 - Read predictions from `photo.predictions[currentModel]` instead of flat `photo.prediction`
 
-This is a large HTML file. The subagent implementing this task should read the existing `review.html` at `spotter/templates/review.html` and the design doc at `docs/plans/2026-03-17-review-webapp-v2-design.md` to understand all required changes. Key changes:
+This is a large HTML file. The subagent implementing this task should read the existing `review.html` at `vireo/templates/review.html` and the design doc at `docs/plans/2026-03-17-review-webapp-v2-design.md` to understand all required changes. Key changes:
 
 1. Add a `<select id="modelSelector">` in the header populated from `allData.models`
 2. Update `renderGrid()` to handle both individual photos (`photo.predictions`) and groups (`photo.consensus`, `photo.members`, `photo.group_id`)
@@ -2146,7 +2146,7 @@ This is a large HTML file. The subagent implementing this task should read the e
 
 **Step 2: Update settings.html**
 
-Replace the placeholder `spotter/templates/settings.html` with a full settings page that:
+Replace the placeholder `vireo/templates/settings.html` with a full settings page that:
 - Shows configured models from `GET /api/photos` response's `models` object
 - Shows taxonomy status (from `GET /api/settings`)
 - Has grouping toggle and time window slider
@@ -2156,13 +2156,13 @@ Replace the placeholder `spotter/templates/settings.html` with a full settings p
 
 **Step 3: Verify the review server tests still pass**
 
-Run: `pytest spotter/tests/test_review_server.py -v`
+Run: `pytest vireo/tests/test_review_server.py -v`
 Expected: all 7 tests PASS
 
 **Step 4: Commit**
 
 ```bash
-git add spotter/templates/review.html spotter/templates/settings.html
+git add vireo/templates/review.html vireo/templates/settings.html
 git commit -m "feat: update review UI for multi-model, groups, and settings page"
 ```
 
@@ -2173,15 +2173,15 @@ git commit -m "feat: update review UI for multi-model, groups, and settings page
 **Step 1: Download the iNaturalist taxonomy**
 
 ```bash
-python spotter/taxonomy.py --download
+python vireo/taxonomy.py --download
 ```
 
-This creates `spotter/taxonomy.json`. Verify it loaded successfully by checking the log output for taxa counts.
+This creates `vireo/taxonomy.json`. Verify it loaded successfully by checking the log output for taxa counts.
 
 **Step 2: Run analyze on real photos**
 
 ```bash
-python spotter/analyze.py \
+python vireo/analyze.py \
   --folder "/Volumes/Photography/Raw Files/USA/2019/2019-03-17" \
   --labels-file /tmp/usa_labels.txt \
   --output-dir /tmp/photo-review-v2 \
@@ -2197,7 +2197,7 @@ Verify:
 **Step 3: Start the review server and verify**
 
 ```bash
-python spotter/review_server.py --data-dir /tmp/photo-review-v2 --port 8080
+python vireo/review_server.py --data-dir /tmp/photo-review-v2 --port 8080
 ```
 
 Verify in the browser:
@@ -2210,7 +2210,7 @@ Verify in the browser:
 **Step 4: Run all tests**
 
 ```bash
-pytest spotter/tests/ -v
+pytest vireo/tests/ -v
 ```
 
 Expected: all tests pass (taxonomy, compare, grouping, analyze, review_server)

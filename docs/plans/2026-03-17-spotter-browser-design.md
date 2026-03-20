@@ -1,13 +1,13 @@
-# Spotter Photo Browser Design
+# Vireo Photo Browser Design
 
-**Goal:** Turn Spotter into a full photo browser for organizing ~200k wildlife photos, paired with darktable for editing.
+**Goal:** Turn Vireo into a full photo browser for organizing ~200k wildlife photos, paired with darktable for editing.
 
 **Key decisions:**
 - Flask + SQLite (sufficient for single-user desktop tool)
 - XMP sidecars are the durable source of truth; SQLite is a fast local cache
 - Database-first writes, batch sync to XMP
 - Full offline support via local thumbnail cache and database
-- Spotter classification stays as a separate tab/mode
+- Vireo classification stays as a separate tab/mode
 
 ---
 
@@ -15,7 +15,7 @@
 
 Three layers:
 
-**Storage layer** — SQLite database (`~/.spotter/spotter.db`) is the working store. Holds all metadata: paths, keywords, ratings, flags, EXIF data, thumbnail paths. Lives locally so it works when the NAS is offline. Thumbnail cache also lives locally (`~/.spotter/thumbnails/`).
+**Storage layer** — SQLite database (`~/.vireo/vireo.db`) is the working store. Holds all metadata: paths, keywords, ratings, flags, EXIF data, thumbnail paths. Lives locally so it works when the NAS is offline. Thumbnail cache also lives locally (`~/.vireo/thumbnails/`).
 
 **Sync engine** — Reconciles database and XMP sidecars. Two directions:
 - **DB → XMP**: When you edit keywords/ratings in the browser, changes queue in a `pending_changes` table. A background sync writes them to XMP when the NAS is available.
@@ -118,7 +118,7 @@ Key indexes: `photos.timestamp` for date browsing, `photos.folder_id` for folder
 
 **`thumbnails.py`** — Generates and manages the local thumbnail cache.
 - Reuses `image_loader.load_image()` for RAW support.
-- Stores at `~/.spotter/thumbnails/{photo_id}.jpg` (~400px).
+- Stores at `~/.vireo/thumbnails/{photo_id}.jpg` (~400px).
 - Generates on first scan, skips existing on incremental scan.
 - Independent of NAS availability once generated.
 
@@ -130,7 +130,7 @@ These three modules are the only things that touch the filesystem. Everything el
 
 **`/browse`** — Main grid view. Left sidebar: folder tree (collapsible) and keyword tree. Top bar: search field, date range filter, rating filter, sort options (date, name, rating). Main area: thumbnail grid with virtual scrolling. Click a thumbnail to open a detail panel: larger preview, all keywords, rating stars, EXIF summary, file path, "Open in darktable" button. Keyboard shortcuts: arrow keys to navigate, 1-5 for rating, P/X for flag/reject.
 
-**`/classify`** — Existing Spotter review UI. Separate from browsing. Run classification on a folder and review predictions.
+**`/classify`** — Existing Vireo review UI. Separate from browsing. Run classification on a folder and review predictions.
 
 **`/import`** — LR migration dashboard. Three phases: select catalogs, preview & resolve conflicts, execute with progress bar.
 
@@ -150,9 +150,9 @@ Navigation via top nav bar, consistent across all pages.
 - Photo count getting keywords written to XMP sidecars.
 - Multi-catalog photos — expandable diff showing keywords per catalog. Options: merge all, prefer one catalog, resolve per-file.
 - Photos in catalog not found on disk — list with last known paths.
-- Ratings, flags, color labels imported into Spotter database (not stored in XMP).
+- Ratings, flags, color labels imported into Vireo database (not stored in XMP).
 
-**Phase 3: Execute.** Progress bar. Writes XMP sidecars (keywords, hierarchical keywords) and populates Spotter database (ratings, flags, folder structure). Summary: written, skipped, failed with error details.
+**Phase 3: Execute.** Progress bar. Writes XMP sidecars (keywords, hierarchical keywords) and populates Vireo database (ratings, flags, folder structure). Summary: written, skipped, failed with error details.
 
 `catalog_reader.py` and `xmp_writer.py` already do the hard work. The import UI adds preview, conflict resolution, and progress reporting.
 
@@ -166,7 +166,7 @@ Three tabs on `/audit`:
 
 **Tab 2: Orphan DB entries** — DB rows where file no longer exists. Could be deleted, moved, or unmounted NAS. Actions: "Remove from database" or "Re-scan to find moved files" (matches by filename + EXIF timestamp).
 
-**Tab 3: Untracked files** — Files on disk not in DB. Happens when photos added outside Spotter. Action: "Import to database" (runs scanner on those files).
+**Tab 3: Untracked files** — Files on disk not in DB. Happens when photos added outside Vireo. Action: "Import to database" (runs scanner on those files).
 
 Runs on-demand or as part of scheduled scan. When NAS is offline, only Tab 2 available.
 

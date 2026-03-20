@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vireo - Statistics</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  padding-bottom: 36px;
+}
+.content { max-width: 1000px; margin: 0 auto; padding: 32px 24px; }
+.section {
+  background: #16213e; border: 1px solid #0f3460;
+  border-radius: 8px; padding: 24px; margin-bottom: 24px;
+}
+.section-title {
+  font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #fff;
+  padding-bottom: 8px; border-bottom: 1px solid #0f3460;
+}
+.bar-chart { margin-top: 8px; }
+.bar-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px;
+}
+.bar-label {
+  width: 180px; text-align: right; color: #c0c0c0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0;
+}
+.bar-track {
+  flex: 1; height: 18px; background: #0f3460; border-radius: 3px; overflow: hidden;
+}
+.bar-fill {
+  height: 100%; border-radius: 3px; transition: width 0.3s;
+}
+.bar-value { width: 60px; color: #888; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.species-bar .bar-fill { background: #4ecca3; }
+.month-bar .bar-fill { background: #7ec8e3; }
+.rating-bar .bar-fill { background: #f0c040; }
+
+.grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 768px) { .grid-2col { grid-template-columns: 1fr; } }
+
+.stat-big { text-align: center; padding: 16px; }
+.stat-big .number { font-size: 36px; font-weight: 700; color: #4ecca3; }
+.stat-big .label { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+{% set active_page = 'stats' %}
+{% include '_navbar.html' %}
+
+<div class="content">
+  <h2 style="margin-bottom:20px;font-size:20px;">Statistics</h2>
+
+  <!-- Top Species -->
+  <div class="section">
+    <div class="section-title">Top Species</div>
+    <div class="bar-chart" id="speciesChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+  </div>
+
+  <div class="grid-2col">
+    <!-- Rating Distribution -->
+    <div class="section">
+      <div class="section-title">Ratings</div>
+      <div class="bar-chart" id="ratingChart"></div>
+    </div>
+
+    <!-- Flag Distribution -->
+    <div class="section">
+      <div class="section-title">Flags</div>
+      <div id="flagStats"></div>
+    </div>
+  </div>
+
+  <!-- Photos by Month -->
+  <div class="section">
+    <div class="section-title">Photos by Month</div>
+    <div class="bar-chart" id="monthChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+  </div>
+</div>
+
+<script>
+loadStats();
+
+async function loadStats() {
+  try {
+    var resp = await fetch('/api/stats');
+    var data = await resp.json();
+    renderSpecies(data.top_keywords || []);
+    renderMonths(data.photos_by_month || []);
+    renderRatings(data.rating_distribution || []);
+    renderFlags(data.flag_distribution || []);
+  } catch(e) {
+    document.getElementById('speciesChart').textContent = 'Failed to load statistics.';
+  }
+}
+
+function renderSpecies(keywords) {
+  var species = keywords.filter(function(k) { return k.is_species; });
+  var container = document.getElementById('speciesChart');
+  if (species.length === 0) {
+    container.innerHTML = '<span style="color:#555;font-size:13px;">No species classified yet. Run classification on the Classify page.</span>';
+    return;
+  }
+  var max = species[0].photo_count;
+  var html = '';
+  species.slice(0, 20).forEach(function(k) {
+    var pct = Math.round((k.photo_count / max) * 100);
+    html += '<div class="bar-row species-bar">' +
+      '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
+    '</div>';
+  });
+
+  // Also show top non-species keywords
+  var nonSpecies = keywords.filter(function(k) { return !k.is_species; }).slice(0, 10);
+  if (nonSpecies.length > 0) {
+    html += '<div style="margin-top:16px;font-size:11px;color:#666;text-transform:uppercase;margin-bottom:8px;">Other Keywords</div>';
+    nonSpecies.forEach(function(k) {
+      var pct = Math.round((k.photo_count / max) * 100);
+      html += '<div class="bar-row">' +
+        '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
+        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:#555;"></div></div>' +
+        '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
+      '</div>';
+    });
+  }
+  container.innerHTML = html;
+}
+
+function renderMonths(months) {
+  var container = document.getElementById('monthChart');
+  if (months.length === 0) {
+    container.innerHTML = '<span style="color:#555;font-size:13px;">No timestamp data available.</span>';
+    return;
+  }
+  var max = Math.max.apply(null, months.map(function(m) { return m.count; }));
+  var html = '';
+  months.forEach(function(m) {
+    var pct = Math.round((m.count / max) * 100);
+    html += '<div class="bar-row month-bar">' +
+      '<span class="bar-label">' + (m.month || 'Unknown') + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="bar-value">' + m.count.toLocaleString() + '</span>' +
+    '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function renderRatings(ratings) {
+  var container = document.getElementById('ratingChart');
+  var total = ratings.reduce(function(sum, r) { return sum + r.count; }, 0);
+  if (total === 0) return;
+  var max = Math.max.apply(null, ratings.map(function(r) { return r.count; }));
+  var html = '';
+  for (var i = 0; i <= 5; i++) {
+    var r = ratings.find(function(x) { return x.rating === i; });
+    var count = r ? r.count : 0;
+    var pct = max > 0 ? Math.round((count / max) * 100) : 0;
+    var stars = i === 0 ? 'Unrated' : '';
+    for (var s = 0; s < i; s++) stars += '\u2605';
+    html += '<div class="bar-row rating-bar">' +
+      '<span class="bar-label">' + stars + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="bar-value">' + count.toLocaleString() + '</span>' +
+    '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function renderFlags(flags) {
+  var container = document.getElementById('flagStats');
+  var html = '';
+  flags.forEach(function(f) {
+    var color = f.flag === 'flagged' ? '#4ecca3' : f.flag === 'rejected' ? '#e74c3c' : '#888';
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0a1a35;">' +
+      '<span style="color:' + color + ';font-size:14px;font-weight:600;text-transform:capitalize;">' + f.flag + '</span>' +
+      '<span style="margin-left:auto;font-size:14px;color:#c0c0c0;font-variant-numeric:tabular-nums;">' + f.count.toLocaleString() + '</span>' +
+    '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>

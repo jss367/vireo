@@ -6,9 +6,9 @@
 
 Three-phase workflow:
 
-1. **Analyze** (`spotter/analyze.py`) — Scans a folder of photos. For each image: reads existing XMP keywords, runs BioCLIP classification, compares them, and generates a thumbnail JPEG. Saves everything to a `results.json` file. No XMP writes happen here.
+1. **Analyze** (`vireo/analyze.py`) — Scans a folder of photos. For each image: reads existing XMP keywords, runs BioCLIP classification, compares them, and generates a thumbnail JPEG. Saves everything to a `results.json` file. No XMP writes happen here.
 
-2. **Review server** (`spotter/review_server.py`) — A lightweight Flask app that serves a single-page review UI. Reads `results.json`, serves thumbnails, and provides an API endpoint for accepting/rejecting suggestions. Shows only photos where the prediction differs from existing tags, grouped by category (New / Refinement / Disagreement).
+2. **Review server** (`vireo/review_server.py`) — A lightweight Flask app that serves a single-page review UI. Reads `results.json`, serves thumbnails, and provides an API endpoint for accepting/rejecting suggestions. Shows only photos where the prediction differs from existing tags, grouped by category (New / Refinement / Disagreement).
 
 3. **Apply** — When the user clicks "Accept" in the UI, the server writes the accepted keyword to the XMP sidecar (using the existing `xmp_writer`), then marks it as resolved in the JSON. The user then does "Read Metadata from Files" in Lightroom.
 
@@ -45,7 +45,7 @@ Single-page web app:
 
 ## Data Flow & File Structure
 
-**New files in `spotter/`:**
+**New files in `vireo/`:**
 - `analyze.py` — CLI: scans folder, classifies, compares, generates thumbnails, writes `results.json`
 - `review_server.py` — Flask app serving the review UI + REST API
 - `templates/review.html` — the single-page review UI
@@ -90,12 +90,12 @@ Single-page web app:
 **Usage:**
 ```bash
 # Step 1: Analyze
-python spotter/analyze.py \
+python vireo/analyze.py \
   --folder "/Volumes/Photography/Raw Files/USA/2019/2019-03-17" \
   --labels-file /tmp/usa_labels.txt
 
 # Step 2: Review
-python spotter/review_server.py
+python vireo/review_server.py
 # Opens browser to http://localhost:5000
 ```
 

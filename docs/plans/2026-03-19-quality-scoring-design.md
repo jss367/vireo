@@ -78,7 +78,7 @@ Existing `sharpness` column stays as overall image sharpness. No new tables. Run
 
 1. Add MegaDetector to model registry (download handler, settings entry)
 2. Add database columns with migrations
-3. Build `spotter/detector.py` wrapping MegaDetector
+3. Build `vireo/detector.py` wrapping MegaDetector
 4. Integrate into classify job (detect + score in same pass)
 5. Update UI (quality sort, score display, burst ordering)
 6. Absorb standalone sharpness scoring into combined pipeline

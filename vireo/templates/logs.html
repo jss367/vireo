@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vireo - Logs</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-toolbar {
+  background: #16213e;
+  padding: 8px 20px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.log-toolbar select, .log-toolbar input {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a3a6e;
+  border-radius: 4px; padding: 5px 10px; font-size: 12px; outline: none;
+}
+.log-toolbar input { flex: 1; max-width: 300px; }
+.log-toolbar input:focus, .log-toolbar select:focus { border-color: #4ecca3; }
+.log-toolbar button {
+  background: #0f3460; color: #c0c0c0; border: none; border-radius: 4px;
+  padding: 5px 12px; font-size: 12px; cursor: pointer;
+}
+.log-toolbar button:hover { background: #1a3a6e; }
+.log-toolbar label { font-size: 12px; color: #888; display: flex; align-items: center; gap: 4px; }
+.log-toolbar input[type=checkbox] { accent-color: #4ecca3; }
+.log-count { font-size: 12px; color: #555; margin-left: auto; }
+
+.log-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+.log-line .log-time { color: #555; margin-right: 8px; }
+.log-line .log-level { margin-right: 8px; font-weight: 600; min-width: 60px; display: inline-block; }
+.log-line .log-logger { color: #555; margin-right: 8px; }
+.level-DEBUG .log-level { color: #666; }
+.level-INFO .log-level { color: #c0c0c0; }
+.level-WARNING .log-level { color: #f0c040; }
+.level-ERROR .log-level { color: #e74c3c; }
+.level-CRITICAL .log-level { color: #e74c3c; font-weight: 900; }
+.log-line.filtered { display: none; }
+</style>
+</head>
+<body>
+
+{% set active_page = 'logs' %}
+{% include '_navbar.html' %}
+
+<div class="content">
+  <div class="log-toolbar">
+    <select id="levelFilter" onchange="applyFilter()">
+      <option value="DEBUG">DEBUG+</option>
+      <option value="INFO" selected>INFO+</option>
+      <option value="WARNING">WARNING+</option>
+      <option value="ERROR">ERROR+</option>
+    </select>
+    <input type="text" id="searchFilter" placeholder="Filter..." oninput="applyFilter()">
+    <label><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
+    <button onclick="clearLogs()">Clear</button>
+    <span class="log-count" id="logCount">0 lines</span>
+  </div>
+  <div class="log-container" id="logContainer"></div>
+</div>
+
+<script>
+var logLines = [];
+var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
+
+/* Load recent logs first */
+fetch('/api/logs/recent?count=500')
+  .then(function(r) { return r.json(); })
+  .then(function(logs) {
+    logs.forEach(function(l) { addLogLine(l); });
+    applyFilter();
+  });
+
+/* Connect to SSE stream */
+var source = new EventSource('/api/logs/stream');
+source.addEventListener('log', function(e) {
+  var record = JSON.parse(e.data);
+  addLogLine(record);
+  applyFilter();
+});
+
+function addLogLine(record) {
+  var time = new Date(record.time * 1000);
+  var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  logLines.push(record);
+  var container = document.getElementById('logContainer');
+  var div = document.createElement('div');
+  div.className = 'log-line level-' + record.level;
+  div.dataset.level = record.level;
+  div.dataset.message = (record.message || '').toLowerCase();
+  div.innerHTML = '<span class="log-time">' + timeStr + '</span>' +
+    '<span class="log-level">' + record.level + '</span>' +
+    '<span class="log-logger">' + escapeHtml(record.logger || '') + '</span>' +
+    escapeHtml(record.message || '');
+  container.appendChild(div);
+
+  if (document.getElementById('autoScroll').checked) {
+    container.scrollTop = container.scrollHeight;
+  }
+  document.getElementById('logCount').textContent = logLines.length + ' lines';
+}
+
+function applyFilter() {
+  var minLevel = document.getElementById('levelFilter').value;
+  var search = document.getElementById('searchFilter').value.toLowerCase();
+  var minOrder = LEVEL_ORDER[minLevel] || 0;
+  var lines = document.querySelectorAll('.log-line');
+  lines.forEach(function(el) {
+    var levelOk = (LEVEL_ORDER[el.dataset.level] || 0) >= minOrder;
+    var searchOk = !search || (el.dataset.message || '').indexOf(search) !== -1;
+    el.classList.toggle('filtered', !(levelOk && searchOk));
+  });
+}
+
+function clearLogs() {
+  logLines = [];
+  document.getElementById('logContainer').innerHTML = '';
+  document.getElementById('logCount').textContent = '0 lines';
+}
+
+function escapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>

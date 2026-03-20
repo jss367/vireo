@@ -1,0 +1,1153 @@
+<style>
+/* ---------- Theme Variables ---------- */
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --bg-input: #0f3460;
+  --bg-panel: #0d1b2a;
+  --border-primary: #0f3460;
+  --border-secondary: #1a3a6e;
+  --border-subtle: #0a1a35;
+  --text-primary: #e0e0e0;
+  --text-secondary: #c0c0c0;
+  --text-muted: #a0a0a0;
+  --text-dim: #888;
+  --text-faint: #666;
+  --text-ghost: #555;
+  --text-invisible: #444;
+  --accent: #4ecca3;
+  --accent-hover: #3db890;
+  --accent-dim: #2a5a4a;
+  --warning: #f0c040;
+  --danger: #e74c3c;
+  --info: #7ec8e3;
+}
+
+/* Global overrides — these apply theme variables to common patterns across all pages */
+body { background: var(--bg-primary) !important; color: var(--text-primary) !important; }
+.section, .card, .grid-card { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.section-title { color: var(--text-primary) !important; border-bottom-color: var(--border-primary) !important; }
+.sidebar { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.header { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.settings-panel { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.tabs { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.filter-bar { background: var(--bg-primary) !important; border-color: var(--border-primary) !important; }
+.stat-card { background: var(--bg-tertiary) !important; }
+.stat-number { color: var(--accent) !important; }
+.setting-row { border-color: var(--border-subtle) !important; }
+.setting-label { color: var(--text-secondary) !important; }
+.setting-label small { color: var(--text-faint) !important; }
+.btn-batch-accept { background: var(--accent) !important; }
+.btn-batch-accept:hover { background: var(--accent-hover) !important; }
+.badge-new { background: var(--accent) !important; }
+.badge-disagreement { background: var(--danger) !important; }
+.badge-refinement { background: var(--warning) !important; }
+.grid-card img { background: var(--bg-tertiary) !important; }
+.confidence-bar { background: var(--bg-tertiary) !important; }
+input[type=text], input[type=date], select, .path-input, .text-input, .model-selector {
+  background: var(--bg-input) !important; color: var(--text-primary) !important;
+  border-color: var(--border-secondary) !important;
+}
+.tree-item:hover { background: var(--bg-tertiary) !important; }
+.tree-item.active { background: var(--bg-tertiary) !important; color: var(--accent) !important; }
+.detail-panel { background: var(--bg-secondary) !important; border-color: var(--border-primary) !important; }
+.log-panel-content, .bp-logs-content, .log-container { background: var(--bg-panel) !important; }
+.bp-tabs { border-color: var(--border-primary) !important; }
+
+:root[data-theme="light"] {
+  --bg-primary: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8eaed;
+  --bg-input: #ffffff;
+  --bg-panel: #f0f0f2;
+  --border-primary: #d0d0d0;
+  --border-secondary: #c0c0c0;
+  --border-subtle: #e0e0e0;
+  --text-primary: #1a1a2e;
+  --text-secondary: #333;
+  --text-muted: #555;
+  --text-dim: #777;
+  --text-faint: #999;
+  --text-ghost: #aaa;
+  --text-invisible: #ccc;
+  --accent: #0d8a6a;
+  --accent-hover: #0a7058;
+  --accent-dim: #c8efe4;
+  --warning: #b8860b;
+  --danger: #c0392b;
+  --info: #2980b9;
+}
+
+.navbar {
+  background: var(--bg-secondary);
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  height: 48px;
+}
+.navbar .brand { font-size: 16px; font-weight: 700; color: var(--accent); margin-right: 32px; text-decoration: none; }
+.navbar a {
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 13px 14px;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.navbar a:hover { color: var(--text-primary); }
+.navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.navbar .nav-spacer { flex: 1; }
+.navbar .nav-icon {
+  color: #555;
+  text-decoration: none;
+  font-size: 16px;
+  padding: 8px;
+  cursor: pointer;
+  transition: color 0.15s;
+  position: relative;
+}
+.navbar .nav-icon:hover { color: #fff; }
+
+/* Activity indicator */
+.activity-dot {
+  display: none;
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4ecca3;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.activity-dot.active { display: block; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ---------- Bottom Panel ---------- */
+.bottom-toggle {
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-primary);
+  padding: 4px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 300;
+  height: 28px;
+  user-select: none;
+}
+.bottom-toggle span { font-size: 11px; color: #555; }
+.bottom-toggle:hover span { color: #888; }
+.bottom-toggle .toggle-arrow {
+  font-size: 10px; color: #555; transition: transform 0.2s; cursor: pointer;
+}
+.bottom-toggle.open .toggle-arrow { transform: rotate(180deg); }
+.bottom-toggle .job-summary {
+  font-size: 11px; color: #4ecca3; margin-left: 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+}
+.bottom-toggle .job-summary.idle { color: #444; }
+
+.bottom-panel {
+  position: fixed;
+  bottom: 28px;
+  left: 0;
+  right: 0;
+  height: 0;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-primary);
+  z-index: 299;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.bottom-panel.open { height: 240px; }
+.bottom-panel.animating { transition: height 0.2s ease; }
+
+/* Drag handle */
+.bp-drag-handle {
+  height: 4px;
+  cursor: ns-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+}
+.bp-drag-handle:hover, .bp-drag-handle.dragging {
+  background: #4ecca3;
+}
+.bp-drag-handle::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 0;
+  right: 0;
+}
+
+/* Tabs */
+.bp-tabs {
+  display: flex;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.bp-tab {
+  padding: 5px 16px;
+  font-size: 11px;
+  color: #666;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.bp-tab:hover { color: #ccc; }
+.bp-tab.active { color: #e0e0e0; border-bottom-color: #4ecca3; }
+.bp-tab .bp-tab-badge {
+  margin-left: 5px; font-size: 10px; background: #0f3460;
+  padding: 1px 5px; border-radius: 8px; font-variant-numeric: tabular-nums;
+}
+
+/* Tab content */
+.bp-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.bp-pane { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+.bp-pane.active { display: flex; }
+
+/* Jobs tab */
+.bp-jobs-toolbar {
+  padding: 4px 12px; display: flex; gap: 8px; align-items: center;
+  flex-shrink: 0;
+}
+.bp-jobs-toolbar span { font-size: 11px; color: #444; }
+.bp-jobs-list {
+  flex: 1; overflow-y: auto; padding: 4px 12px;
+}
+.bp-job {
+  padding: 6px 0; border-bottom: 1px solid #0a1a35; font-size: 12px;
+}
+.bp-job:last-child { border-bottom: none; }
+.bp-job-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.bp-job-type { color: #c0c0c0; font-weight: 600; text-transform: capitalize; }
+.bp-job-status { font-size: 11px; }
+.bp-job-status.running { color: #4ecca3; }
+.bp-job-status.completed { color: #555; }
+.bp-job-status.failed { color: #e74c3c; }
+.bp-job-elapsed { font-size: 11px; color: #444; margin-left: auto; font-variant-numeric: tabular-nums; }
+.bp-job-progress {
+  height: 3px; background: #0f3460; border-radius: 2px; overflow: hidden; margin-bottom: 3px;
+}
+.bp-job-progress-fill {
+  height: 100%; background: #4ecca3; border-radius: 2px; transition: width 0.3s;
+}
+.bp-job-detail {
+  font-size: 11px; color: #666;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bp-job-detail .rate { color: #4ecca3; margin-left: 8px; }
+.bp-jobs-empty { font-size: 12px; color: #444; padding: 16px 0; text-align: center; }
+
+/* Logs tab */
+.bp-logs-toolbar {
+  padding: 4px 12px; display: flex; gap: 8px; align-items: center;
+  border-bottom: 1px solid #0f3460; flex-shrink: 0;
+}
+.bp-logs-toolbar select {
+  background: #0f3460; color: #c0c0c0; border: 1px solid #1a3a6e;
+  border-radius: 3px; padding: 2px 6px; font-size: 11px; outline: none;
+}
+.bp-logs-toolbar label {
+  font-size: 11px; color: #555; display: flex; align-items: center; gap: 3px; cursor: pointer;
+}
+.bp-logs-toolbar .lp-count { font-size: 11px; color: #444; margin-left: auto; }
+.bp-logs-content {
+  flex: 1; overflow-y: auto; padding: 4px 12px;
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 11px; line-height: 1.5;
+}
+.lp-line { white-space: pre-wrap; word-break: break-all; padding: 0; }
+.lp-line .lp-time { color: #444; margin-right: 6px; }
+.lp-line .lp-level { margin-right: 6px; font-weight: 600; }
+.lp-line.lp-DEBUG .lp-level { color: #555; }
+.lp-line.lp-INFO .lp-level { color: #888; }
+.lp-line.lp-WARNING .lp-level { color: #f0c040; }
+.lp-line.lp-ERROR .lp-level { color: #e74c3c; }
+
+/* ---------- Lightbox ---------- */
+.lightbox-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.92);
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.lightbox-overlay.active { display: flex; }
+.lightbox-overlay img {
+  max-width: 95vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: default;
+}
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  font-size: 28px;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0.7;
+  z-index: 10000;
+}
+.lightbox-close:hover { opacity: 1; }
+.lightbox-filename {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #aaa;
+  font-size: 13px;
+  background: rgba(0,0,0,0.6);
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+
+/* ---------- Pipeline Inspector ---------- */
+.pipeline-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  background: rgba(0,0,0,0.85);
+  overflow-y: auto;
+}
+.pipeline-overlay.active { display: block; }
+.pipeline-panel {
+  max-width: 900px;
+  margin: 40px auto;
+  background: var(--bg-secondary, #16213e);
+  border-radius: 8px;
+  padding: 24px;
+  color: var(--text-primary, #e0e0e0);
+}
+.pipeline-panel h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: var(--accent, #4ecca3);
+}
+.pipeline-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.pipeline-step {
+  background: var(--bg-primary, #1a1a2e);
+  border-radius: 6px;
+  padding: 16px;
+  border: 1px solid var(--border-primary, #0f3460);
+}
+.pipeline-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.pipeline-step-num {
+  background: var(--accent, #4ecca3);
+  color: #000;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.pipeline-step-title { font-weight: 600; font-size: 14px; }
+.pipeline-images {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.pipeline-img-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+}
+.pipeline-img-wrap img {
+  width: 100%;
+  border-radius: 4px;
+  display: block;
+}
+.pipeline-img-label {
+  font-size: 11px;
+  color: var(--text-muted, #a0a0a0);
+  margin-top: 4px;
+  text-align: center;
+}
+.pipeline-det-box {
+  position: absolute;
+  border: 2px solid #4ecca3;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.pipeline-crop-box {
+  position: absolute;
+  border: 2px dashed #f0c040;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.pipeline-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.pipeline-table td, .pipeline-table th {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-primary, #0f3460);
+}
+.pipeline-table th { color: var(--text-muted, #a0a0a0); font-weight: 500; }
+.pipeline-conf-bar {
+  display: inline-block;
+  height: 10px;
+  background: var(--accent, #4ecca3);
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.pipeline-close {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-size: 24px;
+  color: var(--text-muted, #a0a0a0);
+  cursor: pointer;
+  background: none;
+  border: none;
+}
+.pipeline-close:hover { color: var(--text-primary, #e0e0e0); }
+.pipeline-stat { display: inline-block; margin-right: 16px; font-size: 12px; color: var(--text-dim, #888); }
+.pipeline-stat b { color: var(--text-primary, #e0e0e0); }
+
+/* ---------- Similar Photos ---------- */
+.similar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9997;
+  background: rgba(0,0,0,0.85);
+  overflow-y: auto;
+}
+.similar-overlay.active { display: block; }
+.similar-panel {
+  max-width: 1000px;
+  margin: 40px auto;
+  background: var(--bg-secondary, #16213e);
+  border-radius: 8px;
+  padding: 24px;
+  color: var(--text-primary, #e0e0e0);
+  position: relative;
+}
+.similar-panel h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: var(--accent, #4ecca3);
+}
+.similar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+.similar-card {
+  background: var(--bg-primary, #1a1a2e);
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-primary, #0f3460);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.similar-card:hover { border-color: var(--accent, #4ecca3); }
+.similar-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.similar-card-info {
+  padding: 6px 8px;
+  font-size: 11px;
+}
+.similar-card-name {
+  color: var(--text-muted, #a0a0a0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.similar-card-score {
+  color: var(--accent, #4ecca3);
+  font-weight: 600;
+}
+</style>
+
+<nav class="navbar">
+  <a class="brand" href="/browse">Vireo</a>
+  <a href="/browse" {% if active_page == 'browse' %}class="active"{% endif %}>Browse</a>
+  <a href="/classify" {% if active_page == 'classify' %}class="active"{% endif %}>Classify</a>
+  <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
+  <a href="/import" {% if active_page == 'import' %}class="active"{% endif %}>Import</a>
+  <a href="/audit" {% if active_page == 'audit' %}class="active"{% endif %}>Audit</a>
+  <a href="/variants" {% if active_page == 'variants' %}class="active"{% endif %}>Variants</a>
+  <a href="/stats" {% if active_page == 'stats' %}class="active"{% endif %}>Stats</a>
+  <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
+  <span class="nav-spacer"></span>
+  <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
+  <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
+    &#9638;
+    <span class="activity-dot" id="navActivityDot"></span>
+  </span>
+  <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
+</nav>
+
+<!-- Lightbox -->
+<div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
+  <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
+  <img id="lightboxImg" src="" alt="">
+  <div class="lightbox-filename" id="lightboxFilename"></div>
+  <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
+    <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:#7ec8e3;border:1px solid #7ec8e3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Find Similar
+    </button>
+    <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:#4ecca3;border:1px solid #4ecca3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Inspect Pipeline
+    </button>
+  </div>
+</div>
+
+<script>
+function openLightbox(photoId, filename) {
+  var overlay = document.getElementById('lightboxOverlay');
+  var img = document.getElementById('lightboxImg');
+  var label = document.getElementById('lightboxFilename');
+  var inspectBtn = document.getElementById('lightboxInspect');
+  var similarBtn = document.getElementById('lightboxSimilar');
+  img.src = '/photos/' + photoId + '/full';
+  label.textContent = filename || '';
+  inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
+  similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+function closeLightbox(e) {
+  if (e && e.target && e.target.tagName === 'IMG') return;
+  document.getElementById('lightboxOverlay').classList.remove('active');
+  document.getElementById('lightboxImg').src = '';
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); }
+});
+</script>
+
+<!-- Pipeline Inspector -->
+<div class="pipeline-overlay" id="pipelineOverlay">
+  <div class="pipeline-panel" style="position:relative;">
+    <button class="pipeline-close" onclick="closePipeline()">&times;</button>
+    <h2>Pipeline Inspector</h2>
+    <div id="pipelineContent">Loading...</div>
+  </div>
+</div>
+
+<script>
+function openPipeline(photoId) {
+  var overlay = document.getElementById('pipelineOverlay');
+  var content = document.getElementById('pipelineContent');
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  content.innerHTML = '<p style="color:#888;">Loading pipeline data...</p>';
+
+  fetch('/api/photos/' + photoId + '/pipeline')
+    .then(function(r) { return r.json(); })
+    .then(function(data) { renderPipeline(data, photoId); })
+    .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + e.message + '</p>'; });
+}
+
+function closePipeline() {
+  document.getElementById('pipelineOverlay').classList.remove('active');
+  document.body.style.overflow = '';
+}
+
+function renderPipeline(data, photoId) {
+  var c = document.getElementById('pipelineContent');
+  var html = '<div class="pipeline-steps">';
+
+  // Step 1: Original image
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Original Image</span></div>' +
+    '<div class="pipeline-stat"><b>' + data.filename + '</b></div>' +
+    (data.width ? '<div class="pipeline-stat">' + data.width + ' &times; ' + data.height + '</div>' : '') +
+    (data.timestamp ? '<div class="pipeline-stat">' + data.timestamp + '</div>' : '') +
+    '</div>';
+
+  // Step 2: Detection
+  var hasDetection = data.detection_box && data.detection_box.x != null;
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Subject Detection (MegaDetector)</span></div>';
+
+  if (hasDetection) {
+    var db = data.detection_box;
+    var cropBox = data.crop_box || {};
+    html += '<div class="pipeline-images">' +
+      '<div class="pipeline-img-wrap">' +
+        '<img src="/photos/' + photoId + '/full" alt="Detection">' +
+        '<div class="pipeline-det-box" style="left:' + (db.x*100) + '%;top:' + (db.y*100) + '%;width:' + (db.w*100) + '%;height:' + (db.h*100) + '%;"></div>' +
+        (cropBox.x != null ? '<div class="pipeline-crop-box" style="left:' + (cropBox.x*100) + '%;top:' + (cropBox.y*100) + '%;width:' + (cropBox.w*100) + '%;height:' + (cropBox.h*100) + '%;"></div>' : '') +
+        '<div class="pipeline-img-label">Green = detection box, Yellow dashed = crop sent to classifier</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="margin-top:8px;">' +
+      '<div class="pipeline-stat">Confidence: <b>' + Math.round(data.detection_conf * 100) + '%</b></div>' +
+      '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
+    '</div>';
+  } else {
+    html += '<p style="color:#888;font-size:13px;">No subject detected — full image sent to classifier</p>';
+  }
+  html += '</div>';
+
+  // Step 3: Classification crop
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Classification Input (BioCLIP)</span></div>' +
+    '<div class="pipeline-images">' +
+      '<div class="pipeline-img-wrap" style="max-width:300px;">' +
+        '<img src="/photos/' + photoId + '/crop" alt="Crop">' +
+        '<div class="pipeline-img-label">' + (hasDetection ? 'Cropped + padded region' : 'Full image (no detection)') + '</div>' +
+      '</div>' +
+    '</div>' +
+  '</div>';
+
+  // Step 4: Predictions
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Classification Results</span></div>';
+
+  if (data.predictions && data.predictions.length > 0) {
+    html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Model</th><th>Status</th><th>Category</th></tr>';
+    data.predictions.forEach(function(p) {
+      var pct = Math.round(p.confidence * 100);
+      var statusColor = p.status === 'accepted' ? '#4ecca3' : p.status === 'rejected' ? '#e74c3c' : '#888';
+      html += '<tr>' +
+        '<td>' + p.species + (p.scientific_name ? '<br><span style="font-size:11px;color:#888;font-style:italic;">' + p.scientific_name + '</span>' : '') + '</td>' +
+        '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
+        '<td style="color:#888;">' + p.model + '</td>' +
+        '<td style="color:' + statusColor + ';">' + p.status + '</td>' +
+        '<td style="color:#888;">' + p.category + '</td>' +
+      '</tr>';
+    });
+    html += '</table>';
+
+    // Taxonomy hierarchy
+    var withTax = data.predictions.find(function(p) { return p.taxonomy_order; });
+    if (withTax) {
+      var parts = [];
+      if (withTax.taxonomy_kingdom) parts.push(withTax.taxonomy_kingdom);
+      if (withTax.taxonomy_phylum) parts.push(withTax.taxonomy_phylum);
+      if (withTax.taxonomy_class) parts.push(withTax.taxonomy_class);
+      if (withTax.taxonomy_order) parts.push(withTax.taxonomy_order);
+      if (withTax.taxonomy_family) parts.push(withTax.taxonomy_family);
+      if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
+      html += '<div style="margin-top:8px;font-size:12px;color:#888;">' +
+        '<span style="color:var(--text-muted,#a0a0a0);">Taxonomy:</span> ' +
+        parts.join(' &rsaquo; ') +
+      '</div>';
+    }
+
+    // Group info
+    var grouped = data.predictions.find(function(p) { return p.group_id; });
+    if (grouped) {
+      html += '<div style="margin-top:8px;">' +
+        '<div class="pipeline-stat">Burst group: <b>' + grouped.group_id + '</b></div>' +
+        '<div class="pipeline-stat">Votes: <b>' + grouped.vote_count + '/' + grouped.total_votes + '</b></div>' +
+      '</div>';
+    }
+  } else {
+    html += '<p style="color:#888;font-size:13px;">No predictions yet — run classification first</p>';
+  }
+  html += '</div>';
+
+  // Step 5: Quality scoring
+  html += '<div class="pipeline-step">' +
+    '<div class="pipeline-step-header"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Quality Scoring</span></div>' +
+    '<div class="pipeline-stat">Overall sharpness: <b>' + (data.sharpness != null ? Math.round(data.sharpness) : 'N/A') + '</b></div>' +
+    '<div class="pipeline-stat">Subject sharpness: <b>' + (data.subject_sharpness != null ? Math.round(data.subject_sharpness) : 'N/A') + '</b></div>' +
+    '<div class="pipeline-stat">Quality score: <b>' + (data.quality_score != null ? data.quality_score : 'N/A') + '</b></div>' +
+  '</div>';
+
+  // Step 6: Keywords
+  if (data.keywords && data.keywords.length > 0) {
+    html += '<div class="pipeline-step">' +
+      '<div class="pipeline-step-header"><span class="pipeline-step-num">6</span><span class="pipeline-step-title">Current Keywords</span></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    data.keywords.forEach(function(k) {
+      html += '<span style="background:var(--bg-tertiary,#0f3460);padding:3px 8px;border-radius:4px;font-size:12px;">' + k.name + '</span>';
+    });
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  c.innerHTML = html;
+}
+</script>
+
+<!-- Similar Photos -->
+<div class="similar-overlay" id="similarOverlay">
+  <div class="similar-panel">
+    <button class="pipeline-close" onclick="closeSimilar()">&times;</button>
+    <h2>Similar Photos</h2>
+    <div id="similarContent">Loading...</div>
+  </div>
+</div>
+
+<script>
+function findSimilar(photoId) {
+  var overlay = document.getElementById('similarOverlay');
+  var content = document.getElementById('similarContent');
+  overlay.classList.add('active');
+  document.body.style.overflow = 'hidden';
+  content.innerHTML = '<p style="color:#888;">Searching for similar photos...</p>';
+
+  fetch('/api/photos/' + photoId + '/similar?limit=40')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + data.error + '</p>';
+        return;
+      }
+      var html = '<p style="font-size:12px;color:var(--text-dim,#888);margin-bottom:12px;">Compared against ' +
+        data.total_compared.toLocaleString() + ' photos with embeddings</p>';
+
+      if (data.similar.length === 0) {
+        html += '<p style="color:#888;">No similar photos found.</p>';
+      } else {
+        html += '<div class="similar-grid">';
+        data.similar.forEach(function(item) {
+          var p = item.photo;
+          var pct = Math.round(item.similarity * 100);
+          html += '<div class="similar-card" onclick="closeSimilar(); openLightbox(' + p.id + ',\'' + (p.filename || '').replace(/'/g, "\\'") + '\')">' +
+            '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">' +
+            '<div class="similar-card-info">' +
+              '<div class="similar-card-name" title="' + (p.filename || '') + '">' + (p.filename || '') + '</div>' +
+              '<div class="similar-card-score">' + pct + '% similar</div>' +
+            '</div>' +
+          '</div>';
+        });
+        html += '</div>';
+      }
+      content.innerHTML = html;
+    })
+    .catch(function(e) {
+      content.innerHTML = '<p style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</p>';
+    });
+}
+
+function closeSimilar() {
+  document.getElementById('similarOverlay').classList.remove('active');
+  document.body.style.overflow = '';
+}
+</script>
+
+<!-- Bottom Panel -->
+<div class="bottom-panel" id="bottomPanel">
+  <div class="bp-drag-handle" id="bpDragHandle"></div>
+  <div class="bp-tabs">
+    <div class="bp-tab active" onclick="switchBpTab('jobs')">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
+    <div class="bp-tab" onclick="switchBpTab('logs')">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
+  </div>
+  <div class="bp-content">
+    <!-- Jobs Pane -->
+    <div class="bp-pane active" id="bpJobs">
+      <div class="bp-jobs-list" id="bpJobsList">
+        <div class="bp-jobs-empty">No jobs running</div>
+      </div>
+    </div>
+    <!-- Logs Pane -->
+    <div class="bp-pane" id="bpLogs">
+      <div class="bp-logs-toolbar">
+        <select id="lpLevelFilter" onchange="lpApplyFilter()">
+          <option value="DEBUG">DEBUG+</option>
+          <option value="INFO" selected>INFO+</option>
+          <option value="WARNING">WARNING+</option>
+          <option value="ERROR">ERROR+</option>
+        </select>
+        <label>
+          <input type="checkbox" id="lpAutoScroll" checked style="accent-color:#4ecca3;"> Auto-scroll
+        </label>
+        <span class="lp-count" id="lpCount">0</span>
+      </div>
+      <div class="bp-logs-content" id="lpContent"></div>
+    </div>
+  </div>
+</div>
+<div class="bottom-toggle" id="bottomToggle">
+  <span class="toggle-arrow" id="bpArrow" onclick="toggleBottomPanel()">&#9650;</span>
+  <span class="job-summary idle" id="jobSummary">No active jobs</span>
+</div>
+
+<script>
+/* ---------- Bottom Panel ---------- */
+(function() {
+  var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
+  var lpLines = [];
+  var lpSource = null;
+  var lpMaxLines = 200;
+  var activeJobs = [];
+  var currentBpTab = 'jobs';
+
+  // Theme: restore on load (before init to avoid flash)
+  (function() {
+    var saved = localStorage.getItem('vireo_theme') || 'dark';
+    if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    updateThemeIcon();
+  })();
+
+  window.toggleTheme = function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var next = current === 'light' ? 'dark' : 'light';
+    if (next === 'dark') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+    localStorage.setItem('vireo_theme', next);
+    updateThemeIcon();
+  };
+
+  function updateThemeIcon() {
+    var btn = document.getElementById('themeToggle');
+    if (!btn) return;
+    var isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    btn.textContent = isLight ? '\u263D' : '\u2600';
+    btn.title = isLight ? 'Switch to dark mode' : 'Switch to light mode';
+  }
+
+  function init() {
+    // Restore panel state and height
+    if (localStorage.getItem('vireo_panel_open') === 'true') {
+      var savedH = parseInt(localStorage.getItem('vireo_panel_height')) || 240;
+      var panel = document.getElementById('bottomPanel');
+      panel.classList.add('open');
+      panel.style.height = savedH + 'px';
+      document.getElementById('bottomToggle').classList.add('open');
+      document.body.style.paddingBottom = (savedH + 28) + 'px';
+    }
+    var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
+    switchBpTab(savedTab);
+
+    // SSE for logs
+    lpSource = new EventSource('/api/logs/stream');
+    lpSource.addEventListener('log', function(e) {
+      addLpLine(JSON.parse(e.data));
+    });
+    // Track internal navigation so we don't warn on same-site clicks
+    var isInternalNav = false;
+    document.addEventListener('click', function(e) {
+      var link = e.target.closest('a[href]');
+      if (link && link.hostname === location.hostname) {
+        isInternalNav = true;
+      }
+    });
+
+    window.addEventListener('beforeunload', function(e) {
+      // Save logs to sessionStorage so they persist across page navigations
+      try {
+        sessionStorage.setItem('vireo_logs', JSON.stringify(lpLines.slice(-lpMaxLines)));
+      } catch(ex) {}
+      if (lpSource) { lpSource.close(); lpSource = null; }
+      // Only warn on actual tab close, not internal navigation
+      if (isInternalNav) { isInternalNav = false; return; }
+      var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+      if (running.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    // Restore logs from sessionStorage (persisted across page navigations)
+    var savedLogs = [];
+    try {
+      var raw = sessionStorage.getItem('vireo_logs');
+      if (raw) savedLogs = JSON.parse(raw);
+    } catch(ex) {}
+
+    if (savedLogs.length > 0) {
+      // Use saved logs and merge with any newer server logs
+      savedLogs.forEach(function(l) { addLpLine(l, true); });
+      var lastTime = savedLogs[savedLogs.length - 1].time || 0;
+      fetch('/api/logs/recent?count=50')
+        .then(function(r) { return r.json(); })
+        .then(function(logs) {
+          logs.forEach(function(l) {
+            if (l.time > lastTime) addLpLine(l, true);
+          });
+          lpApplyFilter();
+        });
+    } else {
+      fetch('/api/logs/recent?count=50')
+        .then(function(r) { return r.json(); })
+        .then(function(logs) {
+          logs.forEach(function(l) { addLpLine(l, true); });
+          lpApplyFilter();
+        });
+    }
+
+    // Poll jobs
+    pollJobs();
+    setInterval(pollJobs, 2000);
+  }
+
+  /* ---------- Tab switching ---------- */
+  window.switchBpTab = function(tab) {
+    currentBpTab = tab;
+    document.querySelectorAll('.bp-tab').forEach(function(t, i) {
+      t.classList.toggle('active', ['jobs', 'logs'][i] === tab);
+    });
+    document.querySelectorAll('.bp-pane').forEach(function(p) {
+      p.classList.toggle('active', p.id === (tab === 'jobs' ? 'bpJobs' : 'bpLogs'));
+    });
+    localStorage.setItem('vireo_panel_tab', tab);
+  };
+
+  window.toggleBottomPanel = function() {
+    var panel = document.getElementById('bottomPanel');
+    var toggle = document.getElementById('bottomToggle');
+    panel.classList.add('animating');
+    panel.classList.toggle('open');
+    toggle.classList.toggle('open');
+    var isOpen = panel.classList.contains('open');
+    localStorage.setItem('vireo_panel_open', isOpen);
+    var h = isOpen ? (parseInt(localStorage.getItem('vireo_panel_height')) || 240) : 0;
+    panel.style.height = h + 'px';
+    document.body.style.paddingBottom = isOpen ? (h + 28) + 'px' : '28px';
+    setTimeout(function() { panel.classList.remove('animating'); }, 200);
+  };
+
+  /* ---------- Panel drag resize ---------- */
+  (function() {
+    var handle = document.getElementById('bpDragHandle');
+    var panel = document.getElementById('bottomPanel');
+    var dragging = false;
+    var startY, startH;
+
+    handle.addEventListener('mousedown', function(e) {
+      dragging = true;
+      startY = e.clientY;
+      startH = panel.offsetHeight;
+      handle.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      var newH = Math.max(100, Math.min(window.innerHeight - 100, startH + (startY - e.clientY)));
+      panel.style.height = newH + 'px';
+      document.body.style.paddingBottom = (newH + 28) + 'px';
+    });
+
+    document.addEventListener('mouseup', function() {
+      if (!dragging) return;
+      dragging = false;
+      handle.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      localStorage.setItem('vireo_panel_height', panel.offsetHeight);
+    });
+  })();
+
+  /* ---------- Jobs polling ---------- */
+  function pollJobs() {
+    fetch('/api/jobs')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        activeJobs = data.active || [];
+        renderJobs();
+        updateSummary();
+        updateActivityDot();
+      })
+      .catch(function() {});
+  }
+
+  function renderJobs() {
+    var container = document.getElementById('bpJobsList');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var recent = activeJobs.filter(function(j) { return j.status !== 'running'; }).slice(0, 5);
+    var all = running.concat(recent);
+
+    document.getElementById('jobsBadge').textContent = running.length;
+
+    if (all.length === 0) {
+      container.innerHTML = '<div class="bp-jobs-empty">No jobs running</div>';
+      return;
+    }
+
+    var html = '';
+    all.forEach(function(j) {
+      var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
+      var statusClass = j.status;
+      var elapsed = '';
+      if (j.started_at) {
+        var secs = (Date.now() - new Date(j.started_at).getTime()) / 1000;
+        if (j.finished_at) secs = (new Date(j.finished_at).getTime() - new Date(j.started_at).getTime()) / 1000;
+        elapsed = formatElapsed(secs);
+      }
+
+      html += '<div class="bp-job">';
+      html += '<div class="bp-job-header">';
+      html += '<span class="bp-job-type">' + bpEscape(j.type) + '</span>';
+      html += '<span class="bp-job-status ' + statusClass + '">' + j.status + '</span>';
+      html += '<span class="bp-job-elapsed">' + elapsed + '</span>';
+      html += '</div>';
+
+      if (j.status === 'running') {
+        if (j.progress && j.progress.phase) {
+          html += '<div class="bp-job-detail" style="color:var(--accent,#4ecca3);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
+        }
+        html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
+        var detail = '';
+        if (j.progress && j.progress.current > 0) {
+          detail = j.progress.current.toLocaleString();
+          if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
+        }
+        if (j.progress && j.progress.current_file) {
+          detail += ' ' + bpEscape(j.progress.current_file);
+        }
+        html += '<div class="bp-job-detail">' + detail + '</div>';
+      } else if (j.status === 'completed' && j.result) {
+        var parts = [];
+        for (var k in j.result) {
+          var v = j.result[k];
+          if (v && typeof v === 'object') {
+            var sub = [];
+            for (var sk in v) sub.push(sk + ': ' + v[sk]);
+            parts.push(k + ' (' + sub.join(', ') + ')');
+          } else {
+            parts.push(k + ': ' + v);
+          }
+        }
+        html += '<div class="bp-job-detail">' + bpEscape(parts.join(', ')) + '</div>';
+      } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
+        html += '<div class="bp-job-detail" style="color:#e74c3c;">' + bpEscape(j.errors[0]) + '</div>';
+      }
+
+      html += '</div>';
+    });
+    container.innerHTML = html;
+  }
+
+  function updateSummary() {
+    var summary = document.getElementById('jobSummary');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+
+    if (running.length === 0) {
+      summary.textContent = 'No active jobs';
+      summary.classList.add('idle');
+      summary.classList.remove('active');
+      return;
+    }
+
+    summary.classList.remove('idle');
+    var j = running[0];
+    var text = j.type;
+    if (j.progress && j.progress.phase) {
+      text += ' — ' + j.progress.phase;
+    }
+    if (j.progress && j.progress.total > 0) {
+      var pct = Math.round((j.progress.current / j.progress.total) * 100);
+      text += ' ' + j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+    } else if (j.progress && j.progress.current_file) {
+      text += ' ' + j.progress.current_file;
+    }
+    if (running.length > 1) {
+      text += ' + ' + (running.length - 1) + ' more';
+    }
+    summary.textContent = text;
+  }
+
+  function updateActivityDot() {
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var dot = document.getElementById('navActivityDot');
+    if (dot) dot.classList.toggle('active', running.length > 0);
+  }
+
+  function formatElapsed(secs) {
+    if (secs < 60) return Math.round(secs) + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.round(secs % 60) + 's';
+    return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  }
+
+  /* ---------- Log lines ---------- */
+  window.addLpLine = function(record, bulk) {
+    if (lpLines.length >= lpMaxLines) {
+      lpLines.shift();
+      var first = document.getElementById('lpContent').firstChild;
+      if (first) first.remove();
+    }
+    lpLines.push(record);
+    var container = document.getElementById('lpContent');
+    var time = new Date(record.time * 1000);
+    var timeStr = time.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    var div = document.createElement('div');
+    div.className = 'lp-line lp-' + record.level;
+    div.dataset.level = record.level;
+    div.innerHTML = '<span class="lp-time">' + timeStr + '</span>' +
+      '<span class="lp-level">' + record.level + '</span>' +
+      bpEscape(record.message || '');
+    container.appendChild(div);
+    if (!bulk) {
+      var autoScroll = document.getElementById('lpAutoScroll');
+      if (autoScroll && autoScroll.checked) {
+        container.scrollTop = container.scrollHeight;
+      }
+      lpApplyFilter();
+    }
+    document.getElementById('lpCount').textContent = lpLines.length;
+    document.getElementById('logsBadge').textContent = lpLines.length;
+  };
+
+  window.lpApplyFilter = function() {
+    var minLevel = document.getElementById('lpLevelFilter').value;
+    var minOrder = LEVEL_ORDER[minLevel] || 0;
+    document.querySelectorAll('#lpContent .lp-line').forEach(function(el) {
+      var ok = (LEVEL_ORDER[el.dataset.level] || 0) >= minOrder;
+      el.style.display = ok ? '' : 'none';
+    });
+  };
+
+  function bpEscape(str) {
+    if (str == null) return '';
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(String(str)));
+    return div.innerHTML;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
