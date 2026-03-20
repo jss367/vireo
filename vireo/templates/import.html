@@ -126,7 +126,79 @@ body {
 
 <div class="content">
   <h2 class="page-title">Import</h2>
-  <p class="page-subtitle">Bring your photos into Vireo. Scan a folder on disk, or import keywords from a Lightroom catalog.</p>
+  <p class="page-subtitle">Bring your photos into Vireo. Use the wizard for a full pipeline, or run individual steps below.</p>
+
+  <!-- ==================== Import Wizard ==================== -->
+  <div class="section" style="border-color:var(--accent,#24E5CA);">
+    <div class="section-title">Import Wizard</div>
+    <p class="help-text" style="margin-bottom:12px;">
+      Configure everything, click Start, and walk away. Vireo will scan your photos, build thumbnails and previews, classify species, and group bursts — all in one run.
+    </p>
+
+    <!-- Folders -->
+    <div style="margin-bottom:14px;">
+      <div style="font-size:13px;color:var(--text-primary,#E0F0F0);font-weight:500;margin-bottom:6px;">1. Folders to scan</div>
+      <div style="display:flex;gap:6px;margin-bottom:6px;">
+        <input type="text" class="path-input" id="wizFolder" placeholder="/path/to/photos"
+               onkeydown="if(event.key==='Enter')wizAddFolder()">
+        <button class="btn btn-secondary" onclick="wizAddFolder()">Add</button>
+      </div>
+      <div id="wizFolderList" style="font-size:12px;color:var(--text-muted,#888);"></div>
+    </div>
+
+    <!-- Pipeline steps -->
+    <div style="margin-bottom:14px;">
+      <div style="font-size:13px;color:var(--text-primary,#E0F0F0);font-weight:500;margin-bottom:8px;">2. Pipeline steps</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
+          <input type="checkbox" id="wizScan" checked disabled style="accent-color:var(--accent,#24E5CA);">
+          Scan folders &amp; read EXIF/XMP <span style="color:var(--text-dim,#888);font-size:11px;">(always runs)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
+          <input type="checkbox" id="wizThumbnails" checked style="accent-color:var(--accent,#24E5CA);">
+          Generate thumbnails
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
+          <input type="checkbox" id="wizPreviews" checked style="accent-color:var(--accent,#24E5CA);">
+          Generate previews
+          <select id="wizPreviewSize" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:2px 6px;font-size:12px;">
+            <option value="1920">1920px</option>
+            <option value="2560">2560px</option>
+            <option value="3840">3840px (4K)</option>
+            <option value="0">Full resolution (1:1)</option>
+          </select>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
+          <input type="checkbox" id="wizClassify" checked style="accent-color:var(--accent,#24E5CA);">
+          Classify species
+        </label>
+        <div id="wizClassifyOpts" style="margin-left:28px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <label style="font-size:12px;color:var(--text-dim,#888);">Model:</label>
+          <select id="wizModel" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:2px 6px;font-size:12px;">
+            <option value="">Loading...</option>
+          </select>
+          <label style="font-size:12px;color:var(--text-dim,#888);">Labels:</label>
+          <select id="wizLabels" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:2px 6px;font-size:12px;">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Start button -->
+    <div style="display:flex;gap:12px;align-items:center;">
+      <button class="btn btn-primary" id="wizStartBtn" onclick="wizStart()" disabled style="padding:10px 28px;font-size:14px;">
+        Start Pipeline
+      </button>
+      <span id="wizStatus" style="font-size:13px;color:var(--text-dim,#888);"></span>
+    </div>
+    <div id="wizProgress" style="display:none;margin-top:10px;">
+      <div class="progress-bar" style="display:block;">
+        <div class="progress-fill" id="wizProgressFill"></div>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim,#888);margin-top:4px;" id="wizProgressDetail"></div>
+    </div>
+  </div>
 
   <!-- ==================== Scan Photos ==================== -->
   <div class="section">
@@ -168,6 +240,36 @@ body {
       <span class="rate" id="thumbRate"></span>
     </div>
     <div class="status-msg" id="thumbStatus"></div>
+  </div>
+
+  <!-- ==================== Generate Previews ==================== -->
+  <div class="section">
+    <div class="section-title">Generate Previews</div>
+    <p class="help-text">
+      Pre-generate larger preview images for the lightbox viewer. Without this, previews are generated on first view (slower).
+    </p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+      <label style="font-size:12px;color:#888;">Quality:</label>
+      <select id="cfgPreviewSize" class="path-input" style="width:auto;flex:none;" onchange="savePreviewSize()">
+        <option value="1280">1280px (fast, small)</option>
+        <option value="1920">1920px (default)</option>
+        <option value="2560">2560px (high quality)</option>
+        <option value="3840">3840px (4K)</option>
+        <option value="0">Full resolution (1:1)</option>
+      </select>
+      <label style="font-size:12px;color:#888;">Collection:</label>
+      <select id="previewScope" class="path-input" style="width:auto;flex:none;">
+        <option value="all">All photos</option>
+      </select>
+      <button class="btn btn-primary" id="previewBtn" onclick="startPreviewJob()">Generate Previews</button>
+    </div>
+    <div class="progress-bar" id="previewProgress">
+      <div class="progress-fill" id="previewProgressFill"></div>
+    </div>
+    <div class="progress-detail" id="previewDetail">
+      <span class="rate" id="previewRate"></span>
+    </div>
+    <div class="status-msg" id="previewStatus"></div>
   </div>
 
   <!-- ==================== Lightroom Catalog Import ==================== -->
@@ -272,6 +374,49 @@ async function startThumbJob() {
   startJob('/api/jobs/thumbnails', {},
     'thumbProgress', 'thumbProgressFill', 'thumbDetail', 'thumbStatus', null, 'thumbRate',
     ['thumbBtn']);
+}
+
+/* ==================== Preview Job ==================== */
+(async function loadPreviewCollections() {
+  try {
+    var resp = await fetch('/api/collections');
+    var collections = await resp.json();
+    var sel = document.getElementById('previewScope');
+    collections.forEach(function(c) {
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+})();
+
+// Load preview size from config
+(async function loadPreviewSize() {
+  try {
+    var resp = await fetch('/api/config');
+    var cfg = await resp.json();
+    document.getElementById('cfgPreviewSize').value = cfg.preview_max_size || 1920;
+  } catch(e) {}
+})();
+
+async function savePreviewSize() {
+  var size = parseInt(document.getElementById('cfgPreviewSize').value, 10) || 1920;
+  try {
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({preview_max_size: size}),
+    });
+  } catch(e) {}
+}
+
+async function startPreviewJob() {
+  var scope = document.getElementById('previewScope').value;
+  var collectionId = scope === 'all' ? null : parseInt(scope);
+  startJob('/api/jobs/previews', {collection_id: collectionId},
+    'previewProgress', 'previewProgressFill', 'previewDetail', 'previewStatus', null, 'previewRate',
+    ['previewBtn']);
 }
 
 /* ==================== Generic Job Runner ==================== */
@@ -500,6 +645,192 @@ function escapeHtml(str) {
   var div = document.createElement('div');
   div.appendChild(document.createTextNode(String(str)));
   return div.innerHTML;
+}
+
+/* ==================== Import Wizard ==================== */
+var wizFolders = [];
+
+function wizAddFolder() {
+  var input = document.getElementById('wizFolder');
+  var path = input.value.trim();
+  if (!path) return;
+  if (wizFolders.indexOf(path) === -1) {
+    wizFolders.push(path);
+  }
+  input.value = '';
+  wizRenderFolders();
+}
+
+function wizRemoveFolder(idx) {
+  wizFolders.splice(idx, 1);
+  wizRenderFolders();
+}
+
+function wizRenderFolders() {
+  var html = '';
+  wizFolders.forEach(function(f, i) {
+    html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;">' +
+      '<span style="font-family:monospace;color:var(--text-secondary,#B0CCCC);">' + escapeHtml(f) + '</span>' +
+      '<button onclick="wizRemoveFolder(' + i + ')" style="background:none;border:none;color:var(--text-ghost,#555);cursor:pointer;font-size:14px;">&times;</button>' +
+    '</div>';
+  });
+  document.getElementById('wizFolderList').innerHTML = html;
+  document.getElementById('wizStartBtn').disabled = wizFolders.length === 0;
+}
+
+// Load models and labels for wizard
+(async function wizLoadOptions() {
+  try {
+    // Models
+    var mResp = await fetch('/api/models');
+    var mData = await mResp.json();
+    var mSel = document.getElementById('wizModel');
+    mSel.innerHTML = '';
+    var downloaded = mData.models.filter(function(m) { return m.downloaded; });
+    downloaded.forEach(function(m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name;
+      if (m.id === mData.active_id) opt.selected = true;
+      mSel.appendChild(opt);
+    });
+    if (downloaded.length === 0) {
+      mSel.innerHTML = '<option value="">No models — download in Settings</option>';
+    }
+
+    // Labels
+    var lResp = await fetch('/api/labels');
+    var lData = await lResp.json();
+    var lSel = document.getElementById('wizLabels');
+    lSel.innerHTML = '<option value="">(Tree of Life — all species)</option>';
+    (lData.labels || []).forEach(function(l) {
+      var opt = document.createElement('option');
+      opt.value = l.labels_file;
+      opt.textContent = l.name + ' (' + (l.species_count || 0) + ')';
+      if (lData.active && lData.active.labels_file === l.labels_file) opt.selected = true;
+      lSel.appendChild(opt);
+    });
+
+    // Preview size from config
+    var cResp = await fetch('/api/config');
+    var cfg = await cResp.json();
+    document.getElementById('wizPreviewSize').value = cfg.preview_max_size || 1920;
+  } catch(e) {}
+})();
+
+async function wizStart() {
+  if (wizFolders.length === 0) return;
+
+  var doThumbnails = document.getElementById('wizThumbnails').checked;
+  var doPreviews = document.getElementById('wizPreviews').checked;
+  var doClassify = document.getElementById('wizClassify').checked;
+  var previewSize = parseInt(document.getElementById('wizPreviewSize').value, 10) || 1920;
+  var modelId = document.getElementById('wizModel').value;
+  var labelsFile = document.getElementById('wizLabels').value;
+
+  var btn = document.getElementById('wizStartBtn');
+  var status = document.getElementById('wizStatus');
+  var progressDiv = document.getElementById('wizProgress');
+  var progressFill = document.getElementById('wizProgressFill');
+  var progressDetail = document.getElementById('wizProgressDetail');
+  btn.disabled = true;
+  progressDiv.style.display = '';
+
+  var steps = [];
+  // Each folder gets scanned (thumbnails are auto-generated with scan)
+  wizFolders.forEach(function(f) {
+    steps.push({name: 'Scan: ' + f, url: '/api/jobs/scan', body: {root: f}});
+  });
+  if (doPreviews) {
+    // Save preview size first
+    steps.push({name: 'Set preview quality', url: '/api/config', body: {preview_max_size: previewSize}, noJob: true});
+    steps.push({name: 'Generate previews', url: '/api/jobs/previews', body: {}});
+  }
+  if (doClassify) {
+    // Classify "Needs Classification" collection (id will be resolved)
+    steps.push({name: 'Classify species', url: '/api/jobs/classify', body: {
+      collection_id: '_needs_classification',
+      model_id: modelId || undefined,
+      labels_file: labelsFile || undefined,
+    }});
+  }
+
+  var totalSteps = steps.length;
+  for (var si = 0; si < steps.length; si++) {
+    var step = steps[si];
+    status.textContent = 'Step ' + (si + 1) + '/' + totalSteps + ': ' + step.name;
+    progressFill.style.width = Math.round((si / totalSteps) * 100) + '%';
+
+    try {
+      if (step.noJob) {
+        // Simple POST (config update)
+        await fetch(step.url, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(step.body),
+        });
+        continue;
+      }
+
+      // Resolve _needs_classification to actual collection ID
+      if (step.body.collection_id === '_needs_classification') {
+        var cResp = await fetch('/api/collections');
+        var collections = await cResp.json();
+        var nc = collections.find(function(c) { return c.name === 'Needs Classification'; });
+        if (nc) {
+          step.body.collection_id = nc.id;
+        } else {
+          // Fall back to first collection or skip
+          status.textContent = 'No "Needs Classification" collection found — skipping classify';
+          continue;
+        }
+      }
+
+      var resp = await fetch(step.url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(step.body),
+      });
+      if (!resp.ok) {
+        var err = await resp.json();
+        status.textContent = 'Error at step ' + (si + 1) + ': ' + (err.error || 'failed');
+        status.style.color = 'var(--danger,#e74c3c)';
+        btn.disabled = false;
+        return;
+      }
+      var data = await resp.json();
+      if (!data.job_id) continue;
+
+      // Wait for job to complete
+      await new Promise(function(resolve) {
+        var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+        source.addEventListener('progress', function(e) {
+          var p = JSON.parse(e.data);
+          var detail = '';
+          if (p.phase) detail += p.phase;
+          if (p.total > 0 && p.current > 0) detail += ' ' + p.current + '/' + p.total;
+          if (p.current_file) detail += ' — ' + p.current_file;
+          progressDetail.textContent = detail;
+        });
+        source.addEventListener('complete', function(e) {
+          source.close();
+          resolve();
+        });
+        source.onerror = function() { source.close(); resolve(); };
+      });
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+      status.style.color = 'var(--danger,#e74c3c)';
+      btn.disabled = false;
+      return;
+    }
+  }
+
+  progressFill.style.width = '100%';
+  status.textContent = 'Pipeline complete! Go to Review to check your predictions.';
+  status.style.color = 'var(--accent,#24E5CA)';
+  progressDetail.textContent = '';
+  btn.disabled = false;
 }
 </script>
 </body>

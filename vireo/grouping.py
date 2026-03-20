@@ -2,6 +2,7 @@
 
 import logging
 from collections import Counter
+from datetime import datetime
 
 import numpy as np
 
@@ -10,6 +11,9 @@ log = logging.getLogger(__name__)
 
 def group_by_timestamp(photos, window_seconds=10):
     """Group sequential photos that were taken within a time window.
+
+    Sorts by timestamp first, then walks sequentially grouping photos
+    within the window.
 
     Args:
         photos: list of dicts, each with 'filename' and 'timestamp' (datetime or None)
@@ -20,6 +24,12 @@ def group_by_timestamp(photos, window_seconds=10):
     """
     if not photos:
         return []
+
+    # Sort by timestamp (None timestamps go to the end)
+    photos = sorted(
+        photos,
+        key=lambda p: p["timestamp"] if p["timestamp"] is not None else datetime.max,
+    )
 
     groups = []
     current_group = [photos[0]]
@@ -144,10 +154,10 @@ def consensus_prediction(predictions):
     for p in predictions:
         conf_by_pred.setdefault(p["prediction"], []).append(p["confidence"])
 
-    # Pick the most common; break ties by higher average confidence
+    # Pick by total confidence weight (count × avg_confidence), with count as tiebreaker
     best = max(
         counts.keys(),
-        key=lambda sp: (counts[sp], sum(conf_by_pred[sp]) / len(conf_by_pred[sp])),
+        key=lambda sp: (sum(conf_by_pred[sp]), counts[sp]),
     )
 
     avg_conf = sum(conf_by_pred[best]) / len(conf_by_pred[best])

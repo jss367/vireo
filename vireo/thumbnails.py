@@ -47,7 +47,9 @@ def get_thumb_path(photo_id, cache_dir):
 
 
 def generate_all(db, cache_dir, progress_callback=None):
-    """Generate thumbnails for all photos that don't have one yet.
+    """Generate thumbnails for photos that don't have one yet.
+
+    Only processes photos missing thumbnails, so re-running is fast.
 
     Args:
         db: Database instance
@@ -59,19 +61,35 @@ def generate_all(db, cache_dir, progress_callback=None):
     photos = db.get_photos(per_page=999999)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
-    total = len(photos)
-    failed = 0
-    for i, photo in enumerate(photos):
+    # Filter to only photos needing thumbnails
+    needed = []
+    for photo in photos:
         thumb_path = os.path.join(cache_dir, f"{photo['id']}.jpg")
         if not os.path.exists(thumb_path):
-            folder_path = folders.get(photo["folder_id"], "")
-            source_path = os.path.join(folder_path, photo["filename"])
-            if generate_thumbnail(photo["id"], source_path, cache_dir) is None:
-                failed += 1
+            needed.append(photo)
+
+    total = len(needed)
+    skipped = len(photos) - total
+
+    if total == 0:
+        log.info("All %d thumbnails up to date", skipped)
+        return {"generated": 0, "skipped": skipped, "failed": 0}
+
+    log.info("Generating %d thumbnails (%d already cached)", total, skipped)
+
+    generated = 0
+    failed = 0
+    for i, photo in enumerate(needed):
+        folder_path = folders.get(photo["folder_id"], "")
+        source_path = os.path.join(folder_path, photo["filename"])
+        if generate_thumbnail(photo["id"], source_path, cache_dir) is not None:
+            generated += 1
+        else:
+            failed += 1
 
         if progress_callback:
             progress_callback(i + 1, total)
 
     if failed:
         log.warning("Thumbnail generation: %d of %d failed", failed, total)
-    return {"generated": total - failed, "failed": failed}
+    return {"generated": generated, "skipped": skipped, "failed": failed}

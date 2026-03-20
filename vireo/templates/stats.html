@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-<title>Vireo - Statistics</title>
+<title>Vireo - Dashboard</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -53,11 +53,11 @@ body {
 </head>
 <body>
 
-{% set active_page = 'stats' %}
+{% set active_page = 'dashboard' %}
 {% include '_navbar.html' %}
 
 <div class="content">
-  <h2 style="margin-bottom:20px;font-size:20px;">Statistics</h2>
+  <h2 style="margin-bottom:20px;font-size:20px;">Dashboard</h2>
 
   <!-- Top Species -->
   <div class="section">
@@ -84,10 +84,21 @@ body {
     <div class="section-title">Photos by Month</div>
     <div class="bar-chart" id="monthChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
   </div>
+
+  <!-- Storage Management -->
+  <div class="section">
+    <div class="section-title">Storage</div>
+    <div id="storageChart" style="margin-bottom:16px;"></div>
+    <div style="font-size:12px;color:var(--text-dim,#888);margin-bottom:16px;">
+      Total: <b id="storageTotalSize" style="color:var(--text-primary,#E0F0F0);">-</b>
+    </div>
+    <div id="storageRows"></div>
+  </div>
 </div>
 
 <script>
 loadStats();
+loadStoragePanel();
 
 async function loadStats() {
   try {
@@ -194,6 +205,77 @@ function escapeHtml(str) {
   var div = document.createElement('div');
   div.appendChild(document.createTextNode(String(str)));
   return div.innerHTML;
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  var k = 1024;
+  var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+async function loadStoragePanel() {
+  try {
+    var resp = await fetch('/api/storage');
+    var s = await resp.json();
+
+    document.getElementById('storageTotalSize').textContent = formatBytes(s.total);
+
+    var categories = [
+      {name: 'Database', size: s.database.size, color: '#24E5CA', type: null},
+      {name: 'Thumbnails', size: s.thumbnails.size, color: '#12C3B5', count: s.thumbnails.count, type: 'thumbnails'},
+      {name: 'Previews', size: s.previews.size, color: '#038A96', count: s.previews.count, type: 'previews'},
+      {name: 'Embeddings', size: s.embeddings.size, color: '#0D5B79', count: s.embeddings.count, type: 'embeddings'},
+      {name: 'Models', size: s.models.size, color: '#0A2F4D', type: null},
+      {name: 'HF Cache', size: s.hf_cache.size, color: '#14374E', type: null},
+    ];
+
+    var maxSize = Math.max.apply(null, categories.map(function(c) { return c.size; })) || 1;
+    var chartHtml = '';
+    categories.forEach(function(c) {
+      if (c.size === 0 && !c.type) return;
+      var pct = Math.max(1, Math.round((c.size / maxSize) * 100));
+      chartHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;">' +
+        '<span style="width:80px;color:var(--text-muted,#a0a0a0);text-align:right;">' + c.name + '</span>' +
+        '<div style="flex:1;height:16px;background:var(--bg-primary,#0A1F2E);border-radius:3px;overflow:hidden;">' +
+          '<div style="height:100%;width:' + pct + '%;background:' + c.color + ';border-radius:3px;transition:width 0.3s;"></div>' +
+        '</div>' +
+        '<span style="width:70px;color:var(--text-secondary,#B0CCCC);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>' +
+      '</div>';
+    });
+    document.getElementById('storageChart').innerHTML = chartHtml;
+
+    var rowsHtml = '';
+    categories.forEach(function(c) {
+      if (c.size === 0 && !c.type) return;
+      rowsHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle,#0E2A3D);font-size:12px;">' +
+        '<div><span style="color:var(--text-primary,#E0F0F0);">' + c.name + '</span>' +
+          (c.count != null ? ' <span style="color:var(--text-dim,#888);">(' + c.count.toLocaleString() + ' files)</span>' : '') +
+        '</div><div style="display:flex;align-items:center;gap:8px;">' +
+          '<span style="color:var(--text-secondary,#B0CCCC);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>';
+      if (c.type) {
+        rowsHtml += '<button onclick="clearStorageCache(\'' + c.type + '\')" ' +
+          'style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;"' +
+          (c.size === 0 ? ' disabled style="opacity:0.3;"' : '') + '>Clear</button>';
+      }
+      rowsHtml += '</div></div>';
+    });
+    document.getElementById('storageRows').innerHTML = rowsHtml;
+  } catch(e) {
+    document.getElementById('storageChart').innerHTML = '<span style="color:var(--danger,#e74c3c);font-size:12px;">Failed to load storage info</span>';
+  }
+}
+
+async function clearStorageCache(type) {
+  var labels = {thumbnails: 'thumbnails', previews: 'previews', embeddings: 'label embeddings'};
+  if (!confirm('Clear all cached ' + (labels[type] || type) + '? They will be regenerated as needed.')) return;
+  await fetch('/api/storage/clear', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: type}),
+  });
+  loadStoragePanel();
 }
 </script>
 </body>

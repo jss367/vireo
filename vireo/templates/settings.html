@@ -205,6 +205,28 @@
         <span id="cfgSimilarityVal" style="font-size:13px;color:#E0F0F0;min-width:30px;">85%</span>
       </div>
     </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label">
+        Keyword casing
+        <small>How species names are capitalized when added as keywords. "Auto" matches your existing keywords.</small>
+      </div>
+      <select id="cfgKeywordCase" onchange="saveConfig()"
+              style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:4px 8px;font-size:13px;">
+        <option value="auto">Auto-detect</option>
+        <option value="title">Title Case (Black Phoebe)</option>
+        <option value="lower">Sentence case (Black phoebe)</option>
+      </select>
+    </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label">
+        Clean up keywords
+        <small>Merge duplicate keywords that differ only in capitalization (e.g. "House Finch" and "House finch").</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button onclick="cleanKeywords()" style="background:var(--bg-tertiary,#14374E);color:var(--text-secondary,#B0CCCC);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clean Keywords</button>
+        <span id="cleanKeywordsStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
+      </div>
+    </div>
   </div>
 
   <!-- HuggingFace -->
@@ -262,44 +284,6 @@
     </div>
   </div>
 
-  <!-- Storage Management -->
-  <div class="section">
-    <div class="section-title">Storage Management</div>
-
-    <!-- Usage bar chart -->
-    <div id="storageChart" style="margin-bottom:16px;"></div>
-    <div style="font-size:12px;color:var(--text-dim,#888);margin-bottom:16px;">
-      Total: <b id="storageTotalSize" style="color:var(--text-primary,#E0F0F0);">-</b>
-    </div>
-
-    <!-- Storage rows -->
-    <div id="storageRows"></div>
-
-    <!-- Preview settings -->
-    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-primary,#14374E);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-        <div>
-          <span style="font-size:13px;color:var(--text-primary,#E0F0F0);font-weight:500;">Preview Quality</span>
-          <div style="font-size:11px;color:var(--text-dim,#888);">Controls the resolution of cached preview images for the lightbox viewer.</div>
-        </div>
-        <select id="cfgPreviewSize" onchange="saveConfig()"
-                style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:4px 8px;font-size:12px;">
-          <option value="1280">1280px (fast, small)</option>
-          <option value="1920" selected>1920px (default)</option>
-          <option value="2560">2560px (high quality)</option>
-          <option value="3840">3840px (4K)</option>
-          <option value="0">Full resolution (1:1)</option>
-        </select>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button onclick="generatePreviews()" style="background:var(--accent,#24E5CA);color:var(--bg-primary,#0A1F2E);border:none;border-radius:4px;padding:6px 16px;font-size:12px;cursor:pointer;font-weight:500;">Generate Previews</button>
-        <span id="previewJobStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
-      </div>
-      <div id="previewProgress" style="display:none;margin-top:6px;">
-        <div style="height:4px;background:var(--border-primary,#14374E);border-radius:2px;overflow:hidden;"><div id="previewProgressFill" style="height:100%;background:var(--accent,#24E5CA);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>
-      </div>
-    </div>
-  </div>
 
   <!-- Embedding Matrix -->
   <div class="section">
@@ -387,7 +371,7 @@ async function loadConfig() {
     document.getElementById('cfgSimilarity').value = simPct;
     document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
     document.getElementById('cfgHfToken').value = cfg.hf_token || '';
-    document.getElementById('cfgPreviewSize').value = cfg.preview_max_size || 1920;
+    document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
   } catch(e) {}
 }
 
@@ -398,7 +382,7 @@ function saveConfig() {
     var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10) || 10;
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
     var hfToken = document.getElementById('cfgHfToken').value.trim();
-    var previewSize = parseInt(document.getElementById('cfgPreviewSize').value, 10) || 1920;
+    var keywordCase = document.getElementById('cfgKeywordCase').value;
     try {
       await fetch('/api/config', {
         method: 'POST',
@@ -407,7 +391,7 @@ function saveConfig() {
           classification_threshold: threshold,
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
-          preview_max_size: previewSize,
+          keyword_case: keywordCase,
           hf_token: hfToken,
         }),
       });
@@ -861,8 +845,6 @@ async function loadDashboard() {
     document.getElementById('thumbSize').textContent = formatBytes(d.thumb_cache_size);
   } catch(e) {}
 
-  // Load storage management panel
-  loadStoragePanel();
 }
 
 function formatBytes(b) {
@@ -1026,7 +1008,21 @@ async function loadPreviewCache() {
   } catch(e) {}
 }
 
+async function loadPreviewScope() {
+  try {
+    var resp = await fetch('/api/collections');
+    var collections = await resp.json();
+    var sel = document.getElementById('previewScope');
+    sel.innerHTML = '<option value="all">All photos</option>';
+    collections.forEach(function(c) {
+      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+    });
+  } catch(e) {}
+}
+
 async function generatePreviews() {
+  var scope = document.getElementById('previewScope').value;
+  var collectionId = scope === 'all' ? null : parseInt(scope);
   var status = document.getElementById('previewJobStatus');
   var progressDiv = document.getElementById('previewProgress');
   var progressFill = document.getElementById('previewProgressFill');
@@ -1038,7 +1034,7 @@ async function generatePreviews() {
     var resp = await fetch('/api/jobs/previews', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({}),
+      body: JSON.stringify({collection_id: collectionId}),
     });
     var data = await resp.json();
 
@@ -1179,6 +1175,49 @@ async function removeScanRoot(index) {
     });
     loadScanRoots();
   } catch(e) {}
+}
+
+async function cleanKeywords() {
+  var status = document.getElementById('cleanKeywordsStatus');
+  status.textContent = 'Checking...';
+  status.style.color = '';
+  try {
+    var resp = await fetch('/api/keywords/duplicates');
+    var dupes = await resp.json();
+    if (dupes.length === 0) {
+      status.textContent = 'No duplicates found';
+      status.style.color = 'var(--text-dim,#888)';
+      return;
+    }
+
+    // Build confirmation message
+    var msg = dupes.length + ' duplicate group(s) found:
+
+';
+    dupes.forEach(function(d) {
+      var variants = d.variants.map(function(v) {
+        return '"' + v.name + '" (' + v.photo_count + ' photos)';
+      });
+      msg += '  ' + variants.join(' + ') + '  →  keep "' + d.keep + '"
+';
+    });
+    msg += '
+Merge all duplicates?';
+
+    if (!confirm(msg)) {
+      status.textContent = 'Cancelled';
+      status.style.color = 'var(--text-dim,#888)';
+      return;
+    }
+
+    var mergeResp = await fetch('/api/keywords/clean', {method: 'POST'});
+    var data = await mergeResp.json();
+    status.textContent = 'Merged ' + data.merged + ' duplicate(s)';
+    status.style.color = 'var(--accent,#24E5CA)';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger,#e74c3c)';
+  }
 }
 
 /* ---------- Version ---------- */

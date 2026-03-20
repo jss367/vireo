@@ -362,16 +362,72 @@ class Database:
 
     # -- Keywords --
 
+    def detect_keyword_case_convention(self):
+        """Detect the casing convention used by existing species keywords.
+
+        Returns:
+            'title' if most are Title Case (e.g. "Black Phoebe")
+            'lower' if most are lowercase after first word (e.g. "Black phoebe")
+            'upper' if most are ALL CAPS
+            None if not enough data to determine
+        """
+        rows = self.conn.execute(
+            "SELECT name FROM keywords WHERE is_species = 1"
+        ).fetchall()
+        if len(rows) < 3:
+            return None
+
+        title_count = 0
+        lower_count = 0
+        for r in rows:
+            name = r["name"]
+            words = name.split()
+            if len(words) < 2:
+                continue
+            # Check the second word's casing
+            second = words[1]
+            if second[0].isupper():
+                title_count += 1
+            else:
+                lower_count += 1
+
+        if lower_count > title_count:
+            return "lower"
+        elif title_count > lower_count:
+            return "title"
+        return None
+
+    def _apply_case_convention(self, name, convention):
+        """Apply a casing convention to a species name."""
+        if convention == "lower":
+            # First word capitalized, rest lowercase: "Black phoebe"
+            words = name.split()
+            if len(words) > 1:
+                return words[0].capitalize() + " " + " ".join(w.lower() for w in words[1:])
+            return name.capitalize()
+        elif convention == "title":
+            # Title Case: "Black Phoebe"
+            return name.title()
+        return name
+
     def add_keyword(self, name, parent_id=None, is_species=False):
-        """Insert a keyword. Returns existing id if duplicate. Returns the keyword id."""
-        # Check for null parent_id separately since UNIQUE(name, parent_id) treats NULLs as distinct
+        """Insert a keyword. Returns existing id if duplicate (case-insensitive).
+
+        If a keyword with the same name but different casing exists, reuses
+        the existing one rather than creating a duplicate.
+
+        For new species keywords, auto-detects the user's casing convention
+        from existing keywords and applies it (unless overridden by config).
+        """
+        # Case-insensitive lookup
         if parent_id is None:
             existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? AND parent_id IS NULL", (name,)
+                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id IS NULL",
+                (name,),
             ).fetchone()
         else:
             existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?",
+                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE AND parent_id = ?",
                 (name, parent_id),
             ).fetchone()
         if existing:
@@ -384,12 +440,59 @@ class Database:
                 self.conn.commit()
             return existing["id"]
 
+        # Apply casing convention for new species keywords
+        if is_species:
+            import config as cfg
+
+            override = cfg.get("keyword_case")
+            if override and override != "auto":
+                name = self._apply_case_convention(name, override)
+            else:
+                convention = self.detect_keyword_case_convention()
+                if convention:
+                    name = self._apply_case_convention(name, convention)
+
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species) VALUES (?, ?, ?)",
             (name, parent_id, 1 if is_species else 0),
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def merge_duplicate_keywords(self):
+        """Find and merge case-insensitive duplicate keywords.
+
+        Keeps the lowest ID (earliest created), moves all photo associations,
+        and deletes the duplicates. Returns count of merges performed.
+        """
+        dupes = self.conn.execute(
+            """SELECT LOWER(name) as lname, MIN(id) as keep_id, GROUP_CONCAT(id) as all_ids
+               FROM keywords GROUP BY LOWER(name) HAVING COUNT(*) > 1"""
+        ).fetchall()
+
+        merged = 0
+        for d in dupes:
+            keep_id = d["keep_id"]
+            all_ids = [int(x) for x in d["all_ids"].split(",")]
+            remove_ids = [x for x in all_ids if x != keep_id]
+
+            for rid in remove_ids:
+                # Move photo associations (ignore if already exists for keep_id)
+                self.conn.execute(
+                    "UPDATE OR IGNORE photo_keywords SET keyword_id = ? WHERE keyword_id = ?",
+                    (keep_id, rid),
+                )
+                # Delete orphaned associations
+                self.conn.execute(
+                    "DELETE FROM photo_keywords WHERE keyword_id = ?", (rid,)
+                )
+                # Delete the duplicate keyword
+                self.conn.execute("DELETE FROM keywords WHERE id = ?", (rid,))
+                merged += 1
+
+        if merged:
+            self.conn.commit()
+        return merged
 
     def get_keyword_tree(self):
         """Return all keywords as a list of Row objects."""
@@ -525,7 +628,8 @@ class Database:
     def accept_prediction(self, prediction_id):
         """Accept a prediction: mark as accepted and add species keyword.
 
-        If the prediction belongs to a group, accepts all photos in the group.
+        If the prediction belongs to a group, derives the consensus species
+        from the individual votes and applies that to all photos.
         """
         pred = self.conn.execute(
             "SELECT * FROM predictions WHERE id = ?", (prediction_id,)
@@ -533,7 +637,19 @@ class Database:
         if not pred:
             return
 
-        kid = self.add_keyword(pred["species"], is_species=True)
+        # For grouped predictions, derive consensus from individual votes
+        species = pred["species"]
+        if pred["group_id"] and pred["individual"]:
+            import json as _json
+
+            try:
+                votes = _json.loads(pred["individual"])
+                best = max(votes, key=lambda sp: votes[sp])
+                species = best
+            except Exception:
+                pass
+
+        kid = self.add_keyword(species, is_species=True)
 
         # If grouped, accept all predictions in the group
         if pred["group_id"]:
@@ -544,16 +660,22 @@ class Database:
             for gp in group_preds:
                 self.update_prediction_status(gp["id"], "accepted")
                 self.tag_photo(gp["photo_id"], kid)
-                self.queue_change(gp["photo_id"], "keyword_add", pred["species"])
+                self.queue_change(gp["photo_id"], "keyword_add", species)
         else:
             self.update_prediction_status(prediction_id, "accepted")
             self.tag_photo(pred["photo_id"], kid)
-            self.queue_change(pred["photo_id"], "keyword_add", pred["species"])
+            self.queue_change(pred["photo_id"], "keyword_add", species)
 
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value):
-        """Add a change to the sync queue."""
+        """Add a change to the sync queue (skips if already queued)."""
+        existing = self.conn.execute(
+            "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ?",
+            (photo_id, change_type, value),
+        ).fetchone()
+        if existing:
+            return
         self.conn.execute(
             "INSERT INTO pending_changes (photo_id, change_type, value) VALUES (?, ?, ?)",
             (photo_id, change_type, value),
@@ -615,10 +737,19 @@ class Database:
 
         for rule in rules:
             field = rule["field"]
-            op = rule["op"]
-            value = rule["value"]
+            op = rule.get("op", "")
+            value = rule.get("value")
 
-            if field == "rating":
+            if field == "photo_ids":
+                # Static collection — explicit list of photo IDs
+                ids = value if isinstance(value, list) else []
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    conditions.append(f"p.id IN ({placeholders})")
+                    params.extend(ids)
+                else:
+                    conditions.append("0")  # empty collection
+            elif field == "rating":
                 if op == ">=":
                     conditions.append("p.rating >= ?")
                     params.append(value)

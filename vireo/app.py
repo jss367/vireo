@@ -82,7 +82,7 @@ def create_app(db_path, thumb_cache_dir=None):
         "~/.vireo/thumbnails"
     )
 
-    # Request timing middleware — logs slow requests
+    # Request timing middleware — logs slow requests and user actions
     @app.before_request
     def _start_timer():
         request._start_time = time.time()
@@ -91,14 +91,35 @@ def create_app(db_path, thumb_cache_dir=None):
     def _log_requests(response):
         if hasattr(request, "_start_time"):
             elapsed = time.time() - request._start_time
-            # Log all POST/DELETE actions (user-initiated) and slow requests
             if request.method in ("POST", "DELETE"):
+                # Log user actions with details about what changed
+                body = request.get_json(silent=True) or {}
+                detail = ""
+                path = request.path
+                if "/rating" in path:
+                    detail = f" rating={body.get('rating')}"
+                elif "/flag" in path:
+                    detail = f" flag={body.get('flag')}"
+                elif "/keywords" in path and request.method == "POST":
+                    detail = f" keyword={body.get('name')}"
+                elif "/accept" in path:
+                    detail = " (accept prediction)"
+                elif "/reject" in path:
+                    detail = " (reject prediction)"
+                elif "batch" in path:
+                    ids = body.get("photo_ids", [])
+                    detail = f" ({len(ids)} photos)"
+                elif "/classify" in path:
+                    detail = f" collection={body.get('collection_id')}"
+                elif "/scan" in path:
+                    detail = f" root={body.get('root', '')}"
                 log.info(
-                    "Action: %s %s → %s (%.1fs)",
+                    "Action: %s %s → %s (%.1fs)%s",
                     request.method,
-                    request.path,
+                    path,
                     response.status_code,
                     elapsed,
+                    detail,
                 )
             elif elapsed > 0.5:
                 log.warning(
@@ -108,6 +129,12 @@ def create_app(db_path, thumb_cache_dir=None):
                     elapsed,
                 )
         return response
+
+    # Catch uncaught exceptions so they don't disappear silently
+    @app.errorhandler(Exception)
+    def _handle_error(e):
+        log.exception("Unhandled error: %s %s", request.method, request.path)
+        return jsonify({"error": "Internal server error"}), 500
 
     def _get_db():
         """Get a Database instance. Creates a new connection per request."""
@@ -290,7 +317,7 @@ def create_app(db_path, thumb_cache_dir=None):
             if xmp_exists:
                 from compare import read_xmp_keywords
 
-                xmp_keywords = read_xmp_keywords(xmp_path)
+                xmp_keywords = sorted(read_xmp_keywords(xmp_path))
             result["xmp_exists"] = xmp_exists
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path
@@ -306,6 +333,37 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         keywords = db.get_keyword_tree()
         return jsonify([dict(k) for k in keywords])
+
+    @app.route("/api/keywords/duplicates")
+    def api_keyword_duplicates():
+        """Find case-insensitive duplicate keywords (preview before merge)."""
+        db = _get_db()
+        dupes = db.conn.execute(
+            """SELECT LOWER(name) as lname, GROUP_CONCAT(id) as ids,
+                      GROUP_CONCAT(name, ' | ') as names, COUNT(*) as cnt
+               FROM keywords GROUP BY LOWER(name) HAVING COUNT(*) > 1"""
+        ).fetchall()
+        results = []
+        for d in dupes:
+            ids = [int(x) for x in d["ids"].split(",")]
+            names = d["names"].split(" | ")
+            # Count photos for each variant
+            variants = []
+            for kid, kname in zip(ids, names):
+                count = db.conn.execute(
+                    "SELECT COUNT(*) FROM photo_keywords WHERE keyword_id = ?", (kid,)
+                ).fetchone()[0]
+                variants.append({"id": kid, "name": kname, "photo_count": count})
+            results.append({"variants": variants, "keep": variants[0]["name"]})
+        return jsonify(results)
+
+    @app.route("/api/keywords/clean", methods=["POST"])
+    def api_clean_keywords():
+        """Merge case-insensitive duplicate keywords."""
+        db = _get_db()
+        merged = db.merge_duplicate_keywords()
+        log.info("Keyword cleanup: merged %d duplicates", merged)
+        return jsonify({"ok": True, "merged": merged})
 
     # -- Undo stack (in-memory, session-only) --
     _undo_stack = []
@@ -591,6 +649,52 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    @app.route("/api/sync/preview")
+    def api_sync_preview():
+        """Preview all pending changes grouped by photo."""
+        db = _get_db()
+        changes = db.get_pending_changes()
+        if not changes:
+            return jsonify({"photos": [], "total_changes": 0})
+
+        # Group by photo
+        by_photo = {}
+        for c in changes:
+            pid = c["photo_id"]
+            if pid not in by_photo:
+                photo = db.get_photo(pid)
+                folder = db.conn.execute(
+                    "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+                ).fetchone()
+                by_photo[pid] = {
+                    "photo_id": pid,
+                    "filename": photo["filename"],
+                    "folder": folder["path"] if folder else "",
+                    "changes": [],
+                }
+            by_photo[pid]["changes"].append({
+                "id": c["id"],
+                "type": c["change_type"],
+                "value": c["value"],
+            })
+
+        return jsonify({
+            "photos": list(by_photo.values()),
+            "total_changes": len(changes),
+        })
+
+    @app.route("/api/sync/discard", methods=["POST"])
+    def api_sync_discard():
+        """Discard specific pending changes."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        change_ids = body.get("change_ids", [])
+        if not change_ids:
+            return jsonify({"error": "change_ids required"}), 400
+        db.clear_pending(change_ids)
+        log.info("Discarded %d pending changes", len(change_ids))
+        return jsonify({"ok": True, "discarded": len(change_ids)})
+
     # -- Collection API routes --
 
     @app.route("/api/collections")
@@ -617,6 +721,45 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         db.delete_collection(collection_id)
         return jsonify({"ok": True})
+
+    @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
+    def api_collection_add_photos(collection_id):
+        """Add photos to a static collection by appending to its photo_ids rule."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        if not photo_ids:
+            return jsonify({"error": "photo_ids required"}), 400
+
+        row = db.conn.execute(
+            "SELECT rules FROM collections WHERE id = ?", (collection_id,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "Collection not found"}), 404
+
+        rules = json.loads(row["rules"])
+        # Find or create a photo_ids rule
+        ids_rule = None
+        for r in rules:
+            if r.get("field") == "photo_ids":
+                ids_rule = r
+                break
+        if ids_rule is None:
+            ids_rule = {"field": "photo_ids", "value": []}
+            rules.append(ids_rule)
+
+        # Merge new IDs
+        existing = set(ids_rule["value"])
+        for pid in photo_ids:
+            existing.add(pid)
+        ids_rule["value"] = sorted(existing)
+
+        db.conn.execute(
+            "UPDATE collections SET rules = ? WHERE id = ?",
+            (json.dumps(rules), collection_id),
+        )
+        db.conn.commit()
+        return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
@@ -649,7 +792,22 @@ def create_app(db_path, thumb_cache_dir=None):
             )
         else:
             preds = db.get_predictions(status=status)
-        return jsonify([dict(p) for p in preds])
+
+        # Enrich disagreement/refinement predictions with existing species keywords
+        results = []
+        for p in preds:
+            d = dict(p)
+            if d.get("category") in ("disagreement", "refinement"):
+                keywords = db.get_photo_keywords(d["photo_id"])
+                existing_species = [
+                    k["name"] for k in keywords
+                    if db.conn.execute(
+                        "SELECT is_species FROM keywords WHERE id = ?", (k["id"],)
+                    ).fetchone()["is_species"]
+                ]
+                d["existing_species"] = existing_species
+            results.append(d)
+        return jsonify(results)
 
     @app.route("/api/predictions/<int:pred_id>/accept", methods=["POST"])
     def api_accept_prediction(pred_id):
@@ -1586,6 +1744,7 @@ def create_app(db_path, thumb_cache_dir=None):
                         "rate": round(
                             current / max(time.time() - job["_start_time"], 0.01), 1
                         ),
+                        "phase": "Scanning photos",
                     },
                 )
 
@@ -1593,9 +1752,8 @@ def create_app(db_path, thumb_cache_dir=None):
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental
             )
-            photo_count = thread_db.count_photos()
 
-            # Auto-generate thumbnails after scan
+            # Auto-generate thumbnails for new photos only
             from thumbnails import generate_all
 
             log.info("Generating thumbnails...")
@@ -1604,9 +1762,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 "progress",
                 {
                     "current": 0,
-                    "total": photo_count,
-                    "current_file": "Generating thumbnails...",
+                    "total": 0,
+                    "current_file": "Checking for new thumbnails...",
                     "rate": 0,
+                    "phase": "Generating thumbnails",
                 },
             )
 
@@ -1619,10 +1778,11 @@ def create_app(db_path, thumb_cache_dir=None):
                     {
                         "current": current,
                         "total": total,
-                        "current_file": "Generating thumbnails...",
+                        "current_file": "",
                         "rate": round(
                             current / max(time.time() - job["_start_time"], 0.01), 1
                         ),
+                        "phase": "Generating thumbnails",
                     },
                 )
 
@@ -2436,28 +2596,31 @@ def create_app(db_path, thumb_cache_dir=None):
                     )
 
                     # Store prediction for each photo in the group
+                    # Keep each photo's original species/confidence — only set group fields
                     for item in group:
                         if item.get("_existing"):
-                            # Update group info on existing prediction
+                            # Update group info only, preserve original species/confidence
                             thread_db.conn.execute(
-                                """UPDATE predictions SET group_id=?, vote_count=?, total_votes=?, individual=?
+                                """UPDATE predictions
+                                   SET group_id=?, vote_count=?, total_votes=?, individual=?
                                    WHERE photo_id=? AND model=?""",
                                 (gid, cons["vote_count"], cons["total_votes"],
                                  individual_json, item["photo"]["id"], model_name),
                             )
                             thread_db.conn.commit()
                         else:
+                            # New prediction — store individual species/confidence
                             thread_db.add_prediction(
                                 photo_id=item["photo"]["id"],
-                                species=cons["prediction"],
-                                confidence=round(cons["confidence"], 4),
+                                species=item["prediction"],
+                                confidence=round(item["confidence"], 4),
                                 model=model_name,
                                 category=category,
                                 group_id=gid,
                                 vote_count=cons["vote_count"],
                                 total_votes=cons["total_votes"],
                                 individual=individual_json,
-                                taxonomy=cons_hierarchy,
+                                taxonomy=item.get("taxonomy") or cons_hierarchy,
                             )
                     predictions_stored += len(group)
 
@@ -2608,7 +2771,28 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/thumbnails/<filename>")
     def serve_thumbnail(filename):
-        return send_from_directory(app.config["THUMB_CACHE_DIR"], filename)
+        thumb_path = os.path.join(app.config["THUMB_CACHE_DIR"], filename)
+        if os.path.exists(thumb_path):
+            return send_from_directory(app.config["THUMB_CACHE_DIR"], filename)
+
+        # Try to generate on the fly
+        try:
+            photo_id = int(filename.replace(".jpg", ""))
+            db = _get_db()
+            photo = db.conn.execute(
+                "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+                (photo_id,),
+            ).fetchone()
+            if photo:
+                from thumbnails import generate_thumbnail
+                source = os.path.join(photo["path"], photo["filename"])
+                result = generate_thumbnail(photo_id, source, app.config["THUMB_CACHE_DIR"])
+                if result:
+                    return send_from_directory(app.config["THUMB_CACHE_DIR"], filename)
+        except Exception:
+            pass
+
+        return "", 404
 
     @app.route("/api/species/<path:species_name>/clusters")
     def api_species_clusters(species_name):
@@ -2941,9 +3125,13 @@ def create_app(db_path, thumb_cache_dir=None):
     def logs_page():
         return render_template("logs.html")
 
-    @app.route("/stats")
-    def stats_page():
+    @app.route("/dashboard")
+    def dashboard_page():
         return render_template("stats.html")
+
+    @app.route("/stats")
+    def stats_redirect():
+        return redirect("/dashboard")
 
     return app
 
@@ -2965,6 +3153,21 @@ def main():
     args = parser.parse_args()
 
     app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
+
+    # Startup banner
+    import config as cfg
+    startup_cfg = cfg.load()
+    log.info("=" * 50)
+    log.info("Vireo starting on http://localhost:%d", args.port)
+    log.info("  Database: %s", args.db)
+    log.info("  Thumbnails: %s", args.thumb_dir)
+    log.info("  Threshold: %.0f%%  Grouping: %ds  Similarity: %.0f%%",
+             startup_cfg.get("classification_threshold", 0.4) * 100,
+             startup_cfg.get("grouping_window_seconds", 10),
+             startup_cfg.get("similarity_threshold", 0.85) * 100)
+    if startup_cfg.get("hf_token"):
+        log.info("  HuggingFace token: configured")
+    log.info("=" * 50)
 
     # Open browser after server is ready, not before
     if not args.no_browser:

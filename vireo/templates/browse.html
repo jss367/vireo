@@ -1106,31 +1106,55 @@ async function batchAddKeyword() {
 
 async function addToCollection() {
   if (selectedPhotos.size === 0) return;
-  var name = prompt('Collection name for ' + selectedPhotos.size + ' photos:\n\n(This tags all selected photos with this name and creates a matching collection.)');
-  if (!name) return;
-  name = name.trim();
-  if (!name) return;
+
+  // Build a picker: existing collections + option to create new
+  try {
+    var resp = await fetch('/api/collections');
+    var collections = await resp.json();
+  } catch(e) { return; }
+
+  var options = collections.map(function(c) { return c.name + ' (id:' + c.id + ')'; });
+  var choiceStr = 'Add ' + selectedPhotos.size + ' photo(s) to which collection?\n\n';
+  options.forEach(function(o, i) { choiceStr += (i + 1) + '. ' + o + '\n'; });
+  choiceStr += '\nEnter a number to add to existing, or type a new name to create one:';
+
+  var choice = prompt(choiceStr);
+  if (!choice) return;
+  choice = choice.trim();
+  if (!choice) return;
 
   var ids = Array.from(selectedPhotos);
+  var collectionId = null;
+  var collectionName = '';
 
-  // Tag all selected photos with this keyword
-  await fetch('/api/batch/keyword', {
+  // Check if user entered a number
+  var num = parseInt(choice);
+  if (!isNaN(num) && num >= 1 && num <= collections.length) {
+    collectionId = collections[num - 1].id;
+    collectionName = collections[num - 1].name;
+  } else {
+    // Create a new static collection
+    collectionName = choice;
+    var createResp = await fetch('/api/collections', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: collectionName,
+        rules: [{"field": "photo_ids", "value": []}],
+      }),
+    });
+    var createData = await createResp.json();
+    collectionId = createData.id;
+  }
+
+  // Add photos to the collection
+  await fetch('/api/collections/' + collectionId + '/add-photos', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids, name: name}),
+    body: JSON.stringify({photo_ids: ids}),
   });
 
-  // Create a collection that matches this keyword
-  await fetch('/api/collections', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      name: name,
-      rules: [{"field": "keyword", "op": "contains", "value": name}],
-    }),
-  });
-
-  showToast('Created collection "' + name + '" with ' + ids.length + ' photos');
+  showToast('Added ' + ids.length + ' photos to "' + collectionName + '"');
   loadCollections();
   clearSelection();
 }

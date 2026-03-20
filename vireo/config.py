@@ -13,6 +13,7 @@ DEFAULTS = {
     "grouping_window_seconds": 10,
     "similarity_threshold": 0.85,
     "preview_max_size": 1920,
+    "keyword_case": "auto",
     "hf_token": "",
     "scan_roots": [],
 }
