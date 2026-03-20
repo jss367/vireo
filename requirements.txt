@@ -1,7 +1,12 @@
+backports.tarfile
 flask
+huggingface_hub
+lightning
 numpy
+omegaconf
 Pillow
 pybioclip
 PytorchWildlife
 rawpy
 scipy
+transformers
