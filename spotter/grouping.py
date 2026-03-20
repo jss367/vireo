@@ -29,12 +29,12 @@ def group_by_timestamp(photos, window_seconds=10):
         curr = photos[i]
 
         # If either has no timestamp, start a new group
-        if prev['timestamp'] is None or curr['timestamp'] is None:
+        if prev["timestamp"] is None or curr["timestamp"] is None:
             groups.append(current_group)
             current_group = [curr]
             continue
 
-        delta = abs((curr['timestamp'] - prev['timestamp']).total_seconds())
+        delta = abs((curr["timestamp"] - prev["timestamp"]).total_seconds())
         if delta <= window_seconds:
             current_group.append(curr)
         else:
@@ -75,7 +75,7 @@ def refine_groups_by_similarity(groups, similarity_threshold=0.85):
         subgroups = [[group[0]]]
 
         for i in range(1, len(group)):
-            curr_emb = group[i].get('embedding')
+            curr_emb = group[i].get("embedding")
             placed = False
 
             if curr_emb is not None:
@@ -83,7 +83,7 @@ def refine_groups_by_similarity(groups, similarity_threshold=0.85):
                 for sg in subgroups:
                     # Check if similar to any member of this subgroup
                     for member in sg:
-                        mem_emb = member.get('embedding')
+                        mem_emb = member.get("embedding")
                         if mem_emb is not None:
                             sim = float(np.dot(curr_emb, mem_emb))
                             if sim >= similarity_threshold:
@@ -99,16 +99,23 @@ def refine_groups_by_similarity(groups, similarity_threshold=0.85):
                     subgroups[-1].append(group[i])
                 else:
                     # Doesn't match any existing subgroup — start a new one
-                    log.debug("New subgroup at %s (no match >= %.3f)",
-                              group[i]['filename'], similarity_threshold)
+                    log.debug(
+                        "New subgroup at %s (no match >= %.3f)",
+                        group[i]["filename"],
+                        similarity_threshold,
+                    )
                     subgroups.append([group[i]])
 
         refined.extend(subgroups)
 
     split_count = len(refined) - len(groups)
     if split_count > 0:
-        log.info("Similarity refinement: %d time-based groups → %d groups (%d splits)",
-                 len(groups), len(refined), split_count)
+        log.info(
+            "Similarity refinement: %d time-based groups → %d groups (%d splits)",
+            len(groups),
+            len(refined),
+            split_count,
+        )
 
     return refined
 
@@ -129,13 +136,13 @@ def consensus_prediction(predictions):
     """
     if not predictions:
         return None
-    counts = Counter(p['prediction'] for p in predictions)
+    counts = Counter(p["prediction"] for p in predictions)
     individual = dict(counts)
 
     # Group confidences by prediction
     conf_by_pred = {}
     for p in predictions:
-        conf_by_pred.setdefault(p['prediction'], []).append(p['confidence'])
+        conf_by_pred.setdefault(p["prediction"], []).append(p["confidence"])
 
     # Pick the most common; break ties by higher average confidence
     best = max(
@@ -146,11 +153,11 @@ def consensus_prediction(predictions):
     avg_conf = sum(conf_by_pred[best]) / len(conf_by_pred[best])
 
     return {
-        'prediction': best,
-        'confidence': round(avg_conf, 4),
-        'vote_count': counts[best],
-        'total_votes': len(predictions),
-        'individual_predictions': individual,
+        "prediction": best,
+        "confidence": round(avg_conf, 4),
+        "vote_count": counts[best],
+        "total_votes": len(predictions),
+        "individual_predictions": individual,
     }
 
 
@@ -174,7 +181,9 @@ def read_exif_timestamp(image_path):
                 return None
 
             # DateTimeOriginal tag
-            dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(ExifBase.DateTimeDigitized)
+            dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(
+                ExifBase.DateTimeDigitized
+            )
             if dt_str:
                 return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
     except Exception:

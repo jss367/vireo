@@ -21,7 +21,8 @@ class Database:
         self._create_tables()
 
     def _create_tables(self):
-        self.conn.executescript("""
+        self.conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS folders (
                 id          INTEGER PRIMARY KEY,
                 path        TEXT UNIQUE,
@@ -109,12 +110,15 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
-        """)
+        """
+        )
         # Migrations for existing databases
         try:
             self.conn.execute("SELECT is_species FROM keywords LIMIT 0")
         except Exception:
-            self.conn.execute("ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0")
+            self.conn.execute(
+                "ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0"
+            )
         try:
             self.conn.execute("SELECT group_id FROM predictions LIMIT 0")
         except Exception:
@@ -141,7 +145,9 @@ class Database:
         try:
             self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
         except Exception:
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT")
+            self.conn.execute(
+                "ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT"
+            )
             self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_phylum TEXT")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_class TEXT")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_order TEXT")
@@ -160,8 +166,10 @@ class Database:
         self.conn.commit()
         if cur.lastrowid:
             return cur.lastrowid
-        row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (path,)).fetchone()
-        return row['id']
+        row = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ?", (path,)
+        ).fetchone()
+        return row["id"]
 
     def get_folder_tree(self):
         """Return all folders as a list of Row objects."""
@@ -171,16 +179,35 @@ class Database:
 
     # -- Photos --
 
-    def add_photo(self, folder_id, filename, extension, file_size, file_mtime,
-                  timestamp=None, width=None, height=None, xmp_mtime=None):
+    def add_photo(
+        self,
+        folder_id,
+        filename,
+        extension,
+        file_size,
+        file_mtime,
+        timestamp=None,
+        width=None,
+        height=None,
+        xmp_mtime=None,
+    ):
         """Insert a photo. Returns the photo id."""
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO photos
                (folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                 timestamp, width, height)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
-             timestamp, width, height),
+            (
+                folder_id,
+                filename,
+                extension,
+                file_size,
+                file_mtime,
+                xmp_mtime,
+                timestamp,
+                width,
+                height,
+            ),
         )
         self.conn.commit()
         if cur.lastrowid:
@@ -189,7 +216,7 @@ class Database:
             "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
             (folder_id, filename),
         ).fetchone()
-        return row['id']
+        return row["id"]
 
     # Columns to return in photo queries (excludes large binary fields like embedding)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
@@ -218,8 +245,17 @@ class Database:
         """Return pending changes count."""
         return self.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
 
-    def get_photos(self, folder_id=None, page=1, per_page=50, sort='date',
-                   rating_min=None, date_from=None, date_to=None, keyword=None):
+    def get_photos(
+        self,
+        folder_id=None,
+        page=1,
+        per_page=50,
+        sort="date",
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+    ):
         """Return paginated, filtered photo list."""
         conditions = []
         params = []
@@ -252,21 +288,21 @@ class Database:
             where = "WHERE " + " AND ".join(conditions)
 
         sort_map = {
-            'date': 'p.timestamp ASC',
-            'date_desc': 'p.timestamp DESC',
-            'name': 'p.filename ASC',
-            'name_desc': 'p.filename DESC',
-            'rating': 'p.rating DESC',
-            'sharpness': 'p.sharpness DESC',
-            'sharpness_asc': 'p.sharpness ASC',
-            'quality': 'p.quality_score DESC',
+            "date": "p.timestamp ASC",
+            "date_desc": "p.timestamp DESC",
+            "name": "p.filename ASC",
+            "name_desc": "p.filename DESC",
+            "rating": "p.rating DESC",
+            "sharpness": "p.sharpness DESC",
+            "sharpness_asc": "p.sharpness ASC",
+            "quality": "p.quality_score DESC",
         }
-        order = sort_map.get(sort, 'p.timestamp ASC')
+        order = sort_map.get(sort, "p.timestamp ASC")
 
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
-        pcols = ', '.join(f'p.{c.strip()}' for c in self.PHOTO_COLS.split(','))
+        pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
         query = f"""
             SELECT {pcols} FROM photos p
             {join_clause}
@@ -278,7 +314,9 @@ class Database:
 
     def update_photo_rating(self, photo_id, rating):
         """Set photo rating (0-5)."""
-        self.conn.execute("UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id))
+        self.conn.execute(
+            "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
+        )
         self.conn.commit()
 
     def update_photo_flag(self, photo_id, flag):
@@ -288,21 +326,37 @@ class Database:
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
-        self.conn.execute("UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id))
+        self.conn.execute(
+            "UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id)
+        )
         self.conn.commit()
 
-    def update_photo_quality(self, photo_id, detection_box=None, detection_conf=None,
-                             subject_sharpness=None, subject_size=None, quality_score=None,
-                             sharpness=None):
+    def update_photo_quality(
+        self,
+        photo_id,
+        detection_box=None,
+        detection_conf=None,
+        subject_sharpness=None,
+        subject_size=None,
+        quality_score=None,
+        sharpness=None,
+    ):
         """Update all quality-related scores for a photo."""
         import json as _json
+
         self.conn.execute(
             """UPDATE photos SET detection_box=?, detection_conf=?,
                subject_sharpness=?, subject_size=?, quality_score=?, sharpness=?
                WHERE id=?""",
-            (_json.dumps(detection_box) if detection_box else None,
-             detection_conf, subject_sharpness, subject_size, quality_score,
-             sharpness, photo_id),
+            (
+                _json.dumps(detection_box) if detection_box else None,
+                detection_conf,
+                subject_sharpness,
+                subject_size,
+                quality_score,
+                sharpness,
+                photo_id,
+            ),
         )
         self.conn.commit()
 
@@ -317,17 +371,18 @@ class Database:
             ).fetchone()
         else:
             existing = self.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?", (name, parent_id)
+                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?",
+                (name, parent_id),
             ).fetchone()
         if existing:
             # Update is_species if it wasn't set before
             if is_species:
                 self.conn.execute(
                     "UPDATE keywords SET is_species = 1 WHERE id = ? AND is_species = 0",
-                    (existing['id'],),
+                    (existing["id"],),
                 )
                 self.conn.commit()
-            return existing['id']
+            return existing["id"]
 
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species) VALUES (?, ?, ?)",
@@ -371,9 +426,19 @@ class Database:
 
     # -- Predictions --
 
-    def add_prediction(self, photo_id, species, confidence, model, category='new',
-                       group_id=None, vote_count=None, total_votes=None, individual=None,
-                       taxonomy=None):
+    def add_prediction(
+        self,
+        photo_id,
+        species,
+        confidence,
+        model,
+        category="new",
+        group_id=None,
+        vote_count=None,
+        total_votes=None,
+        individual=None,
+        taxonomy=None,
+    ):
         """Store a classification prediction for a photo.
 
         Uses INSERT OR IGNORE so re-running classification doesn't destroy
@@ -392,11 +457,24 @@ class Database:
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
                 taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (photo_id, species, confidence, model, category,
-             group_id, vote_count, total_votes, individual,
-             tax.get('kingdom'), tax.get('phylum'), tax.get('class'),
-             tax.get('order'), tax.get('family'), tax.get('genus'),
-             tax.get('scientific_name')),
+            (
+                photo_id,
+                species,
+                confidence,
+                model,
+                category,
+                group_id,
+                vote_count,
+                total_votes,
+                individual,
+                tax.get("kingdom"),
+                tax.get("phylum"),
+                tax.get("class"),
+                tax.get("order"),
+                tax.get("family"),
+                tax.get("genus"),
+                tax.get("scientific_name"),
+            ),
         )
         self.conn.commit()
 
@@ -408,7 +486,7 @@ class Database:
             conditions.append("model = ?")
             params.append(model)
         if collection_photo_ids is not None:
-            placeholders = ','.join('?' for _ in collection_photo_ids)
+            placeholders = ",".join("?" for _ in collection_photo_ids)
             conditions.append(f"photo_id IN ({placeholders})")
             params.extend(collection_photo_ids)
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
@@ -420,7 +498,7 @@ class Database:
         conditions = []
         params = []
         if photo_ids is not None:
-            placeholders = ','.join('?' for _ in photo_ids)
+            placeholders = ",".join("?" for _ in photo_ids)
             conditions.append(f"pr.photo_id IN ({placeholders})")
             params.extend(photo_ids)
         if model:
@@ -433,7 +511,8 @@ class Database:
         return self.conn.execute(
             f"""SELECT pr.*, p.filename, p.timestamp FROM predictions pr
                 JOIN photos p ON p.id = pr.photo_id
-                {where} ORDER BY pr.confidence DESC""", params
+                {where} ORDER BY pr.confidence DESC""",
+            params,
         ).fetchall()
 
     def update_prediction_status(self, prediction_id, status):
@@ -454,22 +533,22 @@ class Database:
         if not pred:
             return
 
-        kid = self.add_keyword(pred['species'], is_species=True)
+        kid = self.add_keyword(pred["species"], is_species=True)
 
         # If grouped, accept all predictions in the group
-        if pred['group_id']:
+        if pred["group_id"]:
             group_preds = self.conn.execute(
                 "SELECT * FROM predictions WHERE group_id = ? AND model = ?",
-                (pred['group_id'], pred['model']),
+                (pred["group_id"], pred["model"]),
             ).fetchall()
             for gp in group_preds:
-                self.update_prediction_status(gp['id'], 'accepted')
-                self.tag_photo(gp['photo_id'], kid)
-                self.queue_change(gp['photo_id'], 'keyword_add', pred['species'])
+                self.update_prediction_status(gp["id"], "accepted")
+                self.tag_photo(gp["photo_id"], kid)
+                self.queue_change(gp["photo_id"], "keyword_add", pred["species"])
         else:
-            self.update_prediction_status(prediction_id, 'accepted')
-            self.tag_photo(pred['photo_id'], kid)
-            self.queue_change(pred['photo_id'], 'keyword_add', pred['species'])
+            self.update_prediction_status(prediction_id, "accepted")
+            self.tag_photo(pred["photo_id"], kid)
+            self.queue_change(pred["photo_id"], "keyword_add", pred["species"])
 
     # -- Pending Changes --
 
@@ -491,7 +570,7 @@ class Database:
         """Delete pending changes by id."""
         if not change_ids:
             return
-        placeholders = ','.join('?' for _ in change_ids)
+        placeholders = ",".join("?" for _ in change_ids)
         self.conn.execute(
             f"DELETE FROM pending_changes WHERE id IN ({placeholders})",
             change_ids,
@@ -528,110 +607,128 @@ class Database:
         if not row:
             return []
 
-        rules = json.loads(row['rules'])
+        rules = json.loads(row["rules"])
         conditions = []
         params = []
         need_keyword_join = False
         need_prediction_join = False
 
         for rule in rules:
-            field = rule['field']
-            op = rule['op']
-            value = rule['value']
+            field = rule["field"]
+            op = rule["op"]
+            value = rule["value"]
 
-            if field == 'rating':
-                if op == '>=':
+            if field == "rating":
+                if op == ">=":
                     conditions.append("p.rating >= ?")
                     params.append(value)
-                elif op == '<=':
+                elif op == "<=":
                     conditions.append("p.rating <= ?")
                     params.append(value)
-                elif op in ('equals', 'is'):
+                elif op in ("equals", "is"):
                     conditions.append("p.rating = ?")
                     params.append(value)
-                elif op == 'is not':
+                elif op == "is not":
                     conditions.append("p.rating != ?")
                     params.append(value)
-            elif field == 'keyword':
-                if op == 'contains':
+            elif field == "keyword":
+                if op == "contains":
                     need_keyword_join = True
                     conditions.append("k.name LIKE ?")
                     params.append(f"%{value}%")
-                elif op == 'not_contains':
-                    conditions.append("""NOT EXISTS (
+                elif op == "not_contains":
+                    conditions.append(
+                        """NOT EXISTS (
                         SELECT 1 FROM photo_keywords pk4
                         JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name LIKE ?)""")
+                        WHERE pk4.photo_id = p.id AND k4.name LIKE ?)"""
+                    )
                     params.append(f"%{value}%")
-                elif op in ('equals', 'is'):
+                elif op in ("equals", "is"):
                     need_keyword_join = True
                     conditions.append("k.name = ?")
                     params.append(value)
-                elif op == 'is not':
-                    conditions.append("""NOT EXISTS (
+                elif op == "is not":
+                    conditions.append(
+                        """NOT EXISTS (
                         SELECT 1 FROM photo_keywords pk4
                         JOIN keywords k4 ON k4.id = pk4.keyword_id
-                        WHERE pk4.photo_id = p.id AND k4.name = ?)""")
+                        WHERE pk4.photo_id = p.id AND k4.name = ?)"""
+                    )
                     params.append(value)
-            elif field == 'folder':
-                if op == 'under':
+            elif field == "folder":
+                if op == "under":
                     conditions.append("f.path LIKE ?")
                     params.append(f"{value}%")
-                elif op == 'not_under':
+                elif op == "not_under":
                     conditions.append("(f.path IS NULL OR f.path NOT LIKE ?)")
                     params.append(f"{value}%")
-            elif field == 'flag':
-                if op in ('equals', 'is'):
+            elif field == "flag":
+                if op in ("equals", "is"):
                     conditions.append("p.flag = ?")
                     params.append(value)
-                elif op == 'is not':
+                elif op == "is not":
                     conditions.append("p.flag != ?")
                     params.append(value)
-            elif field == 'has_species':
-                if op == 'equals' and value is False or value == 0:
-                    conditions.append("""NOT EXISTS (
+            elif field == "has_species":
+                if op == "equals" and value is False or value == 0:
+                    conditions.append(
+                        """NOT EXISTS (
                         SELECT 1 FROM photo_keywords pk3
                         JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)""")
-                elif op == 'equals' and value is True or value == 1:
-                    conditions.append("""EXISTS (
+                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
+                    )
+                elif op == "equals" and value is True or value == 1:
+                    conditions.append(
+                        """EXISTS (
                         SELECT 1 FROM photo_keywords pk3
                         JOIN keywords k3 ON k3.id = pk3.keyword_id
-                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)""")
-            elif field == 'keyword_count':
-                if op == 'equals':
-                    conditions.append("""(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) = ?""")
+                        WHERE pk3.photo_id = p.id AND k3.is_species = 1)"""
+                    )
+            elif field == "keyword_count":
+                if op == "equals":
+                    conditions.append(
+                        """(SELECT COUNT(*) FROM photo_keywords pk2
+                                         WHERE pk2.photo_id = p.id) = ?"""
+                    )
                     params.append(value)
-                elif op == '>=':
-                    conditions.append("""(SELECT COUNT(*) FROM photo_keywords pk2
-                                         WHERE pk2.photo_id = p.id) >= ?""")
+                elif op == ">=":
+                    conditions.append(
+                        """(SELECT COUNT(*) FROM photo_keywords pk2
+                                         WHERE pk2.photo_id = p.id) >= ?"""
+                    )
                     params.append(value)
-            elif field == 'timestamp':
-                if op == 'between' and isinstance(value, list) and len(value) == 2:
+            elif field == "timestamp":
+                if op == "between" and isinstance(value, list) and len(value) == 2:
                     conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
                     params.extend(value)
-                elif op == 'recent_days':
+                elif op == "recent_days":
                     conditions.append("p.timestamp >= datetime('now', ?)")
                     params.append(f"-{value} days")
-            elif field == 'extension':
-                if op in ('equals', 'is'):
+            elif field == "extension":
+                if op in ("equals", "is"):
                     conditions.append("p.extension = ?")
                     params.append(value)
-                elif op == 'is not':
+                elif op == "is not":
                     conditions.append("p.extension != ?")
                     params.append(value)
-            elif field in ('taxonomy_kingdom', 'taxonomy_phylum', 'taxonomy_class',
-                           'taxonomy_order', 'taxonomy_family', 'taxonomy_genus'):
+            elif field in (
+                "taxonomy_kingdom",
+                "taxonomy_phylum",
+                "taxonomy_class",
+                "taxonomy_order",
+                "taxonomy_family",
+                "taxonomy_genus",
+            ):
                 need_prediction_join = True
-                col = f'pred.{field}'
-                if op in ('equals', 'is'):
+                col = f"pred.{field}"
+                if op in ("equals", "is"):
                     conditions.append(f"{col} = ?")
                     params.append(value)
-                elif op == 'is not':
+                elif op == "is not":
                     conditions.append(f"({col} IS NULL OR {col} != ?)")
                     params.append(value)
-                elif op == 'contains':
+                elif op == "contains":
                     conditions.append(f"{col} LIKE ?")
                     params.append(f"%{value}%")
 
@@ -652,7 +749,7 @@ class Database:
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
-        pcols = ', '.join(f'p.{c.strip()}' for c in self.PHOTO_COLS.split(','))
+        pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
         query = f"""
             SELECT DISTINCT {pcols} FROM photos p
             {folder_join}
@@ -665,11 +762,13 @@ class Database:
 
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""
-        self.conn.execute("""
+        self.conn.execute(
+            """
             UPDATE folders SET photo_count = (
                 SELECT COUNT(*) FROM photos WHERE photos.folder_id = folders.id
             )
-        """)
+        """
+        )
         self.conn.commit()
 
     def mark_species_keywords(self, taxonomy):
@@ -678,11 +777,15 @@ class Database:
         Args:
             taxonomy: a Taxonomy instance with is_taxon() method
         """
-        keywords = self.conn.execute("SELECT id, name FROM keywords WHERE is_species = 0").fetchall()
+        keywords = self.conn.execute(
+            "SELECT id, name FROM keywords WHERE is_species = 0"
+        ).fetchall()
         updated = 0
         for kw in keywords:
-            if taxonomy.is_taxon(kw['name']):
-                self.conn.execute("UPDATE keywords SET is_species = 1 WHERE id = ?", (kw['id'],))
+            if taxonomy.is_taxon(kw["name"]):
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1 WHERE id = ?", (kw["id"],)
+                )
                 updated += 1
         if updated:
             self.conn.commit()
@@ -690,13 +793,19 @@ class Database:
 
     def create_default_collections(self):
         """Create default smart collections, skipping any that already exist by name."""
-        existing_names = {c['name'] for c in self.get_collections()}
+        existing_names = {c["name"] for c in self.get_collections()}
 
         defaults = [
-            ('Needs Classification', [{"field": "has_species", "op": "equals", "value": 0}]),
-            ('Untagged', [{"field": "keyword_count", "op": "equals", "value": 0}]),
-            ('Flagged', [{"field": "flag", "op": "equals", "value": "flagged"}]),
-            ('Recent Import', [{"field": "timestamp", "op": "recent_days", "value": 30}]),
+            (
+                "Needs Classification",
+                [{"field": "has_species", "op": "equals", "value": 0}],
+            ),
+            ("Untagged", [{"field": "keyword_count", "op": "equals", "value": 0}]),
+            ("Flagged", [{"field": "flag", "op": "equals", "value": "flagged"}]),
+            (
+                "Recent Import",
+                [{"field": "timestamp", "op": "recent_days", "value": 30}],
+            ),
         ]
         for name, rules in defaults:
             if name not in existing_names:

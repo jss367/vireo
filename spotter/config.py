@@ -9,12 +9,12 @@ log = logging.getLogger(__name__)
 CONFIG_PATH = os.path.expanduser("~/.spotter/config.json")
 
 DEFAULTS = {
-    'classification_threshold': 0.4,
-    'grouping_window_seconds': 10,
-    'similarity_threshold': 0.85,
-    'preview_max_size': 1920,
-    'hf_token': '',
-    'scan_roots': [],
+    "classification_threshold": 0.4,
+    "grouping_window_seconds": 10,
+    "similarity_threshold": 0.85,
+    "preview_max_size": 1920,
+    "hf_token": "",
+    "scan_roots": [],
 }
 
 
@@ -33,7 +33,7 @@ def load():
 def save(config):
     """Save config to disk."""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, 'w') as f:
+    with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
 

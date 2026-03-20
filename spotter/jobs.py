@@ -29,7 +29,8 @@ class JobRunner:
             self._ensure_history_table(db)
 
     def _ensure_history_table(self, db):
-        db.conn.executescript("""
+        db.conn.executescript(
+            """
             CREATE TABLE IF NOT EXISTS job_history (
                 id          TEXT PRIMARY KEY,
                 type        TEXT,
@@ -41,7 +42,8 @@ class JobRunner:
                 error_count INTEGER DEFAULT 0,
                 config      TEXT
             );
-        """)
+        """
+        )
 
     def start(self, job_type, work_fn, config=None):
         """Start a background job.
@@ -59,15 +61,15 @@ class JobRunner:
         now = datetime.now().isoformat()
 
         job = {
-            'id': job_id,
-            'type': job_type,
-            'status': 'running',
-            'started_at': now,
-            'finished_at': None,
-            'progress': {'current': 0, 'total': 0, 'current_file': ''},
-            'result': None,
-            'errors': [],
-            'config': config or {},
+            "id": job_id,
+            "type": job_type,
+            "status": "running",
+            "started_at": now,
+            "finished_at": None,
+            "progress": {"current": 0, "total": 0, "current_file": ""},
+            "result": None,
+            "errors": [],
+            "config": config or {},
         }
 
         with self._lock:
@@ -85,21 +87,25 @@ class JobRunner:
         start_time = time.time()
         try:
             result = work_fn(job)
-            job['status'] = 'completed'
-            job['result'] = result
+            job["status"] = "completed"
+            job["result"] = result
         except Exception as e:
-            job['status'] = 'failed'
-            job['errors'].append(str(e))
-            log.exception("Job %s failed", job['id'])
+            job["status"] = "failed"
+            job["errors"].append(str(e))
+            log.exception("Job %s failed", job["id"])
         finally:
             elapsed = time.time() - start_time
-            job['finished_at'] = datetime.now().isoformat()
-            self.push_event(job['id'], 'complete', {
-                'status': job['status'],
-                'result': job['result'],
-                'duration': round(elapsed, 1),
-                'errors': job['errors'],
-            })
+            job["finished_at"] = datetime.now().isoformat()
+            self.push_event(
+                job["id"],
+                "complete",
+                {
+                    "status": job["status"],
+                    "result": job["result"],
+                    "duration": round(elapsed, 1),
+                    "errors": job["errors"],
+                },
+            )
             if self._db_path:
                 self._persist_job(job, elapsed)
 
@@ -109,28 +115,37 @@ class JobRunner:
             return
         try:
             import sqlite3
+
             conn = sqlite3.connect(self._db_path, timeout=10)
 
             # For failed jobs, store the error message in result
-            result_data = job['result']
-            if job['status'] == 'failed' and job['errors']:
-                result_data = {'error': job['errors'][0]}
+            result_data = job["result"]
+            if job["status"] == "failed" and job["errors"]:
+                result_data = {"error": job["errors"][0]}
 
             conn.execute(
                 """INSERT OR REPLACE INTO job_history
                    (id, type, status, started_at, finished_at, duration,
                     result, error_count, config)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (job['id'], job['type'], job['status'],
-                 job['started_at'], job['finished_at'], round(duration, 1),
-                 json.dumps(result_data),
-                 len(job['errors']),
-                 json.dumps(job['config'])),
+                (
+                    job["id"],
+                    job["type"],
+                    job["status"],
+                    job["started_at"],
+                    job["finished_at"],
+                    round(duration, 1),
+                    json.dumps(result_data),
+                    len(job["errors"]),
+                    json.dumps(job["config"]),
+                ),
             )
             conn.commit()
             conn.close()
         except Exception:
-            log.warning("Failed to persist job history for %s", job['id'], exc_info=True)
+            log.warning(
+                "Failed to persist job history for %s", job["id"], exc_info=True
+            )
 
     def get(self, job_id):
         """Get a job by id."""
@@ -159,7 +174,7 @@ class JobRunner:
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
-        event = {'type': event_type, 'data': data, 'time': time.time()}
+        event = {"type": event_type, "data": data, "time": time.time()}
         with self._lock:
             if job_id in self._events:
                 self._events[job_id].append(event)
@@ -224,13 +239,14 @@ class LogBroadcaster(logging.Handler):
         # Include traceback if present
         if record.exc_info and record.exc_info[1] is not None:
             import traceback
-            tb = ''.join(traceback.format_exception(*record.exc_info))
-            message = message + '\n' + tb
+
+            tb = "".join(traceback.format_exception(*record.exc_info))
+            message = message + "\n" + tb
         entry = {
-            'time': record.created,
-            'level': record.levelname,
-            'logger': record.name,
-            'message': message,
+            "time": record.created,
+            "level": record.levelname,
+            "logger": record.name,
+            "message": message,
         }
         with self._lock:
             self._buffer.append(entry)

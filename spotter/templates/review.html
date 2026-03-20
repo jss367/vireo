@@ -435,6 +435,74 @@
     flex-shrink: 0;
   }
   .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+
+  /* Loupe mode — split layout with preview on right */
+  .grm-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  .grm-strips {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    min-width: 0;
+  }
+  .grm-loupe {
+    width: 45%;
+    min-width: 300px;
+    background: var(--bg-primary, #1a1a2e);
+    border-left: 1px solid var(--border-primary, #0f3460);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .grm-loupe-img {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+  .grm-loupe-img img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  .grm-loupe-info {
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--text-dim, #888);
+    border-top: 1px solid var(--border-primary, #0f3460);
+    text-align: center;
+  }
+  .grm-loupe-crosshair {
+    position: absolute;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .grm-loupe-crosshair-h {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: rgba(78, 204, 163, 0.4);
+    pointer-events: none;
+  }
+  .grm-loupe-crosshair-v {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(78, 204, 163, 0.4);
+    pointer-events: none;
+  }
+
+  /* Zoomed strip thumbnails */
+  .grm-card.zoomed img {
+    transition: none;
+  }
 </style>
 </head>
 <body>
@@ -975,6 +1043,60 @@ function renderGroupModal() {
 function grmSelect(photoId) {
   grmState.selected = (grmState.selected === photoId) ? null : photoId;
   renderGroupModal();
+
+  // Update loupe preview
+  var loupeImg = document.getElementById('grmLoupePhoto');
+  var loupeInfo = document.getElementById('grmLoupeInfo');
+  if (grmState.selected) {
+    loupeImg.src = '/photos/' + grmState.selected + '/full';
+    var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+    if (item) {
+      var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
+      loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
+    }
+  } else {
+    loupeImg.src = '';
+    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    grmLoupeReset();
+  }
+}
+
+var _grmZoomLevel = 4;
+
+function grmLoupeMove(e) {
+  var rect = e.currentTarget.getBoundingClientRect();
+  var x = ((e.clientX - rect.left) / rect.width) * 100;
+  var y = ((e.clientY - rect.top) / rect.height) * 100;
+
+  // Update crosshairs
+  document.getElementById('grmCrosshairH').style.top = y + '%';
+  document.getElementById('grmCrosshairV').style.left = x + '%';
+
+  // Zoom all strip thumbnails to the same position
+  document.querySelectorAll('.grm-card img').forEach(function(img) {
+    img.style.transformOrigin = x + '% ' + y + '%';
+    img.style.transform = 'scale(' + _grmZoomLevel + ')';
+    img.parentElement.classList.add('zoomed');
+  });
+}
+
+function grmLoupeZoom(e) {
+  e.preventDefault();
+  if (e.deltaY < 0) {
+    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+  } else {
+    _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
+  }
+  // Re-trigger the move to update zoom
+  grmLoupeMove(e);
+}
+
+function grmLoupeReset() {
+  document.querySelectorAll('.grm-card img').forEach(function(img) {
+    img.style.transform = '';
+    img.style.transformOrigin = '';
+    img.parentElement.classList.remove('zoomed');
+  });
 }
 
 function _grmGetZone(photoId) {
@@ -1096,23 +1218,35 @@ document.addEventListener('keydown', function(e) {
     <span id="grmCount" style="font-size:12px;color:var(--text-dim,#888);"></span>
     <button class="grm-close" onclick="closeGroupReview()">&times;</button>
   </div>
-  <div class="grm-zone grm-picks">
-    <div class="grm-zone-label">PICKS ↑</div>
-    <div class="grm-strip" id="grmPicks"></div>
-  </div>
-  <div class="grm-zone grm-candidates">
-    <div class="grm-zone-label">CANDIDATES ↑↓</div>
-    <div class="grm-strip" id="grmCandidates"></div>
-  </div>
-  <div class="grm-zone grm-rejects">
-    <div class="grm-zone-label">REJECTS ↓</div>
-    <div class="grm-strip" id="grmRejects"></div>
+  <div class="grm-body">
+    <div class="grm-strips">
+      <div class="grm-zone grm-picks">
+        <div class="grm-zone-label">PICKS ↑</div>
+        <div class="grm-strip" id="grmPicks"></div>
+      </div>
+      <div class="grm-zone grm-candidates">
+        <div class="grm-zone-label">CANDIDATES ↑↓</div>
+        <div class="grm-strip" id="grmCandidates"></div>
+      </div>
+      <div class="grm-zone grm-rejects">
+        <div class="grm-zone-label">REJECTS ↓</div>
+        <div class="grm-strip" id="grmRejects"></div>
+      </div>
+    </div>
+    <div class="grm-loupe" id="grmLoupe">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onwheel="grmLoupeZoom(event)">
+        <img id="grmLoupePhoto" src="" alt="">
+        <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
+        <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
+      </div>
+      <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
+    </div>
   </div>
   <div class="grm-footer">
     <label style="font-size:12px;color:var(--text-muted,#888);">Species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#0f3460);color:var(--text-primary,#e0e0e0);border:1px solid var(--border-secondary,#1a3a6e);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#0f3460);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
-    <span class="grm-hint">↑ pick &nbsp; ↓ reject &nbsp; Space = unsort &nbsp; ←→ navigate &nbsp; Del = remove from group</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Hover preview to compare sharpness</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>

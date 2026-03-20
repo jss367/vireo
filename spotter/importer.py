@@ -33,14 +33,14 @@ def preview_catalog(catalog_path, db):
             matched += 1
         else:
             unmatched += 1
-        all_keywords.update(kw_data['flat_keywords'])
+        all_keywords.update(kw_data["flat_keywords"])
 
     return {
-        'catalog': os.path.basename(catalog_path),
-        'total_files': total,
-        'matched_files': matched,
-        'unmatched_files': unmatched,
-        'keyword_count': len(all_keywords),
+        "catalog": os.path.basename(catalog_path),
+        "total_files": total,
+        "matched_files": matched,
+        "unmatched_files": unmatched,
+        "keyword_count": len(all_keywords),
     }
 
 
@@ -67,31 +67,37 @@ def preview_import(catalog_paths, db):
 
             for file_path, kw_data in data.items():
                 if file_path not in merged:
-                    merged[file_path] = {'keywords_by_catalog': {}}
-                merged[file_path]['keywords_by_catalog'][cat_name] = kw_data['flat_keywords']
+                    merged[file_path] = {"keywords_by_catalog": {}}
+                merged[file_path]["keywords_by_catalog"][cat_name] = kw_data[
+                    "flat_keywords"
+                ]
         except Exception:
             log.exception("Failed to read catalog: %s", cat_path)
 
     # Detect conflicts: files in multiple catalogs with different keywords
     conflicts = []
     for file_path, info in merged.items():
-        if len(info['keywords_by_catalog']) > 1:
-            conflicts.append({
-                'file_path': file_path,
-                'keywords_by_catalog': {
-                    cat: sorted(kws) for cat, kws in info['keywords_by_catalog'].items()
-                },
-            })
+        if len(info["keywords_by_catalog"]) > 1:
+            conflicts.append(
+                {
+                    "file_path": file_path,
+                    "keywords_by_catalog": {
+                        cat: sorted(kws)
+                        for cat, kws in info["keywords_by_catalog"].items()
+                    },
+                }
+            )
 
     return {
-        'catalogs': catalogs,
-        'conflict_count': len(conflicts),
-        'conflicts': conflicts,
+        "catalogs": catalogs,
+        "conflict_count": len(conflicts),
+        "conflicts": conflicts,
     }
 
 
-def execute_import(catalog_paths, db, write_xmp=False, strategy='merge_all',
-                   progress_callback=None):
+def execute_import(
+    catalog_paths, db, write_xmp=False, strategy="merge_all", progress_callback=None
+):
     """Import keywords from catalogs into the Spotter database.
 
     Args:
@@ -107,10 +113,10 @@ def execute_import(catalog_paths, db, write_xmp=False, strategy='merge_all',
     # Build path -> DB photo lookup
     photos_by_path = {}
     all_photos = db.get_photos(per_page=999999)
-    folders = {f['id']: f['path'] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
     for p in all_photos:
-        folder_path = folders.get(p['folder_id'], '')
-        full_path = os.path.join(folder_path, p['filename'])
+        folder_path = folders.get(p["folder_id"], "")
+        full_path = os.path.join(folder_path, p["filename"])
         photos_by_path[full_path] = p
 
     # Merge catalog data
@@ -125,19 +131,25 @@ def execute_import(catalog_paths, db, write_xmp=False, strategy='merge_all',
         for file_path, kw_data in data.items():
             if file_path not in merged:
                 merged[file_path] = {
-                    'flat_keywords': set(),
-                    'hierarchical_keywords': set(),
+                    "flat_keywords": set(),
+                    "hierarchical_keywords": set(),
                 }
 
-            if strategy == 'merge_all':
-                merged[file_path]['flat_keywords'].update(kw_data['flat_keywords'])
-                merged[file_path]['hierarchical_keywords'].update(kw_data['hierarchical_keywords'])
-            elif strategy == 'prefer_first' and not merged[file_path]['flat_keywords']:
-                merged[file_path]['flat_keywords'] = kw_data['flat_keywords']
-                merged[file_path]['hierarchical_keywords'] = kw_data['hierarchical_keywords']
-            elif strategy == 'prefer_last':
-                merged[file_path]['flat_keywords'] = kw_data['flat_keywords']
-                merged[file_path]['hierarchical_keywords'] = kw_data['hierarchical_keywords']
+            if strategy == "merge_all":
+                merged[file_path]["flat_keywords"].update(kw_data["flat_keywords"])
+                merged[file_path]["hierarchical_keywords"].update(
+                    kw_data["hierarchical_keywords"]
+                )
+            elif strategy == "prefer_first" and not merged[file_path]["flat_keywords"]:
+                merged[file_path]["flat_keywords"] = kw_data["flat_keywords"]
+                merged[file_path]["hierarchical_keywords"] = kw_data[
+                    "hierarchical_keywords"
+                ]
+            elif strategy == "prefer_last":
+                merged[file_path]["flat_keywords"] = kw_data["flat_keywords"]
+                merged[file_path]["hierarchical_keywords"] = kw_data[
+                    "hierarchical_keywords"
+                ]
 
     imported = 0
     skipped = 0
@@ -155,26 +167,26 @@ def execute_import(catalog_paths, db, write_xmp=False, strategy='merge_all',
 
         try:
             # Import keywords into DB
-            for kw_name in kw_data['flat_keywords']:
+            for kw_name in kw_data["flat_keywords"]:
                 kid = db.add_keyword(kw_name)
-                db.tag_photo(photo['id'], kid)
+                db.tag_photo(photo["id"], kid)
 
             # Import hierarchical keywords
-            for hier in kw_data['hierarchical_keywords']:
-                parts = hier.split('|')
+            for hier in kw_data["hierarchical_keywords"]:
+                parts = hier.split("|")
                 parent_id = None
                 for part in parts:
                     kid = db.add_keyword(part, parent_id=parent_id)
                     parent_id = kid
-                db.tag_photo(photo['id'], parent_id)
+                db.tag_photo(photo["id"], parent_id)
 
             # Write XMP if requested
             if write_xmp and Path(file_path).exists():
-                xmp_path = str(Path(file_path).with_suffix('.xmp'))
+                xmp_path = str(Path(file_path).with_suffix(".xmp"))
                 write_xmp_sidecar(
                     xmp_path,
-                    flat_keywords=kw_data['flat_keywords'],
-                    hierarchical_keywords=kw_data['hierarchical_keywords'],
+                    flat_keywords=kw_data["flat_keywords"],
+                    hierarchical_keywords=kw_data["hierarchical_keywords"],
                 )
 
             imported += 1
@@ -185,9 +197,11 @@ def execute_import(catalog_paths, db, write_xmp=False, strategy='merge_all',
         if progress_callback:
             progress_callback(i + 1, total)
 
-    log.info("Import complete: %d imported, %d skipped, %d failed", imported, skipped, failed)
+    log.info(
+        "Import complete: %d imported, %d skipped, %d failed", imported, skipped, failed
+    )
     return {
-        'imported': imported,
-        'skipped': skipped,
-        'failed': failed,
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
     }

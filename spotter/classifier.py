@@ -62,9 +62,13 @@ class Classifier:
         pretrained_str: path to pretrained weights or HF tag
     """
 
-    def __init__(self, labels=None, model_str='ViT-B-16',
-                 pretrained_str='/tmp/bioclip_model/open_clip_pytorch_model.bin',
-                 embedding_progress_callback=None):
+    def __init__(
+        self,
+        labels=None,
+        model_str="ViT-B-16",
+        pretrained_str="/tmp/bioclip_model/open_clip_pytorch_model.bin",
+        embedding_progress_callback=None,
+    ):
         if labels is not None:
             if not labels:
                 raise ValueError("labels list must not be empty")
@@ -75,17 +79,24 @@ class Classifier:
             cache_path = _embedding_cache_path(labels, model_str)
 
             if os.path.exists(cache_path):
-                log.info("Loading cached label embeddings for %d labels...", len(labels))
+                log.info(
+                    "Loading cached label embeddings for %d labels...", len(labels)
+                )
                 self._classifier = CustomLabelsClassifier(
                     cls_ary=["_placeholder"],
                     model_str=model_str,
                     pretrained_str=pretrained_str,
                 )
                 self._classifier.classes = [cls.strip() for cls in labels]
-                self._classifier.txt_embeddings = torch.load(cache_path, weights_only=True)
+                self._classifier.txt_embeddings = torch.load(
+                    cache_path, weights_only=True
+                )
                 log.info("Label embeddings loaded from cache")
             else:
-                log.info("Computing label embeddings for %d labels (first run — will be cached for next time)...", len(labels))
+                log.info(
+                    "Computing label embeddings for %d labels (first run — will be cached for next time)...",
+                    len(labels),
+                )
                 self._classifier = CustomLabelsClassifier(
                     cls_ary=["_placeholder"],
                     model_str=model_str,
@@ -93,23 +104,25 @@ class Classifier:
                 )
                 self._classifier.classes = [cls.strip() for cls in labels]
                 self._classifier.txt_embeddings = _compute_embeddings_with_progress(
-                    self._classifier, self._classifier.classes,
+                    self._classifier,
+                    self._classifier.classes,
                     progress_callback=embedding_progress_callback,
                 )
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 torch.save(self._classifier.txt_embeddings, cache_path)
                 log.info("Label embeddings computed and cached to disk")
 
-            self._mode = 'custom'
+            self._mode = "custom"
         else:
             log.info("Loading TreeOfLife classifier...")
             from bioclip import TreeOfLifeClassifier, Rank
+
             self._classifier = TreeOfLifeClassifier(
                 model_str=model_str,
                 pretrained_str=pretrained_str,
             )
             log.info("TreeOfLife classifier ready")
-            self._mode = 'tol'
+            self._mode = "tol"
             self._rank = Rank.SPECIES
 
     def classify(self, image_path, threshold=0.4):
@@ -142,7 +155,7 @@ class Classifier:
         img_features = clf.create_image_features_for_image(image_path, normalize=True)
         embedding = img_features.cpu().numpy().astype(np.float32).flatten()
 
-        if self._mode == 'custom':
+        if self._mode == "custom":
             # Dot product with text embeddings to get probabilities (same as predict())
             probs = (100.0 * img_features @ clf.txt_embeddings).softmax(dim=-1)
             probs = probs.cpu().numpy().flatten()
@@ -154,36 +167,38 @@ class Classifier:
                 score = float(score)
                 if score < threshold:
                     continue
-                results.append({
-                    'species': species,
-                    'score': score,
-                    'auto_tag': f"auto:{species}",
-                    'confidence_tag': f"auto:confidence:{score:.2f}",
-                })
+                results.append(
+                    {
+                        "species": species,
+                        "score": score,
+                        "auto_tag": f"auto:{species}",
+                        "confidence_tag": f"auto:confidence:{score:.2f}",
+                    }
+                )
             return results, embedding
         else:
             # TreeOfLife mode — predictions include full taxonomy
             raw_preds = clf.predict(image_path, self._rank)
             results = []
             for pred in raw_preds:
-                species = pred.get('common_name') or pred.get('species', '')
-                score = pred['score']
+                species = pred.get("common_name") or pred.get("species", "")
+                score = pred["score"]
                 if score < threshold:
                     continue
                 result = {
-                    'species': species,
-                    'score': score,
-                    'auto_tag': f"auto:{species}",
-                    'confidence_tag': f"auto:confidence:{score:.2f}",
+                    "species": species,
+                    "score": score,
+                    "auto_tag": f"auto:{species}",
+                    "confidence_tag": f"auto:confidence:{score:.2f}",
                 }
                 # TreeOfLife predictions include taxonomy fields
                 taxonomy = {}
-                for rank in ('kingdom', 'phylum', 'class', 'order', 'family', 'genus'):
+                for rank in ("kingdom", "phylum", "class", "order", "family", "genus"):
                     if rank in pred and pred[rank]:
                         taxonomy[rank] = pred[rank]
-                if pred.get('species'):
-                    taxonomy['scientific_name'] = pred['species']
+                if pred.get("species"):
+                    taxonomy["scientific_name"] = pred["species"]
                 if taxonomy:
-                    result['taxonomy'] = taxonomy
+                    result["taxonomy"] = taxonomy
                 results.append(result)
             return results, embedding

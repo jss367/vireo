@@ -6,8 +6,8 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
-RAW_EXTENSIONS = {'.nef', '.cr2', '.cr3', '.arw', '.raf', '.dng', '.rw2', '.orf'}
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.webp'}
+RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 
 
@@ -33,12 +33,13 @@ def load_image(file_path, max_size=1024):
     try:
         if ext in RAW_EXTENSIONS:
             import rawpy
+
             with rawpy.imread(str(path)) as raw:
                 rgb = raw.postprocess()
             img = Image.fromarray(rgb)
         else:
             img = Image.open(str(path))
-            img = img.convert('RGB')
+            img = img.convert("RGB")
 
         if max_size and max(img.size) > max_size:
             img.thumbnail((max_size, max_size))

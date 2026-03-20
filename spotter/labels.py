@@ -14,13 +14,13 @@ LABELS_DIR = os.path.expanduser("~/.spotter/labels")
 
 # Major taxonomic groups with their iNaturalist taxon IDs
 TAXON_GROUPS = {
-    'birds': {'id': 3, 'name': 'Birds', 'class': 'Aves'},
-    'mammals': {'id': 40151, 'name': 'Mammals', 'class': 'Mammalia'},
-    'reptiles': {'id': 26036, 'name': 'Reptiles', 'class': 'Reptilia'},
-    'amphibians': {'id': 20978, 'name': 'Amphibians', 'class': 'Amphibia'},
-    'insects': {'id': 47158, 'name': 'Insects', 'class': 'Insecta'},
-    'plants': {'id': 47126, 'name': 'Plants', 'kingdom': 'Plantae'},
-    'fungi': {'id': 47170, 'name': 'Fungi', 'kingdom': 'Fungi'},
+    "birds": {"id": 3, "name": "Birds", "class": "Aves"},
+    "mammals": {"id": 40151, "name": "Mammals", "class": "Mammalia"},
+    "reptiles": {"id": 26036, "name": "Reptiles", "class": "Reptilia"},
+    "amphibians": {"id": 20978, "name": "Amphibians", "class": "Amphibia"},
+    "insects": {"id": 47158, "name": "Insects", "class": "Insecta"},
+    "plants": {"id": 47126, "name": "Plants", "kingdom": "Plantae"},
+    "fungi": {"id": 47170, "name": "Fungi", "kingdom": "Fungi"},
 }
 
 
@@ -33,25 +33,29 @@ def search_places(query):
     Returns:
         list of {id, name, display_name, place_type}
     """
-    params = urllib.parse.urlencode({'q': query})
+    params = urllib.parse.urlencode({"q": query})
     url = f"{INAT_API}/places/autocomplete?{params}"
     log.info("Searching iNaturalist places: %s", query)
 
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Spotter/1.0'})
+        req = urllib.request.Request(url, headers={"User-Agent": "Spotter/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
     except Exception:
-        log.warning("Failed to search iNaturalist places for '%s'", query, exc_info=True)
+        log.warning(
+            "Failed to search iNaturalist places for '%s'", query, exc_info=True
+        )
         return []
 
     results = []
-    for r in data.get('results', []):
-        results.append({
-            'id': r['id'],
-            'name': r.get('name', ''),
-            'display_name': r.get('display_name', r.get('name', '')),
-        })
+    for r in data.get("results", []):
+        results.append(
+            {
+                "id": r["id"],
+                "name": r.get("name", ""),
+                "display_name": r.get("display_name", r.get("name", "")),
+            }
+        )
     log.info("Found %d places for '%s'", len(results), query)
     return results
 
@@ -74,8 +78,8 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
         if not group:
             continue
 
-        taxon_id = group['id']
-        group_name = group['name']
+        taxon_id = group["id"]
+        group_name = group["name"]
         group_prefix = f"[{gi + 1}/{len(taxon_groups)}] {group_name}"
 
         if progress_callback:
@@ -87,44 +91,58 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
         group_total = 0
 
         while True:
-            params = urllib.parse.urlencode({
-                'place_id': place_id,
-                'taxon_id': taxon_id,
-                'per_page': per_page,
-                'page': page,
-            })
+            params = urllib.parse.urlencode(
+                {
+                    "place_id": place_id,
+                    "taxon_id": taxon_id,
+                    "per_page": per_page,
+                    "page": page,
+                }
+            )
             url = f"{INAT_API}/observations/species_counts?{params}"
 
             data = None
             for attempt in range(3):
                 try:
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Spotter/1.0'})
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Spotter/1.0"}
+                    )
                     with urllib.request.urlopen(req, timeout=60) as resp:
                         data = json.loads(resp.read())
                     break
                 except Exception:
-                    log.warning("Fetch attempt %d failed for page %d of %s",
-                                attempt + 1, page, group_name, exc_info=True)
+                    log.warning(
+                        "Fetch attempt %d failed for page %d of %s",
+                        attempt + 1,
+                        page,
+                        group_name,
+                        exc_info=True,
+                    )
                     if attempt < 2:
                         import time
+
                         time.sleep(2)
                     else:
                         if progress_callback:
-                            progress_callback(f"{group_prefix}: failed after 3 attempts on page {page}", 0, 0)
+                            progress_callback(
+                                f"{group_prefix}: failed after 3 attempts on page {page}",
+                                0,
+                                0,
+                            )
 
             if data is None:
                 break
 
-            results = data.get('results', [])
+            results = data.get("results", [])
             if not results:
                 break
 
-            group_total = data.get('total_results', 0)
+            group_total = data.get("total_results", 0)
 
             for r in results:
-                taxon = r.get('taxon', {})
-                common_name = taxon.get('preferred_common_name', '')
-                scientific_name = taxon.get('name', '')
+                taxon = r.get("taxon", {})
+                common_name = taxon.get("preferred_common_name", "")
+                scientific_name = taxon.get("name", "")
                 name = common_name or scientific_name
                 if name:
                     group_species.append(name)
@@ -134,18 +152,28 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
             if progress_callback:
                 progress_callback(
                     f"{group_prefix}: {fetched}/{group_total} species",
-                    fetched, group_total,
+                    fetched,
+                    group_total,
                 )
 
             if fetched >= group_total:
                 break
             page += 1
 
-        log.info("Fetched %d %s species for place %d", len(group_species), group_name, place_id)
+        log.info(
+            "Fetched %d %s species for place %d",
+            len(group_species),
+            group_name,
+            place_id,
+        )
         all_species.extend(group_species)
 
     if progress_callback:
-        progress_callback(f"Done — {len(all_species)} total species", len(all_species), len(all_species))
+        progress_callback(
+            f"Done — {len(all_species)} total species",
+            len(all_species),
+            len(all_species),
+        )
 
     return all_species
 
@@ -165,25 +193,25 @@ def save_labels(name, place_id, place_name, taxon_groups, species):
     """
     os.makedirs(LABELS_DIR, exist_ok=True)
 
-    slug = name.lower().replace(' ', '-')
+    slug = name.lower().replace(" ", "-")
     labels_path = os.path.join(LABELS_DIR, f"{slug}.txt")
     meta_path = os.path.join(LABELS_DIR, f"{slug}.json")
 
     # Write labels file (one per line)
-    with open(labels_path, 'w') as f:
+    with open(labels_path, "w") as f:
         for sp in sorted(set(species)):
-            f.write(sp + '\n')
+            f.write(sp + "\n")
 
     # Write metadata
     meta = {
-        'name': name,
-        'place_id': place_id,
-        'place_name': place_name,
-        'taxon_groups': taxon_groups,
-        'species_count': len(set(species)),
-        'labels_file': labels_path,
+        "name": name,
+        "place_id": place_id,
+        "place_name": place_name,
+        "taxon_groups": taxon_groups,
+        "species_count": len(set(species)),
+        "labels_file": labels_path,
     }
-    with open(meta_path, 'w') as f:
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 
     return labels_path
@@ -200,7 +228,7 @@ def get_saved_labels():
 
     result = []
     for fname in sorted(os.listdir(LABELS_DIR)):
-        if fname.endswith('.json'):
+        if fname.endswith(".json"):
             try:
                 with open(os.path.join(LABELS_DIR, fname)) as f:
                     meta = json.load(f)
@@ -217,7 +245,7 @@ def get_active_labels():
         try:
             with open(config_path) as f:
                 data = json.load(f)
-            path = data.get('labels_file', '')
+            path = data.get("labels_file", "")
             if path and os.path.exists(path):
                 return data
         except Exception:
@@ -230,10 +258,10 @@ def set_active_labels(labels_file):
     config_path = os.path.expanduser("~/.spotter/labels_active.json")
     # Find the metadata for this labels file
     for saved in get_saved_labels():
-        if saved.get('labels_file') == labels_file:
-            with open(config_path, 'w') as f:
+        if saved.get("labels_file") == labels_file:
+            with open(config_path, "w") as f:
                 json.dump(saved, f, indent=2)
             return
     # Fallback — save just the path
-    with open(config_path, 'w') as f:
-        json.dump({'labels_file': labels_file}, f, indent=2)
+    with open(config_path, "w") as f:
+        json.dump({"labels_file": labels_file}, f, indent=2)

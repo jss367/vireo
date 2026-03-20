@@ -33,7 +33,9 @@ def _read_hierarchical_keywords(xmp_path):
 
     root = tree.getroot()
     results = []
-    for li in root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"):
+    for li in root.findall(
+        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+    ):
         if li.text:
             results.append(li.text)
     return results
@@ -47,7 +49,7 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     # Build hierarchy from lr:hierarchicalSubject
     # e.g., 'Birds|Raptors|Black kite' creates Birds -> Raptors -> Black kite
     for hier in hier_keywords:
-        parts = hier.split('|')
+        parts = hier.split("|")
         parent_id = None
         for part in parts:
             kid = db.add_keyword(part, parent_id=parent_id)
@@ -56,7 +58,7 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         db.tag_photo(photo_id, parent_id)
 
     # Also add any flat keywords not already covered by hierarchy
-    existing_kw_names = {k['name'] for k in db.get_photo_keywords(photo_id)}
+    existing_kw_names = {k["name"] for k in db.get_photo_keywords(photo_id)}
     for kw in flat_keywords:
         if kw not in existing_kw_names:
             kid = db.add_keyword(kw)
@@ -79,10 +81,11 @@ def scan(root, db, progress_callback=None, incremental=False):
 
     # Discover all image files
     image_files = sorted(
-        f for f in root_path.rglob('*')
+        f
+        for f in root_path.rglob("*")
         if f.is_file()
         and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        and not f.name.startswith('.')
+        and not f.name.startswith(".")
     )
 
     total = len(image_files)
@@ -94,13 +97,13 @@ def scan(root, db, progress_callback=None, incremental=False):
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
             # Key by folder_id + filename won't work easily, so use a second lookup
-            existing_photos[p['id']] = p
+            existing_photos[p["id"]] = p
         # Build a path-based lookup: we need folder path + filename
         existing_by_path = {}
-        folders = {f['id']: f['path'] for f in db.get_folder_tree()}
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
         for p in all_photos:
-            folder_path = folders.get(p['folder_id'], '')
-            full_path = os.path.join(folder_path, p['filename'])
+            folder_path = folders.get(p["folder_id"], "")
+            full_path = os.path.join(folder_path, p["filename"])
             existing_by_path[full_path] = p
 
     # Build folder cache: path -> folder_id
@@ -133,7 +136,7 @@ def scan(root, db, progress_callback=None, incremental=False):
         file_mtime = stat.st_mtime
 
         # XMP sidecar
-        xmp_path = image_path.with_suffix('.xmp')
+        xmp_path = image_path.with_suffix(".xmp")
         xmp_mtime = None
         if xmp_path.exists():
             xmp_mtime = xmp_path.stat().st_mtime
@@ -143,8 +146,8 @@ def scan(root, db, progress_callback=None, incremental=False):
             full_path_str = str(image_path)
             existing = existing_by_path.get(full_path_str)
             if existing:
-                file_unchanged = (existing['file_mtime'] == file_mtime)
-                xmp_unchanged = (existing['xmp_mtime'] == xmp_mtime)
+                file_unchanged = existing["file_mtime"] == file_mtime
+                xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
 
                 if file_unchanged and xmp_unchanged:
                     if progress_callback:
@@ -153,10 +156,10 @@ def scan(root, db, progress_callback=None, incremental=False):
 
                 # XMP changed: re-import keywords
                 if not xmp_unchanged and xmp_mtime is not None:
-                    _import_keywords_for_photo(db, existing['id'], str(xmp_path))
+                    _import_keywords_for_photo(db, existing["id"], str(xmp_path))
                     db.conn.execute(
                         "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
-                        (xmp_mtime, existing['id']),
+                        (xmp_mtime, existing["id"]),
                     )
                     db.conn.commit()
 

@@ -11,7 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lr-migration'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
 
 from classifier import Classifier
 from image_loader import load_image, SUPPORTED_EXTENSIONS
@@ -24,9 +24,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def run(folder, labels=None, model_str='ViT-B-16',
-        pretrained_str='/tmp/bioclip_model/open_clip_pytorch_model.bin',
-        write=False, threshold=0.4, recursive=True):
+def run(
+    folder,
+    labels=None,
+    model_str="ViT-B-16",
+    pretrained_str="/tmp/bioclip_model/open_clip_pytorch_model.bin",
+    write=False,
+    threshold=0.4,
+    recursive=True,
+):
     """Scan a folder, classify images, and write/report XMP sidecars.
 
     Args:
@@ -46,21 +52,23 @@ def run(folder, labels=None, model_str='ViT-B-16',
     folder_path = Path(folder)
     if recursive:
         image_files = sorted(
-            f for f in folder_path.rglob('*')
-            if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith('.')
+            f
+            for f in folder_path.rglob("*")
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
         )
     else:
         image_files = sorted(
-            f for f in folder_path.iterdir()
-            if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith('.')
+            f
+            for f in folder_path.iterdir()
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(".")
         )
 
     stats = {
-        'images_found': len(image_files),
-        'images_processed': 0,
-        'images_skipped': 0,
-        'images_failed': 0,
-        'sidecars_written': 0,
+        "images_found": len(image_files),
+        "images_processed": 0,
+        "images_skipped": 0,
+        "images_failed": 0,
+        "sidecars_written": 0,
     }
 
     log.info("Found %d images in %s", len(image_files), folder)
@@ -69,11 +77,11 @@ def run(folder, labels=None, model_str='ViT-B-16',
         # Load and resize image
         img = load_image(str(image_path))
         if img is None:
-            stats['images_failed'] += 1
+            stats["images_failed"] += 1
             continue
 
         # Re-save as temp JPEG since image was loaded/resized by load_image
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
             img.save(tmp_path, quality=85)
 
@@ -81,25 +89,25 @@ def run(folder, labels=None, model_str='ViT-B-16',
             predictions = clf.classify(tmp_path, threshold=threshold)
         except Exception:
             log.warning("Classification failed for %s", image_path, exc_info=True)
-            stats['images_failed'] += 1
+            stats["images_failed"] += 1
             continue
         finally:
             os.unlink(tmp_path)
 
-        stats['images_processed'] += 1
+        stats["images_processed"] += 1
 
         if not predictions:
-            stats['images_skipped'] += 1
+            stats["images_skipped"] += 1
             log.debug("No predictions above threshold for %s", image_path)
             continue
 
         top = predictions[0]
         flat_keywords = set()
         for pred in predictions:
-            flat_keywords.add(pred['auto_tag'])
-            flat_keywords.add(pred['confidence_tag'])
+            flat_keywords.add(pred["auto_tag"])
+            flat_keywords.add(pred["confidence_tag"])
 
-        xmp_path = image_path.with_suffix('.xmp')
+        xmp_path = image_path.with_suffix(".xmp")
 
         if write:
             try:
@@ -108,24 +116,26 @@ def run(folder, labels=None, model_str='ViT-B-16',
                     flat_keywords=flat_keywords,
                     hierarchical_keywords=set(),
                 )
-                stats['sidecars_written'] += 1
+                stats["sidecars_written"] += 1
             except Exception:
                 log.warning("Failed to write sidecar for %s", image_path, exc_info=True)
         else:
             log.info(
                 "[DRY RUN] %s -> %s (%.2f)",
-                image_path.name, top['species'], top['score'],
+                image_path.name,
+                top["species"],
+                top["score"],
             )
 
         if (i + 1) % 100 == 0:
             log.info("Progress: %d/%d images processed", i + 1, len(image_files))
 
     log.info("--- Summary ---")
-    log.info("Images found:      %d", stats['images_found'])
-    log.info("Images processed:  %d", stats['images_processed'])
-    log.info("Images skipped:    %d", stats['images_skipped'])
-    log.info("Images failed:     %d", stats['images_failed'])
-    log.info("Sidecars written:  %d", stats['sidecars_written'])
+    log.info("Images found:      %d", stats["images_found"])
+    log.info("Images processed:  %d", stats["images_processed"])
+    log.info("Images skipped:    %d", stats["images_skipped"])
+    log.info("Images failed:     %d", stats["images_failed"])
+    log.info("Sidecars written:  %d", stats["sidecars_written"])
 
     return stats
 

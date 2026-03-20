@@ -57,16 +57,16 @@ def generate_all(db, cache_dir, progress_callback=None):
     os.makedirs(cache_dir, exist_ok=True)
 
     photos = db.get_photos(per_page=999999)
-    folders = {f['id']: f['path'] for f in db.get_folder_tree()}
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
     total = len(photos)
     failed = 0
     for i, photo in enumerate(photos):
         thumb_path = os.path.join(cache_dir, f"{photo['id']}.jpg")
         if not os.path.exists(thumb_path):
-            folder_path = folders.get(photo['folder_id'], '')
-            source_path = os.path.join(folder_path, photo['filename'])
-            if generate_thumbnail(photo['id'], source_path, cache_dir) is None:
+            folder_path = folders.get(photo["folder_id"], "")
+            source_path = os.path.join(folder_path, photo["filename"])
+            if generate_thumbnail(photo["id"], source_path, cache_dir) is None:
                 failed += 1
 
         if progress_callback:
@@ -74,4 +74,4 @@ def generate_all(db, cache_dir, progress_callback=None):
 
     if failed:
         log.warning("Thumbnail generation: %d of %d failed", failed, total)
-    return {'generated': total - failed, 'failed': failed}
+    return {"generated": total - failed, "failed": failed}
