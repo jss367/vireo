@@ -65,6 +65,52 @@ body {
 }
 .stat-label { font-size: 11px; color: #888; margin-top: 4px; }
 #pendingCard:hover { background: #1A4560; }
+
+.modal-overlay {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.6); z-index: 1000; justify-content: center; align-items: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: #0E2A3D; border: 1px solid #14374E; border-radius: 8px;
+  width: 90%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column;
+}
+.modal-header {
+  padding: 16px 20px; border-bottom: 1px solid #14374E;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-header h3 { font-size: 15px; font-weight: 600; color: #fff; margin: 0; }
+.modal-close {
+  background: none; border: none; color: #888; font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.modal-close:hover { color: #fff; }
+.modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+.modal-footer {
+  padding: 12px 20px; border-top: 1px solid #14374E;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-desc { font-size: 12px; color: #888; margin-bottom: 14px; line-height: 1.5; }
+.file-list { margin: 0; padding: 0; list-style: none; }
+.file-item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  border-bottom: 1px solid #14374E; font-size: 12px;
+}
+.file-item label { flex: 1; color: #B0CCCC; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .file-size { color: #666; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.file-select-bar { display: flex; gap: 12px; margin-bottom: 8px; font-size: 11px; }
+.file-select-bar a { color: #24E5CA; cursor: pointer; text-decoration: none; }
+.file-select-bar a:hover { text-decoration: underline; }
+.btn-danger {
+  background: #e74c3c; color: #fff; border: none; border-radius: 4px;
+  padding: 6px 16px; font-size: 12px; cursor: pointer; font-weight: 500;
+}
+.btn-danger:hover { background: #c0392b; }
+.btn-danger:disabled { opacity: 0.4; cursor: default; }
+.btn-secondary {
+  background: none; color: #888; border: 1px solid #14374E; border-radius: 4px;
+  padding: 6px 16px; font-size: 12px; cursor: pointer;
+}
+.btn-secondary:hover { color: #B0CCCC; border-color: #1A4560; }
 </style>
 </head>
 <body>
@@ -93,14 +139,6 @@ body {
       <div class="stat-card" id="pendingCard" style="cursor:pointer;" onclick="togglePendingDetail()">
         <div class="stat-number" id="pendingCount">-</div>
         <div class="stat-label">Pending Sync &#9662;</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number" id="dbSize">-</div>
-        <div class="stat-label">DB Size</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-number" id="thumbSize">-</div>
-        <div class="stat-label">Thumb Cache</div>
       </div>
     </div>
     <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid #14374E;padding-top:16px;"></div>
@@ -158,12 +196,36 @@ body {
 
   <!-- Storage Management -->
   <div class="section">
-    <div class="section-title">Storage</div>
-    <div id="storageChart" style="margin-bottom:16px;"></div>
-    <div style="font-size:12px;color:var(--text-dim,#888);margin-bottom:16px;">
-      Total: <b id="storageTotalSize" style="color:var(--text-primary,#E0F0F0);">-</b>
+    <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:#888;margin-left:8px;">-</span></div>
+    <div id="storageGrid" class="stats-grid"><span style="color:#555;font-size:13px;">Loading...</span></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="storageModal" onclick="if(event.target===this)closeStorageModal()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Manage Cache</h3>
+      <button class="modal-close" onclick="closeStorageModal()">&times;</button>
     </div>
-    <div id="storageRows"></div>
+    <div class="modal-body">
+      <div class="modal-desc" id="modalDesc"></div>
+      <div id="modalLoading" style="color:#555;font-size:13px;">Loading files...</div>
+      <div id="modalFileList" style="display:none;">
+        <div class="file-select-bar">
+          <a onclick="selectAllFiles(true)">Select all</a>
+          <a onclick="selectAllFiles(false)">Select none</a>
+          <span id="modalSelectedInfo" style="color:#888;margin-left:auto;"></span>
+        </div>
+        <ul class="file-list" id="modalFiles"></ul>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeStorageModal()">Cancel</button>
+      <div>
+        <button class="btn-danger" id="modalDeleteSelected" onclick="deleteSelectedFiles()" disabled>Delete Selected</button>
+        <button class="btn-danger" id="modalDeleteAll" onclick="deleteAllFiles()" style="margin-left:8px;">Delete All</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -305,11 +367,26 @@ function renderClassification(predStatus, classified, total) {
   container.innerHTML = html;
 }
 
-function renderDetection(detected, total) {
+async function renderDetection(detected, total) {
   var container = document.getElementById('detectionStats');
   if (total === 0) {
     container.innerHTML = '<span style="color:#555;font-size:13px;">No photos.</span>';
     return;
+  }
+  if (detected === 0) {
+    // Check if MegaDetector is even installed
+    try {
+      var resp = await fetch('/api/system/info');
+      var info = await resp.json();
+      if (info.megadetector !== 'installed') {
+        container.innerHTML = '<div style="text-align:center;padding:16px 0;">' +
+          '<div style="font-size:13px;color:#888;">Subject detection requires MegaDetector.</div>' +
+          '<div style="font-size:12px;color:#555;margin-top:8px;">Install with: <code style="background:#14374E;padding:2px 6px;border-radius:3px;">pip install PytorchWildlife</code></div>' +
+          '<div style="font-size:12px;color:#555;margin-top:4px;">Detection runs automatically during classification.</div>' +
+        '</div>';
+        return;
+      }
+    } catch(e) {}
   }
   var pct = Math.round((detected / total) * 100);
   var undetected = total - detected;
@@ -410,8 +487,6 @@ async function loadDashboard() {
     document.getElementById('folderCount').textContent = d.folder_count.toLocaleString();
     document.getElementById('keywordCount').textContent = d.keyword_count.toLocaleString();
     document.getElementById('pendingCount').textContent = d.pending_changes.toLocaleString();
-    document.getElementById('dbSize').textContent = formatBytes(d.db_size);
-    document.getElementById('thumbSize').textContent = formatBytes(d.thumb_cache_size);
   } catch(e) {}
 }
 
@@ -456,62 +531,144 @@ async function loadStoragePanel() {
     var resp = await fetch('/api/storage');
     var s = await resp.json();
 
-    document.getElementById('storageTotalSize').textContent = formatBytes(s.total);
+    document.getElementById('storageTotalSize').textContent = 'Total: ' + formatBytes(s.total);
 
     var categories = [
-      {name: 'Database', size: s.database.size, color: '#24E5CA', type: null},
-      {name: 'Thumbnails', size: s.thumbnails.size, color: '#12C3B5', count: s.thumbnails.count, type: 'thumbnails'},
-      {name: 'Previews', size: s.previews.size, color: '#038A96', count: s.previews.count, type: 'previews'},
-      {name: 'Embeddings', size: s.embeddings.size, color: '#0D5B79', count: s.embeddings.count, type: 'embeddings'},
-      {name: 'Models', size: s.models.size, color: '#0A2F4D', type: null},
-      {name: 'HF Cache', size: s.hf_cache.size, color: '#14374E', type: null},
+      {name: 'Database', size: s.database.size, type: null},
+      {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails'},
+      {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews'},
+      {name: 'Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings'},
+      {name: 'Models', size: s.models.size, type: null},
+      {name: 'HF Cache', size: s.hf_cache.size, type: null},
     ];
 
-    var maxSize = Math.max.apply(null, categories.map(function(c) { return c.size; })) || 1;
-    var chartHtml = '';
+    var html = '';
     categories.forEach(function(c) {
       if (c.size === 0 && !c.type) return;
-      var pct = Math.max(1, Math.round((c.size / maxSize) * 100));
-      chartHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;">' +
-        '<span style="width:80px;color:var(--text-muted,#a0a0a0);text-align:right;">' + c.name + '</span>' +
-        '<div style="flex:1;height:16px;background:var(--bg-primary,#0A1F2E);border-radius:3px;overflow:hidden;">' +
-          '<div style="height:100%;width:' + pct + '%;background:' + c.color + ';border-radius:3px;transition:width 0.3s;"></div>' +
-        '</div>' +
-        '<span style="width:70px;color:var(--text-secondary,#B0CCCC);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>' +
-      '</div>';
-    });
-    document.getElementById('storageChart').innerHTML = chartHtml;
-
-    var rowsHtml = '';
-    categories.forEach(function(c) {
-      if (c.size === 0 && !c.type) return;
-      rowsHtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-subtle,#0E2A3D);font-size:12px;">' +
-        '<div><span style="color:var(--text-primary,#E0F0F0);">' + c.name + '</span>' +
-          (c.count != null ? ' <span style="color:var(--text-dim,#888);">(' + c.count.toLocaleString() + ' files)</span>' : '') +
-        '</div><div style="display:flex;align-items:center;gap:8px;">' +
-          '<span style="color:var(--text-secondary,#B0CCCC);font-variant-numeric:tabular-nums;">' + formatBytes(c.size) + '</span>';
+      html += '<div class="stat-card" style="position:relative;">' +
+        '<div class="stat-number">' + formatBytes(c.size) + '</div>' +
+        '<div class="stat-label">' + c.name +
+          (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
+        '</div>';
       if (c.type) {
-        rowsHtml += '<button onclick="clearStorageCache(\'' + c.type + '\')" ' +
-          'style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;"' +
-          (c.size === 0 ? ' disabled style="opacity:0.3;"' : '') + '>Clear</button>';
+        html += '<button onclick="openStorageModal(\'' + c.type + '\')" ' +
+          'style="background:none;color:#24E5CA;border:1px solid #24E5CA;border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer;margin-top:8px;">Manage</button>';
       }
-      rowsHtml += '</div></div>';
+      html += '</div>';
     });
-    document.getElementById('storageRows').innerHTML = rowsHtml;
+    document.getElementById('storageGrid').innerHTML = html;
   } catch(e) {
-    document.getElementById('storageChart').innerHTML = '<span style="color:var(--danger,#e74c3c);font-size:12px;">Failed to load storage info</span>';
+    document.getElementById('storageGrid').innerHTML = '<span style="color:#e74c3c;font-size:12px;">Failed to load storage info</span>';
   }
 }
 
-async function clearStorageCache(type) {
-  var labels = {thumbnails: 'thumbnails', previews: 'previews', embeddings: 'label embeddings'};
-  if (!confirm('Clear all cached ' + (labels[type] || type) + '? They will be regenerated as needed.')) return;
+var _modalType = '';
+var _modalFiles = [];
+var STORAGE_INFO = {
+  thumbnails: {
+    title: 'Thumbnails',
+    desc: 'Small preview images generated for fast browsing. Deleting these is safe \u2014 they\u2019ll be regenerated automatically when you browse photos.',
+  },
+  previews: {
+    title: 'Previews',
+    desc: 'Larger preview images used for the detail view. Safe to delete \u2014 they\u2019ll be regenerated on demand when you open a photo.',
+  },
+  embeddings: {
+    title: 'Label Embeddings',
+    desc: 'Cached text embeddings for species labels used during classification. Deleting these means they\u2019ll be recomputed next time you run classification (adds a few seconds).',
+  },
+};
+
+async function openStorageModal(type) {
+  _modalType = type;
+  _modalFiles = [];
+  var info = STORAGE_INFO[type] || {title: type, desc: ''};
+  document.getElementById('modalTitle').textContent = 'Manage ' + info.title;
+  document.getElementById('modalDesc').textContent = info.desc;
+  document.getElementById('modalLoading').style.display = 'block';
+  document.getElementById('modalFileList').style.display = 'none';
+  document.getElementById('modalDeleteSelected').disabled = true;
+  document.getElementById('storageModal').classList.add('open');
+
+  try {
+    var resp = await fetch('/api/storage/files?type=' + type);
+    var data = await resp.json();
+    _modalFiles = data.files || [];
+    document.getElementById('modalLoading').style.display = 'none';
+    document.getElementById('modalFileList').style.display = 'block';
+
+    if (_modalFiles.length === 0) {
+      document.getElementById('modalFiles').innerHTML = '<li style="color:#555;font-size:13px;padding:12px 0;">Cache is empty.</li>';
+      document.getElementById('modalDeleteAll').disabled = true;
+      updateSelectedInfo();
+      return;
+    }
+    document.getElementById('modalDeleteAll').disabled = false;
+
+    var html = '';
+    _modalFiles.forEach(function(f, i) {
+      html += '<li class="file-item">' +
+        '<input type="checkbox" id="fc' + i + '" onchange="updateSelectedInfo()">' +
+        '<label for="fc' + i + '">' + escapeHtml(f.name) + '</label>' +
+        '<span class="file-size">' + formatBytes(f.size) + '</span>' +
+      '</li>';
+    });
+    document.getElementById('modalFiles').innerHTML = html;
+    updateSelectedInfo();
+  } catch(e) {
+    document.getElementById('modalLoading').innerHTML = '<span style="color:#e74c3c;">Failed to load files.</span>';
+  }
+}
+
+function closeStorageModal() {
+  document.getElementById('storageModal').classList.remove('open');
+}
+
+function selectAllFiles(checked) {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  boxes.forEach(function(cb) { cb.checked = checked; });
+  updateSelectedInfo();
+}
+
+function updateSelectedInfo() {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  var count = 0, size = 0;
+  boxes.forEach(function(cb, i) {
+    if (cb.checked) { count++; size += _modalFiles[i].size; }
+  });
+  document.getElementById('modalSelectedInfo').textContent = count > 0
+    ? count + ' selected (' + formatBytes(size) + ')'
+    : '';
+  document.getElementById('modalDeleteSelected').disabled = count === 0;
+}
+
+async function deleteSelectedFiles() {
+  var boxes = document.querySelectorAll('#modalFiles input[type=checkbox]');
+  var names = [];
+  boxes.forEach(function(cb, i) {
+    if (cb.checked) names.push(_modalFiles[i].name);
+  });
+  if (names.length === 0) return;
+  if (!confirm('Delete ' + names.length + ' file(s)?')) return;
+  await fetch('/api/storage/delete-files', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: _modalType, files: names}),
+  });
+  loadStoragePanel();
+  openStorageModal(_modalType);
+}
+
+async function deleteAllFiles() {
+  var info = STORAGE_INFO[_modalType] || {title: _modalType};
+  if (!confirm('Delete all ' + _modalFiles.length + ' ' + info.title.toLowerCase() + '? They will be regenerated as needed.')) return;
   await fetch('/api/storage/clear', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({type: type}),
+    body: JSON.stringify({type: _modalType}),
   });
   loadStoragePanel();
+  openStorageModal(_modalType);
 }
 </script>
 </body>
