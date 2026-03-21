@@ -535,7 +535,7 @@
       <option value="confidence_desc">Confidence (highest)</option>
       <option value="confidence_asc">Confidence (lowest)</option>
       <option value="species">Species (A-Z)</option>
-      <option value="filename">Filename (A-Z)</option>
+      <option value="filename" selected>Filename (A-Z)</option>
       <option value="date">Date (oldest)</option>
       <option value="date_desc">Date (newest)</option>
     </select>
@@ -579,7 +579,7 @@ var allPredictions = [];  // unfiltered copy
 var currentTab = 'all';
 var currentModel = 'all';
 var currentCollection = 'all';
-var currentSort = 'confidence_desc';
+var currentSort = 'filename';
 var minConfidence = 0;
 var availableModels = [];
 var collectionPhotoIds = null;  // null = no filter
@@ -1049,6 +1049,7 @@ var grmState = { groupId: null, model: null, items: [], picks: new Set(), reject
 
 function openGroupReview(groupId, model) {
   grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+  _grmLoupeLocked = false;
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
 }
@@ -1158,8 +1159,25 @@ function grmSelect(photoId) {
 }
 
 var _grmZoomLevel = 4;
+var _grmLoupeLocked = false;
+
+function grmLoupeToggleLock(e) {
+  _grmLoupeLocked = !_grmLoupeLocked;
+  var ch = document.getElementById('grmCrosshairH');
+  var cv = document.getElementById('grmCrosshairV');
+  if (_grmLoupeLocked) {
+    ch.style.background = 'rgba(255, 180, 50, 0.7)';
+    cv.style.background = 'rgba(255, 180, 50, 0.7)';
+  } else {
+    ch.style.background = '';
+    cv.style.background = '';
+    grmLoupeMove(e);
+  }
+}
 
 function grmLoupeMove(e) {
+  if (_grmLoupeLocked) return;
+
   var rect = e.currentTarget.getBoundingClientRect();
   var x = ((e.clientX - rect.left) / rect.width) * 100;
   var y = ((e.clientY - rect.top) / rect.height) * 100;
@@ -1183,11 +1201,15 @@ function grmLoupeZoom(e) {
   } else {
     _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
   }
-  // Re-trigger the move to update zoom
+  // Re-trigger the move to update zoom (even if locked)
+  var wasLocked = _grmLoupeLocked;
+  _grmLoupeLocked = false;
   grmLoupeMove(e);
+  _grmLoupeLocked = wasLocked;
 }
 
 function grmLoupeReset() {
+  if (_grmLoupeLocked) return;
   document.querySelectorAll('.grm-card img').forEach(function(img) {
     img.style.transform = '';
     img.style.transformOrigin = '';
@@ -1544,7 +1566,7 @@ async function discardAllChanges() {
       </div>
     </div>
     <div class="grm-loupe" id="grmLoupe">
-      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onwheel="grmLoupeZoom(event)">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
         <img id="grmLoupePhoto" src="" alt="">
         <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
@@ -1556,7 +1578,7 @@ async function discardAllChanges() {
     <label style="font-size:12px;color:var(--text-muted,#888);">Species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Hover preview to compare sharpness</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>

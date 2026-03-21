@@ -1626,6 +1626,63 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify({"job_id": job_id})
 
+    # -- iNaturalist --
+
+    @app.route("/api/inat/prepare/<int:photo_id>")
+    def api_inat_prepare(photo_id):
+        """Prepare iNaturalist submission data for a photo."""
+        import config as cfg
+
+        db = _get_db()
+        photo = db.conn.execute(
+            """SELECT p.*, f.path as folder_path FROM photos p
+               JOIN folders f ON f.id = p.folder_id WHERE p.id = ?""",
+            (photo_id,),
+        ).fetchone()
+        if not photo:
+            return jsonify({"error": "Photo not found"}), 404
+
+        # Get species prediction
+        pred = db.conn.execute(
+            "SELECT species, scientific_name, confidence FROM predictions WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()
+
+        species = pred["species"] if pred else ""
+        scientific = pred["scientific_name"] if pred else ""
+
+        # Build iNaturalist upload URL for quick mode
+        # https://www.inaturalist.org/observations/upload
+        params = []
+        if scientific:
+            params.append("taxon_name=" + scientific)
+        elif species:
+            params.append("taxon_name=" + species)
+        if photo["timestamp"]:
+            params.append("observed_on=" + photo["timestamp"][:10])
+        lat = photo["latitude"] if "latitude" in photo.keys() else None
+        lng = photo["longitude"] if "longitude" in photo.keys() else None
+        if lat and lng:
+            params.append("lat=" + str(lat))
+            params.append("lng=" + str(lng))
+
+        upload_url = "https://www.inaturalist.org/observations/upload"
+        if params:
+            upload_url += "?" + "&".join(params)
+
+        user_cfg = cfg.load()
+        return jsonify({
+            "species": species,
+            "scientific_name": scientific,
+            "confidence": pred["confidence"] if pred else 0,
+            "timestamp": photo["timestamp"],
+            "latitude": lat,
+            "longitude": lng,
+            "filename": photo["filename"],
+            "upload_url": upload_url,
+            "mode": user_cfg.get("inat_mode", "quick"),
+        })
+
     @app.route("/api/system/info")
     def api_system_info():
         """Return system information: GPU, Python, PyTorch."""
@@ -2940,6 +2997,7 @@ def create_app(db_path, thumb_cache_dir=None):
         """Run culling analysis as a background job."""
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
+        separate_file_types = body.get("separate_file_types", True)
 
         runner = app._job_runner
 
@@ -2959,7 +3017,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 },
             )
 
-            result = analyze_for_culling(thread_db, collection_id=collection_id)
+            result = analyze_for_culling(
+                thread_db,
+                collection_id=collection_id,
+                separate_file_types=separate_file_types,
+            )
 
             # Store culling results in a temporary cache for the UI
             import json as _json

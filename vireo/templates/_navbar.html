@@ -353,12 +353,45 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   cursor: zoom-out;
 }
 .lightbox-overlay.active { display: flex; }
-.lightbox-overlay img {
+.lightbox-img-wrap {
   max-width: 95vw;
+  max-height: 92vh;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lightbox-img-wrap.zoomed {
+  overflow: auto;
+  cursor: grab;
+}
+.lightbox-img-wrap.zoomed:active {
+  cursor: grabbing;
+}
+.lightbox-overlay img {
+  max-width: 100%;
   max-height: 92vh;
   object-fit: contain;
   border-radius: 4px;
-  cursor: default;
+  cursor: zoom-in;
+}
+.lightbox-img-wrap.zoomed img {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+.lightbox-zoom-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  pointer-events: none;
+  z-index: 1;
 }
 .lightbox-close {
   position: absolute;
@@ -587,12 +620,18 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
-  <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;" title="Previous (←)">&#9664;</div>
-  <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;" title="Next (→)">&#9654;</div>
-  <img id="lightboxImg" src="" alt="">
+  <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
+  <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); toggleLightboxZoom(event);">
+    <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
+    <img id="lightboxImg" src="" alt="">
+  </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
+    <button id="lightboxInat" onclick="" style="background:rgba(0,0,0,0.6);color:#74ac00;border:1px solid #74ac00;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      iNaturalist
+    </button>
     <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:#7ec8e3;border:1px solid #7ec8e3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Find Similar
     </button>
@@ -615,10 +654,18 @@ function openLightbox(photoId, filename, photoList) {
   var label = document.getElementById('lightboxFilename');
   var inspectBtn = document.getElementById('lightboxInspect');
   var similarBtn = document.getElementById('lightboxSimilar');
+  var inatBtn = document.getElementById('lightboxInat');
+  var wrap = document.getElementById('lightboxWrap');
+  // Reset zoom when loading a new image
+  wrap.classList.remove('zoomed');
+  wrap.scrollTop = 0;
+  wrap.scrollLeft = 0;
+  document.getElementById('lightboxZoomBadge').style.display = 'none';
   img.src = '/photos/' + photoId + '/full';
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
+  inatBtn.onclick = function() { submitToInat(photoId); };
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
 
@@ -643,17 +690,100 @@ function lightboxNav(delta) {
   openLightbox(next.id, next.filename, _lightboxPhotoList);
 }
 
+function toggleLightboxZoom(e) {
+  var wrap = document.getElementById('lightboxWrap');
+  var img = document.getElementById('lightboxImg');
+  var badge = document.getElementById('lightboxZoomBadge');
+  var isZoomed = wrap.classList.contains('zoomed');
+
+  if (isZoomed) {
+    // Zoom out
+    wrap.classList.remove('zoomed');
+    badge.style.display = 'none';
+    wrap.scrollTop = 0;
+    wrap.scrollLeft = 0;
+  } else {
+    // Zoom to 1:1 centered on click position
+    wrap.classList.add('zoomed');
+    badge.style.display = '';
+
+    // Wait for layout to update, then scroll to click position
+    setTimeout(function() {
+      var rect = wrap.getBoundingClientRect();
+      // Click position as fraction of the visible image
+      var clickX = (e.clientX - rect.left) / rect.width;
+      var clickY = (e.clientY - rect.top) / rect.height;
+
+      // Scroll to center the clicked point
+      var scrollX = (img.naturalWidth * clickX) - (wrap.clientWidth / 2);
+      var scrollY = (img.naturalHeight * clickY) - (wrap.clientHeight / 2);
+      wrap.scrollLeft = Math.max(0, scrollX);
+      wrap.scrollTop = Math.max(0, scrollY);
+    }, 50);
+  }
+}
+
+// Drag to pan when zoomed
+(function() {
+  var wrap, dragging = false, startX, startY, scrollStartX, scrollStartY;
+
+  document.addEventListener('mousedown', function(e) {
+    wrap = document.getElementById('lightboxWrap');
+    if (!wrap || !wrap.classList.contains('zoomed')) return;
+    if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    scrollStartX = wrap.scrollLeft;
+    scrollStartY = wrap.scrollTop;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    wrap.scrollLeft = scrollStartX - (e.clientX - startX);
+    wrap.scrollTop = scrollStartY - (e.clientY - startY);
+  });
+
+  document.addEventListener('mouseup', function() {
+    dragging = false;
+  });
+})();
+
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
+  var wrap = document.getElementById('lightboxWrap');
+  if (wrap) { wrap.classList.remove('zoomed'); wrap.scrollTop = 0; wrap.scrollLeft = 0; }
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
+  document.getElementById('lightboxZoomBadge').style.display = 'none';
   document.body.style.overflow = '';
 }
+async function submitToInat(photoId) {
+  try {
+    var resp = await fetch('/api/inat/prepare/' + photoId);
+    var data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+
+    // Always open iNaturalist in the browser — the user hits the final submit button
+    window.open(data.upload_url, '_blank');
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
+
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  if (e.key === 'z' || e.key === 'Z') {
+    // Zoom toggle — simulate a click in the center
+    var wrap = document.getElementById('lightboxWrap');
+    var rect = wrap.getBoundingClientRect();
+    toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
+    e.preventDefault();
+  }
 });
 </script>
 

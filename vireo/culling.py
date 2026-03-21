@@ -15,7 +15,7 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
-def analyze_for_culling(db, collection_id=None, pose_threshold=0.80, redundancy_threshold=0.88):
+def analyze_for_culling(db, collection_id=None, pose_threshold=0.80, redundancy_threshold=0.88, separate_file_types=True):
     """Run full culling analysis on a set of photos.
 
     Args:
@@ -55,12 +55,13 @@ def analyze_for_culling(db, collection_id=None, pose_threshold=0.80, redundancy_
                 "confidence": pred["confidence"],
             }
 
-    # Load embeddings and quality scores
+    # Load embeddings, quality scores, and file extensions
     embeddings = {}
     quality = {}
+    extensions = {}
     for pid in photo_ids:
         row = db.conn.execute(
-            "SELECT embedding, quality_score, sharpness, subject_sharpness FROM photos WHERE id = ?",
+            "SELECT embedding, quality_score, sharpness, subject_sharpness, extension FROM photos WHERE id = ?",
             (pid,),
         ).fetchone()
         if row and row["embedding"]:
@@ -70,30 +71,44 @@ def analyze_for_culling(db, collection_id=None, pose_threshold=0.80, redundancy_
         if q == 0 and row and row["sharpness"]:
             q = row["sharpness"] / 1000.0  # normalize roughly
         quality[pid] = q
+        extensions[pid] = (row["extension"] or "").lower() if row else ""
 
-    # Group by species
+    # Classify extensions as RAW or non-RAW for file type separation
+    from image_loader import RAW_EXTENSIONS
+
+    def _file_type(pid):
+        ext = extensions.get(pid, "")
+        return "raw" if ext in RAW_EXTENSIONS else "other"
+
+    # Group by species (and optionally file type)
     species_map = {}
     for pid in photo_ids:
         if pid not in predictions:
             continue
         sp = predictions[pid]["species"]
-        if sp not in species_map:
-            species_map[sp] = []
-        species_map[sp].append(pid)
+        if separate_file_types:
+            key = sp + " [" + _file_type(pid) + "]"
+        else:
+            key = sp
+        if key not in species_map:
+            species_map[key] = {"species": sp, "pids": []}
+        species_map[key]["pids"].append(pid)
 
     # Analyze each species group
     species_groups = []
     total_keepers = 0
     total_rejects = 0
 
-    for species, pids in sorted(species_map.items(), key=lambda x: -len(x[1])):
+    for group_key, group_data in sorted(species_map.items(), key=lambda x: -len(x[1]["pids"])):
+        species = group_data["species"]
+        pids = group_data["pids"]
         # Get embeddings for this species
         sp_embeddings = {pid: embeddings[pid] for pid in pids if pid in embeddings}
 
         if len(sp_embeddings) < 2:
             # Single photo or no embeddings — auto-keep
             species_groups.append({
-                "species": species,
+                "species": group_key,
                 "photo_count": len(pids),
                 "pose_groups": [{
                     "pose_id": 0,
@@ -155,7 +170,7 @@ def analyze_for_culling(db, collection_id=None, pose_threshold=0.80, redundancy_
             sp_rejects += sum(1 for p in photos_in_pose if p["action"] == "reject")
 
         species_groups.append({
-            "species": species,
+            "species": group_key,
             "photo_count": len(pids),
             "pose_groups": pose_groups,
             "keepers": sp_keepers,

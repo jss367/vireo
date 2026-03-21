@@ -194,6 +194,26 @@ def scan(root, db, progress_callback=None, incremental=False):
         except Exception:
             log.debug("Could not read EXIF timestamp from %s", image_path)
 
+        # Read GPS coordinates
+        latitude, longitude = None, None
+        try:
+            with Image.open(str(image_path)) as img:
+                gps_info = img.getexif().get_ifd(0x8825)
+                if gps_info:
+                    lat = gps_info.get(2)  # GPSLatitude
+                    lat_ref = gps_info.get(1)  # N or S
+                    lng = gps_info.get(4)  # GPSLongitude
+                    lng_ref = gps_info.get(3)  # E or W
+                    if lat and lng:
+                        latitude = lat[0] + lat[1] / 60 + lat[2] / 3600
+                        longitude = lng[0] + lng[1] / 60 + lng[2] / 3600
+                        if lat_ref == "S":
+                            latitude = -latitude
+                        if lng_ref == "W":
+                            longitude = -longitude
+        except Exception:
+            pass
+
         photo_id = db.add_photo(
             folder_id=folder_id,
             filename=image_path.name,
@@ -205,6 +225,14 @@ def scan(root, db, progress_callback=None, incremental=False):
             width=width,
             height=height,
         )
+
+        # Store GPS if found
+        if latitude is not None:
+            db.conn.execute(
+                "UPDATE photos SET latitude=?, longitude=? WHERE id=?",
+                (latitude, longitude, photo_id),
+            )
+            db.conn.commit()
 
         # Import XMP keywords if sidecar exists
         if xmp_path.exists():

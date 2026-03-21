@@ -279,9 +279,9 @@ function renderCulling() {
         html += '<div class="pose-label">Pose ' + (pi + 1) + ' (' + pg.photos.length + ' photos)</div>';
       }
 
-      // Build photo list for lightbox navigation
-      var posePhotoList = pg.photos.map(function(p) { return {id: p.photo_id, filename: p.filename || ''}; });
-      var poseListJson = JSON.stringify(posePhotoList).replace(/'/g, "\\'");
+      // Store photo list for lightbox navigation
+      var poseKey = 'cullPose_' + si + '_' + pi;
+      window[poseKey] = pg.photos.map(function(p) { return {id: p.photo_id, filename: p.filename || ''}; });
 
       html += '<div class="pose-strip">';
       pg.photos.forEach(function(photo) {
@@ -296,7 +296,7 @@ function renderCulling() {
         var qScore = photo.quality_score != null ? Math.round(photo.quality_score * 100) : (photo.sharpness != null ? Math.round(photo.sharpness) : '-');
 
         html += '<div class="' + cardClass + '" data-photo-id="' + photo.photo_id + '" ' +
-          'onclick="openLightbox(' + photo.photo_id + ',\'' + escapeHtml(photo.filename || '').replace(/'/g, "\\'") + '\',' + poseListJson + ')" ' +
+          'onclick="openLightbox(' + photo.photo_id + ',\'' + escapeHtml(photo.filename || '').replace(/'/g, "\\'") + '\', window.' + poseKey + ')" ' +
           'ondblclick="toggleCullAction(' + si + ',' + pi + ',' + photo.photo_id + ')">' +
           badge +
           '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy">' +
