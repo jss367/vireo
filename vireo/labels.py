@@ -239,29 +239,56 @@ def get_saved_labels():
 
 
 def get_active_labels():
-    """Return the currently active labels file path, or None."""
+    """Return the list of currently active label set metadata objects.
+
+    Returns:
+        list of metadata dicts (each has at least 'labels_file').
+        Empty list if nothing is configured or files are missing.
+    """
     config_path = os.path.expanduser("~/.vireo/labels_active.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path) as f:
-                data = json.load(f)
-            path = data.get("labels_file", "")
-            if path and os.path.exists(path):
-                return data
-        except Exception:
-            pass
-    return None
+    if not os.path.exists(config_path):
+        return []
+
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+    except Exception:
+        return []
+
+    # New format: {"active_labels": ["/path/a.txt", "/path/b.txt"]}
+    if "active_labels" in data and isinstance(data["active_labels"], list):
+        paths = data["active_labels"]
+    elif "labels_file" in data:
+        # Old format: single object — migrate to list
+        paths = [data["labels_file"]]
+    else:
+        return []
+
+    # Resolve metadata for each path, skip missing files
+    saved = get_saved_labels()
+    saved_by_file = {s["labels_file"]: s for s in saved}
+    result = []
+    for p in paths:
+        if not p or not os.path.exists(p):
+            log.warning("Active label file missing, skipping: %s", p)
+            continue
+        meta = saved_by_file.get(p)
+        if meta:
+            result.append(meta)
+        else:
+            result.append({"labels_file": p})
+    return result
 
 
-def set_active_labels(labels_file):
-    """Set the active labels file."""
+def set_active_labels(labels_files):
+    """Set the active label files.
+
+    Args:
+        labels_files: list of label file paths, or a single path string
+                      (for backward compat).
+    """
     config_path = os.path.expanduser("~/.vireo/labels_active.json")
-    # Find the metadata for this labels file
-    for saved in get_saved_labels():
-        if saved.get("labels_file") == labels_file:
-            with open(config_path, "w") as f:
-                json.dump(saved, f, indent=2)
-            return
-    # Fallback — save just the path
+    if isinstance(labels_files, str):
+        labels_files = [labels_files]
     with open(config_path, "w") as f:
-        json.dump({"labels_file": labels_file}, f, indent=2)
+        json.dump({"active_labels": labels_files}, f, indent=2)
