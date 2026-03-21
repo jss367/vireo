@@ -182,6 +182,11 @@ body {
             <option value="">Loading...</option>
           </select>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
+          <input type="checkbox" id="wizCull" checked style="accent-color:var(--accent,#24E5CA);">
+          Prepare for culling
+          <span style="font-size:11px;color:var(--text-dim,#888);">(find redundant photos, suggest keepers)</span>
+        </label>
       </div>
     </div>
 
@@ -724,6 +729,7 @@ async function wizStart() {
   var doThumbnails = document.getElementById('wizThumbnails').checked;
   var doPreviews = document.getElementById('wizPreviews').checked;
   var doClassify = document.getElementById('wizClassify').checked;
+  var doCull = document.getElementById('wizCull').checked;
   var previewSize = parseInt(document.getElementById('wizPreviewSize').value, 10) || 1920;
   var modelId = document.getElementById('wizModel').value;
   var labelsFile = document.getElementById('wizLabels').value;
@@ -753,6 +759,9 @@ async function wizStart() {
       model_id: modelId || undefined,
       labels_file: labelsFile || undefined,
     }});
+  }
+  if (doCull) {
+    steps.push({name: 'Prepare for culling', url: '/api/jobs/cull', body: {}});
   }
 
   var totalSteps = steps.length;
@@ -827,7 +836,7 @@ async function wizStart() {
   }
 
   progressFill.style.width = '100%';
-  status.textContent = 'Pipeline complete! Go to Review to check your predictions.';
+  status.textContent = 'Pipeline complete! Go to Review for predictions, or Cull to pick keepers.';
   status.style.color = 'var(--accent,#24E5CA)';
   progressDetail.textContent = '';
   btn.disabled = false;

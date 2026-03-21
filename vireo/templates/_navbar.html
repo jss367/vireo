@@ -570,6 +570,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/classify" {% if active_page == 'classify' %}class="active"{% endif %}>Classify</a>
   <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
   <a href="/import" {% if active_page == 'import' %}class="active"{% endif %}>Import</a>
+  <a href="/cull" {% if active_page == 'cull' %}class="active"{% endif %}>Cull</a>
   <a href="/audit" {% if active_page == 'audit' %}class="active"{% endif %}>Audit</a>
   <a href="/variants" {% if active_page == 'variants' %}class="active"{% endif %}>Variants</a>
   <a href="/dashboard" {% if active_page == 'dashboard' %}class="active"{% endif %}>Dashboard</a>
@@ -586,8 +587,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
+  <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;" title="Previous (←)">&#9664;</div>
+  <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;" title="Next (→)">&#9654;</div>
   <img id="lightboxImg" src="" alt="">
   <div class="lightbox-filename" id="lightboxFilename"></div>
+  <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
     <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:#7ec8e3;border:1px solid #7ec8e3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Find Similar
@@ -599,7 +603,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 </div>
 
 <script>
-function openLightbox(photoId, filename) {
+var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
+var _lightboxCurrentId = null;
+
+function openLightbox(photoId, filename, photoList) {
+  _lightboxCurrentId = photoId;
+  if (photoList) _lightboxPhotoList = photoList;
+
   var overlay = document.getElementById('lightboxOverlay');
   var img = document.getElementById('lightboxImg');
   var label = document.getElementById('lightboxFilename');
@@ -611,7 +621,28 @@ function openLightbox(photoId, filename) {
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
+
+  // Show position indicator if navigating a list
+  var counter = document.getElementById('lightboxCounter');
+  if (_lightboxPhotoList.length > 1) {
+    var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
+    counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length;
+    counter.style.display = '';
+  } else {
+    counter.style.display = 'none';
+  }
 }
+
+function lightboxNav(delta) {
+  if (_lightboxPhotoList.length < 2) return;
+  var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === _lightboxCurrentId; });
+  if (idx === -1) return;
+  var newIdx = idx + delta;
+  if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) return;
+  var next = _lightboxPhotoList[newIdx];
+  openLightbox(next.id, next.filename, _lightboxPhotoList);
+}
+
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
   document.getElementById('lightboxOverlay').classList.remove('active');
@@ -620,6 +651,9 @@ function closeLightbox(e) {
 }
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); }
+  if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
+  if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
 });
 </script>
 

@@ -69,97 +69,40 @@ def detect_animals(image_path, confidence_threshold=0.2):
 
     detections = []
 
-    # PytorchWildlife returns results with 'detections' containing boxes
-    # The exact format varies by version — handle common patterns
-    if hasattr(results, "keys"):
-        # Dict-like result
-        boxes = results.get("detections", results.get("boxes", []))
-        if isinstance(boxes, dict):
-            # Some versions return {'xyxy': tensor, 'confidence': tensor, 'class': tensor}
-            xyxy = boxes.get("xyxy", [])
-            confs = boxes.get("confidence", [])
-            classes = boxes.get("class", [])
-            for i in range(len(xyxy)):
-                conf = float(confs[i]) if i < len(confs) else 0
-                if conf < confidence_threshold:
-                    continue
-                box = xyxy[i]
-                # Convert xyxy to xywh normalized
-                img = Image.open(str(image_path))
-                iw, ih = img.size
-                x1, y1, x2, y2 = (
-                    float(box[0]),
-                    float(box[1]),
-                    float(box[2]),
-                    float(box[3]),
-                )
-                detections.append(
-                    {
-                        "box": {
-                            "x": x1 / iw,
-                            "y": y1 / ih,
-                            "w": (x2 - x1) / iw,
-                            "h": (y2 - y1) / ih,
-                        },
-                        "confidence": conf,
-                        "category": "animal",
-                    }
-                )
-        elif hasattr(boxes, "__len__"):
-            # List of box objects
-            for det in boxes:
-                conf = float(det.get("confidence", det.get("conf", 0)))
-                if conf < confidence_threshold:
-                    continue
-                box = det.get("bbox", det.get("box", [0, 0, 0, 0]))
-                cat = det.get("category", det.get("class", "animal"))
-                # Normalize category
-                if isinstance(cat, (int, float)):
-                    cat = {1: "animal", 2: "person", 3: "vehicle"}.get(
-                        int(cat), "unknown"
-                    )
-                if cat != "animal":
-                    continue
-                if len(box) == 4:
-                    detections.append(
-                        {
-                            "box": {
-                                "x": float(box[0]),
-                                "y": float(box[1]),
-                                "w": float(box[2]),
-                                "h": float(box[3]),
-                            },
-                            "confidence": conf,
-                            "category": "animal",
-                        }
-                    )
-    else:
-        # Try treating as an object with attributes
-        try:
-            for det in results:
-                conf = float(getattr(det, "confidence", getattr(det, "conf", 0)))
-                if conf < confidence_threshold:
-                    continue
-                box = getattr(det, "bbox", getattr(det, "box", [0, 0, 0, 0]))
-                detections.append(
-                    {
-                        "box": {
-                            "x": float(box[0]),
-                            "y": float(box[1]),
-                            "w": float(box[2]),
-                            "h": float(box[3]),
-                        },
-                        "confidence": conf,
-                        "category": "animal",
-                    }
-                )
-        except Exception:
-            log.warning(
-                "Could not parse detection results for %s: %s",
-                image_path,
-                type(results),
-                exc_info=True,
-            )
+    # PytorchWildlife returns a dict with:
+    #   detections: supervision.Detections with xyxy, confidence, class_id
+    #   normalized_coords: list of [x1, y1, x2, y2] normalized 0-1
+    #   labels: list of "animal 0.28" strings
+    if not hasattr(results, "keys"):
+        log.warning("Unexpected detection result type: %s", type(results))
+        return []
+
+    # Prefer normalized_coords (already 0-1, no image size needed)
+    norm_coords = results.get("normalized_coords", [])
+    det_obj = results.get("detections")
+
+    # Get confidences from the Detections object
+    confs = []
+    if det_obj is not None and hasattr(det_obj, "confidence") and det_obj.confidence is not None:
+        confs = det_obj.confidence
+
+    for i, coords in enumerate(norm_coords):
+        conf = float(confs[i]) if i < len(confs) else 0
+        if conf < confidence_threshold:
+            continue
+        x1, y1, x2, y2 = [float(c) for c in coords]
+        detections.append(
+            {
+                "box": {
+                    "x": x1,
+                    "y": y1,
+                    "w": x2 - x1,
+                    "h": y2 - y1,
+                },
+                "confidence": conf,
+                "category": "animal",
+            }
+        )
 
     return detections
 

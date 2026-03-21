@@ -8,7 +8,7 @@ from xml.etree import ElementTree as ET
 from PIL import Image
 
 from compare import read_xmp_keywords
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
 from grouping import read_exif_timestamp
 
 log = logging.getLogger(__name__)
@@ -171,8 +171,17 @@ def scan(root, db, progress_callback=None, incremental=False):
         # Read dimensions
         width, height = None, None
         try:
-            with Image.open(str(image_path)) as img:
-                width, height = img.size
+            ext = image_path.suffix.lower()
+            if ext in SUPPORTED_EXTENSIONS and ext not in IMAGE_EXTENSIONS:
+                # RAW file — PIL only reads the thumbnail, use rawpy
+                import rawpy
+
+                with rawpy.imread(str(image_path)) as raw:
+                    sizes = raw.sizes
+                    width, height = sizes.width, sizes.height
+            else:
+                with Image.open(str(image_path)) as img:
+                    width, height = img.size
         except Exception:
             log.debug("Could not read dimensions from %s", image_path)
 

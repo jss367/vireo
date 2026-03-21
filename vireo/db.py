@@ -52,6 +52,8 @@ class Database:
                 subject_size REAL,
                 quality_score REAL,
                 embedding BLOB,
+                latitude REAL,
+                longitude REAL,
                 UNIQUE(folder_id, filename)
             );
 
@@ -143,6 +145,11 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
         try:
+            self.conn.execute("SELECT latitude FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN latitude REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN longitude REAL")
+        try:
             self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
         except Exception:
             self.conn.execute(
@@ -221,7 +228,8 @@ class Database:
     # Columns to return in photo queries (excludes large binary fields like embedding)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
-                    detection_box, detection_conf, subject_sharpness, subject_size, quality_score"""
+                    detection_box, detection_conf, subject_sharpness, subject_size, quality_score,
+                    latitude, longitude"""
 
     def get_photo(self, photo_id):
         """Return a single photo by id."""

@@ -203,6 +203,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def audit():
         return render_template("audit.html")
 
+    @app.route("/cull")
+    def cull_page():
+        return render_template("cull.html")
+
     @app.route("/variants")
     def variants_page():
         return render_template("variants.html")
@@ -2928,6 +2932,95 @@ def create_app(db_path, thumb_cache_dir=None):
                ORDER BY photo_count DESC"""
         ).fetchall()
         return jsonify([dict(r) for r in rows])
+
+    # -- Culling API --
+
+    @app.route("/api/jobs/cull", methods=["POST"])
+    def api_job_cull():
+        """Run culling analysis as a background job."""
+        body = request.get_json(silent=True) or {}
+        collection_id = body.get("collection_id")
+
+        runner = app._job_runner
+
+        def work(job):
+            from culling import analyze_for_culling
+
+            thread_db = Database(db_path)
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": 0,
+                    "total": 0,
+                    "current_file": "Analyzing photos for culling...",
+                    "rate": 0,
+                    "phase": "Culling analysis",
+                },
+            )
+
+            result = analyze_for_culling(thread_db, collection_id=collection_id)
+
+            # Store culling results in a temporary cache for the UI
+            import json as _json
+
+            cache_path = os.path.join(
+                os.path.dirname(db_path), "culling_results.json"
+            )
+            with open(cache_path, "w") as f:
+                _json.dump(result, f)
+
+            return {
+                "total_photos": result["total_photos"],
+                "suggested_keepers": result["suggested_keepers"],
+                "suggested_rejects": result["suggested_rejects"],
+                "species_count": len(result["species_groups"]),
+            }
+
+        job_id = runner.start(
+            "cull", work, config={"collection_id": collection_id}
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/culling/results")
+    def api_culling_results():
+        """Return the most recent culling analysis results."""
+        cache_path = os.path.join(os.path.dirname(db_path), "culling_results.json")
+        if not os.path.exists(cache_path):
+            return jsonify({"error": "No culling analysis found. Run one first."}), 404
+
+        with open(cache_path) as f:
+            results = json.load(f)
+
+        # Enrich with photo metadata for the UI
+        db = _get_db()
+        for sg in results["species_groups"]:
+            for pg in sg["pose_groups"]:
+                for photo in pg["photos"]:
+                    p = db.get_photo(photo["photo_id"])
+                    if p:
+                        photo["filename"] = p["filename"]
+                        photo["sharpness"] = p["sharpness"]
+                        photo["subject_sharpness"] = p["subject_sharpness"]
+                        photo["quality_score"] = p["quality_score"]
+
+        return jsonify(results)
+
+    @app.route("/api/culling/apply", methods=["POST"])
+    def api_culling_apply():
+        """Apply culling decisions — flag keepers and reject others."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        keepers = body.get("keepers", [])
+        rejects = body.get("rejects", [])
+
+        for pid in keepers:
+            db.update_photo_flag(pid, "flagged")
+        for pid in rejects:
+            db.update_photo_flag(pid, "rejected")
+
+        log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
+        return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
 
     @app.route("/api/photos/<int:photo_id>/similar")
     def api_photo_similar(photo_id):
