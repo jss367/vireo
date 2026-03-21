@@ -292,3 +292,26 @@ def set_active_labels(labels_files):
         labels_files = [labels_files]
     with open(config_path, "w") as f:
         json.dump({"active_labels": labels_files}, f, indent=2)
+
+
+def load_merged_labels(label_sets):
+    """Read and merge species from multiple label sets.
+
+    Args:
+        label_sets: list of metadata dicts, each with a 'labels_file' key.
+
+    Returns:
+        sorted, deduplicated list of species name strings.
+    """
+    all_species = set()
+    for ls in label_sets:
+        path = ls.get("labels_file", "")
+        if not path or not os.path.exists(path):
+            log.warning("Label file missing, skipping: %s", path)
+            continue
+        with open(path) as f:
+            for line in f:
+                name = line.strip()
+                if name:
+                    all_species.add(name)
+    return sorted(all_species)

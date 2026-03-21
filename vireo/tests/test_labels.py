@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from labels import get_active_labels, set_active_labels, get_saved_labels, LABELS_DIR
+from labels import get_active_labels, set_active_labels, load_merged_labels, get_saved_labels, LABELS_DIR
 
 
 def test_get_active_labels_empty(tmp_path, monkeypatch):
@@ -100,3 +100,46 @@ def test_get_active_labels_skips_missing_files(tmp_path, monkeypatch):
 
     result = get_active_labels()
     assert result == []
+
+
+def test_load_merged_labels_deduplicates(tmp_path):
+    """Merging label sets deduplicates and sorts species."""
+    dir_ = str(tmp_path / "labels")
+    os.makedirs(dir_)
+
+    txt1 = os.path.join(dir_, "birds.txt")
+    with open(txt1, "w") as f:
+        f.write("Robin\nJay\nSparrow\n")
+
+    txt2 = os.path.join(dir_, "reptiles.txt")
+    with open(txt2, "w") as f:
+        f.write("Lizard\nSnake\nRobin\n")  # Robin is a duplicate
+
+    label_sets = [
+        {"labels_file": txt1, "name": "Birds"},
+        {"labels_file": txt2, "name": "Reptiles"},
+    ]
+    result = load_merged_labels(label_sets)
+    assert result == ["Jay", "Lizard", "Robin", "Snake", "Sparrow"]
+
+
+def test_load_merged_labels_empty():
+    """Empty input returns empty list."""
+    assert load_merged_labels([]) == []
+
+
+def test_load_merged_labels_skips_missing(tmp_path):
+    """Missing files are skipped, valid ones still load."""
+    dir_ = str(tmp_path / "labels")
+    os.makedirs(dir_)
+
+    txt1 = os.path.join(dir_, "birds.txt")
+    with open(txt1, "w") as f:
+        f.write("Robin\nJay\n")
+
+    label_sets = [
+        {"labels_file": txt1},
+        {"labels_file": "/nonexistent/gone.txt"},
+    ]
+    result = load_merged_labels(label_sets)
+    assert result == ["Jay", "Robin"]
