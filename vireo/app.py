@@ -941,11 +941,13 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
         from classifier import _embedding_cache_path
-        from labels import get_active_labels, get_saved_labels
+        from labels import get_active_labels, get_saved_labels, load_merged_labels
         from models import get_active_model, get_models
 
         model_id = request.args.get("model_id", "")
         labels_file = request.args.get("labels_file", "")
+        labels_files_raw = request.args.get("labels_files", "")
+        labels_files = [p for p in labels_files_raw.split(",") if p] if labels_files_raw else []
 
         # Resolve model
         models = get_models()
@@ -965,21 +967,38 @@ def create_app(db_path, thumb_cache_dir=None):
         use_tol = False
         label_count = 0
         label_name = ""
+        labels = []
+
         if labels_file:
+            # Single file override from query param (classify page picker)
             if os.path.exists(labels_file):
                 with open(labels_file) as f:
                     label_count = sum(1 for line in f if line.strip())
-                # Find display name
                 for ls in get_saved_labels():
                     if ls.get("labels_file") == labels_file:
                         label_name = ls.get("name", labels_file)
                         break
+                with open(labels_file) as f:
+                    labels = [line.strip() for line in f if line.strip()]
+        elif labels_files:
+            # Multiple files override from query param
+            active_sets = []
+            saved = get_saved_labels()
+            saved_by_file = {s["labels_file"]: s for s in saved}
+            for p in labels_files:
+                meta = saved_by_file.get(p, {"labels_file": p})
+                active_sets.append(meta)
+            labels = load_merged_labels(active_sets)
+            label_count = len(labels)
+            names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
+            label_name = ", ".join(names)
         else:
-            active = get_active_labels()
-            if active and os.path.exists(active.get("labels_file", "")):
-                labels_file = active["labels_file"]
-                label_name = active.get("name", "")
-                label_count = active.get("species_count", 0)
+            active_sets = get_active_labels()
+            if active_sets:
+                labels = load_merged_labels(active_sets)
+                label_count = len(labels)
+                names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
+                label_name = ", ".join(names)
             else:
                 tol_models = {"hf-hub:imageomics/bioclip", "hf-hub:imageomics/bioclip-2"}
                 model_str_check = model.get("model_str", "") if model else ""
@@ -991,12 +1010,9 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Check embedding cache
         embeddings_cached = False
-        if model and not use_tol and labels_file and os.path.exists(labels_file):
-            with open(labels_file) as f:
-                labels = [line.strip() for line in f if line.strip()]
-            if labels:
-                cache_path = _embedding_cache_path(labels, model.get("model_str", ""))
-                embeddings_cached = os.path.exists(cache_path)
+        if model and not use_tol and labels:
+            cache_path = _embedding_cache_path(labels, model.get("model_str", ""))
+            embeddings_cached = os.path.exists(cache_path)
 
         return jsonify(
             {
@@ -1153,6 +1169,33 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    @app.route("/api/storage/files")
+    def api_storage_files():
+        """List individual files in a cache directory."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+
+        cache_type = request.args.get("type", "")
+        dirs = {
+            "thumbnails": app.config["THUMB_CACHE_DIR"],
+            "previews": os.path.join(
+                os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+            ),
+            "embeddings": EMB_CACHE_DIR,
+        }
+        cache_dir = dirs.get(cache_type)
+        if not cache_dir:
+            return jsonify({"error": "Unknown cache type"}), 400
+
+        files = []
+        if os.path.isdir(cache_dir):
+            for f in sorted(os.listdir(cache_dir)):
+                fp = os.path.join(cache_dir, f)
+                if os.path.isfile(fp):
+                    files.append(
+                        {"name": f, "size": os.path.getsize(fp)}
+                    )
+        return jsonify({"type": cache_type, "path": cache_dir, "files": files})
+
     @app.route("/api/storage/clear", methods=["POST"])
     def api_storage_clear():
         """Clear a specific cache."""
@@ -1184,6 +1227,38 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify({"ok": True})
         else:
             return jsonify({"error": "Unknown cache type"}), 400
+
+    @app.route("/api/storage/delete-files", methods=["POST"])
+    def api_storage_delete_files():
+        """Delete specific files from a cache directory."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+
+        body = request.get_json(silent=True) or {}
+        cache_type = body.get("type", "")
+        filenames = body.get("files", [])
+        dirs = {
+            "thumbnails": app.config["THUMB_CACHE_DIR"],
+            "previews": os.path.join(
+                os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+            ),
+            "embeddings": EMB_CACHE_DIR,
+        }
+        cache_dir = dirs.get(cache_type)
+        if not cache_dir:
+            return jsonify({"error": "Unknown cache type"}), 400
+        if not filenames:
+            return jsonify({"error": "No files specified"}), 400
+
+        deleted = 0
+        for fname in filenames:
+            # Prevent path traversal
+            safe = os.path.basename(fname)
+            fp = os.path.join(cache_dir, safe)
+            if os.path.isfile(fp):
+                os.remove(fp)
+                deleted += 1
+        log.info("Deleted %d files from %s cache", deleted, cache_type)
+        return jsonify({"ok": True, "deleted": deleted})
 
     @app.route("/api/preview-cache")
     def api_preview_cache():
@@ -1601,12 +1676,16 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/labels/active", methods=["POST"])
     def api_set_active_labels():
         body = request.get_json(silent=True) or {}
-        labels_file = body.get("labels_file")
-        if not labels_file:
-            return jsonify({"error": "labels_file required"}), 400
+        # Accept new list format or old single-path format
+        labels_files = body.get("labels_files")
+        if labels_files is None:
+            single = body.get("labels_file")
+            if not single:
+                return jsonify({"error": "labels_files or labels_file required"}), 400
+            labels_files = [single]
         from labels import set_active_labels
 
-        set_active_labels(labels_file)
+        set_active_labels(labels_files)
         return jsonify({"ok": True})
 
     @app.route("/api/jobs/fetch-labels", methods=["POST"])
@@ -2250,25 +2329,30 @@ def create_app(db_path, thumb_cache_dir=None):
 
             # Phase 2: Load labels
             labels = None
-            if labels_file and os.path.exists(labels_file):
+            labels_files = body.get("labels_files")
+            if labels_files and isinstance(labels_files, list):
+                from labels import get_saved_labels, load_merged_labels
+
+                saved = get_saved_labels()
+                saved_by_file = {s["labels_file"]: s for s in saved}
+                active_sets = []
+                for p in labels_files:
+                    meta = saved_by_file.get(p, {"labels_file": p})
+                    active_sets.append(meta)
+                labels = load_merged_labels(active_sets)
+                log.info("Using %d merged labels from %d sets", len(labels), len(active_sets))
+            elif labels_file and os.path.exists(labels_file):
                 with open(labels_file) as f:
                     labels = [line.strip() for line in f if line.strip()]
                 log.info("Using %d labels from file: %s", len(labels), labels_file)
             else:
-                # Try active labels from the labels manager
-                from labels import get_active_labels
+                from labels import get_active_labels, load_merged_labels
 
-                active_labels = get_active_labels()
-                if active_labels and os.path.exists(
-                    active_labels.get("labels_file", "")
-                ):
-                    with open(active_labels["labels_file"]) as f:
-                        labels = [line.strip() for line in f if line.strip()]
-                    log.info(
-                        "Using %d labels from: %s",
-                        len(labels),
-                        active_labels.get("name", active_labels["labels_file"]),
-                    )
+                active_sets = get_active_labels()
+                if active_sets:
+                    labels = load_merged_labels(active_sets)
+                    names = [s.get("name", "?") for s in active_sets]
+                    log.info("Using %d merged labels from active sets: %s", len(labels), ", ".join(names))
 
             # Log what we're using
             if labels:
