@@ -138,9 +138,7 @@ select.picker:focus { border-color: var(--accent, #24E5CA); }
       </div>
       <div class="config-item">
         <div class="config-label">Labels</div>
-        <select class="picker" id="labelsPicker" onchange="updateReadiness()">
-          <option value="">Loading labels...</option>
-        </select>
+        <div id="labelsPicker" style="font-size:12px;max-height:120px;overflow-y:auto;padding:4px 0;"></div>
       </div>
       <div class="config-item">
         <div class="config-label" title="Minimum confidence to include a prediction. Photos below this threshold are skipped.">Threshold</div>
@@ -217,24 +215,22 @@ async function loadConfig() {
     // Load labels
     var labelsResp = await fetch('/api/labels');
     var labelsData = await labelsResp.json();
-    var labelsSel = document.getElementById('labelsPicker');
-    labelsSel.innerHTML = '';
+    var labelsDiv = document.getElementById('labelsPicker');
+    var active = labelsData.active || [];
+    var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
+
     if (!labelsData.labels || labelsData.labels.length === 0) {
-      labelsSel.innerHTML = '<option value="">(Tree of Life — all species)</option>';
+      labelsDiv.innerHTML = '<span style="color:#888;font-size:12px;">(Tree of Life — all species)</span>';
     } else {
-      // Add Tree of Life option first
-      var tolOpt = document.createElement('option');
-      tolOpt.value = '';
-      tolOpt.textContent = '(Tree of Life — all species)';
-      labelsSel.appendChild(tolOpt);
-      // Add downloaded label sets
+      var html = '';
       labelsData.labels.forEach(function(l) {
-        var opt = document.createElement('option');
-        opt.value = l.labels_file;
-        opt.textContent = l.name + ' (' + (l.species_count || 0) + ' species)';
-        if (labelsData.active && labelsData.active.labels_file === l.labels_file) opt.selected = true;
-        labelsSel.appendChild(opt);
+        var isActive = activePaths.has(l.labels_file);
+        html += '<label style="display:flex;align-items:center;gap:4px;color:#B0CCCC;cursor:pointer;padding:2px 0;">' +
+          '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
+          (isActive ? ' checked' : '') + ' onchange="updateReadiness()" style="accent-color:#24E5CA;"> ' +
+          l.name + ' (' + (l.species_count || 0) + ')</label>';
       });
+      labelsDiv.innerHTML = html;
     }
 
     // Load threshold
@@ -252,12 +248,15 @@ async function loadConfig() {
 async function updateReadiness() {
   var panel = document.getElementById('readinessPanel');
   var modelId = document.getElementById('modelPicker').value;
-  var labelsFile = document.getElementById('labelsPicker').value;
+  var labelsFiles = [];
+  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    labelsFiles.push(cb.value);
+  });
 
   try {
     var params = [];
     if (modelId) params.push('model_id=' + encodeURIComponent(modelId));
-    if (labelsFile) params.push('labels_file=' + encodeURIComponent(labelsFile));
+    if (labelsFiles.length > 0) params.push('labels_files=' + encodeURIComponent(labelsFiles.join(',')));
     var resp = await fetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''));
     var r = await resp.json();
 
@@ -403,7 +402,11 @@ async function runClassification(reclassify) {
         collection_id: parseInt(collId),
         threshold: threshold,
         model_id: document.getElementById('modelPicker').value || undefined,
-        labels_file: document.getElementById('labelsPicker').value || undefined,
+        labels_files: (function() {
+          var files = [];
+          document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) { files.push(cb.value); });
+          return files.length > 0 ? files : undefined;
+        })(),
         reclassify: !!reclassify,
       }),
     });

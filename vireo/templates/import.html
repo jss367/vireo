@@ -712,7 +712,8 @@ function wizRenderFolders() {
       var opt = document.createElement('option');
       opt.value = l.labels_file;
       opt.textContent = l.name + ' (' + (l.species_count || 0) + ')';
-      if (lData.active && lData.active.labels_file === l.labels_file) opt.selected = true;
+      var activeArr = Array.isArray(lData.active) ? lData.active : (lData.active ? [lData.active] : []);
+      if (activeArr.some(function(a) { return a.labels_file === l.labels_file; })) opt.selected = true;
       lSel.appendChild(opt);
     });
 
