@@ -275,7 +275,8 @@ async function updateReadiness() {
     if (r.use_tol) {
       items.push('<span style="color:var(--info,#7ec8e3);">&#9679;</span> Labels: <b>Tree of Life</b> — classifying against all species (slower, less accurate than regional labels)');
     } else if (r.labels_count > 0) {
-      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + r.labels_name + '</b> — ' + r.labels_count.toLocaleString() + ' species');
+      var labelDisplay = r.labels_name.length > 60 ? r.labels_name.substring(0, 57) + '...' : r.labels_name;
+      items.push('<span style="color:var(--accent,#24E5CA);">&#10003;</span> Labels: <b>' + labelDisplay + '</b> — ' + r.labels_count.toLocaleString() + ' species');
     }
 
     // Embeddings status
