@@ -598,10 +598,60 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   color: var(--accent, #4ecca3);
   font-weight: 600;
 }
+
+/* ---------- Workspace switcher ---------- */
+.ws-dropdown { position: relative; }
+.ws-current {
+  background: none; border: 1px solid var(--border-primary, #14374E);
+  color: var(--text-secondary, #B0CCCC); border-radius: 4px;
+  padding: 4px 10px; font-size: 13px; cursor: pointer;
+  display: flex; align-items: center; gap: 4px;
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-current:hover { border-color: var(--accent, #4ecca3); color: var(--text-primary, #E0F0F0); }
+.ws-arrow { font-size: 10px; }
+.ws-menu {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0;
+  background: var(--bg-secondary, #0E2A3D); border: 1px solid var(--border-primary, #14374E);
+  border-radius: 6px; min-width: 220px; z-index: 1000;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 4px 0;
+}
+.ws-menu.open { display: block; }
+.ws-menu-header {
+  font-size: 11px; color: var(--text-muted, #7FAAB0); padding: 8px 12px 4px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.ws-menu-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; cursor: pointer; font-size: 13px;
+  color: var(--text-secondary, #B0CCCC);
+}
+.ws-menu-item:hover { background: var(--bg-tertiary, #14374E); }
+.ws-menu-item.active { color: var(--accent, #4ecca3); }
+.ws-menu-item .ws-item-check { font-size: 14px; }
+.ws-menu-divider { border-top: 1px solid var(--border-primary, #14374E); margin: 4px 0; }
+.ws-menu-action {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: 8px 12px; cursor: pointer; font-size: 13px;
+  color: var(--accent, #4ecca3);
+}
+.ws-menu-action:hover { background: var(--bg-tertiary, #14374E); }
 </style>
 
 <nav class="navbar">
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
+  <div class="ws-dropdown" id="wsDropdown">
+    <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn">
+      {{ active_workspace.name if active_workspace else 'Default' }}
+      <span class="ws-arrow">&#9662;</span>
+    </button>
+    <div class="ws-menu" id="wsMenu">
+      <div class="ws-menu-header">Workspaces</div>
+      <div id="wsMenuList"></div>
+      <div class="ws-menu-divider"></div>
+      <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
+    </div>
+  </div>
   <a href="/browse" {% if active_page == 'browse' %}class="active"{% endif %}>Browse</a>
   <a href="/classify" {% if active_page == 'classify' %}class="active"{% endif %}>Classify</a>
   <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
@@ -620,6 +670,164 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
+
+<!-- Create Workspace Modal -->
+<div class="modal-overlay" id="createWsModal">
+  <div class="modal" style="width:400px;">
+    <h3 style="margin-bottom:16px; font-size:16px;">New Workspace</h3>
+    <div style="margin-bottom:12px;">
+      <label style="font-size:13px; color:var(--text-muted, #7FAAB0); display:block; margin-bottom:4px;">Name</label>
+      <input class="modal-input" id="newWsName" placeholder="e.g. Kenya 2025"
+             style="width:100%; padding:8px 10px; background:var(--bg-tertiary, #14374E); border:1px solid var(--border-primary, #14374E); color:var(--text-primary, #E0F0F0); border-radius:4px; font-size:14px;">
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="font-size:13px; color:var(--text-muted, #7FAAB0); display:block; margin-bottom:4px;">Folders</label>
+      <div id="newWsFolderList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border-primary, #14374E); border-radius:4px; padding:4px;"></div>
+      <div style="font-size:11px; color:var(--text-muted, #7FAAB0); margin-top:4px;">Select which folders to include. You can change this later.</div>
+    </div>
+    <div class="modal-actions" style="display:flex; gap:8px; justify-content:flex-end;">
+      <button class="modal-btn modal-btn-cancel" onclick="hideCreateWsModal()" style="background:none; border:1px solid var(--border-primary, #14374E); color:var(--text-secondary, #B0CCCC); border-radius:4px; padding:6px 16px; cursor:pointer;">Cancel</button>
+      <button class="modal-btn modal-btn-primary" onclick="createWorkspace()" style="background:var(--accent, #24E5CA); color:var(--accent-text, #0A1F2E); border:none; border-radius:4px; padding:6px 16px; cursor:pointer; font-weight:600;">Create</button>
+    </div>
+    <div id="newWsError" style="color:var(--danger, #E74C3C); font-size:13px; margin-top:8px; display:none;"></div>
+  </div>
+</div>
+
+<script>
+/* ---------- Workspace switcher ---------- */
+var _wsDropdownOpen = false;
+
+function wsEscapeHtml(str) {
+  if (str == null) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(String(str)));
+  return div.innerHTML;
+}
+
+function toggleWsDropdown() {
+  _wsDropdownOpen = !_wsDropdownOpen;
+  var menu = document.getElementById('wsMenu');
+  if (_wsDropdownOpen) {
+    loadWorkspaceMenu();
+    menu.classList.add('open');
+    setTimeout(function() {
+      document.addEventListener('click', closeWsDropdownOutside);
+    }, 0);
+  } else {
+    menu.classList.remove('open');
+    document.removeEventListener('click', closeWsDropdownOutside);
+  }
+}
+
+function closeWsDropdownOutside(e) {
+  var dd = document.getElementById('wsDropdown');
+  if (!dd.contains(e.target)) {
+    document.getElementById('wsMenu').classList.remove('open');
+    _wsDropdownOpen = false;
+    document.removeEventListener('click', closeWsDropdownOutside);
+  }
+}
+
+async function loadWorkspaceMenu() {
+  try {
+    var resp = await fetch('/api/workspaces');
+    var workspaces = await resp.json();
+    var activeResp = await fetch('/api/workspaces/active');
+    var active = await activeResp.json();
+    var list = document.getElementById('wsMenuList');
+    list.innerHTML = '';
+    workspaces.forEach(function(ws) {
+      var isActive = ws.id === active.id;
+      var div = document.createElement('div');
+      div.className = 'ws-menu-item' + (isActive ? ' active' : '');
+      div.innerHTML = wsEscapeHtml(ws.name) +
+        (isActive ? ' <span class="ws-item-check">&#10003;</span>' : '');
+      div.onclick = function() { switchWorkspace(ws.id, ws.name); };
+      list.appendChild(div);
+    });
+  } catch(e) {
+    console.error('Failed to load workspaces', e);
+  }
+}
+
+async function switchWorkspace(wsId, wsName) {
+  try {
+    await fetch('/api/workspaces/' + wsId + '/activate', { method: 'POST' });
+    document.getElementById('wsCurrentBtn').firstChild.textContent = wsName + ' ';
+    document.getElementById('wsMenu').classList.remove('open');
+    _wsDropdownOpen = false;
+    document.removeEventListener('click', closeWsDropdownOutside);
+    window.location.reload();
+  } catch(e) {
+    console.error('Failed to switch workspace', e);
+  }
+}
+
+/* ---------- Create Workspace modal ---------- */
+async function showCreateWorkspaceModal() {
+  document.getElementById('wsMenu').classList.remove('open');
+  _wsDropdownOpen = false;
+
+  try {
+    var resp = await fetch('/api/folders');
+    var folders = await resp.json();
+    var list = document.getElementById('newWsFolderList');
+    list.innerHTML = '';
+    if (folders.length === 0) {
+      list.innerHTML = '<div style="padding:8px; color:var(--text-muted, #7FAAB0); font-size:13px;">No folders scanned yet</div>';
+    } else {
+      folders.forEach(function(f) {
+        var label = document.createElement('label');
+        label.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; font-size:13px; color:var(--text-secondary, #B0CCCC); cursor:pointer;';
+        label.innerHTML = '<input type="checkbox" value="' + f.id + '" checked> ' + wsEscapeHtml(f.path);
+        list.appendChild(label);
+      });
+    }
+  } catch(e) {
+    console.error(e);
+  }
+
+  document.getElementById('newWsName').value = '';
+  document.getElementById('newWsError').style.display = 'none';
+  document.getElementById('createWsModal').classList.add('open');
+  document.getElementById('newWsName').focus();
+}
+
+function hideCreateWsModal() {
+  document.getElementById('createWsModal').classList.remove('open');
+}
+
+async function createWorkspace() {
+  var name = document.getElementById('newWsName').value.trim();
+  if (!name) {
+    document.getElementById('newWsError').textContent = 'Name is required';
+    document.getElementById('newWsError').style.display = 'block';
+    return;
+  }
+
+  var checkboxes = document.querySelectorAll('#newWsFolderList input[type=checkbox]:checked');
+  var folderIds = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value); });
+
+  try {
+    var resp = await fetch('/api/workspaces', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: name, folder_ids: folderIds })
+    });
+    var data = await resp.json();
+    if (resp.ok) {
+      hideCreateWsModal();
+      await switchWorkspace(data.id, data.name);
+    } else {
+      document.getElementById('newWsError').textContent = data.error || 'Failed to create';
+      document.getElementById('newWsError').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('newWsError').textContent = 'Error: ' + e.message;
+    document.getElementById('newWsError').style.display = 'block';
+  }
+}
+</script>
 
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightboxOverlay" onclick="closeLightbox(event)">
