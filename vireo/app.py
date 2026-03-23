@@ -902,9 +902,14 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_update_workspace(ws_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        db.update_workspace(ws_id, name=body.get("name"),
-                            config_overrides=body.get("config_overrides"),
-                            ui_state=body.get("ui_state"))
+        kwargs = {}
+        if "name" in body:
+            kwargs["name"] = body["name"]
+        if "config_overrides" in body:
+            kwargs["config_overrides"] = body["config_overrides"]
+        if "ui_state" in body:
+            kwargs["ui_state"] = body["ui_state"]
+        db.update_workspace(ws_id, **kwargs)
         ws = db.get_workspace(ws_id)
         return jsonify(dict(ws))
 
@@ -953,6 +958,33 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         db.remove_workspace_folder(ws_id, folder_id)
         return jsonify({"ok": True})
+
+    @app.route("/api/workspaces/active/config")
+    def api_workspace_config():
+        """Get the active workspace's config overrides."""
+        db = _get_db()
+        ws = db.get_workspace(db._active_workspace_id)
+        if not ws:
+            return jsonify({})
+        overrides = {}
+        if ws["config_overrides"]:
+            try:
+                overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
+        return jsonify(overrides)
+
+    @app.route("/api/workspaces/active/config", methods=["POST"])
+    def api_set_workspace_config():
+        """Set config overrides for the active workspace."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        # Only allow workspace-overridable keys
+        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold"}
+        overrides = {k: v for k, v in body.items() if k in allowed and v is not None}
+        # Remove keys set to null (revert to global)
+        db.update_workspace(db._active_workspace_id, config_overrides=overrides if overrides else None)
+        return jsonify({"ok": True, "overrides": overrides})
 
     # -- Prediction API routes --
 
@@ -1158,7 +1190,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         active = get_active_model()
         tax = get_taxonomy_info()
-        user_cfg = cfg.load()
+        user_cfg = _get_db().get_effective_config(cfg.load())
         return jsonify(
             {
                 "model_name": active["name"] if active else "No model",
@@ -2404,7 +2436,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_classify():
         import config as cfg
 
-        user_cfg = cfg.load()
+        user_cfg = _get_db().get_effective_config(cfg.load())
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
         labels_file = body.get("labels_file")

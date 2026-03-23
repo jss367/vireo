@@ -4,6 +4,8 @@ import json
 import os
 import sqlite3
 
+_UNSET = object()  # sentinel for "not provided" vs explicit None
+
 
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
@@ -325,20 +327,24 @@ class Database:
             "SELECT * FROM workspaces ORDER BY last_opened_at DESC"
         ).fetchall()
 
-    def update_workspace(self, workspace_id, name=None, config_overrides=None,
-                         ui_state=None, last_opened_at=None):
-        """Update workspace fields. Only non-None args are updated."""
+    def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
+                         ui_state=_UNSET, last_opened_at=None):
+        """Update workspace fields. Only provided args are updated.
+
+        For config_overrides and ui_state, pass None to clear the value
+        (set DB column to NULL), or omit the argument to leave it unchanged.
+        """
         updates = []
         params = []
         if name is not None:
             updates.append("name = ?")
             params.append(name)
-        if config_overrides is not None:
+        if config_overrides is not _UNSET:
             updates.append("config_overrides = ?")
-            params.append(json.dumps(config_overrides))
-        if ui_state is not None:
+            params.append(json.dumps(config_overrides) if config_overrides is not None else None)
+        if ui_state is not _UNSET:
             updates.append("ui_state = ?")
-            params.append(json.dumps(ui_state))
+            params.append(json.dumps(ui_state) if ui_state is not None else None)
         if last_opened_at is not None:
             updates.append("last_opened_at = ?")
             params.append(last_opened_at)
@@ -349,6 +355,25 @@ class Database:
             f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params
         )
         self.conn.commit()
+
+    def get_effective_config(self, global_config):
+        """Return config with workspace overrides applied over global config.
+
+        Args:
+            global_config: dict from config.load()
+        Returns:
+            dict with workspace overrides merged on top of global config
+        """
+        ws = self.get_workspace(self._active_workspace_id)
+        if not ws or not ws["config_overrides"]:
+            return global_config
+        try:
+            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            result = dict(global_config)
+            result.update(overrides)
+            return result
+        except (json.JSONDecodeError, TypeError):
+            return global_config
 
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""

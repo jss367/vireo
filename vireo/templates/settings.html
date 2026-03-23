@@ -171,6 +171,58 @@
   <!-- Classification Defaults -->
   <div class="section">
     <div class="section-title">Classification Defaults</div>
+
+    <!-- Workspace Overrides -->
+    <div style="border:1px solid #1A4560;border-radius:6px;padding:10px 14px;margin-bottom:14px;background:#0E2A3C;">
+      <div style="font-size:12px;font-weight:600;color:#24E5CA;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Workspace Overrides</div>
+      <p style="font-size:11px;color:#668;margin:0 0 10px;">Override global defaults for the active workspace only. Unchecked settings use the global value.</p>
+      <div class="setting-row">
+        <div class="setting-label">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')">
+            Workspace threshold override
+          </label>
+          <small>Override the global classification threshold for this workspace</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="wsVal_classification_threshold" min="1" max="99" disabled
+                 oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWorkspaceConfig()"
+                 style="width:120px;">
+          <span id="wsThresholdVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')">
+            Workspace grouping window override
+          </label>
+          <small>Override the global grouping window for this workspace</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120" disabled
+                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveWorkspaceConfig()">
+          <span style="font-size:13px;color:#888;">seconds</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')">
+            Workspace similarity override
+          </label>
+          <small>Override the global similarity threshold for this workspace</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="wsVal_similarity_threshold" min="50" max="99" disabled
+                 oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWorkspaceConfig()"
+                 style="width:120px;">
+          <span id="wsSimilarityVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
+        </div>
+      </div>
+    </div>
+
     <div class="setting-row">
       <div class="setting-label">
         Confidence threshold
@@ -409,6 +461,7 @@ loadTaxonomy();
 loadHistory();
 loadSystemInfo();
 loadConfig();
+loadWorkspaceConfig();
 loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
@@ -464,6 +517,89 @@ function saveConfig() {
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
           darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
         }),
+      });
+    } catch(e) {}
+  }, 500);
+}
+
+/* ---------- Workspace Config Overrides ---------- */
+async function loadWorkspaceConfig() {
+  try {
+    var resp = await fetch('/api/workspaces/active/config');
+    var overrides = await resp.json();
+    var keys = ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'];
+    keys.forEach(function(key) {
+      var checkbox = document.getElementById('wsOverride_' + key);
+      var input = document.getElementById('wsVal_' + key);
+      if (checkbox && input) {
+        if (overrides[key] !== undefined) {
+          checkbox.checked = true;
+          input.disabled = false;
+          if (key === 'classification_threshold' || key === 'similarity_threshold') {
+            input.value = Math.round(overrides[key] * 100);
+          } else {
+            input.value = overrides[key];
+          }
+          updateWsLabel(key);
+        } else {
+          checkbox.checked = false;
+          input.disabled = true;
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+function updateWsLabel(key) {
+  var input = document.getElementById('wsVal_' + key);
+  if (!input) return;
+  if (key === 'classification_threshold') {
+    document.getElementById('wsThresholdVal').textContent = input.value + '%';
+  } else if (key === 'similarity_threshold') {
+    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
+  }
+}
+
+function toggleWsOverride(key) {
+  var checkbox = document.getElementById('wsOverride_' + key);
+  var input = document.getElementById('wsVal_' + key);
+  if (!checkbox || !input) return;
+  input.disabled = !checkbox.checked;
+  if (checkbox.checked && !input.value) {
+    // Set a sensible default from the global config inputs
+    if (key === 'classification_threshold') {
+      input.value = document.getElementById('cfgThreshold').value || 40;
+    } else if (key === 'grouping_window_seconds') {
+      input.value = document.getElementById('cfgGroupingWindow').value || 10;
+    } else if (key === 'similarity_threshold') {
+      input.value = document.getElementById('cfgSimilarity').value || 85;
+    }
+    updateWsLabel(key);
+  }
+  saveWorkspaceConfig();
+}
+
+var _wsSaveTimer = null;
+async function saveWorkspaceConfig() {
+  clearTimeout(_wsSaveTimer);
+  _wsSaveTimer = setTimeout(async function() {
+    var overrides = {};
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
+      var checkbox = document.getElementById('wsOverride_' + key);
+      var input = document.getElementById('wsVal_' + key);
+      if (checkbox && checkbox.checked && input) {
+        if (key === 'classification_threshold' || key === 'similarity_threshold') {
+          overrides[key] = parseInt(input.value) / 100;
+        } else {
+          overrides[key] = parseInt(input.value);
+        }
+      }
+    });
+    try {
+      await fetch('/api/workspaces/active/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(overrides)
       });
     } catch(e) {}
   }, 500);
