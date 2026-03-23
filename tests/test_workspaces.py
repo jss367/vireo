@@ -373,3 +373,79 @@ def test_migration_from_legacy_db(tmp_path):
     assert coll[0] == default_id
     pc = db.conn.execute("SELECT workspace_id FROM pending_changes").fetchone()
     assert pc[0] == default_id
+
+
+# -- Workspace API route tests --
+
+
+@pytest.fixture
+def client(tmp_path):
+    """Flask test client with a fresh DB."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+    from app import create_app
+    app = create_app(str(tmp_path / "test.db"))
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
+
+
+def test_api_get_workspaces(client):
+    resp = client.get("/api/workspaces")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Default workspace exists
+    assert any(w["name"] == "Default" for w in data)
+
+
+def test_api_create_workspace(client):
+    resp = client.post("/api/workspaces",
+        data=json.dumps({"name": "Kenya 2025"}),
+        content_type="application/json")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["name"] == "Kenya 2025"
+    assert "id" in data
+
+
+def test_api_activate_workspace(client):
+    # Create a workspace
+    resp = client.post("/api/workspaces",
+        data=json.dumps({"name": "Test"}),
+        content_type="application/json")
+    ws_id = resp.get_json()["id"]
+    # Activate it
+    resp = client.post(f"/api/workspaces/{ws_id}/activate")
+    assert resp.status_code == 200
+    # Verify it's active
+    resp = client.get("/api/workspaces/active")
+    assert resp.get_json()["id"] == ws_id
+
+
+def test_api_delete_workspace(client):
+    resp = client.post("/api/workspaces",
+        data=json.dumps({"name": "ToDelete"}),
+        content_type="application/json")
+    ws_id = resp.get_json()["id"]
+    resp = client.delete(f"/api/workspaces/{ws_id}")
+    assert resp.status_code == 200
+
+
+def test_api_rename_workspace(client):
+    resp = client.post("/api/workspaces",
+        data=json.dumps({"name": "Old"}),
+        content_type="application/json")
+    ws_id = resp.get_json()["id"]
+    resp = client.put(f"/api/workspaces/{ws_id}",
+        data=json.dumps({"name": "New"}),
+        content_type="application/json")
+    assert resp.status_code == 200
+    assert resp.get_json()["name"] == "New"
+
+
+def test_api_workspace_folders(client):
+    # Get folder tree first (need at least one folder)
+    resp = client.get("/api/workspaces/active")
+    ws_id = resp.get_json()["id"]
+    resp = client.get(f"/api/workspaces/{ws_id}/folders")
+    assert resp.status_code == 200

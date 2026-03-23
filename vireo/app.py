@@ -835,6 +835,97 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    # -- Workspace API routes --
+
+    @app.route("/api/workspaces")
+    def api_get_workspaces():
+        db = _get_db()
+        workspaces = db.get_workspaces()
+        return jsonify([dict(w) for w in workspaces])
+
+    @app.route("/api/workspaces/active")
+    def api_get_active_workspace():
+        db = _get_db()
+        ws = db.get_workspace(db._active_workspace_id)
+        if not ws:
+            return jsonify({"error": "No active workspace"}), 404
+        result = dict(ws)
+        result["folders"] = [dict(f) for f in db.get_workspace_folders(ws["id"])]
+        return jsonify(result)
+
+    @app.route("/api/workspaces", methods=["POST"])
+    def api_create_workspace():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        if not name:
+            return jsonify({"error": "Name is required"}), 400
+        try:
+            ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
+            # Link selected folders if provided
+            for folder_id in body.get("folder_ids", []):
+                db.add_workspace_folder(ws_id, folder_id)
+            ws = db.get_workspace(ws_id)
+            return jsonify(dict(ws))
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
+    @app.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
+    def api_update_workspace(ws_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        db.update_workspace(ws_id, name=body.get("name"),
+                            config_overrides=body.get("config_overrides"),
+                            ui_state=body.get("ui_state"))
+        ws = db.get_workspace(ws_id)
+        return jsonify(dict(ws))
+
+    @app.route("/api/workspaces/<int:ws_id>", methods=["DELETE"])
+    def api_delete_workspace(ws_id):
+        db = _get_db()
+        # Prevent deleting the last workspace
+        workspaces = db.get_workspaces()
+        if len(workspaces) <= 1:
+            return jsonify({"error": "Cannot delete the only workspace"}), 400
+        # Prevent deleting the active workspace
+        if ws_id == db._active_workspace_id:
+            return jsonify({"error": "Cannot delete the active workspace. Switch first."}), 400
+        db.delete_workspace(ws_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
+    def api_activate_workspace(ws_id):
+        db = _get_db()
+        ws = db.get_workspace(ws_id)
+        if not ws:
+            return jsonify({"error": "Workspace not found"}), 404
+        from datetime import datetime
+        db.set_active_workspace(ws_id)
+        db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
+        return jsonify({"ok": True, "workspace": dict(ws)})
+
+    @app.route("/api/workspaces/<int:ws_id>/folders", methods=["GET"])
+    def api_workspace_folders(ws_id):
+        db = _get_db()
+        folders = db.get_workspace_folders(ws_id)
+        return jsonify([dict(f) for f in folders])
+
+    @app.route("/api/workspaces/<int:ws_id>/folders", methods=["POST"])
+    def api_add_workspace_folder(ws_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        folder_id = body.get("folder_id")
+        if not folder_id:
+            return jsonify({"error": "folder_id is required"}), 400
+        db.add_workspace_folder(ws_id, folder_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
+    def api_remove_workspace_folder(ws_id, folder_id):
+        db = _get_db()
+        db.remove_workspace_folder(ws_id, folder_id)
+        return jsonify({"ok": True})
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
