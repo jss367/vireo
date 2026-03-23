@@ -91,15 +91,6 @@
 
 <div class="content">
 
-  <!-- Workspaces -->
-  <div class="section">
-    <div class="section-title">Workspaces</div>
-    <div id="workspacesContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
-    <div style="margin-top:12px; border-top:1px solid var(--border,#14374E); padding-top:12px;">
-      <button onclick="showCreateWorkspaceModal()" style="background:var(--accent,#24E5CA);color:#0A1F2E;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">+ New Workspace</button>
-    </div>
-  </div>
-
   <!-- Models -->
   <div class="section">
     <div class="section-title">Models</div>
@@ -171,57 +162,6 @@
   <!-- Classification Defaults -->
   <div class="section">
     <div class="section-title">Classification Defaults</div>
-
-    <!-- Workspace Overrides -->
-    <div style="border:1px solid #1A4560;border-radius:6px;padding:10px 14px;margin-bottom:14px;background:#0E2A3C;">
-      <div style="font-size:12px;font-weight:600;color:#24E5CA;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">Workspace Overrides</div>
-      <p style="font-size:11px;color:#668;margin:0 0 10px;">Override global defaults for the active workspace only. Unchecked settings use the global value.</p>
-      <div class="setting-row">
-        <div class="setting-label">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')">
-            Workspace threshold override
-          </label>
-          <small>Override the global classification threshold for this workspace</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="wsVal_classification_threshold" min="1" max="99" disabled
-                 oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWorkspaceConfig()"
-                 style="width:120px;">
-          <span id="wsThresholdVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
-        </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-label">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')">
-            Workspace grouping window override
-          </label>
-          <small>Override the global grouping window for this workspace</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120" disabled
-                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-                 onchange="saveWorkspaceConfig()">
-          <span style="font-size:13px;color:#888;">seconds</span>
-        </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-label">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')">
-            Workspace similarity override
-          </label>
-          <small>Override the global similarity threshold for this workspace</small>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="range" id="wsVal_similarity_threshold" min="50" max="99" disabled
-                 oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWorkspaceConfig()"
-                 style="width:120px;">
-          <span id="wsSimilarityVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
-        </div>
-      </div>
-    </div>
 
     <div class="setting-row">
       <div class="setting-label">
@@ -340,12 +280,6 @@
     </div>
   </div>
 
-  <!-- Recent Jobs -->
-  <div class="section">
-    <div class="section-title">Recent Jobs</div>
-    <div id="historyContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
-  </div>
-
   <!-- System Info -->
   <div class="section">
     <div class="section-title">System</div>
@@ -455,13 +389,10 @@
 </div>
 
 <script>
-loadWorkspaces();
 loadModels();
 loadTaxonomy();
-loadHistory();
 loadSystemInfo();
 loadConfig();
-loadWorkspaceConfig();
 loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
@@ -517,89 +448,6 @@ function saveConfig() {
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
           darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
         }),
-      });
-    } catch(e) {}
-  }, 500);
-}
-
-/* ---------- Workspace Config Overrides ---------- */
-async function loadWorkspaceConfig() {
-  try {
-    var resp = await fetch('/api/workspaces/active/config');
-    var overrides = await resp.json();
-    var keys = ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'];
-    keys.forEach(function(key) {
-      var checkbox = document.getElementById('wsOverride_' + key);
-      var input = document.getElementById('wsVal_' + key);
-      if (checkbox && input) {
-        if (overrides[key] !== undefined) {
-          checkbox.checked = true;
-          input.disabled = false;
-          if (key === 'classification_threshold' || key === 'similarity_threshold') {
-            input.value = Math.round(overrides[key] * 100);
-          } else {
-            input.value = overrides[key];
-          }
-          updateWsLabel(key);
-        } else {
-          checkbox.checked = false;
-          input.disabled = true;
-        }
-      }
-    });
-  } catch(e) {}
-}
-
-function updateWsLabel(key) {
-  var input = document.getElementById('wsVal_' + key);
-  if (!input) return;
-  if (key === 'classification_threshold') {
-    document.getElementById('wsThresholdVal').textContent = input.value + '%';
-  } else if (key === 'similarity_threshold') {
-    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
-  }
-}
-
-function toggleWsOverride(key) {
-  var checkbox = document.getElementById('wsOverride_' + key);
-  var input = document.getElementById('wsVal_' + key);
-  if (!checkbox || !input) return;
-  input.disabled = !checkbox.checked;
-  if (checkbox.checked && !input.value) {
-    // Set a sensible default from the global config inputs
-    if (key === 'classification_threshold') {
-      input.value = document.getElementById('cfgThreshold').value || 40;
-    } else if (key === 'grouping_window_seconds') {
-      input.value = document.getElementById('cfgGroupingWindow').value || 10;
-    } else if (key === 'similarity_threshold') {
-      input.value = document.getElementById('cfgSimilarity').value || 85;
-    }
-    updateWsLabel(key);
-  }
-  saveWorkspaceConfig();
-}
-
-var _wsSaveTimer = null;
-async function saveWorkspaceConfig() {
-  clearTimeout(_wsSaveTimer);
-  _wsSaveTimer = setTimeout(async function() {
-    var overrides = {};
-    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
-      var checkbox = document.getElementById('wsOverride_' + key);
-      var input = document.getElementById('wsVal_' + key);
-      if (checkbox && checkbox.checked && input) {
-        if (key === 'classification_threshold' || key === 'similarity_threshold') {
-          overrides[key] = parseInt(input.value) / 100;
-        } else {
-          overrides[key] = parseInt(input.value);
-        }
-      }
-    });
-    try {
-      await fetch('/api/workspaces/active/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(overrides)
       });
     } catch(e) {}
   }, 500);
@@ -1225,162 +1073,6 @@ function formatBytes(b) {
   if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
   if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
   return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-}
-
-async function loadHistory() {
-  try {
-    var resp = await fetch('/api/jobs/history?limit=10');
-    var rows = await resp.json();
-    if (rows.length === 0) {
-      document.getElementById('historyContent').innerHTML = '<span style="color:#555;font-size:13px;">No jobs have run yet.</span>';
-      return;
-    }
-    var html = '<table class="history-table"><thead><tr><th>Type</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
-    rows.forEach(function(r) {
-      var cls = r.status === 'completed' ? 'status-completed' : r.status === 'failed' ? 'status-failed' : '';
-      var started = r.started_at ? new Date(r.started_at).toLocaleString() : '-';
-      var duration = r.duration != null ? formatDuration(r.duration) : '-';
-      var result = '-';
-      if (r.result) {
-        try {
-          var parsed = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
-          var parts = [];
-          for (var k in parsed) parts.push(k + ': ' + parsed[k]);
-          result = parts.join(', ');
-        } catch(e) { result = String(r.result); }
-      }
-      if (r.error_count > 0 && result === '-') result = '';
-      // For failed jobs, show the error message
-      if (r.result) {
-        try {
-          var parsed2 = typeof r.result === 'string' ? JSON.parse(r.result) : r.result;
-          if (parsed2 && parsed2.error) {
-            // Truncate long errors to first line
-            var errMsg = String(parsed2.error).split('\n')[0];
-            if (errMsg.length > 100) errMsg = errMsg.substring(0, 100) + '...';
-            result = errMsg;
-          }
-        } catch(e2) {}
-      }
-      html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + cls + '">' + r.status + '</td>' +
-        '<td>' + started + '</td><td>' + duration + '</td><td style="' + (r.status === 'failed' ? 'color:#e74c3c;' : '') + '">' + escapeHtml(result) + '</td></tr>';
-    });
-    html += '</tbody></table>';
-    document.getElementById('historyContent').innerHTML = html;
-  } catch(e) {
-    document.getElementById('historyContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
-  }
-}
-
-/* ---------- Workspaces ---------- */
-async function loadWorkspaces() {
-  try {
-    var resp = await fetch('/api/workspaces');
-    var workspaces = await resp.json();
-    var activeResp = await fetch('/api/workspaces/active');
-    var active = await activeResp.json();
-    var container = document.getElementById('workspacesContent');
-
-    if (workspaces.length === 0) {
-      container.innerHTML = '<span style="color:#555;font-size:13px;">No workspaces</span>';
-      return;
-    }
-
-    var html = '';
-    workspaces.forEach(function(ws) {
-      var isActive = ws.id === active.id;
-      var folderCount = ws.folder_count || 0;
-      html += '<div class="setting-row" style="gap:8px;">';
-      html += '  <div class="setting-label" style="display:flex;align-items:center;gap:8px;">';
-      html += '    <input type="text" value="' + escapeAttr(ws.name) + '" '
-            + 'onchange="renameWorkspace(' + ws.id + ', this.value)" '
-            + 'style="background:transparent;border:1px solid transparent;color:var(--text-primary,#E0F0F0);'
-            + 'font-size:14px;padding:2px 6px;border-radius:3px;width:200px;" '
-            + 'onfocus="this.style.borderColor=\'var(--border,#14374E)\'" '
-            + 'onblur="this.style.borderColor=\'transparent\'">';
-      if (isActive) {
-        html += '    <span style="font-size:11px;color:var(--accent,#24E5CA);background:rgba(36,229,202,0.1);'
-              + 'padding:2px 8px;border-radius:3px;">Active</span>';
-      }
-      html += '  </div>';
-      html += '  <div style="display:flex;align-items:center;gap:6px;">';
-      if (!isActive) {
-        html += '    <button onclick="activateWorkspace(' + ws.id + ')" '
-              + 'style="background:none;border:1px solid var(--border,#14374E);color:var(--text-secondary,#B0CCCC);'
-              + 'border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;" '
-              + 'title="Switch to this workspace">Switch</button>';
-      }
-      if (!isActive && workspaces.length > 1) {
-        html += '    <button onclick="deleteWorkspaceConfirm(' + ws.id + ', \'' + escapeAttr(ws.name) + '\')" '
-              + 'style="background:none;border:1px solid var(--border,#14374E);color:var(--danger,#e74c3c);'
-              + 'border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;" '
-              + 'title="Delete this workspace">Delete</button>';
-      }
-      html += '  </div>';
-      html += '</div>';
-    });
-    container.innerHTML = html;
-  } catch(e) {
-    document.getElementById('workspacesContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Error loading workspaces</span>';
-  }
-}
-
-async function renameWorkspace(wsId, newName) {
-  newName = newName.trim();
-  if (!newName) return;
-  try {
-    var resp = await fetch('/api/workspaces/' + wsId, {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: newName })
-    });
-    if (!resp.ok) {
-      var data = await resp.json();
-      alert(data.error || 'Failed to rename');
-      loadWorkspaces();
-    }
-    // Update navbar if this is the active workspace
-    var activeResp = await fetch('/api/workspaces/active');
-    var active = await activeResp.json();
-    if (wsId === active.id) {
-      var btn = document.getElementById('wsCurrentBtn');
-      if (btn) btn.firstChild.textContent = newName + ' ';
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-    loadWorkspaces();
-  }
-}
-
-async function activateWorkspace(wsId) {
-  try {
-    var resp = await fetch('/api/workspaces/' + wsId + '/activate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ current_path: window.location.pathname })
-    });
-    var data = await resp.json();
-    window.location.href = data.restore_path || window.location.pathname;
-  } catch(e) {
-    alert('Error: ' + e.message);
-  }
-}
-
-async function deleteWorkspaceConfirm(wsId, name) {
-  if (!confirm('Delete workspace "' + name + '"? This will remove all its predictions, collections, and pending changes. Photos and keywords are not affected.')) {
-    return;
-  }
-  try {
-    var resp = await fetch('/api/workspaces/' + wsId, { method: 'DELETE' });
-    if (resp.ok) {
-      loadWorkspaces();
-    } else {
-      var data = await resp.json();
-      alert(data.error || 'Failed to delete');
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-  }
 }
 
 function escapeHtml(str) {

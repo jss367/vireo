@@ -225,6 +225,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def variants_page():
         return render_template("variants.html")
 
+    @app.route("/workspace")
+    def workspace_page():
+        return render_template("workspace.html")
+
     @app.route("/settings")
     def settings():
         return render_template("settings.html")
