@@ -3238,6 +3238,100 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/develop", methods=["POST"])
+    def api_job_develop():
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        if not photo_ids:
+            return jsonify({"error": "photo_ids required"}), 400
+
+        import config as cfg
+        from develop import find_darktable
+
+        darktable_bin = cfg.get("darktable_bin")
+        binary = find_darktable(darktable_bin)
+        if not binary:
+            return jsonify({"error": "darktable-cli not found. Configure the path in Settings."}), 400
+
+        style = body.get("style") or cfg.get("darktable_style") or ""
+        output_format = body.get("output_format") or cfg.get("darktable_output_format") or "jpg"
+        output_dir = body.get("output_dir") or cfg.get("darktable_output_dir") or ""
+        width = body.get("width")
+
+        runner = app._job_runner
+
+        def work(job):
+            from develop import develop_photo, output_path_for_photo
+
+            thread_db = Database(db_path)
+            ws_id = thread_db.ensure_default_workspace()
+            thread_db.set_active_workspace(ws_id)
+
+            photos = []
+            for pid in photo_ids:
+                p = thread_db.get_photo(pid)
+                if p:
+                    photos.append(p)
+
+            if not photos:
+                return {"developed": 0, "errors": 0, "total": 0}
+
+            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+            total = len(photos)
+            developed = 0
+            errors = 0
+            job["_start_time"] = time.time()
+
+            for i, photo in enumerate(photos):
+                folder_path = folders.get(photo["folder_id"], "")
+                input_path = os.path.join(folder_path, photo["filename"])
+
+                # Determine output directory: configured, or "developed" subfolder next to originals
+                out_dir = output_dir if output_dir else os.path.join(folder_path, "developed")
+                out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
+
+                result = develop_photo(
+                    darktable_bin=binary,
+                    input_path=input_path,
+                    output_path=out_path,
+                    style=style if style else None,
+                    width=width,
+                )
+
+                if result["success"]:
+                    developed += 1
+                else:
+                    errors += 1
+                    job["errors"].append(f'{photo["filename"]}: {result["error"]}')
+                    log.warning("Failed to develop %s: %s", photo["filename"], result["error"])
+
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": i + 1,
+                        "total": total,
+                        "current_file": photo["filename"],
+                        "rate": round(
+                            (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                        ),
+                        "phase": "Developing photos",
+                    },
+                )
+
+            return {"developed": developed, "errors": errors, "total": total}
+
+        job_id = runner.start(
+            "develop",
+            work,
+            config={
+                "photo_ids": photo_ids,
+                "style": style,
+                "output_format": output_format,
+            },
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/culling/results")
     def api_culling_results():
         """Return the most recent culling analysis results."""
