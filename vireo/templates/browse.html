@@ -466,6 +466,7 @@ body {
       <button onclick="batchSetFlag('rejected')" style="background:#14374E;color:#e74c3c;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:#14374E;color:#7ec8e3;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="clearSelection()" style="background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
@@ -1435,6 +1436,56 @@ function escapeHtml(str) {
 function escapeAttr(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function developSelected() {
+  var ids = Array.from(selectedPhotos);
+  if (!ids.length) return;
+
+  // Check darktable availability first
+  try {
+    var statusResp = await fetch('/api/darktable/status');
+    var status = await statusResp.json();
+    if (!status.available) {
+      alert('darktable-cli not found. Configure it in Settings.');
+      return;
+    }
+  } catch(e) {
+    alert('Could not check darktable availability.');
+    return;
+  }
+
+  if (!confirm('Develop ' + ids.length + ' photo(s) with darktable?')) return;
+
+  try {
+    var resp = await fetch('/api/jobs/develop', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    });
+    var data = await resp.json();
+    if (resp.ok && data.job_id) {
+      showToast('Developing ' + ids.length + ' photo(s)...');
+      // Monitor job progress via SSE
+      var evtSource = new EventSource('/api/jobs/' + data.job_id + '/stream');
+      evtSource.addEventListener('progress', function(e) {
+        var prog = JSON.parse(e.data);
+        showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
+      });
+      evtSource.addEventListener('complete', function(e) {
+        var result = JSON.parse(e.data);
+        evtSource.close();
+        showToast('Development complete: ' + (result.developed || 0) + ' developed, ' + (result.errors || 0) + ' errors');
+      });
+      evtSource.addEventListener('error', function(e) {
+        evtSource.close();
+      });
+    } else {
+      alert(data.error || 'Failed to start develop job');
+    }
+  } catch(e) {
+    alert('Error starting develop job');
+  }
 }
 </script>
 
