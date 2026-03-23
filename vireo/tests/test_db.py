@@ -216,6 +216,8 @@ def test_pending_changes_queue(tmp_path):
     """queue_change adds entries, get_pending_changes reads them, clear_pending removes them."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
 
@@ -260,6 +262,8 @@ def test_collection_crud(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     rules = [{"field": "rating", "op": ">=", "value": 4}]
     cid = db.add_collection('Best Photos', json.dumps(rules))
     assert cid is not None
@@ -274,6 +278,8 @@ def test_collection_photos_rating_rule(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='good.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='bad.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -293,6 +299,8 @@ def test_collection_photos_keyword_rule(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='sparrow.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -314,6 +322,8 @@ def test_collection_untagged_rule(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -334,6 +344,8 @@ def test_collection_recent_days_rule(tmp_path):
     from datetime import datetime, timedelta
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
 
     recent_ts = (datetime.now() - timedelta(days=5)).isoformat()
@@ -357,6 +369,8 @@ def test_collection_has_species_rule(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='classified.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='location_only.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
@@ -405,6 +419,8 @@ def test_default_collections_created(tmp_path):
     """create_default_collections creates default collections."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     db.create_default_collections()
 
     colls = db.get_collections()
@@ -419,6 +435,8 @@ def test_default_collections_idempotent(tmp_path):
     """create_default_collections doesn't duplicate if called twice."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     db.create_default_collections()
     db.create_default_collections()
 
@@ -431,6 +449,8 @@ def test_default_collections_adds_missing(tmp_path):
     from db import Database
     import json
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     # Create just one collection manually
     db.add_collection('Flagged', json.dumps([{"field": "flag", "op": "equals", "value": "flagged"}]))
     db.create_default_collections()

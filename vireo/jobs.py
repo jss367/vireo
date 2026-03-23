@@ -41,8 +41,9 @@ class JobRunner:
                 result      TEXT,
                 error_count INTEGER DEFAULT 0,
                 config      TEXT,
-                workspace_id INTEGER
+                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id);
         """
         )
         # Migration: add workspace_id to existing job_history tables

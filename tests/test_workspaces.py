@@ -172,6 +172,7 @@ def test_cascade_delete_removes_predictions(db_with_workspace):
 def test_add_prediction_without_active_workspace_raises(db):
     folder_id = db.add_folder("/photos", name="photos")
     photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 1000, 1.0)
+    db._active_workspace_id = None  # Clear auto-set workspace
     with pytest.raises(RuntimeError):
         db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
 

@@ -19,6 +19,8 @@ def _setup_app(tmp_path):
     os.makedirs(thumb_dir)
 
     db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/photos/2024', name='2024')
     fid2 = db.add_folder('/photos/2024/January', name='January', parent_id=fid)
 

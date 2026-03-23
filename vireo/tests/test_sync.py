@@ -35,6 +35,8 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
     from compare import read_xmp_keywords
 
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     # Queue a keyword_add change
@@ -59,6 +61,8 @@ def test_sync_to_xmp_writes_rating(tmp_path):
     from xml.etree import ElementTree as ET
 
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
 
     db.queue_change(pid, 'rating', '4')
@@ -81,6 +85,8 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
     from sync import sync_to_xmp
 
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     fid = db.add_folder('/nonexistent', name='gone')
     pid = db.add_photo(folder_id=fid, filename='missing.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
@@ -101,6 +107,8 @@ def test_sync_from_xmp_updates_db(tmp_path):
     from xmp_writer import write_xmp_sidecar
 
     db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
     pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Sparrow'})
 
     # Import initial keyword

@@ -18,7 +18,10 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self._active_workspace_id = None
         self._create_tables()
+        ws_id = self.ensure_default_workspace()
+        self.set_active_workspace(ws_id)
 
     def _create_tables(self):
         self.conn.executescript(
@@ -209,8 +212,56 @@ class Database:
                 "SELECT ?, id FROM folders", (default_id,)
             )
 
-            # Add workspace_id to scoped tables and backfill
-            for table in ("predictions", "collections", "pending_changes"):
+            # Recreate predictions table to change UNIQUE(photo_id, model)
+            # to UNIQUE(photo_id, model, workspace_id)
+            try:
+                self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
+            except Exception:
+                self.conn.execute(
+                    """CREATE TABLE predictions_new (
+                        id          INTEGER PRIMARY KEY,
+                        photo_id    INTEGER REFERENCES photos(id),
+                        species     TEXT,
+                        confidence  REAL,
+                        model       TEXT,
+                        category    TEXT,
+                        status      TEXT DEFAULT 'pending',
+                        group_id    TEXT,
+                        vote_count  INTEGER,
+                        total_votes INTEGER,
+                        individual  TEXT,
+                        taxonomy_kingdom TEXT,
+                        taxonomy_phylum TEXT,
+                        taxonomy_class TEXT,
+                        taxonomy_order TEXT,
+                        taxonomy_family TEXT,
+                        taxonomy_genus TEXT,
+                        scientific_name TEXT,
+                        created_at  TEXT DEFAULT (datetime('now')),
+                        workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                        UNIQUE(photo_id, model, workspace_id)
+                    )"""
+                )
+                self.conn.execute(
+                    """INSERT INTO predictions_new
+                       (id, photo_id, species, confidence, model, category, status,
+                        group_id, vote_count, total_votes, individual,
+                        taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                        taxonomy_order, taxonomy_family, taxonomy_genus,
+                        scientific_name, created_at, workspace_id)
+                       SELECT id, photo_id, species, confidence, model, category, status,
+                              group_id, vote_count, total_votes, individual,
+                              taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                              taxonomy_order, taxonomy_family, taxonomy_genus,
+                              scientific_name, created_at, ?
+                       FROM predictions""",
+                    (default_id,)
+                )
+                self.conn.execute("DROP TABLE predictions")
+                self.conn.execute("ALTER TABLE predictions_new RENAME TO predictions")
+
+            # Add workspace_id to collections and pending_changes via ALTER TABLE
+            for table in ("collections", "pending_changes"):
                 try:
                     self.conn.execute(f"SELECT workspace_id FROM {table} LIMIT 0")
                 except Exception:
@@ -221,17 +272,6 @@ class Database:
                     self.conn.execute(
                         f"UPDATE {table} SET workspace_id = ?", (default_id,)
                     )
-
-            # Create workspace-scoped unique index for predictions
-            # Note: the original UNIQUE(photo_id, model) constraint cannot be
-            # dropped in SQLite, but adding this index allows the same
-            # photo+model in different workspaces once data is inserted via
-            # the new index. For migrated DBs with a single workspace, the
-            # original constraint is still satisfied.
-            self.conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_predictions_unique "
-                "ON predictions(photo_id, model, workspace_id)"
-            )
 
             self.conn.commit()
 
@@ -250,8 +290,6 @@ class Database:
         )
 
     # -- Workspaces --
-
-    _active_workspace_id = None
 
     def set_active_workspace(self, workspace_id):
         """Set the active workspace for scoped queries."""
@@ -898,8 +936,8 @@ class Database:
             return
         placeholders = ",".join("?" for _ in change_ids)
         self.conn.execute(
-            f"DELETE FROM pending_changes WHERE id IN ({placeholders})",
-            change_ids,
+            f"DELETE FROM pending_changes WHERE id IN ({placeholders}) AND workspace_id = ?",
+            list(change_ids) + [self._ws_id()],
         )
         self.conn.commit()
 
@@ -923,7 +961,10 @@ class Database:
 
     def delete_collection(self, collection_id):
         """Delete a collection."""
-        self.conn.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+        self.conn.execute(
+            "DELETE FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, self._ws_id()),
+        )
         self.conn.commit()
 
     def get_collection_photos(self, collection_id, page=1, per_page=50):
