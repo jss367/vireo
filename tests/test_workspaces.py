@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from db import Database
+
 
 def test_database_creates_tables(db):
     tables = [r[0] for r in db.conn.execute(
@@ -295,3 +297,78 @@ def test_job_history_workspace_id(db_with_workspace):
     # Verify the table has workspace_id column
     cols = [r[1] for r in db.conn.execute("PRAGMA table_info(job_history)").fetchall()]
     assert "workspace_id" in cols
+
+
+# -- Task 8: Migration test with pre-existing data --
+
+
+def test_migration_from_legacy_db(tmp_path):
+    """Simulate opening an existing Vireo DB that has no workspace tables."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    # Create legacy schema manually (no workspaces table)
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT UNIQUE,
+                              parent_id INTEGER, name TEXT, photo_count INTEGER DEFAULT 0);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER REFERENCES folders(id),
+                             filename TEXT, extension TEXT, file_size INTEGER, file_mtime REAL,
+                             xmp_mtime REAL, timestamp TEXT, width INTEGER, height INTEGER,
+                             rating INTEGER DEFAULT 0, flag TEXT DEFAULT 'none',
+                             thumb_path TEXT, sharpness REAL, detection_box TEXT,
+                             detection_conf REAL, subject_sharpness REAL, subject_size REAL,
+                             quality_score REAL, embedding BLOB, latitude REAL,
+                             longitude REAL, phash TEXT, UNIQUE(folder_id, filename));
+        CREATE TABLE keywords (id INTEGER PRIMARY KEY, name TEXT, parent_id INTEGER,
+                               is_species INTEGER DEFAULT 0, UNIQUE(name, parent_id));
+        CREATE TABLE photo_keywords (photo_id INTEGER, keyword_id INTEGER,
+                                     PRIMARY KEY (photo_id, keyword_id));
+        CREATE TABLE collections (id INTEGER PRIMARY KEY, name TEXT, rules TEXT);
+        CREATE TABLE pending_changes (id INTEGER PRIMARY KEY, photo_id INTEGER,
+                                      change_type TEXT, value TEXT,
+                                      created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE predictions (id INTEGER PRIMARY KEY, photo_id INTEGER,
+                                  species TEXT, confidence REAL, model TEXT, category TEXT,
+                                  status TEXT DEFAULT 'pending', group_id TEXT,
+                                  vote_count INTEGER, total_votes INTEGER, individual TEXT,
+                                  taxonomy_kingdom TEXT, taxonomy_phylum TEXT,
+                                  taxonomy_class TEXT, taxonomy_order TEXT,
+                                  taxonomy_family TEXT, taxonomy_genus TEXT,
+                                  scientific_name TEXT,
+                                  created_at TEXT DEFAULT (datetime('now')),
+                                  UNIQUE(photo_id, model));
+    """)
+    # Insert legacy data
+    conn.execute("INSERT INTO folders (path, name) VALUES ('/photos', 'photos')")
+    conn.execute("INSERT INTO photos (folder_id, filename, extension, file_size, file_mtime) "
+                 "VALUES (1, 'bird.jpg', '.jpg', 1000, 1.0)")
+    conn.execute("INSERT INTO predictions (photo_id, species, confidence, model) "
+                 "VALUES (1, 'Robin', 0.95, 'bioclip')")
+    conn.execute("INSERT INTO collections (name, rules) VALUES ('Test', '[]')")
+    conn.execute("INSERT INTO pending_changes (photo_id, change_type, value) "
+                 "VALUES (1, 'keyword_add', 'Robin')")
+    conn.commit()
+    conn.close()
+
+    # Opening with Database triggers migration
+    db = Database(db_path)
+
+    # Default workspace created
+    ws = db.conn.execute("SELECT * FROM workspaces WHERE name = 'Default'").fetchone()
+    assert ws is not None
+    default_id = ws[0]
+
+    # Folder linked to default workspace
+    wf = db.conn.execute(
+        "SELECT * FROM workspace_folders WHERE workspace_id = ?", (default_id,)
+    ).fetchall()
+    assert len(wf) == 1
+
+    # Existing data backfilled with workspace_id
+    pred = db.conn.execute("SELECT workspace_id FROM predictions").fetchone()
+    assert pred[0] == default_id
+    coll = db.conn.execute("SELECT workspace_id FROM collections").fetchone()
+    assert coll[0] == default_id
+    pc = db.conn.execute("SELECT workspace_id FROM pending_changes").fetchone()
+    assert pc[0] == default_id

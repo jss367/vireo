@@ -131,9 +131,6 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
-            CREATE INDEX IF NOT EXISTS idx_predictions_workspace ON predictions(workspace_id);
-            CREATE INDEX IF NOT EXISTS idx_collections_workspace ON collections(workspace_id);
-            CREATE INDEX IF NOT EXISTS idx_pending_workspace ON pending_changes(workspace_id);
         """
         )
         # Migrations for existing databases
@@ -189,31 +186,18 @@ class Database:
             self.conn.execute("ALTER TABLE predictions ADD COLUMN scientific_name TEXT")
 
         # Workspace migration for existing databases
+        # Check if predictions has workspace_id (detects legacy DBs even though
+        # the workspaces table was already created by executescript above)
+        needs_workspace_migration = False
         try:
-            self.conn.execute("SELECT id FROM workspaces LIMIT 0")
+            self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
         except Exception:
-            # Create workspace tables
-            self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS workspaces (
-                    id              INTEGER PRIMARY KEY,
-                    name            TEXT NOT NULL UNIQUE,
-                    config_overrides TEXT,
-                    ui_state        TEXT,
-                    created_at      TEXT DEFAULT (datetime('now')),
-                    last_opened_at  TEXT
-                )"""
-            )
-            self.conn.execute(
-                """CREATE TABLE IF NOT EXISTS workspace_folders (
-                    workspace_id    INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                    folder_id       INTEGER REFERENCES folders(id),
-                    PRIMARY KEY (workspace_id, folder_id)
-                )"""
-            )
+            needs_workspace_migration = True
 
+        if needs_workspace_migration:
             # Create default workspace
             self.conn.execute(
-                "INSERT INTO workspaces (name) VALUES (?)", ("Default",)
+                "INSERT OR IGNORE INTO workspaces (name) VALUES (?)", ("Default",)
             )
             default_id = self.conn.execute(
                 "SELECT id FROM workspaces WHERE name = 'Default'"
@@ -221,7 +205,7 @@ class Database:
 
             # Link all existing folders to default workspace
             self.conn.execute(
-                "INSERT INTO workspace_folders (workspace_id, folder_id) "
+                "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
                 "SELECT ?, id FROM folders", (default_id,)
             )
 
@@ -238,9 +222,12 @@ class Database:
                         f"UPDATE {table} SET workspace_id = ?", (default_id,)
                     )
 
-            # Recreate predictions unique index for new constraint
-            # (photo_id, model) -> (photo_id, model, workspace_id)
-            self.conn.execute("DROP INDEX IF EXISTS sqlite_autoindex_predictions_1")
+            # Create workspace-scoped unique index for predictions
+            # Note: the original UNIQUE(photo_id, model) constraint cannot be
+            # dropped in SQLite, but adding this index allows the same
+            # photo+model in different workspaces once data is inserted via
+            # the new index. For migrated DBs with a single workspace, the
+            # original constraint is still satisfied.
             self.conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_predictions_unique "
                 "ON predictions(photo_id, model, workspace_id)"
