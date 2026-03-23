@@ -406,3 +406,25 @@ def test_api_job_develop_requires_darktable(tmp_path):
     assert resp.status_code == 400
     data = resp.get_json()
     assert 'darktable' in data['error'].lower()
+
+
+def test_api_config_saves_darktable_settings(tmp_path):
+    """POST /api/config saves darktable settings."""
+    app, _ = _setup_app(tmp_path)
+    client = app.test_client()
+    resp = client.post('/api/config',
+                       data=json.dumps({
+                           "darktable_bin": "/usr/local/bin/darktable-cli",
+                           "darktable_style": "Wildlife",
+                           "darktable_output_format": "tiff",
+                           "darktable_output_dir": "/output",
+                       }),
+                       content_type='application/json')
+    assert resp.status_code == 200
+
+    resp2 = client.get('/api/config')
+    cfg = resp2.get_json()
+    assert cfg["darktable_bin"] == "/usr/local/bin/darktable-cli"
+    assert cfg["darktable_style"] == "Wildlife"
+    assert cfg["darktable_output_format"] == "tiff"
+    assert cfg["darktable_output_dir"] == "/output"
