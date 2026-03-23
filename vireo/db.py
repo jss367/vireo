@@ -454,7 +454,10 @@ class Database:
 
     def count_pending_changes(self):
         """Return pending changes count."""
-        return self.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM pending_changes WHERE workspace_id = ?",
+            (self._ws_id(),),
+        ).fetchone()[0]
 
     def get_photos(
         self,
@@ -884,21 +887,22 @@ class Database:
     def queue_change(self, photo_id, change_type, value):
         """Add a change to the sync queue (skips if already queued)."""
         existing = self.conn.execute(
-            "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ?",
-            (photo_id, change_type, value),
+            "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
+            (photo_id, change_type, value, self._ws_id()),
         ).fetchone()
         if existing:
             return
         self.conn.execute(
-            "INSERT INTO pending_changes (photo_id, change_type, value) VALUES (?, ?, ?)",
-            (photo_id, change_type, value),
+            "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) VALUES (?, ?, ?, ?)",
+            (photo_id, change_type, value, self._ws_id()),
         )
         self.conn.commit()
 
     def get_pending_changes(self):
         """Return all pending changes ordered by creation time."""
         return self.conn.execute(
-            "SELECT * FROM pending_changes ORDER BY created_at"
+            "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at",
+            (self._ws_id(),),
         ).fetchall()
 
     def clear_pending(self, change_ids):

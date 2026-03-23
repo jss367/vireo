@@ -237,3 +237,49 @@ def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     cid2 = db.add_collection("Passerines", rules)
     photos2 = db.get_collection_photos(cid2, per_page=100)
     assert len(photos2) == 0
+
+
+# -- Task 6: Workspace-scoped pending changes --
+
+
+def test_queue_change_uses_workspace(db_with_workspace):
+    db, ws_id, _, photo_id = db_with_workspace
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    row = db.conn.execute(
+        "SELECT workspace_id FROM pending_changes WHERE photo_id = ?", (photo_id,)
+    ).fetchone()
+    assert row["workspace_id"] == ws_id
+
+
+def test_get_pending_changes_scoped(db_with_workspace):
+    db, ws_id, _, photo_id = db_with_workspace
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    ws2 = db.create_workspace("Other")
+    db.set_active_workspace(ws2)
+    assert len(db.get_pending_changes()) == 0
+    db.set_active_workspace(ws_id)
+    assert len(db.get_pending_changes()) == 1
+
+
+def test_count_pending_changes_scoped(db_with_workspace):
+    db, ws_id, _, photo_id = db_with_workspace
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    assert db.count_pending_changes() == 1
+    ws2 = db.create_workspace("Other")
+    db.set_active_workspace(ws2)
+    assert db.count_pending_changes() == 0
+
+
+def test_queue_change_dedup_within_workspace(db_with_workspace):
+    db, ws_id, _, photo_id = db_with_workspace
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    assert db.count_pending_changes() == 1
+
+
+def test_cascade_delete_removes_pending_changes(db_with_workspace):
+    db, ws_id, _, photo_id = db_with_workspace
+    db.queue_change(photo_id, "keyword_add", "Robin")
+    db.delete_workspace(ws_id)
+    count = db.conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0]
+    assert count == 0
