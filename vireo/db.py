@@ -25,7 +25,7 @@ class Database:
         self.ensure_default_workspace()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
-            "SELECT id FROM workspaces ORDER BY last_opened_at DESC NULLS LAST, id ASC LIMIT 1"
+            "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
         ).fetchone()
         self.set_active_workspace(last[0])
 
