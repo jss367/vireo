@@ -621,31 +621,39 @@ def create_app(db_path, thumb_cache_dir=None):
         # Photos by month
         photos_by_month = db.conn.execute(
             """
-            SELECT substr(timestamp, 1, 7) as month, COUNT(*) as count
-            FROM photos
-            WHERE timestamp IS NOT NULL
+            SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
             GROUP BY month
             ORDER BY month
-        """
+        """,
+            (db._active_workspace_id,),
         ).fetchall()
 
         # Rating distribution
         rating_dist = db.conn.execute(
             """
-            SELECT rating, COUNT(*) as count
-            FROM photos
-            GROUP BY rating
-            ORDER BY rating
-        """
+            SELECT p.rating, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+            GROUP BY p.rating
+            ORDER BY p.rating
+        """,
+            (db._active_workspace_id,),
         ).fetchall()
 
         # Flag distribution
         flag_dist = db.conn.execute(
             """
-            SELECT flag, COUNT(*) as count
-            FROM photos
-            GROUP BY flag
-        """
+            SELECT p.flag, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+            GROUP BY p.flag
+        """,
+            (db._active_workspace_id,),
         ).fetchall()
 
         # Classification status breakdown
@@ -668,12 +676,14 @@ def create_app(db_path, thumb_cache_dir=None):
         # Photos by hour of day
         photos_by_hour = db.conn.execute(
             """
-            SELECT CAST(substr(timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
-            FROM photos
-            WHERE timestamp IS NOT NULL AND length(timestamp) >= 13
+            SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
             GROUP BY hour
             ORDER BY hour
-        """
+        """,
+            (db._active_workspace_id,),
         ).fetchall()
 
         # Quality score distribution (buckets of 0.1)
@@ -681,19 +691,25 @@ def create_app(db_path, thumb_cache_dir=None):
             """
             SELECT
                 CASE
-                    WHEN quality_score IS NULL THEN -1
-                    ELSE CAST(quality_score * 10 AS INTEGER)
+                    WHEN p.quality_score IS NULL THEN -1
+                    ELSE CAST(p.quality_score * 10 AS INTEGER)
                 END as bucket,
                 COUNT(*) as count
-            FROM photos
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
             GROUP BY bucket
             ORDER BY bucket
-        """
+        """,
+            (db._active_workspace_id,),
         ).fetchall()
 
         # Subject detection coverage
         detected_count = db.conn.execute(
-            "SELECT COUNT(*) FROM photos WHERE detection_conf IS NOT NULL AND detection_conf > 0"
+            """SELECT COUNT(*) FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.detection_conf IS NOT NULL AND p.detection_conf > 0 AND wf.workspace_id = ?""",
+            (db._active_workspace_id,),
         ).fetchone()[0]
 
         return jsonify(
@@ -3517,8 +3533,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Load all embeddings (excluding source photo)
         rows = db.conn.execute(
-            f"SELECT id, embedding FROM photos WHERE embedding IS NOT NULL AND id != ?",
-            (photo_id,),
+            """SELECT p.id, p.embedding FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.embedding IS NOT NULL AND p.id != ? AND wf.workspace_id = ?""",
+            (photo_id, db._active_workspace_id),
         ).fetchall()
 
         if not rows:
