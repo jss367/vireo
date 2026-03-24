@@ -61,17 +61,43 @@ def search_places(query):
     return results
 
 
-def fetch_species_list(place_id, taxon_groups, progress_callback=None):
+OBSERVATION_FILTERS = {
+    "research": {
+        "name": "Research grade",
+        "description": "Community-verified wild observations only",
+        "params": {"quality_grade": "research"},
+    },
+    "wild": {
+        "name": "Wild only",
+        "description": "All wild observations, including unverified",
+        "params": {"captive": "false"},
+    },
+    "all": {
+        "name": "All observations",
+        "description": "Includes zoo and captive sightings",
+        "params": {},
+    },
+}
+
+
+def fetch_species_list(
+    place_id, taxon_groups, observation_filter="research", progress_callback=None
+):
     """Fetch species observed in a region from iNaturalist.
 
     Args:
         place_id: iNaturalist place ID (e.g., 14 for California)
         taxon_groups: list of group keys from TAXON_GROUPS (e.g., ['birds', 'mammals'])
+        observation_filter: one of 'research', 'wild', 'all'
         progress_callback: optional callable(message, current=None, total=None)
 
     Returns:
         list of species common names
     """
+    filter_params = OBSERVATION_FILTERS.get(
+        observation_filter, OBSERVATION_FILTERS["research"]
+    )["params"]
+
     all_species = []
 
     for gi, group_key in enumerate(taxon_groups):
@@ -98,6 +124,7 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
                     "taxon_id": taxon_id,
                     "per_page": per_page,
                     "page": page,
+                    **filter_params,
                 }
             )
             url = f"{INAT_API}/observations/species_counts?{params}"
@@ -179,7 +206,8 @@ def fetch_species_list(place_id, taxon_groups, progress_callback=None):
     return all_species
 
 
-def save_labels(name, place_id, place_name, taxon_groups, species):
+def save_labels(name, place_id, place_name, taxon_groups, species,
+                 observation_filter="research"):
     """Save a labels list to disk.
 
     Args:
@@ -188,6 +216,7 @@ def save_labels(name, place_id, place_name, taxon_groups, species):
         place_name: human-readable place name
         taxon_groups: list of group keys used
         species: list of species names
+        observation_filter: one of 'research', 'wild', 'all'
 
     Returns:
         path to saved labels file
@@ -204,11 +233,16 @@ def save_labels(name, place_id, place_name, taxon_groups, species):
             f.write(sp + "\n")
 
     # Write metadata
+    filter_info = OBSERVATION_FILTERS.get(
+        observation_filter, OBSERVATION_FILTERS["research"]
+    )
     meta = {
         "name": name,
         "place_id": place_id,
         "place_name": place_name,
         "taxon_groups": taxon_groups,
+        "observation_filter": observation_filter,
+        "observation_filter_name": filter_info["name"],
         "species_count": len(set(species)),
         "labels_file": labels_path,
     }

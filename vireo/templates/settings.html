@@ -158,6 +158,11 @@
         <div id="taxonCheckboxes" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
 
+      <div style="margin-bottom:10px;">
+        <div style="font-size:12px; color:#888; margin-bottom:4px;">Observation quality:</div>
+        <div id="observationFilterRadios" style="display:flex;flex-direction:column;gap:4px;"></div>
+      </div>
+
       <button id="fetchLabelsBtn" onclick="fetchLabels()" disabled
               style="background:#24E5CA;color:#0A1F2E;border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;font-weight:500;">
         Download Species List
@@ -761,6 +766,7 @@ var searchTimer = null;
 
 loadLabels();
 loadTaxonGroups();
+loadObservationFilters();
 
 async function loadLabels() {
   try {
@@ -831,6 +837,21 @@ async function loadTaxonGroups() {
         g.name + '</label>';
     });
     document.getElementById('taxonCheckboxes').innerHTML = html;
+  } catch(e) {}
+}
+
+async function loadObservationFilters() {
+  try {
+    var resp = await fetch('/api/labels/observation-filters');
+    var filters = await resp.json();
+    var html = '';
+    filters.forEach(function(f) {
+      var checked = (f.key === 'research') ? ' checked' : '';
+      html += '<label style="font-size:12px;color:#B0CCCC;display:flex;align-items:center;gap:4px;cursor:pointer;">' +
+        '<input type="radio" name="obs-filter" value="' + f.key + '"' + checked + ' style="accent-color:#24E5CA;"> ' +
+        f.name + ' <span style="color:#666;">— ' + f.description + '</span></label>';
+    });
+    document.getElementById('observationFilterRadios').innerHTML = html;
   } catch(e) {}
 }
 
@@ -905,6 +926,7 @@ async function fetchLabels() {
         place_id: selectedPlaceId,
         place_name: selectedPlaceName,
         taxon_groups: groups,
+        observation_filter: (document.querySelector('input[name="obs-filter"]:checked') || {}).value || 'research',
       }),
     });
     var data = await resp.json();

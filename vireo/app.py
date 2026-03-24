@@ -1912,6 +1912,15 @@ def create_app(db_path, thumb_cache_dir=None):
 
         return jsonify([{"key": k, "name": v["name"]} for k, v in TAXON_GROUPS.items()])
 
+    @app.route("/api/labels/observation-filters")
+    def api_labels_observation_filters():
+        from labels import OBSERVATION_FILTERS
+
+        return jsonify([
+            {"key": k, "name": v["name"], "description": v["description"]}
+            for k, v in OBSERVATION_FILTERS.items()
+        ])
+
     @app.route("/api/labels")
     def api_labels_list():
         from labels import get_active_labels, get_saved_labels
@@ -1946,12 +1955,17 @@ def create_app(db_path, thumb_cache_dir=None):
         place_id = body.get("place_id")
         place_name = body.get("place_name", "")
         taxon_groups = body.get("taxon_groups", ["birds"])
+        observation_filter = body.get("observation_filter", "research")
         name = body.get("name", "")
         if not place_id:
             return jsonify({"error": "place_id required"}), 400
+        if observation_filter not in ("research", "wild", "all"):
+            observation_filter = "research"
         if not name:
+            from labels import OBSERVATION_FILTERS
             group_names = ", ".join(g.title() for g in taxon_groups)
-            name = f"{place_name} {group_names}".strip()
+            filter_label = OBSERVATION_FILTERS[observation_filter]["name"]
+            name = f"{place_name} {group_names} ({filter_label})".strip()
 
         runner = app._job_runner
 
@@ -1976,13 +1990,18 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             species = fetch_species_list(
-                place_id, taxon_groups, progress_callback=progress_cb
+                place_id, taxon_groups,
+                observation_filter=observation_filter,
+                progress_callback=progress_cb,
             )
             if not species:
                 raise RuntimeError(
                     "No species found for this region and taxa selection"
                 )
-            labels_path = save_labels(name, place_id, place_name, taxon_groups, species)
+            labels_path = save_labels(
+                name, place_id, place_name, taxon_groups, species,
+                observation_filter=observation_filter,
+            )
             set_active_labels(labels_path)
 
             # Auto-compute embeddings for the active model
