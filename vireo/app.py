@@ -2746,6 +2746,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     },
                 )
 
+                skipped_det = 0
                 for i, photo in enumerate(photos):
                     folder_path = folders.get(photo["folder_id"], "")
                     image_path = os.path.join(folder_path, photo["filename"])
@@ -2763,6 +2764,21 @@ def create_app(db_path, thumb_cache_dir=None):
                             "phase": "Step 4/5: Detecting subjects",
                         },
                     )
+
+                    # Skip if already detected (unless reclassifying)
+                    if not reclassify and photo["detection_box"]:
+                        import json as _json
+                        det_box = photo["detection_box"]
+                        if isinstance(det_box, str):
+                            det_box = _json.loads(det_box)
+                        detection_map[photo["id"]] = {
+                            "box": det_box,
+                            "confidence": photo["detection_conf"] or 0,
+                            "category": "animal",
+                        }
+                        detected += 1
+                        skipped_det += 1
+                        continue
 
                     detections = detect_animals(image_path)
                     primary = get_primary_detection(detections)
@@ -2813,9 +2829,10 @@ def create_app(db_path, thumb_cache_dir=None):
                         )
 
                 log.info(
-                    "Detection done: %d animals detected out of %d photos",
+                    "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
                     detected,
                     total,
+                    skipped_det,
                 )
             except (ImportError, RuntimeError) as e:
                 if "PytorchWildlife" in str(e):

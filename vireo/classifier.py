@@ -98,15 +98,17 @@ class Classifier:
 
             cache_path = _embedding_cache_path(labels, model_str)
 
+            # For hf-hub models, open_clip manages weights internally;
+            # passing a local pretrained_str would be ignored with a warning.
+            clf_kwargs = {"cls_ary": ["_placeholder"], "model_str": model_str}
+            if not model_str.startswith("hf-hub:"):
+                clf_kwargs["pretrained_str"] = pretrained_str
+
             if os.path.exists(cache_path):
                 log.info(
                     "Loading cached label embeddings for %d labels...", len(labels)
                 )
-                self._classifier = CustomLabelsClassifier(
-                    cls_ary=["_placeholder"],
-                    model_str=model_str,
-                    pretrained_str=pretrained_str,
-                )
+                self._classifier = CustomLabelsClassifier(**clf_kwargs)
                 self._classifier.classes = [cls.strip() for cls in labels]
                 self._classifier.txt_embeddings = torch.load(
                     cache_path, weights_only=True
@@ -117,11 +119,7 @@ class Classifier:
                     "Computing label embeddings for %d labels (first run — will be cached for next time)...",
                     len(labels),
                 )
-                self._classifier = CustomLabelsClassifier(
-                    cls_ary=["_placeholder"],
-                    model_str=model_str,
-                    pretrained_str=pretrained_str,
-                )
+                self._classifier = CustomLabelsClassifier(**clf_kwargs)
                 self._classifier.classes = [cls.strip() for cls in labels]
                 self._classifier.txt_embeddings = _compute_embeddings_with_progress(
                     self._classifier,
@@ -146,10 +144,10 @@ class Classifier:
             log.info("Loading TreeOfLife classifier...")
             from bioclip import TreeOfLifeClassifier, Rank
 
-            self._classifier = TreeOfLifeClassifier(
-                model_str=model_str,
-                pretrained_str=pretrained_str,
-            )
+            tol_kwargs = {"model_str": model_str}
+            if not model_str.startswith("hf-hub:"):
+                tol_kwargs["pretrained_str"] = pretrained_str
+            self._classifier = TreeOfLifeClassifier(**tol_kwargs)
             log.info("TreeOfLife classifier ready")
             self._mode = "tol"
             self._rank = Rank.SPECIES
