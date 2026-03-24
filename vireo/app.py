@@ -129,7 +129,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     elapsed,
                 )
             if request.path.startswith("/api/"):
-                log.info(
+                _quiet = request.method == "GET" and request.path == "/api/jobs"
+                (log.debug if _quiet else log.info)(
                     "API: %s %s → %s (%.3fs)",
                     request.method,
                     request.path,
@@ -2122,14 +2123,426 @@ def create_app(db_path, thumb_cache_dir=None):
 
             info["megadetector"] = "installed"
             info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
+
+            # Check if weights are downloaded
+            import glob
+            import torch
+
+            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+            weight_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
+            if weight_files:
+                size_mb = round(os.path.getsize(weight_files[0]) / 1024 / 1024, 1)
+                info["megadetector_weights_path"] = weight_files[0]
+                info["megadetector_weights_size"] = f"{size_mb} MB"
+                # Validate the weights file is loadable
+                try:
+                    ckpt = torch.load(weight_files[0], map_location="cpu", weights_only=False)
+                    if isinstance(ckpt, dict):
+                        info["megadetector_weights"] = "downloaded"
+                    else:
+                        info["megadetector_weights"] = "corrupt"
+                        info["megadetector_weights_detail"] = "File loads but has unexpected format"
+                except Exception as e:
+                    info["megadetector_weights"] = "corrupt"
+                    info["megadetector_weights_detail"] = str(e)[:100]
+            else:
+                info["megadetector_weights"] = "not downloaded"
+                info["megadetector_weights_path"] = None
+                info["megadetector_weights_size"] = None
         except ImportError:
             info["megadetector"] = "not installed"
             info["megadetector_detail"] = "pip install PytorchWildlife"
+            info["megadetector_weights"] = "unavailable"
         except Exception as e:
             info["megadetector"] = "error"
             info["megadetector_detail"] = str(e)
+            info["megadetector_weights"] = "error"
 
         return jsonify(info)
+
+    @app.route("/api/megadetector/download", methods=["POST"])
+    def api_megadetector_download():
+        """Download MegaDetector weights as a background job."""
+        runner = app._job_runner
+
+        def work(job):
+            import torch
+            import wget
+
+            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+            os.makedirs(hub_dir, exist_ok=True)
+            dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
+            wget_dest = os.path.join(hub_dir, "MDV6-yolov9-c.pt")
+
+            # Remove partial downloads (wget saves as MDV6-yolov9-c.pt, PW expects MDV6b-)
+            for f in [dest, wget_dest, dest + ".tmp", wget_dest + ".tmp"]:
+                if os.path.exists(f):
+                    os.remove(f)
+
+            url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
+            runner.push_event(job["id"], "progress", {
+                "phase": "Downloading MegaDetector weights (~50 MB)...",
+                "current": 0, "total": 1,
+            })
+
+            wget.download(url, out=hub_dir)
+
+            # wget saves as MDV6-yolov9-c.pt, PytorchWildlife expects MDV6b-yolov9-c.pt
+            if os.path.exists(wget_dest) and not os.path.exists(dest):
+                os.rename(wget_dest, dest)
+
+            if not os.path.exists(dest):
+                raise RuntimeError("Download completed but weights file not found")
+
+            # Validate the downloaded file
+            runner.push_event(job["id"], "progress", {
+                "phase": "Validating weights...",
+                "current": 1, "total": 1,
+            })
+            ckpt = torch.load(dest, map_location="cpu", weights_only=False)
+            if not isinstance(ckpt, dict):
+                os.remove(dest)
+                raise RuntimeError("Downloaded file is not a valid model checkpoint")
+
+            size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
+            return {"status": "downloaded", "size": f"{size_mb} MB", "path": dest}
+
+        job_id = runner.start("download-megadetector", work)
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/megadetector/delete", methods=["POST"])
+    def api_megadetector_delete():
+        """Delete MegaDetector weights from disk."""
+        import glob
+
+        try:
+            import torch
+            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+        except ImportError:
+            return jsonify({"error": "torch not installed"}), 400
+
+        removed = []
+        for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
+            for f in glob.glob(os.path.join(hub_dir, pattern)):
+                os.remove(f)
+                removed.append(f)
+
+        # Clear the cached singleton so it reloads next time
+        from detector import _get_detector
+        import detector
+        detector._detector = None
+
+        return jsonify({"deleted": removed, "count": len(removed)})
+
+    @app.route("/api/models/pipeline")
+    def api_models_pipeline():
+        """Return download status of all pipeline models (MegaDetector, SAM2, DINOv2)."""
+        import glob
+
+        models = []
+
+        try:
+            import torch
+            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+        except ImportError:
+            return jsonify({"error": "torch not installed"}), 400
+
+        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
+
+        # MegaDetector
+        md_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
+        md_status = "not downloaded"
+        md_size = None
+        if md_files:
+            md_size = round(os.path.getsize(md_files[0]) / 1024 / 1024, 1)
+            try:
+                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
+                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+                ckpt = torch.load(md_files[0], map_location="cpu", weights_only=False)
+                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+                md_status = "downloaded" if isinstance(ckpt, dict) else "corrupt"
+                del ckpt
+            except Exception:
+                md_status = "corrupt"
+                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+        models.append({
+            "id": "megadetector-v6",
+            "name": "MegaDetector V6",
+            "role": "Detection",
+            "description": "YOLOv9-c animal detector",
+            "size_estimate": "~50 MB",
+            "status": md_status,
+            "size": f"{md_size} MB" if md_size else None,
+        })
+
+        # SAM2 variants
+        sam2_variants = [
+            ("sam2-tiny", "facebook/sam2.1-hiera-tiny", "SAM2 Tiny", "~40 MB"),
+            ("sam2-small", "facebook/sam2.1-hiera-small", "SAM2 Small", "~150 MB"),
+            ("sam2-base-plus", "facebook/sam2.1-hiera-base-plus", "SAM2 Base+", "~320 MB"),
+            ("sam2-large", "facebook/sam2.1-hiera-large", "SAM2 Large", "~900 MB"),
+        ]
+        for variant_id, hf_repo, name, size_est in sam2_variants:
+            repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
+            status = "not downloaded"
+            size = None
+            if os.path.exists(repo_dir):
+                # Check for actual weight files (snapshots with .pt files)
+                pt_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.pt"), recursive=True)
+                if pt_files:
+                    total_size = sum(os.path.getsize(f) for f in pt_files)
+                    size = round(total_size / 1024 / 1024, 1)
+                    status = "downloaded" if size > 10 else "incomplete"
+                else:
+                    # Check for safetensors
+                    st_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.safetensors"), recursive=True)
+                    if st_files:
+                        total_size = sum(os.path.getsize(f) for f in st_files)
+                        size = round(total_size / 1024 / 1024, 1)
+                        status = "downloaded" if size > 10 else "incomplete"
+            models.append({
+                "id": variant_id,
+                "name": name,
+                "role": "Segmentation",
+                "description": f"SAM2 mask generation ({variant_id})",
+                "size_estimate": size_est,
+                "status": status,
+                "size": f"{size} MB" if size else None,
+                "hf_repo": hf_repo,
+            })
+
+        # DINOv2 variants
+        dinov2_variants = [
+            ("vit-s14", "dinov2_vits14", "DINOv2 ViT-S/14", "384-dim", "~85 MB"),
+            ("vit-b14", "dinov2_vitb14", "DINOv2 ViT-B/14", "768-dim", "~350 MB"),
+            ("vit-l14", "dinov2_vitl14", "DINOv2 ViT-L/14", "1024-dim", "~1.2 GB"),
+        ]
+        for variant_id, hub_name, name, dims, size_est in dinov2_variants:
+            # DINOv2 caches in torch hub dir
+            dinov2_hub = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+            status = "not downloaded"
+            size = None
+            # Check HuggingFace cache too (newer versions use HF)
+            hf_dinov2 = os.path.join(hf_hub_dir, f"models--facebook--{hub_name}")
+            # torch.hub caches the repo, check if model file exists
+            if os.path.exists(dinov2_hub):
+                # The model is loaded via torch.hub.load which downloads the repo
+                # Weights are auto-downloaded on first model creation
+                status = "repo cached"
+                try:
+                    total = sum(
+                        os.path.getsize(os.path.join(dp, f))
+                        for dp, _, filenames in os.walk(dinov2_hub)
+                        for f in filenames
+                    )
+                    size = round(total / 1024 / 1024, 1)
+                except Exception:
+                    pass
+            if os.path.exists(hf_dinov2):
+                pt_files = glob.glob(os.path.join(hf_dinov2, "snapshots", "**", "*.bin"), recursive=True)
+                if pt_files:
+                    total_size = sum(os.path.getsize(f) for f in pt_files)
+                    size = round(total_size / 1024 / 1024, 1)
+                    status = "downloaded"
+            # Also check torch hub checkpoints
+            ckpt_files = glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth"))
+            if ckpt_files:
+                size = round(os.path.getsize(ckpt_files[0]) / 1024 / 1024, 1)
+                status = "downloaded"
+            models.append({
+                "id": variant_id,
+                "name": name,
+                "role": "Embeddings",
+                "description": f"{dims} embeddings for grouping",
+                "size_estimate": size_est,
+                "status": status,
+                "size": f"{size} MB" if size else None,
+            })
+
+        return jsonify({"models": models})
+
+    @app.route("/api/models/pipeline/download", methods=["POST"])
+    def api_models_pipeline_download():
+        """Download a pipeline model by ID."""
+        body = request.get_json(silent=True) or {}
+        model_id = body.get("model_id")
+        if not model_id:
+            return jsonify({"error": "model_id required"}), 400
+
+        runner = app._job_runner
+
+        def work(job):
+            import torch
+            import urllib.request
+
+            def _download_url(url, dest, label):
+                """Download a URL with byte-level progress reporting."""
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req) as resp:
+                    total = int(resp.headers.get("Content-Length", 0))
+                    total_mb = round(total / 1024 / 1024, 1) if total else "?"
+                    downloaded = 0
+                    chunk_size = 64 * 1024
+                    with open(dest, "wb") as f:
+                        while True:
+                            chunk = resp.read(chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            mb = round(downloaded / 1024 / 1024, 1)
+                            pct = round(downloaded / total * 100) if total else 0
+                            runner.push_event(job["id"], "progress", {
+                                "phase": f"{label}: {mb}/{total_mb} MB ({pct}%)",
+                                "current": downloaded,
+                                "total": total,
+                            })
+
+            runner.push_event(job["id"], "progress", {
+                "phase": f"Starting download: {model_id}...", "current": 0, "total": 1,
+            })
+
+            if model_id == "megadetector-v6":
+                hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+                os.makedirs(hub_dir, exist_ok=True)
+                dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
+                for f in [dest, os.path.join(hub_dir, "MDV6-yolov9-c.pt")]:
+                    if os.path.exists(f):
+                        os.remove(f)
+                url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
+                _download_url(url, dest, "MegaDetector V6")
+                runner.push_event(job["id"], "progress", {
+                    "phase": "Validating weights...", "current": 1, "total": 1,
+                })
+                _prev = os.environ.get("TORCH_FORCE_WEIGHTS_ONLY_LOAD")
+                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
+                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+                try:
+                    ckpt = torch.load(dest, map_location="cpu", weights_only=False)
+                    if not isinstance(ckpt, dict):
+                        raise RuntimeError("Invalid checkpoint format")
+                    del ckpt
+                finally:
+                    os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+                    if _prev:
+                        os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = _prev
+                return {"status": "downloaded", "model_id": model_id}
+
+            elif model_id.startswith("sam2-"):
+                hf_map = {
+                    "sam2-tiny": "facebook/sam2.1-hiera-tiny",
+                    "sam2-small": "facebook/sam2.1-hiera-small",
+                    "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
+                    "sam2-large": "facebook/sam2.1-hiera-large",
+                }
+                hf_id = hf_map.get(model_id)
+                if not hf_id:
+                    raise ValueError(f"Unknown SAM2 variant: {model_id}")
+                # Download weights via huggingface_hub with progress
+                from huggingface_hub import snapshot_download
+                runner.push_event(job["id"], "progress", {
+                    "phase": f"Downloading {model_id} from HuggingFace...",
+                    "current": 0, "total": 1,
+                })
+                snapshot_download(hf_id)
+                runner.push_event(job["id"], "progress", {
+                    "phase": "Verifying model loads...", "current": 1, "total": 1,
+                })
+                from sam2.build_sam import build_sam2_hf
+                model = build_sam2_hf(hf_id, device="cpu")
+                del model
+                return {"status": "downloaded", "model_id": model_id}
+
+            elif model_id.startswith("vit-"):
+                hub_map = {
+                    "vit-s14": "dinov2_vits14",
+                    "vit-b14": "dinov2_vitb14",
+                    "vit-l14": "dinov2_vitl14",
+                }
+                hub_name = hub_map.get(model_id)
+                if not hub_name:
+                    raise ValueError(f"Unknown DINOv2 variant: {model_id}")
+                runner.push_event(job["id"], "progress", {
+                    "phase": f"Downloading DINOv2 repo from torch hub...",
+                    "current": 0, "total": 1,
+                })
+                # torch.hub.load downloads repo + weights automatically
+                model = torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True)
+                del model
+                runner.push_event(job["id"], "progress", {
+                    "phase": "Model loaded and verified", "current": 1, "total": 1,
+                })
+                return {"status": "downloaded", "model_id": model_id}
+
+            else:
+                raise ValueError(f"Unknown model: {model_id}")
+
+        job_id = runner.start(f"download-{model_id}", work, config={"model_id": model_id})
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/models/pipeline/delete", methods=["POST"])
+    def api_models_pipeline_delete():
+        """Delete a pipeline model's cached weights."""
+        import glob
+        import shutil
+
+        body = request.get_json(silent=True) or {}
+        model_id = body.get("model_id")
+        if not model_id:
+            return jsonify({"error": "model_id required"}), 400
+
+        try:
+            import torch
+            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+        except ImportError:
+            return jsonify({"error": "torch not installed"}), 400
+
+        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
+        removed = []
+
+        if model_id == "megadetector-v6":
+            for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
+                for f in glob.glob(os.path.join(hub_dir, pattern)):
+                    os.remove(f)
+                    removed.append(f)
+            import detector
+            detector._detector = None
+
+        elif model_id.startswith("sam2-"):
+            hf_map = {
+                "sam2-tiny": "facebook/sam2.1-hiera-tiny",
+                "sam2-small": "facebook/sam2.1-hiera-small",
+                "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
+                "sam2-large": "facebook/sam2.1-hiera-large",
+            }
+            hf_repo = hf_map.get(model_id)
+            if hf_repo:
+                repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
+                if os.path.exists(repo_dir):
+                    shutil.rmtree(repo_dir)
+                    removed.append(repo_dir)
+            # Clear singleton
+            import masking
+            masking._sam2_predictor = None
+            masking._sam2_variant_loaded = None
+
+        elif model_id.startswith("vit-"):
+            hub_map = {
+                "vit-s14": "dinov2_vits14",
+                "vit-b14": "dinov2_vitb14",
+                "vit-l14": "dinov2_vitl14",
+            }
+            hub_name = hub_map.get(model_id)
+            if hub_name:
+                for f in glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth")):
+                    os.remove(f)
+                    removed.append(f)
+            # Clear singleton
+            import dino_embed as dinov2_mod
+            dinov2_mod._dinov2_model = None
+            dinov2_mod._dinov2_variant_loaded = None
+
+        return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id})
 
     @app.route("/api/scan/status")
     def api_scan_status():
@@ -2835,19 +3248,34 @@ def create_app(db_path, thumb_cache_dir=None):
                     skipped_det,
                 )
             except (ImportError, RuntimeError) as e:
-                if "PytorchWildlife" in str(e):
+                msg = str(e)
+                if "PytorchWildlife" in msg:
                     log.info(
                         "PytorchWildlife not installed — skipping detection (classifying full images)"
                     )
+                    runner.push_event(job["id"], "progress", {
+                        "current": 0, "total": total, "current_file": "",
+                        "phase": "Step 4/5: Detection skipped (PytorchWildlife not installed)",
+                    })
                 else:
                     log.warning(
                         "Detection unavailable: %s — classifying full images", e
                     )
-            except Exception:
+                    runner.push_event(job["id"], "progress", {
+                        "current": 0, "total": total, "current_file": "",
+                        "phase": f"Step 4/5: Detection failed — {msg[:120]}",
+                    })
+                    job["errors"].append(f"Detection unavailable: {msg[:200]}")
+            except Exception as e:
                 log.warning(
                     "Detection failed (non-fatal) — classifying full images",
                     exc_info=True,
                 )
+                runner.push_event(job["id"], "progress", {
+                    "current": 0, "total": total, "current_file": "",
+                    "phase": f"Step 4/5: Detection failed — {str(e)[:120]}",
+                })
+                job["errors"].append(f"Detection failed: {str(e)[:200]}")
 
             # Phase 6: Classify each photo (cropped to subject when available)
             # Skip photos that already have predictions (unless re-classifying)
@@ -3620,7 +4048,7 @@ def create_app(db_path, thumb_cache_dir=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from dinov2 import embed_global, embed_subject, embedding_to_blob
+            from dino_embed import embed_global, embed_subject, embedding_to_blob
             from masking import (
                 crop_completeness,
                 crop_subject,

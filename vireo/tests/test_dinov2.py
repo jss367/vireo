@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 def test_variants_dict():
     """DINOV2_VARIANTS contains expected model variants."""
-    from dinov2 import DINOV2_VARIANTS
+    from dino_embed import DINOV2_VARIANTS
 
     assert "vit-s14" in DINOV2_VARIANTS
     assert "vit-b14" in DINOV2_VARIANTS
@@ -28,7 +28,7 @@ def test_variants_dict():
 
 def test_get_embedding_dim():
     """get_embedding_dim returns correct dimensions per variant."""
-    from dinov2 import get_embedding_dim
+    from dino_embed import get_embedding_dim
 
     assert get_embedding_dim("vit-s14") == 384
     assert get_embedding_dim("vit-b14") == 768
@@ -37,7 +37,7 @@ def test_get_embedding_dim():
 
 def test_get_embedding_dim_invalid():
     """get_embedding_dim raises ValueError for unknown variant."""
-    from dinov2 import get_embedding_dim
+    from dino_embed import get_embedding_dim
 
     try:
         get_embedding_dim("vit-xl99")
@@ -48,7 +48,7 @@ def test_get_embedding_dim_invalid():
 
 def test_model_loader_invalid_variant():
     """_get_dinov2_model raises ValueError for unknown variant."""
-    from dinov2 import _get_dinov2_model
+    from dino_embed import _get_dinov2_model
 
     try:
         _get_dinov2_model("vit-nonexistent")
@@ -64,7 +64,7 @@ def test_model_loader_invalid_variant():
 
 def test_embedding_to_blob_roundtrip():
     """embedding_to_blob → blob_to_embedding preserves data exactly."""
-    from dinov2 import blob_to_embedding, embedding_to_blob
+    from dino_embed import blob_to_embedding, embedding_to_blob
 
     emb = np.random.randn(768).astype(np.float32)
     blob = embedding_to_blob(emb)
@@ -78,7 +78,7 @@ def test_embedding_to_blob_roundtrip():
 
 def test_embedding_to_blob_different_dims():
     """Serialization works for all DINOv2 embedding dimensions."""
-    from dinov2 import blob_to_embedding, embedding_to_blob
+    from dino_embed import blob_to_embedding, embedding_to_blob
 
     for dim in [384, 768, 1024]:
         emb = np.random.randn(dim).astype(np.float32)
@@ -90,7 +90,7 @@ def test_embedding_to_blob_different_dims():
 
 def test_embedding_to_blob_preserves_float32():
     """Output dtype is always float32."""
-    from dinov2 import blob_to_embedding, embedding_to_blob
+    from dino_embed import blob_to_embedding, embedding_to_blob
 
     # Even if input is float64, output should be float32
     emb = np.random.randn(768).astype(np.float64)
@@ -105,7 +105,7 @@ def test_embedding_to_blob_preserves_float32():
 def test_db_embedding_storage_roundtrip(tmp_path):
     """DINOv2 embeddings survive DB write → read as BLOBs."""
     from db import Database
-    from dinov2 import blob_to_embedding, embedding_to_blob
+    from dino_embed import blob_to_embedding, embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="root")
@@ -153,7 +153,7 @@ def test_db_embedding_null_by_default(tmp_path):
 def test_db_embedding_partial_update(tmp_path):
     """Updating only subject embedding doesn't clobber a previously stored global."""
     from db import Database
-    from dinov2 import blob_to_embedding, embedding_to_blob
+    from dino_embed import blob_to_embedding, embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="root")
@@ -194,7 +194,7 @@ def test_db_embedding_partial_update(tmp_path):
 
 def test_input_size_constant():
     """DINOv2 input size should be 518 (native resolution)."""
-    from dinov2 import DINOV2_INPUT_SIZE
+    from dino_embed import DINOV2_INPUT_SIZE
 
     assert DINOV2_INPUT_SIZE == 518
 
@@ -204,7 +204,7 @@ def test_input_size_constant():
 
 def test_variant_hub_names():
     """Each variant maps to a valid torch hub model name."""
-    from dinov2 import DINOV2_VARIANTS
+    from dino_embed import DINOV2_VARIANTS
 
     expected_hub_names = {
         "vit-s14": "dinov2_vits14",

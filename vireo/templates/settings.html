@@ -32,6 +32,16 @@
   .setting-label { font-size: 14px; color: #B0CCCC; flex: 1; }
   .setting-label small { display: block; font-size: 12px; color: #666; margin-top: 2px; }
   .setting-value { font-size: 13px; color: #888; font-variant-numeric: tabular-nums; }
+  .btn-sm {
+    padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border-secondary, #1A4560);
+    background: var(--bg-tertiary, #14374E); color: var(--text-primary, #E0F0F0);
+    margin-left: 6px;
+  }
+  .btn-sm:hover { background: var(--border-secondary, #1A4560); }
+  .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-sm.btn-danger { border-color: var(--danger, #E74C3C); color: var(--danger, #E74C3C); }
+  .btn-sm.btn-danger:hover { background: rgba(231,76,60,0.15); }
 
   .history-table {
     width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px;
@@ -311,6 +321,15 @@
       </div>
       <span class="setting-value" id="megadetectorStatus">-</span>
     </div>
+  </div>
+
+  <!-- Pipeline Models -->
+  <div class="section">
+    <div class="section-title">Pipeline Models</div>
+    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+      Models used by the culling pipeline. Download the ones you need before running Extract Features.
+    </p>
+    <div id="pipelineModelsContainer" style="font-size:12px;color:#888;">Loading...</div>
   </div>
 
 
@@ -645,6 +664,94 @@ async function loadSystemInfo() {
       mdDetail.textContent = d.megadetector_detail;
     }
   } catch(e) {}
+  loadPipelineModels();
+}
+
+async function loadPipelineModels() {
+  var container = document.getElementById('pipelineModelsContainer');
+  if (!container) return;
+  try {
+    var resp = await fetch('/api/models/pipeline');
+    if (!resp.ok) { container.textContent = 'Failed to load model status'; return; }
+    var data = await resp.json();
+    var html = '<table style="width:100%;border-collapse:collapse;">';
+    html += '<tr style="border-bottom:1px solid var(--border-primary,#14374E);font-size:11px;color:var(--text-dim,#5A8890);">';
+    html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
+    data.models.forEach(function(m) {
+      var statusColor = '#888';
+      var statusText = m.status;
+      if (m.status === 'downloaded') { statusColor = '#24E5CA'; statusText = 'Downloaded'; }
+      else if (m.status === 'corrupt' || m.status === 'incomplete') { statusColor = '#e74c3c'; statusText = m.status.charAt(0).toUpperCase() + m.status.slice(1); }
+      else if (m.status === 'repo cached') { statusColor = '#f0c040'; statusText = 'Repo only'; }
+      else { statusColor = '#f0c040'; statusText = 'Not downloaded'; }
+
+      html += '<tr style="border-bottom:1px solid var(--border-primary,#14374E);">';
+      html += '<td style="padding:8px;"><strong>' + m.name + '</strong><br><span style="color:#888;font-size:11px;">' + m.description + '</span></td>';
+      html += '<td style="padding:8px;color:#888;">' + m.role + '</td>';
+      html += '<td style="padding:8px;color:' + statusColor + ';">' + statusText + '</td>';
+      html += '<td style="padding:8px;color:#888;">' + (m.size || m.size_estimate) + '</td>';
+      html += '<td style="padding:8px;text-align:right;">';
+      if (m.status === 'downloaded') {
+        html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button>';
+      } else if (m.status === 'corrupt' || m.status === 'incomplete') {
+        html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button> ';
+        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Re-download</button>';
+      } else {
+        html += '<button class="btn-sm" onclick="downloadPipelineModel(\'' + m.id + '\',this)">Download</button>';
+      }
+      html += '</td></tr>';
+    });
+    html += '</table>';
+    container.innerHTML = html;
+  } catch(e) {
+    container.textContent = 'Error loading models: ' + e;
+  }
+}
+
+async function downloadPipelineModel(modelId, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
+  try {
+    var resp = await fetch('/api/models/pipeline/download', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    });
+    var data = await resp.json();
+    if (data.job_id) {
+      var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+      source.addEventListener('progress', function(e) {
+        var p = JSON.parse(e.data);
+        if (btn) btn.textContent = p.phase || 'Downloading...';
+      });
+      source.addEventListener('complete', function(e) {
+        source.close();
+        var result = JSON.parse(e.data);
+        if (result.status === 'completed') {
+          if (btn) { btn.textContent = 'Done!'; btn.style.color = '#24E5CA'; }
+        } else {
+          if (btn) { btn.textContent = 'Failed'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+        }
+        setTimeout(loadPipelineModels, 500);
+      });
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = 'Error'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+  }
+}
+
+async function deletePipelineModel(modelId, modelName) {
+  if (!confirm('Delete ' + modelName + ' weights?')) return;
+  try {
+    var resp = await fetch('/api/models/pipeline/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    });
+    await resp.json();
+    loadPipelineModels();
+  } catch(e) {
+    alert('Error deleting model: ' + e);
+  }
 }
 
 /* ---------- Labels ---------- */

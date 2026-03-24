@@ -21,8 +21,8 @@ def _get_detector():
         return _detector
 
     try:
-        from PytorchWildlife.models import detection as pw_detection
         import torch
+        from PytorchWildlife.models import detection as pw_detection
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -32,9 +32,28 @@ def _get_detector():
             "Loading MegaDetector on %s (weights download automatically on first use)...",
             device,
         )
-        _detector = pw_detection.MegaDetectorV6(
-            device=device, pretrained=True, version="MDV6-yolov9-c"
-        )
+
+        # PyTorch 2.6+ defaults to weights_only=True which rejects the
+        # pickled classes in MegaDetector/ultralytics weights. The loading
+        # chain passes through multiple wrappers that capture function
+        # references at import time, making monkey-patching unreliable.
+        # Use the env var that torch.serialization.load checks directly.
+        _prev_no = os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD")
+        _prev_force = os.environ.get("TORCH_FORCE_WEIGHTS_ONLY_LOAD")
+        os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+        os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
+        try:
+            _detector = pw_detection.MegaDetectorV6(
+                device=device, pretrained=True, version="MDV6-yolov9-c"
+            )
+        finally:
+            if _prev_no is None:
+                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+            else:
+                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = _prev_no
+            if _prev_force is not None:
+                os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = _prev_force
+
         log.info("MegaDetector loaded")
         return _detector
 
@@ -62,7 +81,18 @@ def detect_animals(image_path, confidence_threshold=0.2):
     detector = _get_detector()
 
     try:
-        results = detector.single_image_detection(str(image_path))
+        # Load image ourselves using image_loader which supports RAW formats
+        # (NEF, CR2, ARW, etc.). PytorchWildlife's internal loading uses
+        # PIL.Image.open() which cannot read RAW files — it either fails
+        # or reads the tiny embedded JPEG thumbnail, producing bad detections.
+        from image_loader import load_image
+
+        img = load_image(str(image_path), max_size=1280)
+        if img is None:
+            log.warning("Could not load image for detection: %s", image_path)
+            return []
+        img_array = np.array(img.convert("RGB"))
+        results = detector.single_image_detection(img_array, img_path=str(image_path))
     except Exception:
         log.warning("Detection failed for %s", image_path, exc_info=True)
         return []

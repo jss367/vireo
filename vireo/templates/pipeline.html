@@ -151,6 +151,38 @@ body {
 .empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text-secondary, #B0CCCC); }
 .empty-state p { font-size: 14px; max-width: 400px; margin: 0 auto; line-height: 1.5; }
 
+/* Center progress (shown during jobs) */
+.center-progress { display: none; text-align: center; padding: 60px 20px; }
+.center-progress.active { display: block; }
+.center-progress .cp-phase {
+  font-size: 18px; font-weight: 600;
+  color: var(--text-secondary, #B0CCCC);
+  margin-bottom: 16px;
+}
+.center-progress .cp-track {
+  width: 100%; max-width: 480px; height: 8px;
+  background: var(--surface-dim, #1a2a2d); border-radius: 4px;
+  margin: 0 auto 12px; overflow: hidden;
+}
+.center-progress .cp-fill {
+  height: 100%; width: 0%; border-radius: 4px;
+  background: var(--accent, #4ecca3);
+  transition: width 0.3s ease;
+}
+.center-progress .cp-detail {
+  font-size: 14px; color: var(--text-muted, #7FAAB0);
+  font-variant-numeric: tabular-nums;
+}
+.center-progress .cp-file {
+  font-size: 13px; color: var(--text-dim, #5A8890);
+  margin-top: 6px;
+  font-family: var(--mono, monospace);
+}
+.center-progress .cp-rate {
+  font-size: 12px; color: var(--text-dim, #5A8890);
+  margin-top: 4px;
+}
+
 /* Filter bar */
 .filter-bar {
   display: flex;
@@ -768,7 +800,14 @@ input[type="range"]::-moz-range-thumb {
     <div id="encountersContainer"></div>
 
     {% else %}
-    <div class="empty-state">
+    <div class="center-progress" id="centerProgress">
+      <div class="cp-phase" id="cpPhase">Starting...</div>
+      <div class="cp-track"><div class="cp-fill" id="cpFill"></div></div>
+      <div class="cp-detail" id="cpDetail"></div>
+      <div class="cp-file" id="cpFile"></div>
+      <div class="cp-rate" id="cpRate"></div>
+    </div>
+    <div class="empty-state" id="emptyState">
       <h2>Pipeline not yet run</h2>
       <p>
         {% if not has_detections %}
@@ -954,11 +993,37 @@ function onModelConfigChange() {
 
 function showProgress(show) {
   document.getElementById('progressWrap').style.display = show ? 'block' : 'none';
+  var cp = document.getElementById('centerProgress');
+  var es = document.getElementById('emptyState');
+  if (cp) { cp.classList.toggle('active', show); }
+  if (es) { es.style.display = show ? 'none' : ''; }
 }
 
 function updateProgress(pct, text) {
   document.getElementById('progressFill').style.width = pct + '%';
   document.getElementById('progressText').textContent = text;
+}
+
+function updateCenterProgress(p) {
+  var cp = document.getElementById('centerProgress');
+  if (!cp) return;
+  var phase = p.phase || 'Processing';
+  var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+  document.getElementById('cpPhase').textContent = phase;
+  document.getElementById('cpFill').style.width = pct + '%';
+  var detail = '';
+  if (p.current > 0 && p.total > 0) {
+    detail = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + '  (' + pct + '%)';
+  }
+  document.getElementById('cpDetail').textContent = detail;
+  document.getElementById('cpFile').textContent = p.current_file || '';
+  if (p.rate > 0) {
+    var eta = Math.round((p.total - p.current) / p.rate);
+    var mm = Math.floor(eta / 60), ss = eta % 60;
+    document.getElementById('cpRate').textContent = p.rate.toFixed(1) + ' photos/sec — ~' + mm + ':' + String(ss).padStart(2, '0') + ' remaining';
+  } else {
+    document.getElementById('cpRate').textContent = '';
+  }
 }
 
 function runExtractMasks() {
@@ -982,11 +1047,13 @@ function runExtractMasks() {
       var text = (p.phase || 'Processing') + ' ' + (p.current || 0) + '/' + (p.total || '?');
       if (p.current_file) text += ' - ' + p.current_file;
       updateProgress(pct, text);
+      updateCenterProgress(p);
     });
     source.addEventListener('complete', function(e) {
       source.close();
       var result = JSON.parse(e.data);
       updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
+      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
       setTimeout(function() { window.location.reload(); }, 800);
     });
   })
@@ -1012,11 +1079,13 @@ function runRegroup() {
       var p = JSON.parse(e.data);
       var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
       updateProgress(pct, p.phase || 'Processing...');
+      updateCenterProgress(p);
     });
     source.addEventListener('complete', function(e) {
       source.close();
       var result = JSON.parse(e.data);
       updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
+      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
       setTimeout(function() { window.location.reload(); }, 800);
     });
   })

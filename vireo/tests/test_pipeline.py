@@ -20,7 +20,7 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
     Returns (db, photo_ids_by_encounter).
     """
     from db import Database
-    from dinov2 import embedding_to_blob
+    from dino_embed import embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")

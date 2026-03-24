@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 def _setup_db(tmp_path):
     """Create a DB with photos that have full pipeline features."""
     from db import Database
-    from dinov2 import embedding_to_blob
+    from dino_embed import embedding_to_blob
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")

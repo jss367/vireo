@@ -324,6 +324,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_pending_workspace "
             "ON pending_changes(workspace_id)"
         )
+        self.conn.commit()
 
     # -- Workspaces --
 

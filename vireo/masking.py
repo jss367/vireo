@@ -48,6 +48,7 @@ def _get_sam2_predictor(variant="sam2-small"):
 
     try:
         import torch
+        logging.getLogger("sam2").setLevel(logging.WARNING)
         from sam2.build_sam import build_sam2_hf
         from sam2.sam2_image_predictor import SAM2ImagePredictor
     except ImportError:
