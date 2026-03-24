@@ -148,9 +148,9 @@
       <div style="margin-bottom:8px;">
         <div style="font-size:12px; color:#888; margin-bottom:4px;">Region (search iNaturalist places):</div>
         <input type="text" id="placeSearch" placeholder="e.g. California, Virginia, Costa Rica"
-               style="width:100%;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:8px 10px;font-size:13px;outline:none;"
+               style="width:100%;background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:8px 10px;font-size:13px;outline:none;"
                oninput="searchPlacesDebounced()" autocomplete="off">
-        <div id="placeDropdown" style="background:#0a1530;border:1px solid #1A4560;border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;"></div>
+        <div id="placeDropdown" style="background:var(--bg-secondary,#0a1530);border:1px solid var(--border-secondary,#1A4560);border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;"></div>
       </div>
 
       <div style="margin-bottom:10px;">
@@ -893,21 +893,21 @@ async function searchPlaces() {
     var resp = await fetch('/api/labels/search-places?q=' + encodeURIComponent(q));
     var places = await resp.json();
     if (places.length === 0) {
-      dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#555;">No places found</div>';
+      dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim,#555);">No places found</div>';
       return;
     }
     var html = '';
     places.slice(0, 8).forEach(function(p) {
       var dn = p.display_name || p.name || '';
-      html += '<div style="padding:8px 10px;font-size:13px;color:#B0CCCC;cursor:pointer;border-bottom:1px solid #1A4560;" ' +
-        'onmouseover="this.style.background=\'#0E2A3D\'" onmouseout="this.style.background=\'\'" ' +
+      html += '<div style="padding:8px 10px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;border-bottom:1px solid var(--border-secondary,#1A4560);" ' +
+        'onmouseover="this.style.background=\'var(--bg-tertiary,#0E2A3D)\'" onmouseout="this.style.background=\'\'" ' +
         'data-place-id="' + p.id + '" data-place-name="' + escapeAttr(dn) + '" ' +
         'onclick="selectPlace(this.dataset.placeId, this.dataset.placeName)">' +
         escapeHtml(dn) + '</div>';
     });
     dropdown.innerHTML = html;
   } catch(e) {
-    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#e74c3c;">Error: ' + escapeHtml(String(e)) + '</div>';
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger,#e74c3c);">Error: ' + escapeHtml(String(e)) + '</div>';
   }
 }
 
