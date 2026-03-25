@@ -328,20 +328,12 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
             _time.sleep(wait)
 
 
-def _get_total_cache_size(repo_id):
-    """Return total bytes of all blobs in the HF cache for a repo."""
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    blobs_dir = os.path.join(
-        cache_dir, "models--" + repo_id.replace("/", "--"), "blobs"
-    )
-    if not os.path.isdir(blobs_dir):
-        return 0
-    total = 0
-    for f in os.listdir(blobs_dir):
-        fp = os.path.join(blobs_dir, f)
-        if os.path.isfile(fp):
-            total += os.path.getsize(fp)
-    return total
+class _DownloadStalled(TimeoutError):
+    """Raised when a download stalls.  Carries how many bytes tqdm reported."""
+
+    def __init__(self, message, bytes_downloaded=0):
+        super().__init__(message)
+        self.bytes_downloaded = bytes_downloaded
 
 
 def _download_with_byte_progress(repo_id, filename, file_size,
@@ -349,31 +341,63 @@ def _download_with_byte_progress(repo_id, filename, file_size,
                                   stall_timeout=120):
     """Download a file into the HF cache with byte-level progress and stall detection.
 
-    Runs hf_hub_download in a daemon thread while the main thread polls
-    blob sizes for progress. Raises TimeoutError if no new bytes appear
-    for *stall_timeout* seconds, allowing the caller to retry.
+    Uses hf_hub_download's ``tqdm_class`` parameter to intercept progress
+    directly from the download backend (works with both HTTP and XET).
+    Runs the download in a daemon thread so the main thread can detect
+    stalls and raise ``_DownloadStalled`` for the caller to retry.
 
     Args:
         repo_id: HuggingFace repo (e.g. "timm/eva02_large...")
         filename: File within the repo
         file_size: Expected file size in bytes (from repo metadata)
         progress_callback: callable(bytes_downloaded, file_size, rate_bytes_per_sec)
-        stall_timeout: Seconds with no progress before raising TimeoutError.
+        stall_timeout: Seconds with no progress before raising _DownloadStalled.
     """
     from huggingface_hub import hf_hub_download
+    from tqdm.auto import tqdm as base_tqdm
     import threading
     import time as _time
 
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
-    baseline = _get_total_cache_size(repo_id)
+    lock = threading.Lock()
+    state = {
+        "bytes": 0,
+        "last_update": _time.monotonic(),
+        "start": _time.monotonic(),
+    }
+
+    class _ProgressTqdm(base_tqdm):
+        """Intercepts tqdm updates from hf_hub_download / XET."""
+
+        _last_cb = 0.0
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            _ProgressTqdm._last_cb = 0.0
+
+        def update(self, n=1):
+            super().update(n)
+            now = _time.monotonic()
+            with lock:
+                state["bytes"] = int(self.n)
+                state["last_update"] = now
+            if progress_callback and (now - _ProgressTqdm._last_cb) >= 0.5:
+                _ProgressTqdm._last_cb = now
+                elapsed = now - state["start"]
+                rate = self.n / elapsed if elapsed > 0 else 0
+                progress_callback(min(int(self.n), file_size), file_size, rate)
+
     result = [None]
     error = [None]
     done = threading.Event()
 
     def do_download():
         try:
-            result[0] = hf_hub_download(repo_id=repo_id, filename=filename)
+            result[0] = hf_hub_download(
+                repo_id=repo_id, filename=filename,
+                tqdm_class=_ProgressTqdm,
+            )
         except Exception as e:
             error[0] = e
         finally:
@@ -382,30 +406,20 @@ def _download_with_byte_progress(repo_id, filename, file_size,
     dl_thread = threading.Thread(target=do_download, daemon=True)
     dl_thread.start()
 
-    last_size = baseline
-    last_progress_time = _time.monotonic()
-
     while not done.is_set():
-        current_total = _get_total_cache_size(repo_id)
-        delta = current_total - baseline
         now = _time.monotonic()
-
-        if current_total > last_size:
-            dt = now - last_progress_time
-            rate = (current_total - last_size) / dt if dt > 0 else 0
-            last_size = current_total
-            last_progress_time = now
-            if progress_callback:
-                progress_callback(min(delta, file_size), file_size, rate)
-        elif stall_timeout and (now - last_progress_time) > stall_timeout:
-            mb_done = delta // (1024 * 1024)
+        with lock:
+            stall_duration = now - state["last_update"]
+            current_bytes = state["bytes"]
+        if stall_timeout and stall_duration > stall_timeout:
+            mb_done = current_bytes // (1024 * 1024)
             mb_total = file_size // (1024 * 1024)
-            raise TimeoutError(
+            raise _DownloadStalled(
                 f"Download stalled: no new data for {stall_timeout}s "
-                f"({mb_done}/{mb_total} MB)"
+                f"({mb_done}/{mb_total} MB)",
+                bytes_downloaded=current_bytes,
             )
-
-        done.wait(0.5)
+        done.wait(2.0)
 
     if error[0]:
         raise error[0]
@@ -550,7 +564,6 @@ def download_model(model_id, progress_callback=None):
             # multi-GB files on HF's XET storage backend.
             max_stalled = 5
             stalled_count = 0
-            last_blob_size = _get_total_cache_size(hf_repo)
 
             for attempt in range(1, max_stalled + 1):
                 try:
@@ -560,16 +573,14 @@ def download_model(model_id, progress_callback=None):
                     )
                     break  # success
                 except Exception as e:
-                    current_blob_size = _get_total_cache_size(hf_repo)
-                    made_progress = current_blob_size > last_blob_size
+                    peak = getattr(e, "bytes_downloaded", 0)
 
-                    if made_progress:
+                    if peak > 0:
                         stalled_count = 0
-                        last_blob_size = current_blob_size
                         log.info(
-                            "Download interrupted but made progress "
-                            "(%d MB cached), retrying (attempt %d): %s",
-                            current_blob_size // (1024 * 1024), attempt, e,
+                            "Download interrupted at %d MB, "
+                            "retrying (attempt %d): %s",
+                            peak // (1024 * 1024), attempt, e,
                         )
                     else:
                         stalled_count += 1
@@ -582,7 +593,7 @@ def download_model(model_id, progress_callback=None):
                     if stalled_count >= max_stalled:
                         raise RuntimeError(
                             f"Download of {filename} stalled after "
-                            f"{attempt} attempts with no new data. "
+                            f"{attempt} attempts with no progress. "
                             f"Try again — the download will resume "
                             f"from where it left off."
                         ) from e
