@@ -5,33 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Settings</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0A1F2E;
-    color: #E0F0F0;
-    min-height: 100vh;
-    padding-bottom: 36px;
-  }
-  .content { max-width: 800px; margin: 0 auto; padding: 32px 24px; }
-  .section {
-    background: #0E2A3D; border: 1px solid #14374E;
-    border-radius: 8px; padding: 24px; margin-bottom: 24px;
-  }
-  .section-title {
-    font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #fff;
-    padding-bottom: 8px; border-bottom: 1px solid #14374E;
-  }
-  .setting-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 0; border-bottom: 1px solid #0E2A3D;
-  }
-  .setting-row:last-child { border-bottom: none; }
-  .setting-label { font-size: 14px; color: #B0CCCC; flex: 1; }
-  .setting-label small { display: block; font-size: 12px; color: #666; margin-top: 2px; }
-  .setting-value { font-size: 13px; color: #888; font-variant-numeric: tabular-nums; }
+  body { padding-bottom: 36px; }
+  .content { max-width: 800px; }
   .btn-sm {
     padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
     border: 1px solid var(--border-secondary, #1A4560);
@@ -42,19 +20,6 @@
   .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-sm.btn-danger { border-color: var(--danger, #E74C3C); color: var(--danger, #E74C3C); }
   .btn-sm.btn-danger:hover { background: rgba(231,76,60,0.15); }
-
-  .history-table {
-    width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px;
-  }
-  .history-table th {
-    text-align: left; padding: 6px 10px; color: #666;
-    font-weight: 500; border-bottom: 1px solid #14374E;
-  }
-  .history-table td {
-    padding: 6px 10px; border-bottom: 1px solid #0E2A3D; color: #999;
-  }
-  .history-table .status-completed { color: #24E5CA; }
-  .history-table .status-failed { color: #e74c3c; }
 
   .shortcut-context-title {
     font-size: 13px; font-weight: 600; color: #B0CCCC;
