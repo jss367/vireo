@@ -56,7 +56,7 @@ class JobRunner:
             "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)"
         )
 
-    def start(self, job_type, work_fn, config=None):
+    def start(self, job_type, work_fn, config=None, workspace_id=None):
         """Start a background job.
 
         Args:
@@ -64,6 +64,7 @@ class JobRunner:
             work_fn: callable(job_dict) that does the work. Can update
                      job['progress'] and return a result dict.
             config: optional dict of job configuration (persisted to history)
+            workspace_id: optional workspace id to associate with this job
 
         Returns:
             job_id string
@@ -81,6 +82,7 @@ class JobRunner:
             "result": None,
             "errors": [],
             "config": config or {},
+            "workspace_id": workspace_id,
         }
 
         with self._lock:
@@ -141,6 +143,7 @@ class JobRunner:
             json.dumps(result_data),
             len(job["errors"]),
             json.dumps(job["config"]),
+            job.get("workspace_id"),
         )
 
         for attempt in range(3):
@@ -149,8 +152,8 @@ class JobRunner:
                 conn.execute(
                     """INSERT OR REPLACE INTO job_history
                        (id, type, status, started_at, finished_at, duration,
-                        result, error_count, config)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        result, error_count, config, workspace_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     params,
                 )
                 conn.commit()

@@ -295,9 +295,38 @@ def test_job_history_workspace_id(db_with_workspace):
     from jobs import JobRunner
     db, ws_id, _, _ = db_with_workspace
     runner = JobRunner(db=db)
-    # Verify the table has workspace_id column
-    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(job_history)").fetchall()]
-    assert "workspace_id" in cols
+
+    # Start a job with workspace_id
+    def noop(job):
+        return {"ok": True}
+
+    job_id = runner.start("test-job", noop, workspace_id=ws_id)
+
+    # Wait for job to complete
+    import time, sqlite3
+    for _ in range(100):
+        job = runner.get(job_id)
+        if job and job["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed", f"Job did not complete: {job}"
+
+    # Poll for persistence (written by background thread via separate connection)
+    db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    row = None
+    for _ in range(50):
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute(
+            "SELECT workspace_id FROM job_history WHERE id = ?", (job_id,)
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            break
+        time.sleep(0.05)
+
+    # Verify workspace_id was persisted
+    assert row is not None, "Job was not persisted to job_history"
+    assert row[0] == ws_id, f"Expected workspace_id={ws_id}, got {row[0]}"
 
 
 # -- Task 8: Migration test with pre-existing data --
