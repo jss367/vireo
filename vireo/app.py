@@ -1190,9 +1190,27 @@ def create_app(db_path, thumb_cache_dir=None):
         model_name = model["name"] if model else "None"
         model_size = model.get("size_mb", 0) if model else 0
         model_source = model.get("source", "") if model else ""
-        needs_download = not model_ready and model_source.startswith("hf-hub:")
+        model_type = model.get("model_type", "bioclip") if model else "bioclip"
+        needs_download = not model_ready and (
+            model_source.startswith("hf-hub:") or model_source == "timm"
+        )
 
-        # Resolve labels
+        # timm models have a fixed class set — no labels needed
+        if model_type == "timm":
+            return jsonify(
+                {
+                    "model_name": model_name,
+                    "model_ready": model_ready,
+                    "model_size_mb": model_size,
+                    "needs_download": needs_download,
+                    "labels_name": "Built-in (10K iNat21 species)",
+                    "labels_count": 10000,
+                    "use_tol": False,
+                    "embeddings_cached": True,  # no embeddings to compute
+                }
+            )
+
+        # Resolve labels (BioCLIP path)
         use_tol = False
         label_count = 0
         label_name = ""
@@ -3012,6 +3030,7 @@ def create_app(db_path, thumb_cache_dir=None):
             model_str = active_model["model_str"]
             weights_path = active_model["weights_path"]
             effective_name = active_model["name"]
+            model_type = active_model.get("model_type", "bioclip")
             # Use effective name for storing predictions if not explicitly set
             nonlocal model_name
             if not model_name:
@@ -3040,66 +3059,74 @@ def create_app(db_path, thumb_cache_dir=None):
                     log.warning("Could not load taxonomy: %s — continuing without taxonomy enrichment", e)
                     tax = None
 
-            # Phase 2: Load labels
+            # Phase 2: Load labels (skipped for timm models — fixed class set)
             labels = None
-            labels_files = body.get("labels_files")
-            if labels_files and isinstance(labels_files, list):
-                from labels import get_saved_labels, load_merged_labels
-
-                saved = get_saved_labels()
-                saved_by_file = {s["labels_file"]: s for s in saved}
-                active_sets = []
-                for p in labels_files:
-                    meta = saved_by_file.get(p, {"labels_file": p})
-                    active_sets.append(meta)
-                labels = load_merged_labels(active_sets)
-                log.info("Using %d merged labels from %d sets", len(labels), len(active_sets))
-            elif labels_file and os.path.exists(labels_file):
-                with open(labels_file) as f:
-                    labels = [line.strip() for line in f if line.strip()]
-                log.info("Using %d labels from file: %s", len(labels), labels_file)
-            else:
-                from labels import get_active_labels, load_merged_labels
-
-                active_sets = get_active_labels()
-                if active_sets:
-                    labels = load_merged_labels(active_sets)
-                    names = [s.get("name", "?") for s in active_sets]
-                    log.info("Using %d merged labels from active sets: %s", len(labels), ", ".join(names))
-
-            # Log what we're using
-            if labels:
-                log.info(
-                    "Classification config: model=%s, labels=%d from %s, threshold=%.0f%%",
-                    effective_name,
-                    len(labels),
-                    labels_file or "active labels",
-                    threshold * 100,
-                )
-            else:
-                log.info(
-                    "Classification config: model=%s, no labels selected, threshold=%.0f%%",
-                    effective_name,
-                    threshold * 100,
-                )
-
             use_tol = False
-            tol_supported_models = {
-                "hf-hub:imageomics/bioclip",
-                "hf-hub:imageomics/bioclip-2",
-            }
-            if not labels:
-                if model_str in tol_supported_models:
-                    log.info(
-                        "No regional labels available — using Tree of Life classifier (all species)"
-                    )
-                    use_tol = True
+
+            if model_type == "timm":
+                log.info(
+                    "Classification config: model=%s (timm), threshold=%.0f%% — no labels needed",
+                    effective_name,
+                    threshold * 100,
+                )
+            else:
+                labels_files = body.get("labels_files")
+                if labels_files and isinstance(labels_files, list):
+                    from labels import get_saved_labels, load_merged_labels
+
+                    saved = get_saved_labels()
+                    saved_by_file = {s["labels_file"]: s for s in saved}
+                    active_sets = []
+                    for p in labels_files:
+                        meta = saved_by_file.get(p, {"labels_file": p})
+                        active_sets.append(meta)
+                    labels = load_merged_labels(active_sets)
+                    log.info("Using %d merged labels from %d sets", len(labels), len(active_sets))
+                elif labels_file and os.path.exists(labels_file):
+                    with open(labels_file) as f:
+                        labels = [line.strip() for line in f if line.strip()]
+                    log.info("Using %d labels from file: %s", len(labels), labels_file)
                 else:
-                    raise RuntimeError(
-                        f"No labels available and Tree of Life mode is not supported "
-                        f"for {effective_name}. Go to Settings > Labels and download "
-                        f"a species list for your region."
+                    from labels import get_active_labels, load_merged_labels
+
+                    active_sets = get_active_labels()
+                    if active_sets:
+                        labels = load_merged_labels(active_sets)
+                        names = [s.get("name", "?") for s in active_sets]
+                        log.info("Using %d merged labels from active sets: %s", len(labels), ", ".join(names))
+
+                # Log what we're using
+                if labels:
+                    log.info(
+                        "Classification config: model=%s, labels=%d from %s, threshold=%.0f%%",
+                        effective_name,
+                        len(labels),
+                        labels_file or "active labels",
+                        threshold * 100,
                     )
+                else:
+                    log.info(
+                        "Classification config: model=%s, no labels selected, threshold=%.0f%%",
+                        effective_name,
+                        threshold * 100,
+                    )
+
+                tol_supported_models = {
+                    "hf-hub:imageomics/bioclip",
+                    "hf-hub:imageomics/bioclip-2",
+                }
+                if not labels:
+                    if model_str in tol_supported_models:
+                        log.info(
+                            "No regional labels available — using Tree of Life classifier (all species)"
+                        )
+                        use_tol = True
+                    else:
+                        raise RuntimeError(
+                            f"No labels available and Tree of Life mode is not supported "
+                            f"for {effective_name}. Go to Settings > Labels and download "
+                            f"a species list for your region."
+                        )
 
             # Phase 3: Get photos from collection
             runner.push_event(
@@ -3132,7 +3159,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             # Phase 4: Initialize classifier
-            if use_tol:
+            if model_type == "timm":
+                phase_msg = f"Loading {effective_name} timm model..."
+            elif use_tol:
                 phase_msg = f"Loading {effective_name} Tree of Life classifier..."
             else:
                 phase_msg = (
@@ -3150,25 +3179,30 @@ def create_app(db_path, thumb_cache_dir=None):
                 },
             )
 
-            def _emb_progress(current, emb_total):
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": emb_total,
-                        "current_file": f"Computing label embeddings ({current}/{emb_total})...",
-                        "rate": 0,
-                        "phase": "Step 3/5: Computing embeddings",
-                    },
-                )
+            if model_type == "timm":
+                from timm_classifier import TimmClassifier
 
-            clf = Classifier(
-                labels=None if use_tol else labels,
-                model_str=model_str,
-                pretrained_str=weights_path,
-                embedding_progress_callback=_emb_progress,
-            )
+                clf = TimmClassifier(model_str, taxonomy=tax)
+            else:
+                def _emb_progress(current, emb_total):
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": emb_total,
+                            "current_file": f"Computing label embeddings ({current}/{emb_total})...",
+                            "rate": 0,
+                            "phase": "Step 3/5: Computing embeddings",
+                        },
+                    )
+
+                clf = Classifier(
+                    labels=None if use_tol else labels,
+                    model_str=model_str,
+                    pretrained_str=weights_path,
+                    embedding_progress_callback=_emb_progress,
+                )
 
             # Phase 5: Detect subjects (MegaDetector)
             # Run detection first so we can crop to subject for better classification
@@ -3361,14 +3395,18 @@ def create_app(db_path, thumb_cache_dir=None):
                                 timestamp = dt.fromisoformat(photo["timestamp"])
                             except Exception:
                                 pass
-                        emb_row = thread_db.conn.execute(
-                            "SELECT embedding FROM photos WHERE id = ?",
-                            (photo["id"],),
-                        ).fetchone()
+                        # Load embedding for grouping refinement (BioCLIP only).
+                        # timm doesn't produce embeddings — skip to avoid using
+                        # stale BioCLIP vectors that would confuse similarity grouping.
                         embedding = None
-                        if emb_row and emb_row["embedding"]:
-                            import numpy as np
-                            embedding = np.frombuffer(emb_row["embedding"], dtype=np.float32)
+                        if model_type != "timm":
+                            emb_row = thread_db.conn.execute(
+                                "SELECT embedding FROM photos WHERE id = ?",
+                                (photo["id"],),
+                            ).fetchone()
+                            if emb_row and emb_row["embedding"]:
+                                import numpy as np
+                                embedding = np.frombuffer(emb_row["embedding"], dtype=np.float32)
                         raw_results.append({
                             "photo": photo,
                             "folder_path": folder_path,
@@ -3413,9 +3451,13 @@ def create_app(db_path, thumb_cache_dir=None):
                     img.save(tmp_path, quality=85)
 
                 try:
-                    all_preds, embedding = clf.classify_with_embedding(
-                        tmp_path, threshold=0
-                    )
+                    if model_type == "timm":
+                        all_preds = clf.classify(tmp_path, threshold=0)
+                        embedding = None
+                    else:
+                        all_preds, embedding = clf.classify_with_embedding(
+                            tmp_path, threshold=0
+                        )
                 except Exception:
                     log.warning(
                         "Classification failed for %s", photo["filename"], exc_info=True
@@ -3425,7 +3467,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 finally:
                     os.unlink(tmp_path)
 
-                # Store embedding in DB for grouping
+                # Store embedding in DB for grouping (BioCLIP only — timm has no embeddings)
                 if embedding is not None:
                     thread_db.conn.execute(
                         "UPDATE photos SET embedding = ? WHERE id = ?",
