@@ -461,3 +461,258 @@ def test_default_collections_adds_missing(tmp_path):
     assert 'Untagged' in names
     assert 'Recent Import' in names
     assert len(colls) == 4  # no duplicate Flagged
+
+
+# --- Helper to set up a workspace with photos ---
+
+def _make_workspace_with_photos(tmp_path, photo_overrides=None):
+    """Create a db with a workspace, folder, and photos. Returns (db, photo_ids).
+
+    photo_overrides is a list of dicts with column overrides per photo.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(ws_id, fid)
+    overrides = photo_overrides or [{}]
+    photo_ids = []
+    for i, ov in enumerate(overrides):
+        pid = db.add_photo(
+            folder_id=fid,
+            filename=ov.get('filename', f'IMG_{i:04d}.jpg'),
+            extension='.jpg',
+            file_size=1000,
+            file_mtime=1000.0,
+            timestamp=ov.get('timestamp'),
+        )
+        # Apply column overrides via direct UPDATE
+        for col, val in ov.items():
+            if col not in ('filename', 'timestamp'):
+                db.conn.execute(f"UPDATE photos SET {col} = ? WHERE id = ?", (val, pid))
+        db.conn.commit()
+        photo_ids.append(pid)
+    return db, photo_ids
+
+
+# --- Cluster 1: Pipeline Feature Counts ---
+
+def test_get_pipeline_feature_counts_empty(tmp_path):
+    """Returns zeros when no photos have pipeline features."""
+    db, _ = _make_workspace_with_photos(tmp_path, [{}])
+    counts = db.get_pipeline_feature_counts()
+    assert counts['masks'] == 0
+    assert counts['detections'] == 0
+    assert counts['sharpness'] == 0
+
+
+def test_get_pipeline_feature_counts_with_data(tmp_path):
+    """Returns correct counts for each pipeline feature."""
+    db, _ = _make_workspace_with_photos(tmp_path, [
+        {'mask_path': '/mask/1.png', 'detection_box': '0,0,100,100', 'subject_tenengrad': 42.0},
+        {'mask_path': '/mask/2.png'},
+        {'detection_box': '10,10,50,50'},
+        {},
+    ])
+    counts = db.get_pipeline_feature_counts()
+    assert counts['masks'] == 2
+    assert counts['detections'] == 2
+    assert counts['sharpness'] == 1
+
+
+def test_get_pipeline_feature_counts_workspace_scoped(tmp_path):
+    """Only counts photos in the active workspace's folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    db.set_active_workspace(ws1)
+
+    f1 = db.add_folder('/photos1', name='photos1')
+    db.add_workspace_folder(ws1, f1)
+    db.add_photo(folder_id=f1, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET mask_path = '/m' WHERE filename = 'a.jpg'")
+    db.conn.commit()
+
+    # Create second workspace with different folder
+    ws2 = db.create_workspace('WS2')
+    f2 = db.add_folder('/photos2', name='photos2')
+    db.add_workspace_folder(ws2, f2)
+    db.set_active_workspace(ws2)
+    db.add_photo(folder_id=f2, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+
+    # WS2 should have 0 masks
+    counts = db.get_pipeline_feature_counts()
+    assert counts['masks'] == 0
+
+    # WS1 should have 1 mask
+    db.set_active_workspace(ws1)
+    counts = db.get_pipeline_feature_counts()
+    assert counts['masks'] == 1
+
+
+# --- Cluster 2: Dashboard Stats ---
+
+def test_get_dashboard_stats_empty(tmp_path):
+    """Returns sensible defaults when workspace has photos but no metadata."""
+    db, _ = _make_workspace_with_photos(tmp_path, [{}])
+    stats = db.get_dashboard_stats()
+    assert stats['top_keywords'] == []
+    assert stats['photos_by_month'] == []
+    assert stats['classified_count'] == 0
+    assert stats['detected_count'] == 0
+
+
+def test_get_dashboard_stats_with_data(tmp_path):
+    """Returns correct aggregations across all stat types."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'timestamp': '2024-06-15T10:30:00', 'rating': 3, 'flag': 'flagged',
+         'quality_score': 0.85, 'detection_conf': 0.9},
+        {'timestamp': '2024-06-20T14:00:00', 'rating': 5, 'flag': 'none',
+         'quality_score': 0.42, 'detection_conf': 0.0},
+        {'timestamp': '2024-07-01T08:00:00', 'rating': 3, 'flag': 'none'},
+    ])
+
+    # Add keywords
+    kid = db.add_keyword('Robin', is_species=True)
+    db.tag_photo(pids[0], kid)
+    db.tag_photo(pids[1], kid)
+
+    # Add a prediction
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+
+    stats = db.get_dashboard_stats()
+
+    # top_keywords: Robin with 2 photos
+    assert len(stats['top_keywords']) == 1
+    assert stats['top_keywords'][0]['name'] == 'Robin'
+    assert stats['top_keywords'][0]['photo_count'] == 2
+
+    # photos_by_month: 2 in 2024-06, 1 in 2024-07
+    months = {r['month']: r['count'] for r in stats['photos_by_month']}
+    assert months['2024-06'] == 2
+    assert months['2024-07'] == 1
+
+    # rating_distribution
+    ratings = {r['rating']: r['count'] for r in stats['rating_distribution']}
+    assert ratings[3] == 2
+    assert ratings[5] == 1
+
+    # classified_count
+    assert stats['classified_count'] == 1
+
+    # detected_count (detection_conf > 0)
+    assert stats['detected_count'] == 1
+
+    # photos_by_hour
+    hours = {r['hour']: r['count'] for r in stats['photos_by_hour']}
+    assert hours[10] == 1
+    assert hours[14] == 1
+    assert hours[8] == 1
+
+
+# --- Cluster 3: Prediction Management ---
+
+def test_get_group_predictions(tmp_path):
+    """Returns predictions with photo data for a group."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'quality_score': 0.9}, {'quality_score': 0.5},
+    ])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+                      model='test', group_id='g1')
+    db.add_prediction(photo_id=pids[1], species='Robin', confidence=0.80,
+                      model='test', group_id='g1')
+
+    results = db.get_group_predictions('g1')
+    assert len(results) == 2
+    # Should be ordered by quality_score DESC
+    assert results[0]['quality_score'] == 0.9
+    assert results[1]['quality_score'] == 0.5
+    # Should include photo fields
+    assert 'filename' in dict(results[0])
+
+
+def test_update_predictions_status_by_photo(tmp_path):
+    """Updates prediction status for all predictions of a photo."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+
+    db.update_predictions_status_by_photo(pids[0], 'accepted')
+
+    preds = db.get_predictions(photo_ids=[pids[0]])
+    assert preds[0]['status'] == 'accepted'
+
+
+def test_ungroup_prediction(tmp_path):
+    """Removes a prediction from its group."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+                      model='test', group_id='g1')
+    pred = db.get_predictions(photo_ids=[pids[0]])[0]
+
+    db.ungroup_prediction(pred['id'])
+
+    updated = db.get_predictions(photo_ids=[pids[0]])[0]
+    assert updated['group_id'] is None
+
+
+def test_get_existing_prediction_photo_ids(tmp_path):
+    """Returns set of photo_ids that have predictions for a model."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.9, model='bioclip')
+
+    result = db.get_existing_prediction_photo_ids('bioclip')
+    assert result == {pids[0]}
+
+    result = db.get_existing_prediction_photo_ids('other-model')
+    assert result == set()
+
+
+def test_get_prediction_for_photo(tmp_path):
+    """Returns species and confidence for a photo's prediction by model."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+
+    row = db.get_prediction_for_photo(pids[0], 'bioclip')
+    assert row['species'] == 'Robin'
+    assert row['confidence'] == 0.95
+
+    assert db.get_prediction_for_photo(pids[0], 'other') is None
+
+
+def test_get_and_store_photo_embedding(tmp_path):
+    """Stores and retrieves a photo embedding."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+
+    assert db.get_photo_embedding(pids[0]) is None
+
+    db.store_photo_embedding(pids[0], b'\x01\x02\x03\x04')
+
+    result = db.get_photo_embedding(pids[0])
+    assert result == b'\x01\x02\x03\x04'
+
+
+def test_update_prediction_group_info(tmp_path):
+    """Updates group info on an existing prediction."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+
+    db.update_prediction_group_info(
+        photo_id=pids[0], model='bioclip',
+        group_id='g1', vote_count=3, total_votes=5, individual='[{"species":"Robin"}]',
+    )
+
+    pred = db.get_predictions(photo_ids=[pids[0]])[0]
+    assert pred['group_id'] == 'g1'
+    assert pred['vote_count'] == 3
+    assert pred['total_votes'] == 5
+
+
+def test_is_keyword_species(tmp_path):
+    """Checks if a keyword is marked as species."""
+    db, _ = _make_workspace_with_photos(tmp_path, [{}])
+    kid_species = db.add_keyword('Robin', is_species=True)
+    kid_location = db.add_keyword('The Park', is_species=False)
+
+    assert db.is_keyword_species(kid_species) is True
+    assert db.is_keyword_species(kid_location) is False
