@@ -148,6 +148,10 @@ def create_app(db_path, thumb_cache_dir=None):
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
+    def json_error(msg, status=400):
+        """Return a JSON error response. Standard shape: {"error": "msg"}."""
+        return jsonify({"error": msg}), status
+
     def _get_db():
         """Get a Database instance. Creates a new connection per request."""
         if not hasattr(app, "_db") or app._db is None:
