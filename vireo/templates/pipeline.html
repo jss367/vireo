@@ -195,10 +195,8 @@ body { padding-bottom: 36px; }
     <div class="stage-body">
       <div class="setting-row">
         <div class="setting-item">
-          <div class="setting-label">Model</div>
-          <select class="setting-select" id="cfgModel" onchange="updateReadiness()">
-            <option value="">Loading models...</option>
-          </select>
+          <div class="setting-label">Models</div>
+          <div id="modelPicker" style="font-size:12px;max-height:100px;overflow-y:auto;">Loading models...</div>
         </div>
         <div class="setting-item">
           <div class="setting-label">Labels</div>
@@ -354,18 +352,26 @@ async function loadModels() {
   try {
     var resp = await fetch('/api/models');
     var data = await resp.json();
-    var sel = document.getElementById('cfgModel');
-    sel.innerHTML = '';
+    var div = document.getElementById('modelPicker');
+    div.innerHTML = '';
     var downloaded = data.models.filter(function(m) { return m.downloaded; });
     if (downloaded.length === 0) {
-      sel.innerHTML = '<option value="">No models downloaded — go to Settings</option>';
+      div.innerHTML = '<span style="color:var(--text-muted);">No models downloaded — go to Settings</span>';
     } else {
       downloaded.forEach(function(m) {
-        var opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.name + ' (' + m.model_str + ')';
-        if (m.id === data.active_id) opt.selected = true;
-        sel.appendChild(opt);
+        var label = document.createElement('label');
+        label.style.cssText = 'display:block;cursor:pointer;padding:2px 0;';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'model-checkbox';
+        cb.value = m.id;
+        cb.dataset.name = m.name;
+        cb.style.cssText = 'accent-color:var(--accent);margin-right:4px;';
+        cb.onchange = updateReadiness;
+        if (m.id === data.active_id) cb.checked = true;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(m.name + ' (' + m.model_str + ')'));
+        div.appendChild(label);
       });
     }
     updateReadiness();
@@ -407,7 +413,7 @@ async function loadLabels() {
 
 async function updateReadiness() {
   var panel = document.getElementById('readinessPanel');
-  var modelId = document.getElementById('cfgModel').value;
+  var modelId = (document.querySelector('.model-checkbox:checked') || {}).value || '';
   var labelsFiles = [];
   document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
     labelsFiles.push(cb.value);
@@ -459,8 +465,17 @@ async function runClassify(reclassify) {
   var collId = document.getElementById('collectionPicker').value;
   if (!collId) return;
 
+  var selectedModels = [];
+  document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+    selectedModels.push({id: cb.value, name: cb.dataset.name});
+  });
+  if (selectedModels.length === 0) {
+    alert('Select at least one model.');
+    return;
+  }
+
   var reclass = reclassify || document.getElementById('chkReclassify').checked;
-  if (reclass && !confirm('This will clear existing predictions and re-classify from scratch. Continue?')) {
+  if (reclass && !confirm('This will clear existing predictions for selected models and re-classify. Continue?')) {
     return;
   }
 
@@ -470,97 +485,95 @@ async function runClassify(reclassify) {
   var fill = document.getElementById('fillClassify');
   var text = document.getElementById('textClassify');
   var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
+  var num = document.getElementById('numClassify');
 
   btn.disabled = true;
-  status.textContent = reclass ? 'Clearing old predictions...' : 'Starting...';
-  status.className = 'status-msg';
+  num.className = 'stage-num running';
   progressWrap.style.display = '';
   fill.style.width = '0%';
 
-  // Mark stage as running
-  var num = document.getElementById('numClassify');
-  num.className = 'stage-num running';
+  var labelsFiles = (function() {
+    var files = [];
+    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) { files.push(cb.value); });
+    return files.length > 0 ? files : undefined;
+  })();
 
-  try {
-    var resp = await fetch('/api/jobs/classify', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        collection_id: parseInt(collId),
-        threshold: threshold,
-        model_id: document.getElementById('cfgModel').value || undefined,
-        labels_files: (function() {
-          var files = [];
-          document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) { files.push(cb.value); });
-          return files.length > 0 ? files : undefined;
-        })(),
-        reclassify: !!reclass,
-      }),
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.textContent = 'Error: ' + (err.error || 'failed');
-      btn.disabled = false;
-      num.className = 'stage-num';
-      progressWrap.style.display = 'none';
-      return;
-    }
-    var data = await resp.json();
-    status.textContent = 'Classifying...';
+  var completed = 0;
+  var total = selectedModels.length;
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-      fill.style.width = pct + '%';
-      var parts = [];
-      if (p.phase) parts.push(p.phase);
-      if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-      if (p.current_file) parts.push(p.current_file);
-      text.textContent = parts.join(' — ');
-      status.textContent = parts.join(' — ');
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed' && result.result) {
-        var r = result.result;
-        var parts = ['Done! ' + r.total + ' photos processed'];
-        if (r.predictions_stored) parts.push(r.predictions_stored + ' predictions');
-        if (r.burst_groups) parts.push(r.burst_groups + ' burst groups');
-        if (r.already_classified) parts.push(r.already_classified + ' already classified (skipped)');
-        if (result.duration) parts.push(formatDuration(result.duration));
-        status.textContent = parts.join(', ');
-        status.className = 'status-msg ok';
-        fill.style.width = '100%';
-        text.textContent = 'Complete';
-        num.className = 'stage-num complete';
-        document.getElementById('summaryClassify').textContent = (r.predictions_stored || r.total) + ' detections';
-        // Mark downstream as stale
-        markStale('extract');
-        markStale('group');
-        // Enable downstream buttons
-        _pipelineState.hasDetections = true;
-        updateCardStates();
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        num.className = 'stage-num';
+  for (var i = 0; i < selectedModels.length; i++) {
+    var model = selectedModels[i];
+    status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + 'Starting ' + model.name + '...';
+
+    try {
+      var resp = await fetch('/api/jobs/classify', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          collection_id: parseInt(collId),
+          threshold: threshold,
+          model_id: model.id,
+          labels_files: labelsFiles,
+          reclassify: !!reclass,
+        }),
+      });
+      if (!resp.ok) {
+        var err = await resp.json();
+        status.textContent = 'Error (' + model.name + '): ' + (err.error || 'failed');
+        continue;
       }
-      btn.disabled = false;
-    });
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost';
-      btn.disabled = false;
-      num.className = 'stage-num';
-    };
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
-    num.className = 'stage-num';
-    progressWrap.style.display = 'none';
+      var data = await resp.json();
+
+      // Stream progress for this model's job
+      await new Promise(function(resolve) {
+        var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+        source.addEventListener('progress', function(e) {
+          var p = JSON.parse(e.data);
+          // Progress within this model: scale to fraction of total
+          var modelPct = p.total > 0 ? p.current / p.total : 0;
+          var overallPct = Math.round(((completed + modelPct) / total) * 100);
+          fill.style.width = overallPct + '%';
+          var parts = [];
+          if (total > 1) parts.push(model.name);
+          if (p.phase) parts.push(p.phase);
+          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+          if (p.current_file) parts.push(p.current_file);
+          text.textContent = parts.join(' — ');
+          status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + parts.slice(total > 1 ? 1 : 0).join(' — ');
+        });
+        source.addEventListener('complete', function(e) {
+          source.close();
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+          completed++;
+          resolve();
+        });
+        source.addEventListener('error_event', function(e) {
+          source.close();
+          completed++;
+          resolve();
+        });
+        source.onerror = function() {
+          source.close();
+          completed++;
+          resolve();
+        };
+      });
+    } catch(e) {
+      status.textContent = 'Error (' + model.name + '): ' + e.message;
+    }
   }
+
+  // All models done
+  fill.style.width = '100%';
+  text.textContent = 'Complete';
+  status.textContent = 'Done! ' + completed + '/' + total + ' models classified.';
+  status.className = 'status-msg ok';
+  num.className = 'stage-num complete';
+  btn.disabled = false;
+  _pipelineState.hasDetections = true;
+  markStale('extract');
+  markStale('group');
+  updateCardStates();
 }
 
 // -- Card 2: Extract Features --

@@ -270,3 +270,13 @@ def test_compare_predictions_api_requires_collection(app_and_db):
     client = app.test_client()
     resp = client.get("/api/predictions/compare")
     assert resp.status_code == 400
+
+
+def test_pipeline_has_model_checkboxes(app_and_db):
+    """Pipeline page uses checkboxes for model selection, not a single select."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/pipeline')
+    assert resp.status_code == 200
+    assert b'model-checkbox' in resp.data
+    assert b'id="cfgModel"' not in resp.data  # old single select removed
