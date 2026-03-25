@@ -185,10 +185,17 @@ class JobRunner:
             limit: max number of rows
         """
         try:
-            rows = db.conn.execute(
-                "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            ws_id = db._active_workspace_id
+            if ws_id is not None:
+                rows = db.conn.execute(
+                    "SELECT * FROM job_history WHERE workspace_id = ? ORDER BY started_at DESC LIMIT ?",
+                    (ws_id, limit),
+                ).fetchall()
+            else:
+                rows = db.conn.execute(
+                    "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
             return []
