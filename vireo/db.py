@@ -567,6 +567,124 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    def get_pipeline_feature_counts(self):
+        """Return counts of photos with masks, detections, and sharpness data."""
+        ws = self._ws_id()
+        row = self.conn.execute(
+            """SELECT
+                SUM(CASE WHEN p.mask_path IS NOT NULL THEN 1 ELSE 0 END) as masks,
+                SUM(CASE WHEN p.detection_box IS NOT NULL THEN 1 ELSE 0 END) as detections,
+                SUM(CASE WHEN p.subject_tenengrad IS NOT NULL THEN 1 ELSE 0 END) as sharpness
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()
+        return {
+            "masks": row["masks"] or 0,
+            "detections": row["detections"] or 0,
+            "sharpness": row["sharpness"] or 0,
+        }
+
+    def get_dashboard_stats(self):
+        """Return aggregate statistics for the dashboard."""
+        ws = self._ws_id()
+
+        top_keywords = self.conn.execute(
+            """SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
+            FROM keywords k
+            JOIN photo_keywords pk ON pk.keyword_id = k.id
+            GROUP BY k.id
+            ORDER BY photo_count DESC
+            LIMIT 30"""
+        ).fetchall()
+
+        photos_by_month = self.conn.execute(
+            """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
+            GROUP BY month
+            ORDER BY month""",
+            (ws,),
+        ).fetchall()
+
+        rating_dist = self.conn.execute(
+            """SELECT p.rating, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+            GROUP BY p.rating
+            ORDER BY p.rating""",
+            (ws,),
+        ).fetchall()
+
+        flag_dist = self.conn.execute(
+            """SELECT p.flag, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+            GROUP BY p.flag""",
+            (ws,),
+        ).fetchall()
+
+        prediction_status = self.conn.execute(
+            """SELECT status, COUNT(*) as count
+            FROM predictions WHERE workspace_id = ?
+            GROUP BY status""",
+            (ws,),
+        ).fetchall()
+
+        classified_count = self.conn.execute(
+            "SELECT COUNT(DISTINCT photo_id) FROM predictions WHERE workspace_id = ?",
+            (ws,),
+        ).fetchone()[0]
+
+        photos_by_hour = self.conn.execute(
+            """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
+            GROUP BY hour
+            ORDER BY hour""",
+            (ws,),
+        ).fetchall()
+
+        quality_dist = self.conn.execute(
+            """SELECT
+                CASE
+                    WHEN p.quality_score IS NULL THEN -1
+                    ELSE CAST(p.quality_score * 10 AS INTEGER)
+                END as bucket,
+                COUNT(*) as count
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+            GROUP BY bucket
+            ORDER BY bucket""",
+            (ws,),
+        ).fetchall()
+
+        detected_count = self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE p.detection_conf IS NOT NULL AND p.detection_conf > 0
+            AND wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()[0]
+
+        return {
+            "top_keywords": [dict(r) for r in top_keywords],
+            "photos_by_month": [dict(r) for r in photos_by_month],
+            "rating_distribution": [dict(r) for r in rating_dist],
+            "flag_distribution": [dict(r) for r in flag_dist],
+            "prediction_status": [dict(r) for r in prediction_status],
+            "classified_count": classified_count,
+            "photos_by_hour": [dict(r) for r in photos_by_hour],
+            "quality_distribution": [dict(r) for r in quality_dist],
+            "detected_count": detected_count,
+        }
+
     def get_photos(
         self,
         folder_id=None,
@@ -1041,6 +1159,82 @@ class Database:
             "UPDATE predictions SET status = ? WHERE id = ?", (status, prediction_id)
         )
         self.conn.commit()
+
+    def get_group_predictions(self, group_id):
+        """Get all predictions and photo data for a burst group, ordered by quality."""
+        return self.conn.execute(
+            """SELECT pr.*, p.filename, p.timestamp, p.sharpness,
+                      p.quality_score, p.subject_sharpness, p.subject_size,
+                      p.detection_conf, p.rating, p.flag
+               FROM predictions pr
+               JOIN photos p ON p.id = pr.photo_id
+               WHERE pr.group_id = ? AND pr.workspace_id = ?
+               ORDER BY p.quality_score DESC""",
+            (group_id, self._ws_id()),
+        ).fetchall()
+
+    def update_predictions_status_by_photo(self, photo_id, status):
+        """Update status for all predictions of a photo in the active workspace."""
+        self.conn.execute(
+            "UPDATE predictions SET status = ? WHERE photo_id = ? AND workspace_id = ?",
+            (status, photo_id, self._ws_id()),
+        )
+        self.conn.commit()
+
+    def ungroup_prediction(self, prediction_id):
+        """Remove a prediction from its group."""
+        self.conn.execute(
+            "UPDATE predictions SET group_id = NULL WHERE id = ? AND workspace_id = ?",
+            (prediction_id, self._ws_id()),
+        )
+        self.conn.commit()
+
+    def get_existing_prediction_photo_ids(self, model):
+        """Return set of photo_ids that have predictions for a model."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT photo_id FROM predictions WHERE model = ? AND workspace_id = ?",
+            (model, self._ws_id()),
+        ).fetchall()
+        return {r["photo_id"] for r in rows}
+
+    def get_prediction_for_photo(self, photo_id, model):
+        """Return species and confidence for a photo's prediction by model, or None."""
+        return self.conn.execute(
+            "SELECT species, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
+            (photo_id, model, self._ws_id()),
+        ).fetchone()
+
+    def get_photo_embedding(self, photo_id):
+        """Return the embedding blob for a photo, or None."""
+        row = self.conn.execute(
+            "SELECT embedding FROM photos WHERE id = ?", (photo_id,),
+        ).fetchone()
+        return row["embedding"] if row else None
+
+    def store_photo_embedding(self, photo_id, embedding_bytes):
+        """Store an embedding blob for a photo."""
+        self.conn.execute(
+            "UPDATE photos SET embedding = ? WHERE id = ?",
+            (embedding_bytes, photo_id),
+        )
+        self.conn.commit()
+
+    def update_prediction_group_info(self, photo_id, model, group_id, vote_count, total_votes, individual):
+        """Update group info on an existing prediction."""
+        self.conn.execute(
+            """UPDATE predictions
+               SET group_id=?, vote_count=?, total_votes=?, individual=?
+               WHERE photo_id=? AND model=? AND workspace_id=?""",
+            (group_id, vote_count, total_votes, individual, photo_id, model, self._ws_id()),
+        )
+        self.conn.commit()
+
+    def is_keyword_species(self, keyword_id):
+        """Return True if the keyword is marked as a species."""
+        row = self.conn.execute(
+            "SELECT is_species FROM keywords WHERE id = ?", (keyword_id,),
+        ).fetchone()
+        return bool(row["is_species"]) if row else False
 
     def accept_prediction(self, prediction_id):
         """Accept a prediction: mark as accepted and add species keyword.

@@ -231,25 +231,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/pipeline")
     def pipeline_page():
         db = _get_db()
-        # Check pipeline stage status
-        has_masks = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ? AND p.mask_path IS NOT NULL""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
-        has_detections = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ? AND p.detection_box IS NOT NULL""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
-        has_sharpness = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ? AND p.subject_tenengrad IS NOT NULL""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
+        pipeline_counts = db.get_pipeline_feature_counts()
         total_photos = db.count_photos()
 
         from pipeline import load_results
@@ -262,9 +244,9 @@ def create_app(db_path, thumb_cache_dir=None):
         return render_template(
             "pipeline.html",
             total_photos=total_photos,
-            has_detections=has_detections,
-            has_masks=has_masks,
-            has_sharpness=has_sharpness,
+            has_detections=pipeline_counts["detections"],
+            has_masks=pipeline_counts["masks"],
+            has_sharpness=pipeline_counts["sharpness"],
             results=results,
             pipeline_config={
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
@@ -276,18 +258,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/pipeline/review")
     def pipeline_review_page():
         db = _get_db()
-        has_masks = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ? AND p.mask_path IS NOT NULL""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
-        has_detections = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ? AND p.detection_box IS NOT NULL""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
+        pipeline_counts = db.get_pipeline_feature_counts()
         total_photos = db.count_photos()
 
         from pipeline import load_results
@@ -300,8 +271,8 @@ def create_app(db_path, thumb_cache_dir=None):
         return render_template(
             "pipeline_review.html",
             total_photos=total_photos,
-            has_detections=has_detections,
-            has_masks=has_masks,
+            has_detections=pipeline_counts["detections"],
+            has_masks=pipeline_counts["masks"],
             results=results,
             pipeline_config={
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
@@ -699,126 +670,9 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
-        # Top keywords by photo count
-        top_keywords = db.conn.execute(
-            """
-            SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
-            FROM keywords k
-            JOIN photo_keywords pk ON pk.keyword_id = k.id
-            GROUP BY k.id
-            ORDER BY photo_count DESC
-            LIMIT 30
-        """
-        ).fetchall()
-
-        # Photos by month
-        photos_by_month = db.conn.execute(
-            """
-            SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
-            GROUP BY month
-            ORDER BY month
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Rating distribution
-        rating_dist = db.conn.execute(
-            """
-            SELECT p.rating, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
-            GROUP BY p.rating
-            ORDER BY p.rating
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Flag distribution
-        flag_dist = db.conn.execute(
-            """
-            SELECT p.flag, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
-            GROUP BY p.flag
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Classification status breakdown
-        prediction_status = db.conn.execute(
-            """
-            SELECT status, COUNT(*) as count
-            FROM predictions WHERE workspace_id = ?
-            GROUP BY status
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Unclassified photos (no prediction at all)
-        total_photos = db.count_photos()
-        classified_count = db.conn.execute(
-            "SELECT COUNT(DISTINCT photo_id) FROM predictions WHERE workspace_id = ?",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
-
-        # Photos by hour of day
-        photos_by_hour = db.conn.execute(
-            """
-            SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
-            GROUP BY hour
-            ORDER BY hour
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Quality score distribution (buckets of 0.1)
-        quality_dist = db.conn.execute(
-            """
-            SELECT
-                CASE
-                    WHEN p.quality_score IS NULL THEN -1
-                    ELSE CAST(p.quality_score * 10 AS INTEGER)
-                END as bucket,
-                COUNT(*) as count
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
-            GROUP BY bucket
-            ORDER BY bucket
-        """,
-            (db._active_workspace_id,),
-        ).fetchall()
-
-        # Subject detection coverage
-        detected_count = db.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.detection_conf IS NOT NULL AND p.detection_conf > 0 AND wf.workspace_id = ?""",
-            (db._active_workspace_id,),
-        ).fetchone()[0]
-
-        return jsonify(
-            {
-                "top_keywords": [dict(r) for r in top_keywords],
-                "photos_by_month": [dict(r) for r in photos_by_month],
-                "rating_distribution": [dict(r) for r in rating_dist],
-                "flag_distribution": [dict(r) for r in flag_dist],
-                "prediction_status": [dict(r) for r in prediction_status],
-                "classified_count": classified_count,
-                "total_photos": total_photos,
-                "photos_by_hour": [dict(r) for r in photos_by_hour],
-                "quality_distribution": [dict(r) for r in quality_dist],
-                "detected_count": detected_count,
-            }
-        )
+        stats = db.get_dashboard_stats()
+        stats["total_photos"] = db.count_photos()
+        return jsonify(stats)
 
     @app.route("/api/sync/status")
     def api_sync_status():
@@ -1133,9 +987,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
                     k["name"] for k in keywords
-                    if db.conn.execute(
-                        "SELECT is_species FROM keywords WHERE id = ?", (k["id"],)
-                    ).fetchone()["is_species"]
+                    if db.is_keyword_species(k["id"])
                 ]
                 d["existing_species"] = existing_species
             results.append(d)
@@ -1157,16 +1009,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_prediction_group(group_id):
         """Get all predictions and photo data for a burst group."""
         db = _get_db()
-        preds = db.conn.execute(
-            """SELECT pr.*, p.filename, p.timestamp, p.sharpness,
-                      p.quality_score, p.subject_sharpness, p.subject_size,
-                      p.detection_conf, p.rating, p.flag
-               FROM predictions pr
-               JOIN photos p ON p.id = pr.photo_id
-               WHERE pr.group_id = ? AND pr.workspace_id = ?
-               ORDER BY p.quality_score DESC""",
-            (group_id, db._active_workspace_id),
-        ).fetchall()
+        preds = db.get_group_predictions(group_id)
         return jsonify([dict(p) for p in preds])
 
     @app.route("/api/predictions/group/apply", methods=["POST"])
@@ -1191,26 +1034,15 @@ def create_app(db_path, thumb_cache_dir=None):
         for pid in rejects:
             db.update_photo_flag(pid, "rejected")
 
-        # Mark all predictions in this group as accepted
+        # Mark all predictions in this group as accepted/rejected
         for pid in picks:
-            db.conn.execute(
-                "UPDATE predictions SET status = 'accepted' WHERE photo_id = ? AND workspace_id = ?",
-                (pid, db._active_workspace_id),
-            )
+            db.update_predictions_status_by_photo(pid, 'accepted')
         for pid in rejects:
-            db.conn.execute(
-                "UPDATE predictions SET status = 'rejected' WHERE photo_id = ? AND workspace_id = ?",
-                (pid, db._active_workspace_id),
-            )
+            db.update_predictions_status_by_photo(pid, 'rejected')
 
         # Remove predictions from group
         for pred_id in removed:
-            db.conn.execute(
-                "UPDATE predictions SET group_id = NULL WHERE id = ? AND workspace_id = ?",
-                (pred_id, db._active_workspace_id),
-            )
-
-        db.conn.commit()
+            db.ungroup_prediction(pred_id)
         return jsonify({"ok": True})
 
     @app.route("/api/classify/readiness")
@@ -3395,11 +3227,7 @@ def create_app(db_path, thumb_cache_dir=None):
             # Skip photos that already have predictions (unless re-classifying)
             existing_preds = set()
             if not reclassify:
-                rows = thread_db.conn.execute(
-                    "SELECT DISTINCT photo_id FROM predictions WHERE model = ? AND workspace_id = ?",
-                    (model_name, thread_db._active_workspace_id),
-                ).fetchall()
-                existing_preds = {r["photo_id"] for r in rows}
+                existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
                 if existing_preds:
                     log.info("Skipping %d photos with existing predictions (model=%s)",
                              len(existing_preds), model_name)
@@ -3434,10 +3262,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 if photo["id"] in existing_preds:
                     skipped_existing += 1
                     # Load existing prediction into raw_results for grouping
-                    pred_row = thread_db.conn.execute(
-                        "SELECT species, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
-                        (photo["id"], model_name, thread_db._active_workspace_id),
-                    ).fetchone()
+                    pred_row = thread_db.get_prediction_for_photo(photo["id"], model_name)
                     if pred_row:
                         timestamp = None
                         if photo["timestamp"]:
@@ -3450,13 +3275,10 @@ def create_app(db_path, thumb_cache_dir=None):
                         # stale BioCLIP vectors that would confuse similarity grouping.
                         embedding = None
                         if model_type != "timm":
-                            emb_row = thread_db.conn.execute(
-                                "SELECT embedding FROM photos WHERE id = ?",
-                                (photo["id"],),
-                            ).fetchone()
-                            if emb_row and emb_row["embedding"]:
+                            emb_blob = thread_db.get_photo_embedding(photo["id"])
+                            if emb_blob:
                                 import numpy as np
-                                embedding = np.frombuffer(emb_row["embedding"], dtype=np.float32)
+                                embedding = np.frombuffer(emb_blob, dtype=np.float32)
                         raw_results.append({
                             "photo": photo,
                             "folder_path": folder_path,
@@ -3519,10 +3341,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
                 # Store embedding in DB for grouping (BioCLIP only — timm has no embeddings)
                 if embedding is not None:
-                    thread_db.conn.execute(
-                        "UPDATE photos SET embedding = ? WHERE id = ?",
-                        (embedding.tobytes(), photo["id"]),
-                    )
+                    thread_db.store_photo_embedding(photo["id"], embedding.tobytes())
 
                 if not all_preds:
                     continue
@@ -3653,15 +3472,14 @@ def create_app(db_path, thumb_cache_dir=None):
                     for item in group:
                         if item.get("_existing"):
                             # Update group info only, preserve original species/confidence
-                            thread_db.conn.execute(
-                                """UPDATE predictions
-                                   SET group_id=?, vote_count=?, total_votes=?, individual=?
-                                   WHERE photo_id=? AND model=? AND workspace_id=?""",
-                                (gid, cons["vote_count"], cons["total_votes"],
-                                 individual_json, item["photo"]["id"], model_name,
-                                 thread_db._active_workspace_id),
+                            thread_db.update_prediction_group_info(
+                                photo_id=item["photo"]["id"],
+                                model=model_name,
+                                group_id=gid,
+                                vote_count=cons["vote_count"],
+                                total_votes=cons["total_votes"],
+                                individual=individual_json,
                             )
-                            thread_db.conn.commit()
                         else:
                             # New prediction — store individual species/confidence
                             thread_db.add_prediction(
