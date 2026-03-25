@@ -72,38 +72,6 @@ body {
 .empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text-secondary, #B0CCCC); }
 .empty-state p { font-size: 14px; max-width: 400px; margin: 0 auto; line-height: 1.5; }
 
-/* Center progress (shown during jobs) */
-.center-progress { display: none; text-align: center; padding: 60px 20px; }
-.center-progress.active { display: block; }
-.center-progress .cp-phase {
-  font-size: 18px; font-weight: 600;
-  color: var(--text-secondary, #B0CCCC);
-  margin-bottom: 16px;
-}
-.center-progress .cp-track {
-  width: 100%; max-width: 480px; height: 8px;
-  background: var(--surface-dim, #1a2a2d); border-radius: 4px;
-  margin: 0 auto 12px; overflow: hidden;
-}
-.center-progress .cp-fill {
-  height: 100%; width: 0%; border-radius: 4px;
-  background: var(--accent, #4ecca3);
-  transition: width 0.3s ease;
-}
-.center-progress .cp-detail {
-  font-size: 14px; color: var(--text-muted, #7FAAB0);
-  font-variant-numeric: tabular-nums;
-}
-.center-progress .cp-file {
-  font-size: 13px; color: var(--text-dim, #5A8890);
-  margin-top: 6px;
-  font-family: var(--mono, monospace);
-}
-.center-progress .cp-rate {
-  font-size: 12px; color: var(--text-dim, #5A8890);
-  margin-top: 4px;
-}
-
 /* Filter bar */
 .filter-bar {
   display: flex;
@@ -562,6 +530,10 @@ input[type="range"]::-moz-range-thumb {
       <button class="reset-btn" onclick="resetGroupingDefaults()">Reset to defaults</button>
     </div>
     {% endif %}
+
+    <div class="sidebar-section">
+      <a href="/pipeline" class="back-link">&larr; Back to Pipeline</a>
+    </div>
   </div>
 
   <!-- Main area -->
@@ -613,24 +585,9 @@ input[type="range"]::-moz-range-thumb {
     <div id="encountersContainer"></div>
 
     {% else %}
-    <div class="center-progress" id="centerProgress">
-      <div class="cp-phase" id="cpPhase">Starting...</div>
-      <div class="cp-track"><div class="cp-fill" id="cpFill"></div></div>
-      <div class="cp-detail" id="cpDetail"></div>
-      <div class="cp-file" id="cpFile"></div>
-      <div class="cp-rate" id="cpRate"></div>
-    </div>
     <div class="empty-state" id="emptyState">
-      <h2>Pipeline not yet run</h2>
-      <p>
-        {% if not has_detections %}
-          Start by running <strong>Classification</strong> on the Classify page to detect animals, then come back here to extract features and run the full pipeline.
-        {% elif not has_masks %}
-          Detections found for {{ has_detections }} photos. Click <strong>Extract Features</strong> to generate masks, quality features, and embeddings.
-        {% else %}
-          Features extracted for {{ has_masks }} photos. Click <strong>Regroup + Score</strong> to run encounter segmentation, scoring, and triage.
-        {% endif %}
-      </p>
+      <h2>No pipeline results yet</h2>
+      <p>Run the pipeline from the <a href="/pipeline" style="color:var(--accent);">Pipeline</a> page first.</p>
     </div>
     {% endif %}
   </div>
@@ -753,156 +710,6 @@ function setFilter(f) {
     btn.classList.toggle('active', btn.getAttribute('data-filter') === f);
   });
   renderResults();
-}
-
-// -- Model config --
-
-var _savedModelConfig = {
-  sam2_variant: '{{ pipeline_config.sam2_variant }}',
-  dinov2_variant: '{{ pipeline_config.dinov2_variant }}',
-  proxy_longest_edge: {{ pipeline_config.proxy_longest_edge }},
-};
-
-function onModelConfigChange() {
-  var proxyEl = document.getElementById('cfgProxy');
-  var valEl = document.getElementById('valProxy');
-  if (proxyEl && valEl) valEl.textContent = proxyEl.value;
-
-  var newCfg = {
-    sam2_variant: document.getElementById('cfgSam2').value,
-    dinov2_variant: document.getElementById('cfgDinov2').value,
-    proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
-  };
-
-  // Check if anything changed from saved config
-  var changed = (newCfg.sam2_variant !== _savedModelConfig.sam2_variant ||
-                 newCfg.dinov2_variant !== _savedModelConfig.dinov2_variant ||
-                 newCfg.proxy_longest_edge !== _savedModelConfig.proxy_longest_edge);
-
-  var warning = document.getElementById('staleWarning');
-  if (warning) warning.classList.toggle('show', changed);
-
-  // Mark stage 1 dot as stale
-  var dot = document.getElementById('stageMaskDot');
-  if (dot) {
-    if (changed) { dot.className = 'stage-dot stale'; }
-    else { dot.className = 'stage-dot {{ "complete" if has_masks else "not-started" }}'; }
-  }
-
-  // Save to server
-  fetch('/api/pipeline/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(newCfg),
-  }).then(function(r) { return r.json(); }).then(function(data) {
-    if (data.status === 'saved') {
-      _savedModelConfig = newCfg;
-      // Keep warning visible since features need re-extraction
-    }
-  });
-}
-
-// -- Job launching --
-
-function showProgress(show) {
-  document.getElementById('progressWrap').style.display = show ? 'block' : 'none';
-  var cp = document.getElementById('centerProgress');
-  var es = document.getElementById('emptyState');
-  if (cp) { cp.classList.toggle('active', show); }
-  if (es) { es.style.display = show ? 'none' : ''; }
-}
-
-function updateProgress(pct, text) {
-  document.getElementById('progressFill').style.width = pct + '%';
-  document.getElementById('progressText').textContent = text;
-}
-
-function updateCenterProgress(p) {
-  var cp = document.getElementById('centerProgress');
-  if (!cp) return;
-  var phase = p.phase || 'Processing';
-  var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-  document.getElementById('cpPhase').textContent = phase;
-  document.getElementById('cpFill').style.width = pct + '%';
-  var detail = '';
-  if (p.current > 0 && p.total > 0) {
-    detail = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + '  (' + pct + '%)';
-  }
-  document.getElementById('cpDetail').textContent = detail;
-  document.getElementById('cpFile').textContent = p.current_file || '';
-  if (p.rate > 0) {
-    var eta = Math.round((p.total - p.current) / p.rate);
-    var mm = Math.floor(eta / 60), ss = eta % 60;
-    document.getElementById('cpRate').textContent = p.rate.toFixed(1) + ' photos/sec — ~' + mm + ':' + String(ss).padStart(2, '0') + ' remaining';
-  } else {
-    document.getElementById('cpRate').textContent = '';
-  }
-}
-
-function runExtractMasks() {
-  var btn = document.getElementById('btnExtract');
-  btn.disabled = true;
-  showProgress(true);
-  updateProgress(0, 'Starting feature extraction...');
-
-  fetch('/api/jobs/extract-masks', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({}),
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-      var text = (p.phase || 'Processing') + ' ' + (p.current || 0) + '/' + (p.total || '?');
-      if (p.current_file) text += ' - ' + p.current_file;
-      updateProgress(pct, text);
-      updateCenterProgress(p);
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
-      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
-      setTimeout(function() { window.location.reload(); }, 800);
-    });
-  })
-  .catch(function() { btn.disabled = false; showProgress(false); });
-}
-
-function runRegroup() {
-  var btn = document.getElementById('btnRegroup');
-  btn.disabled = true;
-  showProgress(true);
-  updateProgress(0, 'Running pipeline stages 2-6...');
-
-  fetch('/api/jobs/regroup', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({}),
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(data) {
-    if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-      updateProgress(pct, p.phase || 'Processing...');
-      updateCenterProgress(p);
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
-      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
-      setTimeout(function() { window.location.reload(); }, 800);
-    });
-  })
-  .catch(function() { btn.disabled = false; showProgress(false); });
 }
 
 // -- Threshold tuning --
@@ -1031,11 +838,6 @@ function updateSummaryBar(summary) {
     stats[4].querySelector('.num').textContent = summary.review_count;
     stats[5].querySelector('.num').textContent = summary.reject_count;
   }
-  // Update stage stats
-  var ts = document.getElementById('stageTriageStats');
-  if (ts) ts.textContent = summary.keep_count + 'K / ' + summary.review_count + 'R / ' + summary.reject_count + 'X';
-  var gs = document.getElementById('stageGroupStats');
-  if (gs) gs.textContent = summary.encounter_count;
 }
 
 function resetScoringDefaults() {
