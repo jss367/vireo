@@ -326,9 +326,7 @@ body { padding-bottom: 36px; }
 /* ==================== Load saved scan roots ==================== */
 (async function() {
   try {
-    var resp = await fetch('/api/config');
-    if (!resp.ok) return;
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     var list = document.getElementById('scanRootList');
     roots.forEach(function(r) {
@@ -361,8 +359,7 @@ async function startThumbJob() {
 /* ==================== Preview Job ==================== */
 (async function loadPreviewCollections() {
   try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
+    var collections = await safeFetch('/api/collections', {}, { toast: false });
     var sel = document.getElementById('previewScope');
     collections.forEach(function(c) {
       var opt = document.createElement('option');
@@ -376,8 +373,7 @@ async function startThumbJob() {
 // Load preview size from config
 (async function loadPreviewSize() {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     document.getElementById('cfgPreviewSize').value = cfg.preview_max_size || 1920;
   } catch(e) {}
 })();
@@ -385,7 +381,7 @@ async function startThumbJob() {
 async function savePreviewSize() {
   var size = parseInt(document.getElementById('cfgPreviewSize').value, 10) || 1920;
   try {
-    await fetch('/api/config', {
+    await safeFetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({preview_max_size: size}),
@@ -416,72 +412,58 @@ async function startJob(url, body, progressId, fillId, detailId, statusId, fileI
   fill.style.width = '0%';
 
   try {
-    var resp = await fetch(url, {
+    var data = await safeFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.textContent = 'Error: ' + (err.error || 'failed to start');
-      status.className = 'status-msg error';
-      btnIds.forEach(function(id) { document.getElementById(id).disabled = false; });
-      return;
-    }
-    var data = await resp.json();
+    }, { toast: false });
     var jobId = data.job_id;
     status.textContent = 'Running...';
 
-    var source = new EventSource('/api/jobs/' + jobId + '/stream');
-
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.total > 0) {
-        fill.style.width = Math.round((p.current / p.total) * 100) + '%';
-        status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString();
-      }
-      if (fileId && p.current_file) document.getElementById(fileId).textContent = p.current_file;
-      if (rateId && p.rate) document.getElementById(rateId).textContent = p.rate.toFixed(0) + '/sec';
-    });
-
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      fill.style.width = '100%';
-      if (result.status === 'completed') {
-        var parts = [];
-        if (result.result) {
-          for (var k in result.result) {
-            var v = result.result[k];
-            if (v && typeof v === 'object') {
-              var sub = [];
-              for (var sk in v) sub.push(sk + ': ' + v[sk]);
-              parts.push(k + ' (' + sub.join(', ') + ')');
-            } else {
-              parts.push(k + ': ' + v);
+    safeEventSource('/api/jobs/' + jobId + '/stream', {
+      onProgress: function(p) {
+        if (p.total > 0) {
+          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+          status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString();
+        }
+        if (fileId && p.current_file) document.getElementById(fileId).textContent = p.current_file;
+        if (rateId && p.rate) document.getElementById(rateId).textContent = p.rate.toFixed(0) + '/sec';
+      },
+      onComplete: function(result) {
+        fill.style.width = '100%';
+        if (result.status === 'completed') {
+          var parts = [];
+          if (result.result) {
+            for (var k in result.result) {
+              var v = result.result[k];
+              if (v && typeof v === 'object') {
+                var sub = [];
+                for (var sk in v) sub.push(sk + ': ' + v[sk]);
+                parts.push(k + ' (' + sub.join(', ') + ')');
+              } else {
+                parts.push(k + ': ' + v);
+              }
             }
           }
+          var thumbFailed = result.result && result.result.thumbnails && result.result.thumbnails.failed > 0;
+          status.textContent = 'Complete! ' + parts.join(', ') + (result.duration ? ' (' + result.duration + 's)' : '');
+          status.className = thumbFailed ? 'status-msg warning' : 'status-msg ok';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.className = 'status-msg error';
         }
-        var thumbFailed = result.result && result.result.thumbnails && result.result.thumbnails.failed > 0;
-        status.textContent = 'Complete! ' + parts.join(', ') + (result.duration ? ' (' + result.duration + 's)' : '');
-        status.className = thumbFailed ? 'status-msg warning' : 'status-msg ok';
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+        btnIds.forEach(function(id) { document.getElementById(id).disabled = false; });
+        setTimeout(function() {
+          progress.classList.remove('active');
+          if (detail) detail.classList.remove('active');
+        }, 3000);
+      },
+      onError: function() {
+        status.textContent = 'Connection lost.';
         status.className = 'status-msg error';
+        btnIds.forEach(function(id) { document.getElementById(id).disabled = false; });
       }
-      btnIds.forEach(function(id) { document.getElementById(id).disabled = false; });
-      setTimeout(function() {
-        progress.classList.remove('active');
-        if (detail) detail.classList.remove('active');
-      }, 3000);
     });
-
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost.';
-      status.className = 'status-msg error';
-      btnIds.forEach(function(id) { document.getElementById(id).disabled = false; });
-    };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     status.className = 'status-msg error';
@@ -522,11 +504,10 @@ async function previewImport() {
   status.textContent = 'Loading preview...';
   document.getElementById('previewBtn').disabled = true;
   try {
-    var resp = await fetch('/api/import/preview', {
+    var data = await safeFetch('/api/import/preview', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({catalogs: catalogs}),
-    });
-    var data = await resp.json();
+    }, { toast: false });
     var html = '';
     (data.catalogs || []).forEach(function(c) {
       html += '<tr><td>' + escapeHtml(c.catalog) + '</td><td>' + c.total_files + '</td>' +
@@ -570,39 +551,37 @@ async function executeLrImport() {
   var writeXmp = document.getElementById('writeXmp').checked;
 
   try {
-    var resp = await fetch('/api/jobs/import', {
+    var data = await safeFetch('/api/jobs/import', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ catalogs: catalogs, strategy: strategy, write_xmp: writeXmp }),
-    });
-    if (!resp.ok) { status.textContent = 'Error'; return; }
-    var data = await resp.json();
+    }, { toast: false });
     status.textContent = 'Importing...';
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.total > 0) {
-        fill.style.width = Math.round((p.current / p.total) * 100) + '%';
-        status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + ' files';
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.total > 0) {
+          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+          status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + ' files';
+        }
+      },
+      onComplete: function(result) {
+        fill.style.width = '100%';
+        if (result.status === 'completed' && result.result) {
+          status.textContent = 'Complete' + (result.duration ? ' (' + result.duration + 's)' : '');
+          document.getElementById('lrResult').style.display = '';
+          document.getElementById('lrResult').innerHTML =
+            '<span class="ok">Imported: ' + (result.result.imported || 0) + '</span><br>' +
+            '<span class="skip">Skipped: ' + (result.result.skipped || 0) + '</span><br>' +
+            '<span class="fail">Failed: ' + (result.result.failed || 0) + '</span>';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+        }
+        document.getElementById('lrDoneBtn').style.display = '';
+      },
+      onError: function() {
+        status.textContent = 'Connection lost.';
       }
     });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      fill.style.width = '100%';
-      if (result.status === 'completed' && result.result) {
-        status.textContent = 'Complete' + (result.duration ? ' (' + result.duration + 's)' : '');
-        document.getElementById('lrResult').style.display = '';
-        document.getElementById('lrResult').innerHTML =
-          '<span class="ok">Imported: ' + (result.result.imported || 0) + '</span><br>' +
-          '<span class="skip">Skipped: ' + (result.result.skipped || 0) + '</span><br>' +
-          '<span class="fail">Failed: ' + (result.result.failed || 0) + '</span>';
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-      }
-      document.getElementById('lrDoneBtn').style.display = '';
-    });
-    source.onerror = function() { source.close(); status.textContent = 'Connection lost.'; };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
   }
@@ -620,13 +599,6 @@ function lrReset() {
   document.getElementById('lrResult').style.display = 'none';
   document.getElementById('lrDoneBtn').style.display = 'none';
   lrShowPhase(1);
-}
-
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
 }
 
 /* ==================== Import Wizard ==================== */
@@ -664,8 +636,7 @@ function wizRenderFolders() {
 (async function wizLoadOptions() {
   try {
     // Models
-    var mResp = await fetch('/api/models');
-    var mData = await mResp.json();
+    var mData = await safeFetch('/api/models', {}, { toast: false });
     var mSel = document.getElementById('wizModel');
     mSel.innerHTML = '';
     var downloaded = mData.models.filter(function(m) { return m.downloaded; });
@@ -681,8 +652,7 @@ function wizRenderFolders() {
     }
 
     // Labels
-    var lResp = await fetch('/api/labels');
-    var lData = await lResp.json();
+    var lData = await safeFetch('/api/labels', {}, { toast: false });
     var lSel = document.getElementById('wizLabels');
     lSel.innerHTML = '<option value="">(Tree of Life — all species)</option>';
     (lData.labels || []).forEach(function(l) {
@@ -695,8 +665,7 @@ function wizRenderFolders() {
     });
 
     // Preview size from config
-    var cResp = await fetch('/api/config');
-    var cfg = await cResp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     document.getElementById('wizPreviewSize').value = cfg.preview_max_size || 1920;
   } catch(e) {}
 })();
@@ -752,18 +721,17 @@ async function wizStart() {
     try {
       if (step.noJob) {
         // Simple POST (config update)
-        await fetch(step.url, {
+        await safeFetch(step.url, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(step.body),
-        });
+        }, { toast: false });
         continue;
       }
 
       // Resolve _needs_classification to actual collection ID
       if (step.body.collection_id === '_needs_classification') {
-        var cResp = await fetch('/api/collections');
-        var collections = await cResp.json();
+        var collections = await safeFetch('/api/collections', {}, { toast: false });
         var nc = collections.find(function(c) { return c.name === 'Needs Classification'; });
         if (nc) {
           step.body.collection_id = nc.id;
@@ -774,37 +742,30 @@ async function wizStart() {
         }
       }
 
-      var resp = await fetch(step.url, {
+      var data = await safeFetch(step.url, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(step.body),
-      });
-      if (!resp.ok) {
-        var err = await resp.json();
-        status.textContent = 'Error at step ' + (si + 1) + ': ' + (err.error || 'failed');
-        status.style.color = 'var(--danger,#e74c3c)';
-        btn.disabled = false;
-        return;
-      }
-      var data = await resp.json();
+      }, { toast: false });
       if (!data.job_id) continue;
 
       // Wait for job to complete
       await new Promise(function(resolve) {
-        var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-        source.addEventListener('progress', function(e) {
-          var p = JSON.parse(e.data);
-          var detail = '';
-          if (p.phase) detail += p.phase;
-          if (p.total > 0 && p.current > 0) detail += ' ' + p.current + '/' + p.total;
-          if (p.current_file) detail += ' — ' + p.current_file;
-          progressDetail.textContent = detail;
+        safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+          onProgress: function(p) {
+            var detail = '';
+            if (p.phase) detail += p.phase;
+            if (p.total > 0 && p.current > 0) detail += ' ' + p.current + '/' + p.total;
+            if (p.current_file) detail += ' — ' + p.current_file;
+            progressDetail.textContent = detail;
+          },
+          onComplete: function() {
+            resolve();
+          },
+          onError: function() {
+            resolve();
+          }
         });
-        source.addEventListener('complete', function(e) {
-          source.close();
-          resolve();
-        });
-        source.onerror = function() { source.close(); resolve(); };
       });
     } catch(e) {
       status.textContent = 'Error: ' + e.message;
