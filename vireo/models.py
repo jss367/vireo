@@ -15,6 +15,7 @@ KNOWN_MODELS = [
     {
         "id": "bioclip-vit-b-16",
         "name": "BioCLIP",
+        "model_type": "bioclip",
         "model_str": "ViT-B-16",
         "source": "hf-hub:imageomics/bioclip",
         "description": "BioCLIP v1 — trained on TreeOfLife-10M. Good general-purpose species classifier.",
@@ -25,6 +26,7 @@ KNOWN_MODELS = [
     {
         "id": "bioclip-2",
         "name": "BioCLIP-2",
+        "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2",
         "source": "hf-hub:imageomics/bioclip-2",
         "description": "BioCLIP v2 — improved accuracy, larger model. Best quality but slower on CPU.",
@@ -35,12 +37,24 @@ KNOWN_MODELS = [
     {
         "id": "bioclip-2.5-vith14",
         "name": "BioCLIP-2.5",
+        "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
         "source": "hf-hub:imageomics/bioclip-2.5-vith14",
         "description": "BioCLIP v2.5 — latest model with ViT-H/14 backbone. Best accuracy, largest model.",
         "size_mb": 3900,
         "architecture": "ViT-H/14",
         "parameters": "986M",
+    },
+    {
+        "id": "timm-inat21-eva02-l",
+        "name": "iNat21 (EVA-02 Large)",
+        "model_type": "timm",
+        "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+        "source": "timm",
+        "description": "EVA-02 Large fine-tuned on iNaturalist 2021. 10K species, 92% top-1. No label files needed.",
+        "size_mb": 1200,
+        "architecture": "EVA-02 Large",
+        "parameters": "304M",
     },
 ]
 
@@ -66,7 +80,8 @@ def get_models():
 
     result = []
     for km in KNOWN_MODELS:
-        entry = {**km, "downloaded": False, "weights_path": None}
+        entry = {**km, "downloaded": False, "weights_path": None,
+                 "model_type": km.get("model_type", "bioclip")}
         if km["id"] in registered:
             reg = registered[km["id"]]
             path = reg.get("weights_path", "")
@@ -384,6 +399,47 @@ def download_model(model_id, progress_callback=None):
         )
         register_model(model_id, km["name"], km["model_str"], path, km["description"])
         return path
+
+    elif km.get("model_type") == "timm":
+        # timm models auto-download from HuggingFace on first create_model()
+        try:
+            import timm
+        except ImportError:
+            raise RuntimeError("timm not installed. Run: pip install timm")
+
+        model_name = km["model_str"]
+        if progress_callback:
+            progress_callback(
+                f"Downloading {km['name']} via timm...",
+                current=0,
+                total=1,
+            )
+
+        log.info("Downloading timm model: %s", model_name)
+        # This triggers the HuggingFace download
+        timm.create_model(model_name, pretrained=True)
+
+        # Find the cached weights path in the HF cache
+        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+        # model_str is "hf-hub:timm/model_name" — extract "timm/model_name" for cache
+        hf_repo = model_name.replace("hf-hub:", "")
+        repo_dir = os.path.join(
+            cache_dir, "models--" + hf_repo.replace("/", "--")
+        )
+        if not os.path.isdir(repo_dir):
+            # Fall back — just record the model_str as a sentinel
+            repo_dir = model_name
+
+        if progress_callback:
+            progress_callback(
+                f"{km['name']} download complete!",
+                current=1,
+                total=1,
+            )
+
+        register_model(model_id, km["name"], model_name, repo_dir, km["description"])
+        log.info("timm model cached at: %s", repo_dir)
+        return repo_dir
 
     raise ValueError(f"No download handler for {model_id}")
 

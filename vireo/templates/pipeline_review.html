@@ -2,11 +2,1205 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <title>Vireo - Pipeline Review</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary, #0A1F2E);
+  color: var(--text-primary, #E0F0F0);
+  min-height: 100vh;
+  padding-bottom: 36px;
+}
+
+/* Layout: sidebar + main */
+.pipeline-layout {
+  display: flex;
+  min-height: calc(100vh - 44px);
+}
+
+/* -- Sidebar -- */
+.pipeline-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--bg-secondary, #0E2A3D);
+  border-right: 1px solid var(--border-primary, #14374E);
+  padding: 20px 16px;
+  overflow-y: auto;
+}
+.sidebar-section { margin-bottom: 24px; }
+.sidebar-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim, #5A8890);
+  margin-bottom: 10px;
+}
+
+/* -- Main area -- */
+.pipeline-main {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+/* Summary bar */
+.summary-bar {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: var(--bg-secondary, #0E2A3D);
+  border-radius: 8px;
+  border: 1px solid var(--border-primary, #14374E);
+}
+.summary-stat { text-align: center; }
+.summary-stat .num { font-size: 28px; font-weight: 700; }
+.summary-stat .label { font-size: 11px; color: var(--text-dim, #5A8890); margin-top: 2px; }
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 80px 20px;
+  color: var(--text-muted, #7FAAB0);
+}
+.empty-state h2 { font-size: 20px; margin-bottom: 8px; color: var(--text-secondary, #B0CCCC); }
+.empty-state p { font-size: 14px; max-width: 400px; margin: 0 auto; line-height: 1.5; }
+
+/* Center progress (shown during jobs) */
+.center-progress { display: none; text-align: center; padding: 60px 20px; }
+.center-progress.active { display: block; }
+.center-progress .cp-phase {
+  font-size: 18px; font-weight: 600;
+  color: var(--text-secondary, #B0CCCC);
+  margin-bottom: 16px;
+}
+.center-progress .cp-track {
+  width: 100%; max-width: 480px; height: 8px;
+  background: var(--surface-dim, #1a2a2d); border-radius: 4px;
+  margin: 0 auto 12px; overflow: hidden;
+}
+.center-progress .cp-fill {
+  height: 100%; width: 0%; border-radius: 4px;
+  background: var(--accent, #4ecca3);
+  transition: width 0.3s ease;
+}
+.center-progress .cp-detail {
+  font-size: 14px; color: var(--text-muted, #7FAAB0);
+  font-variant-numeric: tabular-nums;
+}
+.center-progress .cp-file {
+  font-size: 13px; color: var(--text-dim, #5A8890);
+  margin-top: 6px;
+  font-family: var(--mono, monospace);
+}
+.center-progress .cp-rate {
+  font-size: 12px; color: var(--text-dim, #5A8890);
+  margin-top: 4px;
+}
+
+/* Filter bar */
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+.filter-btn {
+  padding: 6px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border-primary, #14374E);
+  background: transparent;
+  color: var(--text-secondary, #B0CCCC);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.filter-btn:hover { border-color: var(--text-muted, #7FAAB0); }
+.filter-btn.active { background: var(--accent, #24E5CA); color: #000; border-color: var(--accent, #24E5CA); }
+.filter-btn .count { margin-left: 4px; opacity: 0.7; }
+
+/* Encounter cards */
+.encounter-card {
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+.encounter-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary, #14374E);
+  cursor: pointer;
+}
+.encounter-header:hover { background: var(--border-secondary, #1A4560); }
+.encounter-species { font-size: 15px; font-weight: 600; flex: 1; }
+.encounter-meta {
+  font-size: 11px;
+  color: var(--text-dim, #5A8890);
+  display: flex;
+  gap: 12px;
+}
+.encounter-body { padding: 12px 16px; }
+
+/* Burst strip */
+.burst-strip {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  overflow-x: auto;
+  align-items: flex-start;
+}
+.burst-strip:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.burst-label {
+  font-size: 10px;
+  color: var(--text-dim, #5A8890);
+  writing-mode: vertical-lr;
+  text-orientation: mixed;
+  padding: 4px 0;
+  flex-shrink: 0;
+}
+
+/* Photo cards */
+.photo-card {
+  flex-shrink: 0;
+  width: 160px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.photo-card:hover { border-color: var(--text-muted, #7FAAB0); }
+.photo-card.keep { border-color: var(--accent, #24E5CA); }
+.photo-card.review { border-color: var(--warning, #F0C040); }
+.photo-card.reject { border-color: var(--danger, #E74C3C); opacity: 0.6; }
+.photo-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.photo-label {
+  position: absolute;
+  top: 6px; left: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.photo-label.keep { background: var(--accent, #24E5CA); color: #000; }
+.photo-label.review { background: var(--warning, #F0C040); color: #000; }
+.photo-label.reject { background: var(--danger, #E74C3C); color: #fff; }
+.photo-rarity {
+  position: absolute;
+  top: 6px; right: 6px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  background: var(--warning, #F0C040);
+  color: #000;
+  font-weight: 600;
+}
+.photo-score-bar {
+  height: 3px;
+  background: var(--bg-tertiary, #14374E);
+}
+.photo-score-fill {
+  height: 100%;
+  background: var(--accent, #24E5CA);
+  transition: width 0.3s;
+}
+.photo-info {
+  padding: 4px 8px;
+  font-size: 10px;
+  color: var(--text-dim, #5A8890);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Slider controls */
+.slider-group { margin-bottom: 16px; }
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.slider-label {
+  font-size: 11px;
+  color: var(--text-secondary, #B0CCCC);
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.slider-val {
+  font-size: 11px;
+  color: var(--text-dim, #5A8890);
+  min-width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+}
+input[type="range"] {
+  flex: 1;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--bg-tertiary, #14374E);
+  border-radius: 2px;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent, #24E5CA);
+  cursor: pointer;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent, #24E5CA);
+  cursor: pointer;
+  border: none;
+}
+.slider-section-header {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim, #5A8890);
+  margin: 12px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.reflow-indicator {
+  display: none;
+  font-size: 10px;
+  color: var(--info, #12C3B5);
+  margin-top: 4px;
+  animation: pulse 0.8s infinite;
+}
+.reset-btn {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted, #7FAAB0);
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.reset-btn:hover { background: var(--bg-tertiary, #14374E); }
+
+/* Inspection panel */
+.inspect-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 300;
+}
+.inspect-overlay.open { display: flex; justify-content: center; align-items: flex-start; padding-top: 60px; }
+.inspect-panel {
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 10px;
+  width: 720px;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  padding: 24px;
+}
+.inspect-close {
+  float: right;
+  background: none;
+  border: none;
+  color: var(--text-muted, #7FAAB0);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.inspect-close:hover { color: var(--text-primary, #E0F0F0); }
+.inspect-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+.inspect-img-wrap {
+  position: relative;
+  margin-bottom: 16px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #000;
+}
+.inspect-img-wrap img { width: 100%; display: block; }
+.inspect-img-wrap .mask-overlay {
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%;
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+  pointer-events: none;
+  display: none;
+}
+.inspect-img-wrap .mask-overlay.show { display: block; }
+.mask-toggle {
+  position: absolute;
+  top: 8px; right: 8px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.3);
+  background: rgba(0,0,0,0.5);
+  color: #fff;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mask-toggle:hover { background: rgba(0,0,0,0.7); }
+
+/* Score waterfall */
+.score-waterfall { margin-bottom: 16px; }
+.score-waterfall-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.score-wf-label { font-size: 12px; color: var(--text-secondary, #B0CCCC); width: 100px; flex-shrink: 0; }
+.score-wf-bar-track {
+  flex: 1;
+  height: 16px;
+  background: var(--bg-tertiary, #14374E);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.score-wf-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.score-wf-bar-fill.focus { background: #24E5CA; }
+.score-wf-bar-fill.exposure { background: #F0C040; }
+.score-wf-bar-fill.composition { background: #3498DB; }
+.score-wf-bar-fill.area { background: #9B59B6; }
+.score-wf-bar-fill.noise { background: #E67E22; }
+.score-wf-val { font-size: 11px; color: var(--text-dim, #5A8890); width: 70px; text-align: right; flex-shrink: 0; }
+
+/* Triage reasoning */
+.triage-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.triage-badge.keep { background: var(--accent, #24E5CA); color: #000; }
+.triage-badge.review { background: var(--warning, #F0C040); color: #000; }
+.triage-badge.reject { background: var(--danger, #E74C3C); color: #fff; }
+
+.reject-reasons { margin-bottom: 12px; }
+.reject-reason {
+  font-size: 12px;
+  color: var(--danger, #E74C3C);
+  padding: 2px 0;
+}
+
+/* Feature table */
+.feature-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.feature-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.feature-table td:first-child { color: var(--text-muted, #7FAAB0); width: 160px; }
+.feature-table td:last-child { color: var(--text-primary, #E0F0F0); }
+
+/* Context filmstrip */
+.context-filmstrip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 0;
+  margin-bottom: 16px;
+}
+.context-filmstrip img {
+  width: 80px;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  opacity: 0.5;
+}
+.context-filmstrip img.current { opacity: 1; border-color: var(--accent, #24E5CA); }
+.context-filmstrip img:hover { opacity: 0.8; }
+.context-label {
+  font-size: 11px;
+  color: var(--text-dim, #5A8890);
+  margin-bottom: 4px;
+}
+
+/* Back link */
+.back-link {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-dim, #5A8890);
+  text-decoration: none;
+  margin-top: 12px;
+}
+.back-link:hover { color: var(--accent, #24E5CA); }
+</style>
 </head>
 <body>
 {% set active_page = 'pipeline_review' %}
 {% include '_navbar.html' %}
-<div style="padding:40px;text-align:center;color:#888;">Pipeline Review — coming soon</div>
+
+<div class="pipeline-layout">
+  <!-- Sidebar -->
+  <div class="pipeline-sidebar">
+    {% if results %}
+    <div class="sidebar-section">
+      <div class="sidebar-title">Scoring Thresholds</div>
+      <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
+
+      <div class="slider-section-header">Hard Reject Floors</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label">Crop complete</span>
+          <input type="range" min="0" max="100" value="60" step="1" id="slRejectCrop" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valRejectCrop">0.60</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Focus</span>
+          <input type="range" min="0" max="100" value="35" step="1" id="slRejectFocus" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valRejectFocus">0.35</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Clip highlights</span>
+          <input type="range" min="0" max="100" value="30" step="1" id="slRejectClip" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valRejectClip">0.30</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Composite</span>
+          <input type="range" min="0" max="100" value="40" step="1" id="slRejectComposite" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valRejectComposite">0.40</span>
+        </div>
+      </div>
+
+      <div class="slider-section-header">MMR Selection</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label">Burst lambda</span>
+          <input type="range" min="0" max="100" value="85" step="1" id="slBurstLambda" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valBurstLambda">0.85</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Burst keep</span>
+          <input type="range" min="1" max="10" value="3" step="1" id="slBurstKeep" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valBurstKeep">3</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Enc. lambda</span>
+          <input type="range" min="0" max="100" value="70" step="1" id="slEncLambda" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valEncLambda">0.70</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Enc. keep</span>
+          <input type="range" min="1" max="20" value="5" step="1" id="slEncKeep" oninput="onScoringChange(this)">
+          <span class="slider-val" id="valEncKeep">5</span>
+        </div>
+      </div>
+
+      <button class="reset-btn" onclick="resetScoringDefaults()">Reset to defaults</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-title">Grouping Thresholds</div>
+
+      <div class="slider-section-header">Encounters</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label">Cut score</span>
+          <input type="range" min="0" max="100" value="42" step="1" id="slEncCut" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valEncCut">0.42</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Merge score</span>
+          <input type="range" min="0" max="100" value="62" step="1" id="slEncMerge" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valEncMerge">0.62</span>
+        </div>
+      </div>
+
+      <div class="slider-section-header">Bursts</div>
+      <div class="slider-group">
+        <div class="slider-row">
+          <span class="slider-label">Time gap (s)</span>
+          <input type="range" min="1" max="30" value="3" step="1" id="slBurstTime" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valBurstTime">3</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">pHash dist</span>
+          <input type="range" min="1" max="32" value="12" step="1" id="slBurstPhash" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valBurstPhash">12</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-label">Emb. cosine</span>
+          <input type="range" min="0" max="100" value="80" step="1" id="slBurstEmb" oninput="onGroupingChange(this)">
+          <span class="slider-val" id="valBurstEmb">0.80</span>
+        </div>
+      </div>
+
+      <button class="reset-btn" onclick="resetGroupingDefaults()">Reset to defaults</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Main area -->
+  <div class="pipeline-main" id="mainArea">
+    {% if results %}
+    <!-- Summary bar -->
+    <div class="summary-bar">
+      <div class="summary-stat">
+        <div class="num">{{ results.summary.total_photos }}</div>
+        <div class="label">Photos</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num">{{ results.summary.encounter_count }}</div>
+        <div class="label">Encounters</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num">{{ results.summary.burst_count }}</div>
+        <div class="label">Bursts</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num" style="color:var(--accent,#24E5CA);">{{ results.summary.keep_count }}</div>
+        <div class="label">Keep</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num" style="color:var(--warning,#F0C040);">{{ results.summary.review_count }}</div>
+        <div class="label">Review</div>
+      </div>
+      <div class="summary-stat">
+        <div class="num" style="color:var(--danger,#E74C3C);">{{ results.summary.reject_count }}</div>
+        <div class="label">Reject</div>
+      </div>
+      {% if results.summary.rarity_protected %}
+      <div class="summary-stat">
+        <div class="num" style="color:var(--warning,#F0C040);">{{ results.summary.rarity_protected }}</div>
+        <div class="label">Protected</div>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Filter bar -->
+    <div class="filter-bar" id="filterBar">
+      <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
+      <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
+      <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
+      <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
+    </div>
+
+    <!-- Encounters rendered by JS -->
+    <div id="encountersContainer"></div>
+
+    {% else %}
+    <div class="center-progress" id="centerProgress">
+      <div class="cp-phase" id="cpPhase">Starting...</div>
+      <div class="cp-track"><div class="cp-fill" id="cpFill"></div></div>
+      <div class="cp-detail" id="cpDetail"></div>
+      <div class="cp-file" id="cpFile"></div>
+      <div class="cp-rate" id="cpRate"></div>
+    </div>
+    <div class="empty-state" id="emptyState">
+      <h2>Pipeline not yet run</h2>
+      <p>
+        {% if not has_detections %}
+          Start by running <strong>Classification</strong> on the Classify page to detect animals, then come back here to extract features and run the full pipeline.
+        {% elif not has_masks %}
+          Detections found for {{ has_detections }} photos. Click <strong>Extract Features</strong> to generate masks, quality features, and embeddings.
+        {% else %}
+          Features extracted for {{ has_masks }} photos. Click <strong>Regroup + Score</strong> to run encounter segmentation, scoring, and triage.
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Inspection panel overlay -->
+<div class="inspect-overlay" id="inspectOverlay" onclick="if(event.target===this)closeInspect()">
+  <div class="inspect-panel" id="inspectPanel"></div>
+</div>
+
+<script>
+var pipelineResults = {{ results | tojson if results else 'null' }};
+var activeFilter = 'all';
+
+// -- Rendering --
+
+function renderResults() {
+  if (!pipelineResults) return;
+  var container = document.getElementById('encountersContainer');
+  if (!container) return;
+
+  // Build photo lookup
+  var photoMap = {};
+  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+  // Update filter counts
+  var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0};
+  pipelineResults.photos.forEach(function(p) {
+    counts.all++;
+    if (p.label) counts[p.label] = (counts[p.label] || 0) + 1;
+  });
+  var ce = document.getElementById('countAll'); if (ce) ce.textContent = ' (' + counts.all + ')';
+  ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + (counts.KEEP||0) + ')';
+  ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + (counts.REVIEW||0) + ')';
+  ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + (counts.REJECT||0) + ')';
+
+  var html = '';
+  pipelineResults.encounters.forEach(function(enc, ei) {
+    var speciesName = enc.species ? (enc.species[0] || 'Unknown') : 'Unknown';
+    var speciesConf = enc.species && enc.species[1] ? (enc.species[1] * 100).toFixed(0) + '%' : '';
+    var timeRange = '';
+    if (enc.time_range && enc.time_range[0]) {
+      var t0 = enc.time_range[0].split('T')[1] || '';
+      var t1 = enc.time_range[1] ? enc.time_range[1].split('T')[1] || '' : '';
+      timeRange = t0.substring(0,8) + (t1 ? ' - ' + t1.substring(0,8) : '');
+    }
+
+    // Check if any photo in this encounter passes the filter
+    var encPhotoIds = enc.photo_ids || [];
+    var hasVisible = encPhotoIds.some(function(pid) {
+      var p = photoMap[pid];
+      return p && (activeFilter === 'all' || p.label === activeFilter);
+    });
+    if (!hasVisible) return;
+
+    html += '<div class="encounter-card">';
+    html += '<div class="encounter-header" onclick="toggleEncounter(' + ei + ')">';
+    html += '<span class="encounter-species">' + speciesName + '</span>';
+    html += '<span class="encounter-meta">';
+    html += '<span>' + enc.photo_count + ' photos</span>';
+    if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
+    if (speciesConf) html += '<span>' + speciesConf + '</span>';
+    if (timeRange) html += '<span>' + timeRange + '</span>';
+    html += '</span></div>';
+    html += '<div class="encounter-body" id="encBody' + ei + '">';
+
+    if (enc.bursts && enc.bursts.length > 0) {
+      enc.bursts.forEach(function(burst, bi) {
+        html += '<div class="burst-strip">';
+        if (enc.bursts.length > 1) {
+          html += '<span class="burst-label">B' + (bi+1) + '</span>';
+        }
+        burst.forEach(function(pid) {
+          var p = photoMap[pid];
+          if (!p) return;
+          if (activeFilter !== 'all' && p.label !== activeFilter) return;
+          html += renderPhotoCard(p);
+        });
+        html += '</div>';
+      });
+    } else {
+      // No burst data — render flat
+      encPhotoIds.forEach(function(pid) {
+        var p = photoMap[pid];
+        if (!p) return;
+        if (activeFilter !== 'all' && p.label !== activeFilter) return;
+        html += renderPhotoCard(p);
+      });
+    }
+
+    html += '</div></div>';
+  });
+
+  container.innerHTML = html;
+}
+
+function renderPhotoCard(p) {
+  var label = (p.label || '').toLowerCase();
+  var q = p.quality_composite || 0;
+  var qPct = Math.round(q * 100);
+  var html = '<div class="photo-card ' + label + '" onclick="openInspect(' + p.id + ')">';
+  html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">';
+  if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
+  if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
+  html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
+  html += '<div class="photo-info">' + (p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+  html += '</div>';
+  return html;
+}
+
+function toggleEncounter(idx) {
+  var body = document.getElementById('encBody' + idx);
+  if (!body) return;
+  body.style.display = body.style.display === 'none' ? '' : 'none';
+}
+
+function setFilter(f) {
+  activeFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-filter') === f);
+  });
+  renderResults();
+}
+
+// -- Model config --
+
+var _savedModelConfig = {
+  sam2_variant: '{{ pipeline_config.sam2_variant }}',
+  dinov2_variant: '{{ pipeline_config.dinov2_variant }}',
+  proxy_longest_edge: {{ pipeline_config.proxy_longest_edge }},
+};
+
+function onModelConfigChange() {
+  var proxyEl = document.getElementById('cfgProxy');
+  var valEl = document.getElementById('valProxy');
+  if (proxyEl && valEl) valEl.textContent = proxyEl.value;
+
+  var newCfg = {
+    sam2_variant: document.getElementById('cfgSam2').value,
+    dinov2_variant: document.getElementById('cfgDinov2').value,
+    proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+  };
+
+  // Check if anything changed from saved config
+  var changed = (newCfg.sam2_variant !== _savedModelConfig.sam2_variant ||
+                 newCfg.dinov2_variant !== _savedModelConfig.dinov2_variant ||
+                 newCfg.proxy_longest_edge !== _savedModelConfig.proxy_longest_edge);
+
+  var warning = document.getElementById('staleWarning');
+  if (warning) warning.classList.toggle('show', changed);
+
+  // Mark stage 1 dot as stale
+  var dot = document.getElementById('stageMaskDot');
+  if (dot) {
+    if (changed) { dot.className = 'stage-dot stale'; }
+    else { dot.className = 'stage-dot {{ "complete" if has_masks else "not-started" }}'; }
+  }
+
+  // Save to server
+  fetch('/api/pipeline/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(newCfg),
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.status === 'saved') {
+      _savedModelConfig = newCfg;
+      // Keep warning visible since features need re-extraction
+    }
+  });
+}
+
+// -- Job launching --
+
+function showProgress(show) {
+  document.getElementById('progressWrap').style.display = show ? 'block' : 'none';
+  var cp = document.getElementById('centerProgress');
+  var es = document.getElementById('emptyState');
+  if (cp) { cp.classList.toggle('active', show); }
+  if (es) { es.style.display = show ? 'none' : ''; }
+}
+
+function updateProgress(pct, text) {
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressText').textContent = text;
+}
+
+function updateCenterProgress(p) {
+  var cp = document.getElementById('centerProgress');
+  if (!cp) return;
+  var phase = p.phase || 'Processing';
+  var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+  document.getElementById('cpPhase').textContent = phase;
+  document.getElementById('cpFill').style.width = pct + '%';
+  var detail = '';
+  if (p.current > 0 && p.total > 0) {
+    detail = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + '  (' + pct + '%)';
+  }
+  document.getElementById('cpDetail').textContent = detail;
+  document.getElementById('cpFile').textContent = p.current_file || '';
+  if (p.rate > 0) {
+    var eta = Math.round((p.total - p.current) / p.rate);
+    var mm = Math.floor(eta / 60), ss = eta % 60;
+    document.getElementById('cpRate').textContent = p.rate.toFixed(1) + ' photos/sec — ~' + mm + ':' + String(ss).padStart(2, '0') + ' remaining';
+  } else {
+    document.getElementById('cpRate').textContent = '';
+  }
+}
+
+function runExtractMasks() {
+  var btn = document.getElementById('btnExtract');
+  btn.disabled = true;
+  showProgress(true);
+  updateProgress(0, 'Starting feature extraction...');
+
+  fetch('/api/jobs/extract-masks', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+      var text = (p.phase || 'Processing') + ' ' + (p.current || 0) + '/' + (p.total || '?');
+      if (p.current_file) text += ' - ' + p.current_file;
+      updateProgress(pct, text);
+      updateCenterProgress(p);
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
+      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
+      setTimeout(function() { window.location.reload(); }, 800);
+    });
+  })
+  .catch(function() { btn.disabled = false; showProgress(false); });
+}
+
+function runRegroup() {
+  var btn = document.getElementById('btnRegroup');
+  btn.disabled = true;
+  showProgress(true);
+  updateProgress(0, 'Running pipeline stages 2-6...');
+
+  fetch('/api/jobs/regroup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
+    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    source.addEventListener('progress', function(e) {
+      var p = JSON.parse(e.data);
+      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+      updateProgress(pct, p.phase || 'Processing...');
+      updateCenterProgress(p);
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      var result = JSON.parse(e.data);
+      updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
+      updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
+      setTimeout(function() { window.location.reload(); }, 800);
+    });
+  })
+  .catch(function() { btn.disabled = false; showProgress(false); });
+}
+
+// -- Threshold tuning --
+
+var _reflowTimer = null;
+var _regroupTimer = null;
+
+var SCORING_DEFAULTS = {
+  reject_crop_complete: 60, reject_focus: 35, reject_clip_high: 30, reject_composite: 40,
+  burst_lambda: 85, burst_max_keep: 3, encounter_lambda: 70, encounter_max_keep: 5,
+};
+var GROUPING_DEFAULTS = {
+  hard_cut_score: 42, merge_score: 62,
+  burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 80,
+};
+
+function sliderVal(id) {
+  var el = document.getElementById(id);
+  return el ? parseFloat(el.value) : 0;
+}
+
+function updateSliderDisplay(slider) {
+  var id = slider.id;
+  var valEl = document.getElementById('val' + id.substring(2));
+  if (!valEl) return;
+  // Integer sliders (keep counts, time, phash)
+  if (['slBurstKeep','slEncKeep','slBurstTime','slBurstPhash'].indexOf(id) >= 0) {
+    valEl.textContent = slider.value;
+  } else {
+    valEl.textContent = (slider.value / 100).toFixed(2);
+  }
+}
+
+function getScoringConfig() {
+  return {
+    reject_crop_complete: sliderVal('slRejectCrop') / 100,
+    reject_focus: sliderVal('slRejectFocus') / 100,
+    reject_clip_high: sliderVal('slRejectClip') / 100,
+    reject_composite: sliderVal('slRejectComposite') / 100,
+    burst_lambda: sliderVal('slBurstLambda') / 100,
+    burst_max_keep: Math.round(sliderVal('slBurstKeep')),
+    encounter_lambda: sliderVal('slEncLambda') / 100,
+    encounter_max_keep: Math.round(sliderVal('slEncKeep')),
+  };
+}
+
+function getGroupingConfig() {
+  return {
+    hard_cut_score: sliderVal('slEncCut') / 100,
+    merge_score: sliderVal('slEncMerge') / 100,
+    burst_time_gap: sliderVal('slBurstTime'),
+    burst_phash_threshold: Math.round(sliderVal('slBurstPhash')),
+    burst_embedding_threshold: sliderVal('slBurstEmb') / 100,
+  };
+}
+
+function onScoringChange(slider) {
+  updateSliderDisplay(slider);
+  // Debounce: wait 250ms after last change before calling reflow
+  clearTimeout(_reflowTimer);
+  var indicator = document.getElementById('reflowIndicator');
+  if (indicator) indicator.style.display = 'block';
+  _reflowTimer = setTimeout(doReflow, 250);
+}
+
+function onGroupingChange(slider) {
+  updateSliderDisplay(slider);
+  clearTimeout(_regroupTimer);
+  var indicator = document.getElementById('reflowIndicator');
+  if (indicator) { indicator.style.display = 'block'; indicator.textContent = 'Regrouping...'; }
+  _regroupTimer = setTimeout(doRegroupLive, 500);
+}
+
+function doReflow() {
+  var config = getScoringConfig();
+  fetch('/api/pipeline/reflow', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({config: config}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) return;
+    pipelineResults = data;
+    renderResults();
+    updateSummaryBar(data.summary);
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  })
+  .catch(function() {
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  });
+}
+
+function doRegroupLive() {
+  var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
+  fetch('/api/pipeline/regroup-live', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({config: config}),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) return;
+    pipelineResults = data;
+    renderResults();
+    updateSummaryBar(data.summary);
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  })
+  .catch(function() {
+    var indicator = document.getElementById('reflowIndicator');
+    if (indicator) indicator.style.display = 'none';
+  });
+}
+
+function updateSummaryBar(summary) {
+  // Update the summary stats in the bar
+  var stats = document.querySelectorAll('.summary-stat');
+  if (stats.length >= 6) {
+    stats[0].querySelector('.num').textContent = summary.total_photos;
+    stats[1].querySelector('.num').textContent = summary.encounter_count;
+    stats[2].querySelector('.num').textContent = summary.burst_count;
+    stats[3].querySelector('.num').textContent = summary.keep_count;
+    stats[4].querySelector('.num').textContent = summary.review_count;
+    stats[5].querySelector('.num').textContent = summary.reject_count;
+  }
+  // Update stage stats
+  var ts = document.getElementById('stageTriageStats');
+  if (ts) ts.textContent = summary.keep_count + 'K / ' + summary.review_count + 'R / ' + summary.reject_count + 'X';
+  var gs = document.getElementById('stageGroupStats');
+  if (gs) gs.textContent = summary.encounter_count;
+}
+
+function resetScoringDefaults() {
+  document.getElementById('slRejectCrop').value = SCORING_DEFAULTS.reject_crop_complete;
+  document.getElementById('slRejectFocus').value = SCORING_DEFAULTS.reject_focus;
+  document.getElementById('slRejectClip').value = SCORING_DEFAULTS.reject_clip_high;
+  document.getElementById('slRejectComposite').value = SCORING_DEFAULTS.reject_composite;
+  document.getElementById('slBurstLambda').value = SCORING_DEFAULTS.burst_lambda;
+  document.getElementById('slBurstKeep').value = SCORING_DEFAULTS.burst_max_keep;
+  document.getElementById('slEncLambda').value = SCORING_DEFAULTS.encounter_lambda;
+  document.getElementById('slEncKeep').value = SCORING_DEFAULTS.encounter_max_keep;
+  // Update displays
+  document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
+    updateSliderDisplay(sl);
+  });
+  doReflow();
+}
+
+function resetGroupingDefaults() {
+  document.getElementById('slEncCut').value = GROUPING_DEFAULTS.hard_cut_score;
+  document.getElementById('slEncMerge').value = GROUPING_DEFAULTS.merge_score;
+  document.getElementById('slBurstTime').value = GROUPING_DEFAULTS.burst_time_gap;
+  document.getElementById('slBurstPhash').value = GROUPING_DEFAULTS.burst_phash_threshold;
+  document.getElementById('slBurstEmb').value = GROUPING_DEFAULTS.burst_embedding_threshold;
+  document.querySelectorAll('.sidebar-section input[type="range"]').forEach(function(sl) {
+    updateSliderDisplay(sl);
+  });
+  doRegroupLive();
+}
+
+// -- Photo inspection --
+
+function findPhotoInResults(photoId) {
+  if (!pipelineResults) return null;
+  for (var i = 0; i < pipelineResults.photos.length; i++) {
+    if (pipelineResults.photos[i].id === photoId) return pipelineResults.photos[i];
+  }
+  return null;
+}
+
+function findEncounterForPhoto(photoId) {
+  if (!pipelineResults) return null;
+  for (var i = 0; i < pipelineResults.encounters.length; i++) {
+    var enc = pipelineResults.encounters[i];
+    if (enc.photo_ids && enc.photo_ids.indexOf(photoId) >= 0) return enc;
+  }
+  return null;
+}
+
+function openInspect(photoId) {
+  var photo = findPhotoInResults(photoId);
+  if (!photo) return;
+
+  var enc = findEncounterForPhoto(photoId);
+  var panel = document.getElementById('inspectPanel');
+  var overlay = document.getElementById('inspectOverlay');
+
+  var label = (photo.label || '').toLowerCase();
+  var q = photo.quality_composite || 0;
+
+  // Score components
+  var scores = [
+    {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
+    {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
+    {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
+    {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
+    {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
+  ];
+
+  var html = '<button class="inspect-close" onclick="closeInspect()">&times;</button>';
+  html += '<div class="inspect-title">' + (photo.filename || 'Photo ' + photoId) + '</div>';
+
+  // Image with mask toggle
+  html += '<div class="inspect-img-wrap">';
+  html += '<img src="/thumbnails/' + photoId + '.jpg" alt="">';
+  html += '<img class="mask-overlay" id="maskOverlay" src="/masks/' + photoId + '.png" alt="">';
+  html += '<button class="mask-toggle" onclick="toggleMask()">Toggle Mask</button>';
+  html += '</div>';
+
+  // Triage badge + reasoning
+  html += '<span class="triage-badge ' + label + '">' + (photo.label || 'UNSCORED') + '</span>';
+  if (photo.rarity_protected) {
+    html += ' <span class="triage-badge review">Rarity Protected</span>';
+  }
+
+  if (photo.reject_reasons && photo.reject_reasons.length > 0) {
+    html += '<div class="reject-reasons">';
+    photo.reject_reasons.forEach(function(r) {
+      html += '<div class="reject-reason">&#9888; ' + r + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Score waterfall
+  html += '<div class="score-waterfall">';
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
+  scores.forEach(function(s) {
+    var val = photo[s.key] || 0;
+    var weighted = val * s.weight;
+    var pct = Math.round(val * 100);
+    html += '<div class="score-waterfall-row">';
+    html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
+    html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
+    html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+    html += '</div>';
+  });
+  html += '</div>';
+
+  // Encounter context filmstrip
+  if (enc) {
+    var speciesName = enc.species ? (enc.species[0] || 'Unknown') : 'Unknown';
+    html += '<div class="context-label">Encounter: ' + speciesName + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
+    html += '<div class="context-filmstrip">';
+    (enc.photo_ids || []).forEach(function(pid) {
+      var isCurrent = pid === photoId ? ' current' : '';
+      html += '<img src="/thumbnails/' + pid + '.jpg" class="' + isCurrent + '" onclick="openInspect(' + pid + ')" alt="">';
+    });
+    html += '</div>';
+  }
+
+  // Raw feature table
+  html += '<table class="feature-table">';
+  var features = [
+    ['Subject Tenengrad', photo.subject_tenengrad],
+    ['Background Tenengrad', photo.bg_tenengrad],
+    ['Crop Completeness', photo.crop_complete],
+    ['Background Separation', photo.bg_separation],
+    ['Highlight Clip', photo.subject_clip_high],
+    ['Shadow Clip', photo.subject_clip_low],
+    ['Median Luminance', photo.subject_y_median],
+    ['Subject Size', photo.subject_size],
+    ['Crop pHash', photo.phash_crop],
+    ['Detection Confidence', photo.detection_conf],
+  ];
+  features.forEach(function(f) {
+    var val = f[1];
+    if (val === null || val === undefined) val = '—';
+    else if (typeof val === 'number') val = val.toFixed(4);
+    html += '<tr><td>' + f[0] + '</td><td>' + val + '</td></tr>';
+  });
+  html += '</table>';
+
+  panel.innerHTML = html;
+  overlay.classList.add('open');
+  document.addEventListener('keydown', inspectKeyHandler);
+}
+
+function closeInspect() {
+  document.getElementById('inspectOverlay').classList.remove('open');
+  document.removeEventListener('keydown', inspectKeyHandler);
+}
+
+function inspectKeyHandler(e) {
+  if (e.key === 'Escape') closeInspect();
+}
+
+function toggleMask() {
+  var overlay = document.getElementById('maskOverlay');
+  if (overlay) overlay.classList.toggle('show');
+}
+
+// -- Init --
+if (pipelineResults) {
+  renderResults();
+}
+</script>
 </body>
 </html>

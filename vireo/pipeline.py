@@ -43,12 +43,10 @@ def _resolve_collection_photo_ids(db, collection_id):
         collection_id: collection ID to resolve
 
     Returns:
-        set of photo IDs, or None if collection not found
+        set of photo IDs (empty set if collection not found or has no photos)
     """
     rows = db.get_collection_photos(collection_id, page=1, per_page=1_000_000)
-    if rows is None:
-        return None
-    return {r["id"] for r in rows}
+    return {r["id"] for r in rows} if rows else set()
 
 
 def load_photo_features(db, collection_id=None):

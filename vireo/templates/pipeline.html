@@ -241,6 +241,45 @@ body {
   align-items: flex-start;
 }
 .burst-strip:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.burst-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+.burst-species-label {
+  font-size: 9px;
+  color: var(--text-dim, #5A8890);
+  writing-mode: vertical-lr;
+  text-orientation: mixed;
+  max-height: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.burst-species-label.confirmed { color: var(--accent, #24E5CA); }
+.burst-confirm-btn {
+  writing-mode: horizontal-tb;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary, #14374E);
+  background: transparent;
+  color: var(--text-dim, #5A8890);
+  font-size: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.burst-confirm-btn:hover { border-color: var(--accent, #24E5CA); color: var(--accent, #24E5CA); }
+.burst-species-panel {
+  background: var(--bg-primary, #0A1F2E);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.burst-species-panel .species-panel-title { font-size: 12px; margin-bottom: 8px; }
 .burst-label {
   font-size: 10px;
   color: var(--text-dim, #5A8890);
@@ -310,6 +349,149 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Species review */
+.encounter-header-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.encounter-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.species-confirmed {
+  color: var(--accent, #24E5CA);
+}
+.species-confirmed::after {
+  content: ' \2713';
+  font-size: 13px;
+}
+.encounter-votes {
+  font-size: 11px;
+  color: var(--text-dim, #5A8890);
+  margin-top: 2px;
+}
+.encounter-votes .vote-item { margin-right: 10px; }
+.encounter-votes .vote-count { opacity: 0.7; }
+.btn-confirm-species {
+  padding: 3px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--accent, #24E5CA);
+  background: transparent;
+  color: var(--accent, #24E5CA);
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.btn-confirm-species:hover { background: var(--accent, #24E5CA); color: #000; }
+.species-panel {
+  background: var(--bg-primary, #0A1F2E);
+  border-top: 1px solid var(--border-primary, #14374E);
+  padding: 14px 16px;
+  display: none;
+}
+.species-panel.open { display: block; }
+.species-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.species-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.species-btn {
+  padding: 6px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary, #0E2A3D);
+  color: var(--text-secondary, #B0CCCC);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.species-btn:hover { border-color: var(--accent, #24E5CA); }
+.species-btn.selected { background: var(--accent, #24E5CA); color: #000; border-color: var(--accent, #24E5CA); }
+.species-autocomplete-wrap {
+  position: relative;
+  margin-bottom: 12px;
+}
+.species-autocomplete-wrap input {
+  width: 100%;
+  max-width: 320px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-primary, #E0F0F0);
+  font-size: 12px;
+  outline: none;
+}
+.species-autocomplete-wrap input:focus { border-color: var(--accent, #24E5CA); }
+.species-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  max-width: 320px;
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 0 0 6px 6px;
+  z-index: 10;
+  display: none;
+}
+.species-dropdown.open { display: block; }
+.species-dropdown-item {
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-secondary, #B0CCCC);
+}
+.species-dropdown-item:hover { background: var(--bg-tertiary, #14374E); }
+.species-panel-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.species-panel-actions button {
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  border: none;
+}
+.btn-species-cancel {
+  background: transparent;
+  color: var(--text-dim, #5A8890);
+  border: 1px solid var(--border-primary, #14374E) !important;
+}
+.btn-species-apply {
+  background: var(--accent, #24E5CA);
+  color: #000;
+  font-weight: 600;
+}
+.btn-species-apply:disabled { opacity: 0.4; cursor: not-allowed; }
+.photo-species {
+  padding: 2px 8px;
+  font-size: 9px;
+  color: var(--text-dim, #5A8890);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.photo-card.species-disagree {
+  border-color: var(--warning, #F0C040) !important;
+  border-style: dashed;
 }
 
 /* Slider controls */
@@ -856,8 +1038,28 @@ function renderResults() {
 
   var html = '';
   pipelineResults.encounters.forEach(function(enc, ei) {
-    var speciesName = enc.species ? (enc.species[0] || 'Unknown') : 'Unknown';
-    var speciesConf = enc.species && enc.species[1] ? (enc.species[1] * 100).toFixed(0) + '%' : '';
+    // Derive confirmed species from photos (handles burst-level confirmations)
+    var confirmedSet = {};
+    var allConfirmed = true;
+    (enc.photo_ids || []).forEach(function(pid) {
+      var p = photoMap[pid];
+      if (p && p.confirmed_species) {
+        confirmedSet[p.confirmed_species] = true;
+      } else {
+        allConfirmed = false;
+      }
+    });
+    var uniqueConfirmed = Object.keys(confirmedSet);
+    var confirmed = enc.confirmed_species;
+    var isMixed = false;
+    if (!confirmed && uniqueConfirmed.length > 0) {
+      if (allConfirmed && uniqueConfirmed.length === 1) {
+        confirmed = uniqueConfirmed[0];
+      } else {
+        isMixed = true;
+      }
+    }
+    var speciesName = confirmed || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
     var timeRange = '';
     if (enc.time_range && enc.time_range[0]) {
       var t0 = enc.time_range[0].split('T')[1] || '';
@@ -873,28 +1075,134 @@ function renderResults() {
     });
     if (!hasVisible) return;
 
-    html += '<div class="encounter-card">';
+    // Build vote summary line
+    var votes = enc.species_votes || [];
+    var voteLine = '';
+    votes.forEach(function(v, vi) {
+      if (vi > 0) voteLine += ' &middot; ';
+      voteLine += '<span class="vote-item">' + v.species + ' <span class="vote-count">&times;' + v.count + ' (' + (v.avg_confidence * 100).toFixed(0) + '%)</span></span>';
+    });
+
+    html += '<div class="encounter-card" id="encCard' + ei + '">';
     html += '<div class="encounter-header" onclick="toggleEncounter(' + ei + ')">';
-    html += '<span class="encounter-species">' + speciesName + '</span>';
+    html += '<div class="encounter-header-wrap">';
+    html += '<div class="encounter-header-row">';
+    if (isMixed) {
+      html += '<span class="encounter-species">' + uniqueConfirmed.join(' / ') + ' <span style="font-size:11px;opacity:0.6;">(mixed)</span></span>';
+    } else {
+      html += '<span class="encounter-species' + (confirmed ? ' species-confirmed' : '') + '">' + speciesName + '</span>';
+    }
     html += '<span class="encounter-meta">';
     html += '<span>' + enc.photo_count + ' photos</span>';
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
-    if (speciesConf) html += '<span>' + speciesConf + '</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
-    html += '</span></div>';
+    html += '</span>';
+    if (!confirmed) {
+      html += '<button class="btn-confirm-species" onclick="event.stopPropagation(); openSpeciesPanel(' + ei + ')">Confirm species</button>';
+    } else {
+      html += '<button class="btn-confirm-species" onclick="event.stopPropagation(); openSpeciesPanel(' + ei + ')" title="Change species">&#9998;</button>';
+    }
+    html += '</div>';
+    if (voteLine) html += '<div class="encounter-votes">' + voteLine + '</div>';
+    html += '</div></div>';
+
+    // Species correction panel (hidden by default)
+    html += '<div class="species-panel" id="speciesPanel' + ei + '">';
+    html += '<div class="species-panel-title">What species is this?</div>';
+    html += '<div class="species-suggestions" id="speciesSuggestions' + ei + '">';
+    votes.forEach(function(v) {
+      html += '<button class="species-btn" onclick="selectSpeciesSuggestion(' + ei + ', this, \'' + v.species.replace(/'/g, "\\'") + '\')">';
+      html += v.species + ' &times;' + v.count + ' photos</button>';
+    });
+    html += '</div>';
+    html += '<div class="species-autocomplete-wrap">';
+    html += '<span style="font-size:11px;color:var(--text-dim,#5A8890);margin-bottom:4px;display:block;">Or type:</span>';
+    html += '<input type="text" id="speciesInput' + ei + '" placeholder="Search species..." oninput="onSpeciesSearch(' + ei + ', this.value)" onfocus="onSpeciesSearch(' + ei + ', this.value)" autocomplete="off">';
+    html += '<div class="species-dropdown" id="speciesDropdown' + ei + '"></div>';
+    html += '</div>';
+    html += '<div class="species-panel-actions">';
+    html += '<button class="btn-species-cancel" onclick="closeSpeciesPanel(' + ei + ')">Cancel</button>';
+    html += '<button class="btn-species-apply" id="speciesApply' + ei + '" disabled onclick="applySpecies(' + ei + ')">Apply to all ' + enc.photo_count + '</button>';
+    html += '</div></div>';
+
     html += '<div class="encounter-body" id="encBody' + ei + '">';
+
+    // Encounter species for disagreement detection
+    var encSpecies = confirmed || (enc.species ? enc.species[0] : null);
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
+        var burstPhotoIds = burst;
+        // Determine burst-level confirmed species from photos
+        var burstConfirmed = null;
+        burstPhotoIds.forEach(function(pid) {
+          var p = photoMap[pid];
+          if (p && p.confirmed_species) burstConfirmed = p.confirmed_species;
+        });
+        // Burst-level vote summary from predictions
+        var burstVoteCounts = {};
+        var burstVoteConfs = {};
+        burstPhotoIds.forEach(function(pid) {
+          var p = photoMap[pid];
+          if (!p) return;
+          var top5 = p.species_top5 || [];
+          if (top5.length > 0) {
+            var sp = top5[0][0];
+            burstVoteCounts[sp] = (burstVoteCounts[sp] || 0) + 1;
+            burstVoteConfs[sp] = (burstVoteConfs[sp] || 0) + top5[0][1];
+          }
+        });
+        var burstVotes = [];
+        for (var sp in burstVoteCounts) {
+          burstVotes.push({species: sp, count: burstVoteCounts[sp], avg_confidence: burstVoteConfs[sp] / burstVoteCounts[sp]});
+        }
+        burstVotes.sort(function(a, b) { return b.count - a.count; });
+
+        var burstSpecies = burstConfirmed || (burstVotes.length > 0 ? burstVotes[0].species : encSpecies);
+        var panelKey = ei + '_' + bi;
+
+        // Check if any photo in burst passes filter
+        var burstHasVisible = burstPhotoIds.some(function(pid) {
+          var p = photoMap[pid];
+          return p && (activeFilter === 'all' || p.label === activeFilter);
+        });
+        if (!burstHasVisible) return;
+
+        // Burst species panel (above the strip)
+        html += '<div class="burst-species-panel species-panel" id="speciesPanel' + panelKey + '" style="display:none;">';
+        html += '<div class="species-panel-title">Burst ' + (bi+1) + ': What species is this?</div>';
+        html += '<div class="species-suggestions" id="speciesSuggestions' + panelKey + '">';
+        burstVotes.forEach(function(v) {
+          html += '<button class="species-btn" onclick="selectSpeciesSuggestion(\'' + panelKey + '\', this, \'' + v.species.replace(/'/g, "\\'") + '\')">';
+          html += v.species + ' &times;' + v.count + '</button>';
+        });
+        html += '</div>';
+        html += '<div class="species-autocomplete-wrap">';
+        html += '<span style="font-size:11px;color:var(--text-dim,#5A8890);margin-bottom:4px;display:block;">Or type:</span>';
+        html += '<input type="text" id="speciesInput' + panelKey + '" placeholder="Search species..." oninput="onSpeciesSearch(\'' + panelKey + '\', this.value)" onfocus="onSpeciesSearch(\'' + panelKey + '\', this.value)" autocomplete="off">';
+        html += '<div class="species-dropdown" id="speciesDropdown' + panelKey + '"></div>';
+        html += '</div>';
+        html += '<div class="species-panel-actions">';
+        html += '<button class="btn-species-cancel" onclick="closeSpeciesPanel(\'' + panelKey + '\')">Cancel</button>';
+        html += '<button class="btn-species-apply" id="speciesApply' + panelKey + '" disabled onclick="applyBurstSpecies(\'' + panelKey + '\',' + ei + ',' + bi + ')">Apply to burst ' + (bi+1) + ' (' + burstPhotoIds.length + ')</button>';
+        html += '</div></div>';
+
         html += '<div class="burst-strip">';
         if (enc.bursts.length > 1) {
+          html += '<div class="burst-header">';
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
+          var bsLabel = burstConfirmed || (burstVotes.length > 0 ? burstVotes[0].species : '');
+          if (bsLabel) {
+            html += '<span class="burst-species-label' + (burstConfirmed ? ' confirmed' : '') + '">' + bsLabel + (burstConfirmed ? ' \u2713' : '') + '</span>';
+          }
+          html += '<button class="burst-confirm-btn" onclick="event.stopPropagation(); openSpeciesPanel(\'' + panelKey + '\')" title="' + (burstConfirmed ? 'Change species' : 'Confirm species') + '">' + (burstConfirmed ? '\u270e' : '\u2714') + '</button>';
+          html += '</div>';
         }
         burst.forEach(function(pid) {
           var p = photoMap[pid];
           if (!p) return;
           if (activeFilter !== 'all' && p.label !== activeFilter) return;
-          html += renderPhotoCard(p);
+          html += renderPhotoCard(p, burstSpecies);
         });
         html += '</div>';
       });
@@ -904,7 +1212,7 @@ function renderResults() {
         var p = photoMap[pid];
         if (!p) return;
         if (activeFilter !== 'all' && p.label !== activeFilter) return;
-        html += renderPhotoCard(p);
+        html += renderPhotoCard(p, encSpecies);
       });
     }
 
@@ -914,16 +1222,31 @@ function renderResults() {
   container.innerHTML = html;
 }
 
-function renderPhotoCard(p) {
+function renderPhotoCard(p, encSpecies) {
   var label = (p.label || '').toLowerCase();
   var q = p.quality_composite || 0;
   var qPct = Math.round(q * 100);
-  var html = '<div class="photo-card ' + label + '" onclick="openInspect(' + p.id + ')">';
+
+  // Per-photo species prediction
+  var top5 = p.species_top5 || [];
+  var photoSpecies = top5.length > 0 ? top5[0][0] : null;
+  var photoConf = top5.length > 0 ? (top5[0][1] * 100).toFixed(0) : '';
+
+  // Disagreement: photo's top prediction differs from encounter species
+  var disagree = false;
+  if (photoSpecies && encSpecies && photoSpecies !== encSpecies) {
+    disagree = true;
+  }
+
+  var html = '<div class="photo-card ' + label + (disagree ? ' species-disagree' : '') + '" onclick="openInspect(' + p.id + ')">';
   html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">';
   if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
   html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
   html += '<div class="photo-info">' + (p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
+  if (photoSpecies) {
+    html += '<div class="photo-species">' + photoSpecies + ' ' + photoConf + '%</div>';
+  }
   html += '</div>';
   return html;
 }
@@ -941,6 +1264,213 @@ function setFilter(f) {
   });
   renderResults();
 }
+
+// -- Species correction --
+
+var _speciesSelection = {};  // { encounterIdx: speciesName }
+var _speciesSearchTimer = null;
+
+function openSpeciesPanel(ei) {
+  var panel = document.getElementById('speciesPanel' + ei);
+  if (!panel) return;
+  // Toggle visibility (handle both CSS class and inline style)
+  var isOpen = panel.classList.contains('open') || panel.style.display === 'block';
+  if (isOpen) {
+    panel.classList.remove('open');
+    panel.style.display = 'none';
+  } else {
+    panel.classList.add('open');
+    panel.style.display = 'block';
+  }
+  // Clear previous selection
+  _speciesSelection[ei] = null;
+  var apply = document.getElementById('speciesApply' + ei);
+  if (apply) apply.disabled = true;
+  // Clear suggestion highlights
+  var btns = document.querySelectorAll('#speciesSuggestions' + ei + ' .species-btn');
+  btns.forEach(function(b) { b.classList.remove('selected'); });
+  var input = document.getElementById('speciesInput' + ei);
+  if (input) input.value = '';
+}
+
+function closeSpeciesPanel(ei) {
+  var panel = document.getElementById('speciesPanel' + ei);
+  if (panel) { panel.classList.remove('open'); panel.style.display = 'none'; }
+  _speciesSelection[ei] = null;
+}
+
+function selectSpeciesSuggestion(ei, btn, species) {
+  // Deselect all, select this one
+  var btns = document.querySelectorAll('#speciesSuggestions' + ei + ' .species-btn');
+  btns.forEach(function(b) { b.classList.remove('selected'); });
+  btn.classList.add('selected');
+  _speciesSelection[ei] = species;
+  var input = document.getElementById('speciesInput' + ei);
+  if (input) input.value = '';
+  var dd = document.getElementById('speciesDropdown' + ei);
+  if (dd) dd.classList.remove('open');
+  var apply = document.getElementById('speciesApply' + ei);
+  if (apply) apply.disabled = false;
+}
+
+function onSpeciesSearch(ei, query) {
+  // Deselect suggestion buttons when typing
+  var btns = document.querySelectorAll('#speciesSuggestions' + ei + ' .species-btn');
+  btns.forEach(function(b) { b.classList.remove('selected'); });
+
+  var dd = document.getElementById('speciesDropdown' + ei);
+  if (!dd) return;
+
+  if (query.trim().length < 2) {
+    dd.classList.remove('open');
+    _speciesSelection[ei] = null;
+    var apply = document.getElementById('speciesApply' + ei);
+    if (apply) apply.disabled = true;
+    return;
+  }
+
+  // Enable apply with typed value
+  _speciesSelection[ei] = query.trim();
+  var apply = document.getElementById('speciesApply' + ei);
+  if (apply) apply.disabled = false;
+
+  // Debounced autocomplete search
+  clearTimeout(_speciesSearchTimer);
+  _speciesSearchTimer = setTimeout(function() {
+    fetch('/api/species/search?q=' + encodeURIComponent(query.trim()))
+    .then(function(r) { return r.json(); })
+    .then(function(results) {
+      if (!results || results.length === 0) {
+        dd.classList.remove('open');
+        return;
+      }
+      var html = '';
+      results.forEach(function(name) {
+        html += '<div class="species-dropdown-item" onclick="pickSpeciesDropdown(\'' + ei + '\', \'' + name.replace(/'/g, "\\'") + '\')">' + name + '</div>';
+      });
+      dd.innerHTML = html;
+      dd.classList.add('open');
+    })
+    .catch(function() { dd.classList.remove('open'); });
+  }, 200);
+}
+
+function pickSpeciesDropdown(ei, species) {
+  var input = document.getElementById('speciesInput' + ei);
+  if (input) input.value = species;
+  _speciesSelection[ei] = species;
+  var dd = document.getElementById('speciesDropdown' + ei);
+  if (dd) dd.classList.remove('open');
+  var btns = document.querySelectorAll('#speciesSuggestions' + ei + ' .species-btn');
+  btns.forEach(function(b) { b.classList.remove('selected'); });
+  var apply = document.getElementById('speciesApply' + ei);
+  if (apply) apply.disabled = false;
+}
+
+function applySpecies(ei) {
+  var species = _speciesSelection[ei];
+  if (!species) return;
+
+  var enc = pipelineResults.encounters[ei];
+  if (!enc) return;
+
+  var apply = document.getElementById('speciesApply' + ei);
+  if (apply) { apply.disabled = true; apply.textContent = 'Applying...'; }
+
+  fetch('/api/encounters/species', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      species: species,
+      photo_ids: enc.photo_ids || [],
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) {
+      if (apply) { apply.disabled = false; apply.textContent = 'Apply to all ' + enc.photo_count; }
+      return;
+    }
+    // Update local state
+    enc.confirmed_species = species;
+    // Update photo confirmed_species in local data
+    var photoMap = {};
+    pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+    (enc.photo_ids || []).forEach(function(pid) {
+      if (photoMap[pid]) photoMap[pid].confirmed_species = species;
+    });
+    closeSpeciesPanel(ei);
+    renderResults();
+  })
+  .catch(function() {
+    if (apply) { apply.disabled = false; apply.textContent = 'Apply to all ' + enc.photo_count; }
+  });
+}
+
+function applyBurstSpecies(panelKey, ei, bi) {
+  var species = _speciesSelection[panelKey];
+  if (!species) return;
+
+  var enc = pipelineResults.encounters[ei];
+  if (!enc || !enc.bursts || !enc.bursts[bi]) return;
+
+  var burstPhotoIds = enc.bursts[bi];
+  var apply = document.getElementById('speciesApply' + panelKey);
+  if (apply) { apply.disabled = true; apply.textContent = 'Applying...'; }
+
+  fetch('/api/encounters/species', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      species: species,
+      photo_ids: burstPhotoIds,
+    }),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) {
+      if (apply) { apply.disabled = false; apply.textContent = 'Apply to burst'; }
+      return;
+    }
+    // Update confirmed_species on burst photos in local data
+    var photoMap = {};
+    pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+    burstPhotoIds.forEach(function(pid) {
+      if (photoMap[pid]) photoMap[pid].confirmed_species = species;
+    });
+    // Update encounter confirmed_species: check if all bursts agree
+    var allConfirmed = true;
+    var encSpeciesSet = {};
+    (enc.photo_ids || []).forEach(function(pid) {
+      var p = photoMap[pid];
+      if (p && p.confirmed_species) {
+        encSpeciesSet[p.confirmed_species] = true;
+      } else {
+        allConfirmed = false;
+      }
+    });
+    var uniqueSpecies = Object.keys(encSpeciesSet);
+    if (allConfirmed && uniqueSpecies.length === 1) {
+      enc.confirmed_species = uniqueSpecies[0];
+    } else if (uniqueSpecies.length > 0) {
+      enc.confirmed_species = null;  // mixed — don't set encounter-level
+    }
+    closeSpeciesPanel(panelKey);
+    renderResults();
+  })
+  .catch(function() {
+    if (apply) { apply.disabled = false; apply.textContent = 'Apply to burst'; }
+  });
+}
+
+// Close dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.species-autocomplete-wrap')) {
+    document.querySelectorAll('.species-dropdown').forEach(function(dd) {
+      dd.classList.remove('open');
+    });
+  }
+});
 
 // -- Model config --
 
@@ -1040,7 +1570,8 @@ function runExtractMasks() {
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    var jobId = data.job_id;
+    var source = new EventSource('/api/jobs/' + jobId + '/stream');
     source.addEventListener('progress', function(e) {
       var p = JSON.parse(e.data);
       var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
@@ -1051,6 +1582,7 @@ function runExtractMasks() {
     });
     source.addEventListener('complete', function(e) {
       source.close();
+      window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: jobId}}));
       var result = JSON.parse(e.data);
       updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
       updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
@@ -1074,7 +1606,8 @@ function runRegroup() {
   .then(function(r) { return r.json(); })
   .then(function(data) {
     if (!data.job_id) { btn.disabled = false; showProgress(false); return; }
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
+    var jobId = data.job_id;
+    var source = new EventSource('/api/jobs/' + jobId + '/stream');
     source.addEventListener('progress', function(e) {
       var p = JSON.parse(e.data);
       var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
@@ -1083,6 +1616,7 @@ function runRegroup() {
     });
     source.addEventListener('complete', function(e) {
       source.close();
+      window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: jobId}}));
       var result = JSON.parse(e.data);
       updateProgress(100, result.status === 'completed' ? 'Done! Reloading...' : 'Failed');
       updateCenterProgress({phase: result.status === 'completed' ? 'Done! Reloading...' : 'Failed', current: 1, total: 1});
@@ -1333,8 +1867,9 @@ function openInspect(photoId) {
 
   // Encounter context filmstrip
   if (enc) {
-    var speciesName = enc.species ? (enc.species[0] || 'Unknown') : 'Unknown';
-    html += '<div class="context-label">Encounter: ' + speciesName + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
+    var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
+    var confirmedTag = enc.confirmed_species ? ' \u2713' : '';
+    html += '<div class="context-label">Encounter: ' + speciesName + confirmedTag + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
     html += '<div class="context-filmstrip">';
     (enc.photo_ids || []).forEach(function(pid) {
       var isCurrent = pid === photoId ? ' current' : '';

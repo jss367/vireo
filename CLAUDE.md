@@ -62,7 +62,7 @@ Workspace management: `workspaces`, `workspace_folders`
 When working on a task as a headless agent (e.g. via `claude --worktree`):
 
 1. Work on a **feature branch**, never commit directly to `main`.
-2. Run the lightweight tests before finishing: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_config.py -v`
+2. Run the lightweight tests before finishing: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
 3. **Create a PR** when done using `gh pr create`. Include what was changed and test results in the PR description.
 
 ## Debugging tips
