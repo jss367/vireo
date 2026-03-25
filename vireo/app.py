@@ -142,6 +142,9 @@ def create_app(db_path, thumb_cache_dir=None):
     # Catch uncaught exceptions so they don't disappear silently
     @app.errorhandler(Exception)
     def _handle_error(e):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
@@ -209,10 +212,6 @@ def create_app(db_path, thumb_cache_dir=None):
     def browse():
         return render_template("browse.html")
 
-    @app.route("/classify")
-    def classify():
-        return render_template("classify.html")
-
     @app.route("/review")
     def review():
         return render_template("review.html")
@@ -256,6 +255,43 @@ def create_app(db_path, thumb_cache_dir=None):
 
         return render_template(
             "pipeline.html",
+            total_photos=total_photos,
+            has_detections=has_detections,
+            has_masks=has_masks,
+            results=results,
+            pipeline_config={
+                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
+                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
+                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
+            },
+        )
+
+    @app.route("/pipeline/review")
+    def pipeline_review_page():
+        db = _get_db()
+        has_masks = db.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND p.mask_path IS NOT NULL""",
+            (db._active_workspace_id,),
+        ).fetchone()[0]
+        has_detections = db.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND p.detection_box IS NOT NULL""",
+            (db._active_workspace_id,),
+        ).fetchone()[0]
+        total_photos = db.count_photos()
+
+        from pipeline import load_results
+        import config as cfg
+        cache_dir = os.path.dirname(db_path)
+        results = load_results(cache_dir, db._active_workspace_id)
+        effective_cfg = db.get_effective_config(cfg.load())
+        pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        return render_template(
+            "pipeline_review.html",
             total_photos=total_photos,
             has_detections=has_detections,
             has_masks=has_masks,

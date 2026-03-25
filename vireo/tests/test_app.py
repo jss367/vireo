@@ -130,6 +130,22 @@ def test_species_search(app_and_db):
     assert resp.get_json() == []
 
 
+def test_pipeline_review_page(app_and_db):
+    """GET /pipeline/review returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/pipeline/review')
+    assert resp.status_code == 200
+
+
+def test_classify_route_removed(app_and_db):
+    """GET /classify should return 404 after removal."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/classify')
+    assert resp.status_code == 404
+
+
 def test_pipeline_regroup_accepts_collection_id(app_and_db):
     """POST /api/jobs/regroup accepts collection_id parameter."""
     app, db = app_and_db
