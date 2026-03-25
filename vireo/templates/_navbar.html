@@ -876,6 +876,7 @@ async function createWorkspace() {
 (function() {
   if (sessionStorage.getItem('vireo_ws_switched')) {
     sessionStorage.removeItem('vireo_ws_switched');
+    document.addEventListener('DOMContentLoaded', function() {
     safeFetch('/api/audit/drift', {}, { toast: false }).then(function(drifts) {
       if (drifts && drifts.length > 0) {
         var driftToast = document.createElement('div');
@@ -891,6 +892,7 @@ async function createWorkspace() {
         setTimeout(function() { if (driftToast.parentElement) driftToast.remove(); }, 15000);
       }
     }).catch(function() {});
+    });
   }
 })();
 </script>
@@ -1346,14 +1348,6 @@ function closeSimilar() {
 </div>
 
 <script>
-/* ---------- Shared Utilities ---------- */
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 /* ---------- Toast Notifications ---------- */
 (function() {
   var container = document.createElement('div');
@@ -1725,12 +1719,21 @@ function formatDuration(seconds) {
         }
         html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
         var detail = '';
+        var isBytes = j.type && j.type.indexOf('download') !== -1 && j.progress && j.progress.total > 1000000;
         if (j.progress && j.progress.current > 0) {
-          detail = j.progress.current.toLocaleString();
-          if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
+          if (isBytes) {
+            detail = (j.progress.current / (1024*1024)).toFixed(0) + ' MB';
+            if (j.progress.total > 0) detail += ' / ' + (j.progress.total / (1024*1024)).toFixed(0) + ' MB';
+          } else {
+            detail = j.progress.current.toLocaleString();
+            if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
+          }
+        }
+        if (j.progress && j.progress.rate > 0) {
+          detail += ' \u2014 ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';
         }
         if (j.progress && j.progress.current_file) {
-          detail += ' ' + bpEscape(j.progress.current_file);
+          detail += (detail ? ' ' : '') + bpEscape(j.progress.current_file);
         }
         html += '<div class="bp-job-detail">' + detail + '</div>';
       } else if (j.status === 'completed' && j.result) {
@@ -1774,7 +1777,15 @@ function formatDuration(seconds) {
     }
     if (j.progress && j.progress.total > 0) {
       var pct = Math.round((j.progress.current / j.progress.total) * 100);
-      text += ' ' + j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+      var isBytes = j.type && j.type.indexOf('download') !== -1 && j.progress.total > 1000000;
+      if (isBytes) {
+        text += ' ' + (j.progress.current / (1024*1024)).toFixed(0) + '/' + (j.progress.total / (1024*1024)).toFixed(0) + ' MB (' + pct + '%)';
+      } else {
+        text += ' ' + j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString() + ' (' + pct + '%)';
+      }
+      if (j.progress.rate > 0) {
+        text += ' ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';
+      }
     } else if (j.progress && j.progress.current_file) {
       text += ' ' + j.progress.current_file;
     }
@@ -1848,3 +1859,4 @@ function formatDuration(seconds) {
   }
 })();
 </script>
+<script src="/static/vireo-utils.js"></script>

@@ -1411,12 +1411,6 @@ function scrollToCard(idx) {
   if (cards[idx]) cards[idx].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
-/* ---------- Utilities ---------- */
-function escapeAttr(str) {
-  if (str == null) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 async function developSelected() {
   var ids = Array.from(selectedPhotos);
   if (!ids.length) return;

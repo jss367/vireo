@@ -1041,12 +1041,6 @@ function updateThumbSize(val) {
   renderGrid();
 }
 
-/* ---------- Utilities ---------- */
-function escapeAttr(str) {
-  if (str == null) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
 /* ==================== Group Review Modal ==================== */
 var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
 

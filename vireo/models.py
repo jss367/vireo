@@ -328,6 +328,68 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
             _time.sleep(wait)
 
 
+def _get_total_cache_size(repo_id):
+    """Return total bytes of all blobs in the HF cache for a repo."""
+    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    blobs_dir = os.path.join(
+        cache_dir, "models--" + repo_id.replace("/", "--"), "blobs"
+    )
+    if not os.path.isdir(blobs_dir):
+        return 0
+    total = 0
+    for f in os.listdir(blobs_dir):
+        fp = os.path.join(blobs_dir, f)
+        if os.path.isfile(fp):
+            total += os.path.getsize(fp)
+    return total
+
+
+def _download_with_byte_progress(repo_id, filename, file_size,
+                                  progress_callback=None):
+    """Download a file into the HF cache with byte-level progress polling.
+
+    Calls hf_hub_download directly (no copy to a local_dir) and polls the
+    total cache blob size every 0.5s to report per-file bytes via delta.
+
+    Args:
+        repo_id: HuggingFace repo (e.g. "timm/eva02_large...")
+        filename: File within the repo
+        file_size: Expected file size in bytes (from repo metadata)
+        progress_callback: callable(bytes_downloaded, file_size, rate_bytes_per_sec)
+    """
+    from huggingface_hub import hf_hub_download
+    import threading
+    import time as _time
+
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
+
+    baseline = _get_total_cache_size(repo_id)
+    stop_event = threading.Event()
+    last_reported = [0]
+    last_time = [_time.monotonic()]
+
+    def poll_loop():
+        while not stop_event.is_set():
+            delta = _get_total_cache_size(repo_id) - baseline
+            now = _time.monotonic()
+            dt = now - last_time[0]
+            if delta > last_reported[0] and dt > 0:
+                rate = (delta - last_reported[0]) / dt
+                last_reported[0] = delta
+                last_time[0] = now
+                if progress_callback:
+                    progress_callback(min(delta, file_size), file_size, rate)
+            stop_event.wait(0.5)
+
+    poller = threading.Thread(target=poll_loop, daemon=True)
+    poller.start()
+    try:
+        return hf_hub_download(repo_id=repo_id, filename=filename)
+    finally:
+        stop_event.set()
+        poller.join(timeout=2)
+
+
 def download_model(model_id, progress_callback=None):
     """Download a known model. Returns the weights path."""
     known = {m["id"]: m for m in KNOWN_MODELS}
@@ -401,40 +463,94 @@ def download_model(model_id, progress_callback=None):
         return path
 
     elif km.get("model_type") == "timm":
-        # timm models auto-download from HuggingFace on first create_model()
+        # Pre-download files from HF with byte-level progress, then let
+        # timm load from cache.
         try:
             import timm
         except ImportError:
             raise RuntimeError("timm not installed. Run: pip install timm")
 
         model_name = km["model_str"]
+        hf_repo = model_name.replace("hf-hub:", "")
+
+        from huggingface_hub import HfApi
+
+        log.info("Fetching file list for %s", hf_repo)
         if progress_callback:
             progress_callback(
-                f"Downloading {km['name']} via timm...",
+                f"Fetching file list for {km['name']}...",
                 current=0,
-                total=1,
+                total=0,
             )
 
-        log.info("Downloading timm model: %s", model_name)
-        # This triggers the HuggingFace download
+        # Get file metadata (names + sizes)
+        api = HfApi()
+        repo_info = api.model_info(hf_repo, files_metadata=True)
+        files_meta = {
+            s.rfilename: s.size or 0
+            for s in (repo_info.siblings or [])
+        }
+        total_bytes = sum(files_meta.values())
+        downloaded_bytes = [0]
+        total_files = len(files_meta)
+
+        for fi, (filename, file_size) in enumerate(files_meta.items()):
+            def file_progress(current_bytes, _total, rate,
+                              _fn=filename, _fs=file_size):
+                overall = downloaded_bytes[0] + current_bytes
+                size_mb = current_bytes // (1024 * 1024)
+                total_mb = _fs // (1024 * 1024) if _fs else 0
+                if progress_callback:
+                    progress_callback(
+                        f"{_fn} ({size_mb}/{total_mb} MB)",
+                        current=overall,
+                        total=total_bytes,
+                        rate=rate,
+                    )
+
+            log.info(
+                "Downloading %s/%s (%d/%d, %d MB)",
+                hf_repo, filename, fi + 1, total_files,
+                file_size // (1024 * 1024),
+            )
+
+            if progress_callback:
+                progress_callback(
+                    f"Downloading {fi + 1}/{total_files}: {filename}",
+                    current=downloaded_bytes[0],
+                    total=total_bytes,
+                    rate=0,
+                )
+
+            _download_with_byte_progress(
+                hf_repo, filename, file_size,
+                progress_callback=file_progress,
+            )
+            downloaded_bytes[0] += file_size
+
+        if progress_callback:
+            progress_callback(
+                f"Loading {km['name']} into timm...",
+                current=total_bytes,
+                total=total_bytes,
+            )
+
+        # All files are cached — timm.create_model finds them instantly
+        log.info("All files cached, loading timm model: %s", model_name)
         timm.create_model(model_name, pretrained=True)
 
-        # Find the cached weights path in the HF cache
-        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-        # model_str is "hf-hub:timm/model_name" — extract "timm/model_name" for cache
-        hf_repo = model_name.replace("hf-hub:", "")
+        cache_dir_root = os.path.expanduser("~/.cache/huggingface/hub")
         repo_dir = os.path.join(
-            cache_dir, "models--" + hf_repo.replace("/", "--")
+            cache_dir_root, "models--" + hf_repo.replace("/", "--")
         )
         if not os.path.isdir(repo_dir):
-            # Fall back — just record the model_str as a sentinel
             repo_dir = model_name
 
         if progress_callback:
             progress_callback(
                 f"{km['name']} download complete!",
-                current=1,
-                total=1,
+                current=total_bytes,
+                total=total_bytes,
             )
 
         register_model(model_id, km["name"], model_name, repo_dir, km["description"])
