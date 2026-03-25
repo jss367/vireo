@@ -1017,10 +1017,11 @@ def create_app(db_path, thumb_cache_dir=None):
             models.add(model)
             if pid not in by_photo:
                 by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
-            by_photo[pid]["predictions"][model] = {
-                "species": d["species"],
-                "confidence": d["confidence"],
-            }
+            if model not in by_photo[pid]["predictions"]:
+                by_photo[pid]["predictions"][model] = {
+                    "species": d["species"],
+                    "confidence": d["confidence"],
+                }
 
         return jsonify({
             "models": sorted(models),
