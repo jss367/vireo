@@ -3002,9 +3002,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             if model_type == "timm":
                 log.info(
-                    "Classification config: model=%s (timm), threshold=%.0f%% — no labels needed",
+                    "Classification config: model=%s (timm) — no labels needed",
                     effective_name,
-                    threshold * 100,
                 )
             else:
                 labels_files = body.get("labels_files")
@@ -3035,17 +3034,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 # Log what we're using
                 if labels:
                     log.info(
-                        "Classification config: model=%s, labels=%d from %s, threshold=%.0f%%",
+                        "Classification config: model=%s, labels=%d from %s",
                         effective_name,
                         len(labels),
                         labels_file or "active labels",
-                        threshold * 100,
                     )
                 else:
                     log.info(
-                        "Classification config: model=%s, no labels selected, threshold=%.0f%%",
+                        "Classification config: model=%s, no labels selected",
                         effective_name,
-                        threshold * 100,
                     )
 
                 tol_supported_models = {
