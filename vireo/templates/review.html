@@ -582,8 +582,7 @@ var mode = 'review';
 var _shortcuts = null;
 (async function() {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     _shortcuts = (cfg.keyboard_shortcuts || {}).review || {accept: 'a', skip: 's'};
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
     var el = document.getElementById('kbdHintReview');
@@ -600,8 +599,7 @@ function setMinConfidence(val) {
 
 async function loadCollectionFilter() {
   try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
+    var collections = await safeFetch('/api/collections', {}, { toast: false });
     var sel = document.getElementById('collectionFilter');
     collections.forEach(function(c) {
       var opt = document.createElement('option');
@@ -620,8 +618,7 @@ async function switchCollection(val) {
   } else {
     // Fetch photo IDs in this collection
     try {
-      var resp = await fetch('/api/collections/' + val + '/photos?per_page=999999');
-      var data = await resp.json();
+      var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
       predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
     } catch(e) {
@@ -640,8 +637,7 @@ async function loadPredictions() {
   document.getElementById('empty').style.display = 'none';
 
   try {
-    var allResp = await fetch('/api/predictions');
-    allPredictions = await allResp.json();
+    allPredictions = await safeFetch('/api/predictions', {}, { toast: false });
 
     // Re-apply collection filter if active
     if (currentCollection !== 'all' && collectionPhotoIds) {
@@ -683,8 +679,7 @@ function renderAll() {
 
 async function checkPendingSync() {
   try {
-    var resp = await fetch('/api/sync/status');
-    var data = await resp.json();
+    var data = await safeFetch('/api/sync/status', {}, { toast: false });
     var banner = document.getElementById('syncBanner');
     if (data.pending_count > 0) {
       document.getElementById('syncBannerText').textContent =
@@ -701,25 +696,26 @@ async function runSync() {
   var status = document.getElementById('syncStatus');
   status.textContent = 'Syncing...';
   try {
-    var resp = await fetch('/api/jobs/sync', {method: 'POST'});
-    var data = await resp.json();
+    var data = await safeFetch('/api/jobs/sync', {method: 'POST'}, { toast: false });
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.total > 0) {
-        status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
-      }
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        status.textContent = 'Synced!';
-        status.style.color = 'var(--accent,#24E5CA)';
-        setTimeout(checkPendingSync, 1000);
-      } else {
-        status.textContent = 'Failed';
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.total > 0) {
+          status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          status.textContent = 'Synced!';
+          status.style.color = 'var(--accent,#24E5CA)';
+          setTimeout(checkPendingSync, 1000);
+        } else {
+          status.textContent = 'Failed';
+          status.style.color = 'var(--danger,#e74c3c)';
+        }
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
         status.style.color = 'var(--danger,#e74c3c)';
       }
     });
@@ -999,14 +995,18 @@ function groupMembersHtml(pred) {
 
 /* ---------- Actions ---------- */
 async function acceptPrediction(predId) {
-  await fetch('/api/predictions/' + predId + '/accept', { method: 'POST' });
+  try {
+    await safeFetch('/api/predictions/' + predId + '/accept', { method: 'POST' });
+  } catch(e) { return; }
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'accepted';
   renderAll();
 }
 
 async function rejectPrediction(predId) {
-  await fetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
+  try {
+    await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
+  } catch(e) { return; }
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'rejected';
   renderAll();
@@ -1015,8 +1015,10 @@ async function rejectPrediction(predId) {
 async function acceptAllPending() {
   var pending = predictions.filter(function(p) { return p.status === 'pending'; });
   for (var i = 0; i < pending.length; i++) {
-    await fetch('/api/predictions/' + pending[i].id + '/accept', { method: 'POST' });
-    pending[i].status = 'accepted';
+    try {
+      await safeFetch('/api/predictions/' + pending[i].id + '/accept', { method: 'POST' });
+      pending[i].status = 'accepted';
+    } catch(e) { break; }
   }
   renderAll();
 }
@@ -1040,13 +1042,6 @@ function updateThumbSize(val) {
 }
 
 /* ---------- Utilities ---------- */
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 function escapeAttr(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1068,8 +1063,7 @@ function closeGroupReview() {
 
 async function loadGroupData(groupId) {
   try {
-    var resp = await fetch('/api/predictions/group/' + encodeURIComponent(groupId));
-    grmState.items = await resp.json();
+    grmState.items = await safeFetch('/api/predictions/group/' + encodeURIComponent(groupId), {}, { toast: false });
 
     // Auto-pick the AI best (highest quality score)
     var best = null;
@@ -1294,7 +1288,7 @@ function grmRemoveFromGroup() {
 async function grmApply() {
   var species = document.getElementById('grmSpecies').value.trim();
   try {
-    await fetch('/api/predictions/group/apply', {
+    await safeFetch('/api/predictions/group/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1366,7 +1360,7 @@ function updateSyncThumbSize(val) {
 
 async function discardPhotoChanges(changeIds, btn) {
   try {
-    await fetch('/api/sync/discard', {
+    await safeFetch('/api/sync/discard', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: changeIds}),
@@ -1393,8 +1387,7 @@ async function openSyncPreview() {
   content.innerHTML = '<p style="color:var(--text-dim,#888);padding:20px;">Loading changes...</p>';
 
   try {
-    var resp = await fetch('/api/sync/preview');
-    _syncPreviewData = await resp.json();
+    _syncPreviewData = await safeFetch('/api/sync/preview', {}, { toast: false });
     renderSyncPreview();
   } catch(e) {
     content.innerHTML = '<p style="color:var(--danger,#e74c3c);padding:20px;">Failed to load: ' + e.message + '</p>';
@@ -1499,7 +1492,7 @@ function closeSyncPreview() {
 
 async function discardChange(changeId, rowEl) {
   try {
-    await fetch('/api/sync/discard', {
+    await safeFetch('/api/sync/discard', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: [changeId]}),
@@ -1514,13 +1507,12 @@ async function discardChange(changeId, rowEl) {
 async function discardAllChanges() {
   if (!confirm('Discard ALL pending changes? Nothing will be written to XMP.')) return;
   try {
-    var resp = await fetch('/api/sync/preview');
-    var data = await resp.json();
+    var data = await safeFetch('/api/sync/preview', {}, { toast: false });
     var allIds = [];
     data.photos.forEach(function(p) {
       p.changes.forEach(function(c) { allIds.push(c.id); });
     });
-    await fetch('/api/sync/discard', {
+    await safeFetch('/api/sync/discard', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({change_ids: allIds}),
