@@ -345,17 +345,20 @@ def _get_total_cache_size(repo_id):
 
 
 def _download_with_byte_progress(repo_id, filename, file_size,
-                                  progress_callback=None):
-    """Download a file into the HF cache with byte-level progress polling.
+                                  progress_callback=None,
+                                  stall_timeout=120):
+    """Download a file into the HF cache with byte-level progress and stall detection.
 
-    Calls hf_hub_download directly (no copy to a local_dir) and polls the
-    total cache blob size every 0.5s to report per-file bytes via delta.
+    Runs hf_hub_download in a daemon thread while the main thread polls
+    blob sizes for progress. Raises TimeoutError if no new bytes appear
+    for *stall_timeout* seconds, allowing the caller to retry.
 
     Args:
         repo_id: HuggingFace repo (e.g. "timm/eva02_large...")
         filename: File within the repo
         file_size: Expected file size in bytes (from repo metadata)
         progress_callback: callable(bytes_downloaded, file_size, rate_bytes_per_sec)
+        stall_timeout: Seconds with no progress before raising TimeoutError.
     """
     from huggingface_hub import hf_hub_download
     import threading
@@ -364,30 +367,49 @@ def _download_with_byte_progress(repo_id, filename, file_size,
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
     baseline = _get_total_cache_size(repo_id)
-    stop_event = threading.Event()
-    last_reported = [0]
-    last_time = [_time.monotonic()]
+    result = [None]
+    error = [None]
+    done = threading.Event()
 
-    def poll_loop():
-        while not stop_event.is_set():
-            delta = _get_total_cache_size(repo_id) - baseline
-            now = _time.monotonic()
-            dt = now - last_time[0]
-            if delta > last_reported[0] and dt > 0:
-                rate = (delta - last_reported[0]) / dt
-                last_reported[0] = delta
-                last_time[0] = now
-                if progress_callback:
-                    progress_callback(min(delta, file_size), file_size, rate)
-            stop_event.wait(0.5)
+    def do_download():
+        try:
+            result[0] = hf_hub_download(repo_id=repo_id, filename=filename)
+        except Exception as e:
+            error[0] = e
+        finally:
+            done.set()
 
-    poller = threading.Thread(target=poll_loop, daemon=True)
-    poller.start()
-    try:
-        return hf_hub_download(repo_id=repo_id, filename=filename)
-    finally:
-        stop_event.set()
-        poller.join(timeout=2)
+    dl_thread = threading.Thread(target=do_download, daemon=True)
+    dl_thread.start()
+
+    last_size = baseline
+    last_progress_time = _time.monotonic()
+
+    while not done.is_set():
+        current_total = _get_total_cache_size(repo_id)
+        delta = current_total - baseline
+        now = _time.monotonic()
+
+        if current_total > last_size:
+            dt = now - last_progress_time
+            rate = (current_total - last_size) / dt if dt > 0 else 0
+            last_size = current_total
+            last_progress_time = now
+            if progress_callback:
+                progress_callback(min(delta, file_size), file_size, rate)
+        elif stall_timeout and (now - last_progress_time) > stall_timeout:
+            mb_done = delta // (1024 * 1024)
+            mb_total = file_size // (1024 * 1024)
+            raise TimeoutError(
+                f"Download stalled: no new data for {stall_timeout}s "
+                f"({mb_done}/{mb_total} MB)"
+            )
+
+        done.wait(0.5)
+
+    if error[0]:
+        raise error[0]
+    return result[0]
 
 
 def download_model(model_id, progress_callback=None):
@@ -494,6 +516,8 @@ def download_model(model_id, progress_callback=None):
         downloaded_bytes = [0]
         total_files = len(files_meta)
 
+        import time as _time
+
         for fi, (filename, file_size) in enumerate(files_meta.items()):
             def file_progress(current_bytes, _total, rate,
                               _fn=filename, _fs=file_size):
@@ -522,10 +546,58 @@ def download_model(model_id, progress_callback=None):
                     rate=0,
                 )
 
-            _download_with_byte_progress(
-                hf_repo, filename, file_size,
-                progress_callback=file_progress,
-            )
+            # Retry loop — stalls and connection errors are common for
+            # multi-GB files on HF's XET storage backend.
+            max_stalled = 5
+            stalled_count = 0
+            last_blob_size = _get_total_cache_size(hf_repo)
+
+            for attempt in range(1, max_stalled + 1):
+                try:
+                    _download_with_byte_progress(
+                        hf_repo, filename, file_size,
+                        progress_callback=file_progress,
+                    )
+                    break  # success
+                except Exception as e:
+                    current_blob_size = _get_total_cache_size(hf_repo)
+                    made_progress = current_blob_size > last_blob_size
+
+                    if made_progress:
+                        stalled_count = 0
+                        last_blob_size = current_blob_size
+                        log.info(
+                            "Download interrupted but made progress "
+                            "(%d MB cached), retrying (attempt %d): %s",
+                            current_blob_size // (1024 * 1024), attempt, e,
+                        )
+                    else:
+                        stalled_count += 1
+                        log.warning(
+                            "Download stalled with no progress "
+                            "(attempt %d, %d/%d stalls): %s",
+                            attempt, stalled_count, max_stalled, e,
+                        )
+
+                    if stalled_count >= max_stalled:
+                        raise RuntimeError(
+                            f"Download of {filename} stalled after "
+                            f"{attempt} attempts with no new data. "
+                            f"Try again — the download will resume "
+                            f"from where it left off."
+                        ) from e
+
+                    wait = min(3 * attempt, 15)
+                    if progress_callback:
+                        progress_callback(
+                            f"Retrying {filename} in {wait}s "
+                            f"(attempt {attempt + 1})...",
+                            current=downloaded_bytes[0],
+                            total=total_bytes,
+                            rate=0,
+                        )
+                    _time.sleep(wait)
+
             downloaded_bytes[0] += file_size
 
         if progress_callback:
