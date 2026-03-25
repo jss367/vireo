@@ -700,7 +700,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     </div>
   </div>
   <a href="/browse" {% if active_page == 'browse' %}class="active"{% endif %}>Browse</a>
-  <a href="/classify" {% if active_page == 'classify' %}class="active"{% endif %}>Classify</a>
+  <a href="/pipeline/review" {% if active_page == 'pipeline_review' %}class="active"{% endif %}>Pipeline Review</a>
   <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
   <a href="/import" {% if active_page == 'import' %}class="active"{% endif %}>Import</a>
   <a href="/cull" {% if active_page == 'cull' %}class="active"{% endif %}>Cull</a>
@@ -1609,6 +1609,17 @@ function formatDuration(seconds) {
   }
 
   /* ---------- Jobs polling ---------- */
+  // Pages signal job completion via this event so activeJobs stays current
+  window.addEventListener('vireo-job-done', function(e) {
+    var jobId = e.detail && e.detail.job_id;
+    if (jobId) {
+      activeJobs = activeJobs.filter(function(j) { return j.id !== jobId; });
+      renderJobs();
+      updateSummary();
+      updateActivityDot();
+    }
+  });
+
   function pollJobs() {
     fetch('/api/jobs')
       .then(function(r) { return r.json(); })

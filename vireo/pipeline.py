@@ -59,20 +59,39 @@ def load_photo_features(db, collection_id=None):
 
     Args:
         db: Database instance with active workspace
+        collection_id: optional collection ID to scope results
 
     Returns:
         list of photo dicts
     """
     ws_id = db._ws_id()
 
-    rows = db.conn.execute(
-        f"""SELECT {_PIPELINE_PHOTO_COLS}
-            FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
-            ORDER BY p.timestamp""",
-        (ws_id,),
-    ).fetchall()
+    # Resolve collection to photo IDs if scoping is requested
+    collection_photo_ids = None
+    if collection_id is not None:
+        collection_photo_ids = _resolve_collection_photo_ids(db, collection_id)
+        if not collection_photo_ids:
+            return []
+
+    if collection_photo_ids is not None:
+        placeholders = ",".join("?" for _ in collection_photo_ids)
+        rows = db.conn.execute(
+            f"""SELECT {_PIPELINE_PHOTO_COLS}
+                FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})
+                ORDER BY p.timestamp""",
+            (ws_id, *collection_photo_ids),
+        ).fetchall()
+    else:
+        rows = db.conn.execute(
+            f"""SELECT {_PIPELINE_PHOTO_COLS}
+                FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ?
+                ORDER BY p.timestamp""",
+            (ws_id,),
+        ).fetchall()
 
     # Load species predictions (top-5 per photo, ordered by confidence)
     pred_rows = db.conn.execute(
@@ -91,6 +110,17 @@ def load_photo_features(db, collection_id=None):
         pid = pr["photo_id"]
         if len(species_by_photo[pid]) < 5:
             species_by_photo[pid].append((pr["species"], pr["confidence"]))
+
+    # Load user-confirmed species keywords
+    species_kw_rows = db.conn.execute(
+        """SELECT pk.photo_id, k.name
+           FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           WHERE k.is_species = 1"""
+    ).fetchall()
+    confirmed_by_photo = {}
+    for row in species_kw_rows:
+        confirmed_by_photo[row["photo_id"]] = row["name"]
 
     photos = []
     for row in rows:
@@ -129,6 +159,7 @@ def load_photo_features(db, collection_id=None):
             "dino_subject_embedding": subj_emb,
             "dino_global_embedding": global_emb,
             "species_top5": species_by_photo.get(pid, []),
+            "confirmed_species": confirmed_by_photo.get(pid),
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],
@@ -307,12 +338,42 @@ def serialize_results(results):
 
     serialized_encounters = []
     for enc in results["encounters"]:
+        photos_list = enc.get("photos", [])
+
+        # Derive confirmed_species from photos (any confirmed photo sets encounter)
+        enc_confirmed = None
+        for p in photos_list:
+            if p.get("confirmed_species"):
+                enc_confirmed = p["confirmed_species"]
+                break
+
+        # Build species vote summary from predictions across all photos
+        vote_counts = defaultdict(int)
+        vote_conf_sums = defaultdict(float)
+        for p in photos_list:
+            top5 = p.get("species_top5") or []
+            if top5:
+                top_species = top5[0][0]
+                top_conf = top5[0][1]
+                vote_counts[top_species] += 1
+                vote_conf_sums[top_species] += top_conf
+        species_votes = []
+        for sp in sorted(vote_counts, key=lambda s: vote_counts[s], reverse=True):
+            avg_conf = vote_conf_sums[sp] / vote_counts[sp] if vote_counts[sp] else 0
+            species_votes.append({
+                "species": sp,
+                "count": vote_counts[sp],
+                "avg_confidence": round(avg_conf, 4),
+            })
+
         s_enc = {
             "species": enc.get("species"),
+            "confirmed_species": enc_confirmed,
+            "species_votes": species_votes,
             "photo_count": enc.get("photo_count"),
             "burst_count": enc.get("burst_count"),
             "time_range": enc.get("time_range"),
-            "photo_ids": [p["id"] for p in enc.get("photos", [])],
+            "photo_ids": [p["id"] for p in photos_list],
         }
         if "bursts" in enc:
             s_enc["bursts"] = [

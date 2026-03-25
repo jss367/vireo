@@ -142,6 +142,9 @@ def create_app(db_path, thumb_cache_dir=None):
     # Catch uncaught exceptions so they don't disappear silently
     @app.errorhandler(Exception)
     def _handle_error(e):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
@@ -209,10 +212,6 @@ def create_app(db_path, thumb_cache_dir=None):
     def browse():
         return render_template("browse.html")
 
-    @app.route("/classify")
-    def classify():
-        return render_template("classify.html")
-
     @app.route("/review")
     def review():
         return render_template("review.html")
@@ -245,6 +244,12 @@ def create_app(db_path, thumb_cache_dir=None):
                WHERE wf.workspace_id = ? AND p.detection_box IS NOT NULL""",
             (db._active_workspace_id,),
         ).fetchone()[0]
+        has_sharpness = db.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND p.subject_tenengrad IS NOT NULL""",
+            (db._active_workspace_id,),
+        ).fetchone()[0]
         total_photos = db.count_photos()
 
         from pipeline import load_results
@@ -256,6 +261,44 @@ def create_app(db_path, thumb_cache_dir=None):
 
         return render_template(
             "pipeline.html",
+            total_photos=total_photos,
+            has_detections=has_detections,
+            has_masks=has_masks,
+            has_sharpness=has_sharpness,
+            results=results,
+            pipeline_config={
+                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
+                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
+                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
+            },
+        )
+
+    @app.route("/pipeline/review")
+    def pipeline_review_page():
+        db = _get_db()
+        has_masks = db.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND p.mask_path IS NOT NULL""",
+            (db._active_workspace_id,),
+        ).fetchone()[0]
+        has_detections = db.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND p.detection_box IS NOT NULL""",
+            (db._active_workspace_id,),
+        ).fetchone()[0]
+        total_photos = db.count_photos()
+
+        from pipeline import load_results
+        import config as cfg
+        cache_dir = os.path.dirname(db_path)
+        results = load_results(cache_dir, db._active_workspace_id)
+        effective_cfg = db.get_effective_config(cfg.load())
+        pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        return render_template(
+            "pipeline_review.html",
             total_photos=total_photos,
             has_detections=has_detections,
             has_masks=has_masks,
@@ -2390,15 +2433,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 # The model is loaded via torch.hub.load which downloads the repo
                 # Weights are auto-downloaded on first model creation
                 status = "repo cached"
-                try:
-                    total = sum(
-                        os.path.getsize(os.path.join(dp, f))
-                        for dp, _, filenames in os.walk(dinov2_hub)
-                        for f in filenames
-                    )
-                    size = round(total / 1024 / 1024, 1)
-                except Exception:
-                    pass
             if os.path.exists(hf_dinov2):
                 pt_files = glob.glob(os.path.join(hf_dinov2, "snapshots", "**", "*.bin"), recursive=True)
                 if pt_files:
@@ -4274,6 +4308,7 @@ def create_app(db_path, thumb_cache_dir=None):
         Requires extract-masks to have been run first.
         """
         body = request.get_json(silent=True) or {}
+        collection_id = body.get("collection_id")
 
         import config as cfg
 
@@ -4299,7 +4334,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 {"phase": "Loading features from database", "current": 0, "total": 3},
             )
 
-            photos = load_photo_features(thread_db)
+            photos = load_photo_features(thread_db, collection_id=collection_id)
             if not photos:
                 return {"error": "No photos with pipeline features found. Run extract-masks first."}
 
@@ -4324,6 +4359,83 @@ def create_app(db_path, thumb_cache_dir=None):
 
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg})
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/encounters/species", methods=["POST"])
+    def api_encounter_species():
+        """Confirm species for all photos in an encounter.
+
+        Expects JSON: {"species": "Blue Jay", "photo_ids": [1, 2, 3]}
+        Creates species keyword, tags photos, queues pending changes.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        species = body.get("species", "").strip()
+        photo_ids = body.get("photo_ids", [])
+
+        if not species:
+            return jsonify({"error": "species is required"}), 400
+        if not photo_ids:
+            return jsonify({"error": "photo_ids is required"}), 400
+
+        # Create or find the species keyword
+        kid = db.add_keyword(species, is_species=True)
+
+        # Tag all photos and queue pending changes
+        for pid in photo_ids:
+            db.tag_photo(pid, kid)
+            db.queue_change(pid, "keyword_add", species)
+
+        return jsonify({
+            "ok": True,
+            "species": species,
+            "keyword_id": kid,
+            "photo_count": len(photo_ids),
+        })
+
+    @app.route("/api/species/search")
+    def api_species_search():
+        """Search species names from active label sets for autocomplete."""
+        q = request.args.get("q", "").strip().lower()
+        if len(q) < 2:
+            return jsonify([])
+
+        from labels import get_active_labels
+
+        matches = []
+        seen = set()
+        for label_set in get_active_labels():
+            labels_file = label_set.get("labels_file", "")
+            if not labels_file or not os.path.exists(labels_file):
+                continue
+            try:
+                with open(labels_file) as f:
+                    for line in f:
+                        name = line.strip()
+                        if not name:
+                            continue
+                        name_lower = name.lower()
+                        if q in name_lower and name_lower not in seen:
+                            seen.add(name_lower)
+                            matches.append(name)
+                            if len(matches) >= 20:
+                                break
+            except Exception:
+                pass
+            if len(matches) >= 20:
+                break
+
+        # Also search existing species keywords in the database
+        db = _get_db()
+        kw_rows = db.conn.execute(
+            "SELECT name FROM keywords WHERE is_species = 1 AND LOWER(name) LIKE ?",
+            (f"%{q}%",),
+        ).fetchall()
+        for row in kw_rows:
+            if row["name"].lower() not in seen:
+                seen.add(row["name"].lower())
+                matches.append(row["name"])
+
+        return jsonify(matches[:20])
 
     @app.route("/api/pipeline/results")
     def api_pipeline_results():
