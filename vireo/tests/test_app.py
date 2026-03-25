@@ -180,7 +180,8 @@ def test_pages_link_base_css(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
     pages = ['/browse', '/import', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/stats']
+             '/settings', '/workspace', '/pipeline', '/dashboard',
+             '/review', '/cull', '/pipeline/review']
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
