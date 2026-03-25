@@ -159,7 +159,7 @@ function renderTable(data) {
 
     html += '<tr class="' + (disagree ? 'disagree' : '') + '">';
     html += '<td><div class="thumb-cell">';
-    html += '<img src="/api/thumbnails/' + photo.photo_id + '" alt="">';
+    html += '<img src="/thumbnails/' + photo.photo_id + '.jpg" loading="lazy" alt="">';
     html += '<span>' + escHtml(photo.filename) + '</span>';
     html += '</div></td>';
 
