@@ -111,16 +111,18 @@ def load_photo_features(db, collection_id=None):
         if len(species_by_photo[pid]) < 5:
             species_by_photo[pid].append((pr["species"], pr["confidence"]))
 
-    # Load user-confirmed species keywords
+    # Load user-confirmed species keywords (alphabetically first wins
+    # for photos with multiple species tags — rare but deterministic)
     species_kw_rows = db.conn.execute(
         """SELECT pk.photo_id, k.name
            FROM photo_keywords pk
            JOIN keywords k ON k.id = pk.keyword_id
-           WHERE k.is_species = 1"""
+           WHERE k.is_species = 1
+           ORDER BY k.name"""
     ).fetchall()
     confirmed_by_photo = {}
     for row in species_kw_rows:
-        confirmed_by_photo[row["photo_id"]] = row["name"]
+        confirmed_by_photo.setdefault(row["photo_id"], row["name"])
 
     photos = []
     for row in rows:

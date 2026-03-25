@@ -318,6 +318,26 @@ def test_load_photo_features_confirmed_species(tmp_path):
     assert len(unconfirmed) == len(ids[1])
 
 
+def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
+    """When a photo has multiple species tags, confirmed_species is deterministic (alphabetically first)."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    pid = ids[0][0]
+
+    # Tag with two species in non-alphabetical order
+    k_zebra = db.add_keyword("Zebra Finch", is_species=True)
+    k_blue = db.add_keyword("Blue Jay", is_species=True)
+    db.tag_photo(pid, k_zebra)
+    db.tag_photo(pid, k_blue)
+
+    # Run twice to confirm determinism
+    for _ in range(2):
+        photos = load_photo_features(db)
+        photo = next(p for p in photos if p["id"] == pid)
+        assert photo["confirmed_species"] == "Blue Jay"
+
+
 def test_serialize_results_includes_species_votes(tmp_path):
     """serialize_results includes species_votes and confirmed_species."""
     from pipeline import load_photo_features, run_full_pipeline, serialize_results

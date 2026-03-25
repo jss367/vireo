@@ -108,6 +108,27 @@ def test_encounter_species_validation(app_and_db):
     assert resp.status_code == 400
 
 
+def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
+    """POST /api/encounters/species rejects stale/invalid photo_ids without partial writes."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    valid_id = photos[0]["id"]
+    bogus_id = 99999
+
+    resp = client.post('/api/encounters/species',
+                       json={"species": "Robin", "photo_ids": [valid_id, bogus_id]})
+    assert resp.status_code == 400
+    assert "99999" in resp.get_json()["error"]
+
+    # Verify nothing was written for the valid ID either
+    tags = db.get_photo_keywords(valid_id)
+    assert not any(t["name"] == "Robin" for t in tags)
+    pending = db.get_pending_changes()
+    assert not any(c["value"] == "Robin" for c in pending)
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db

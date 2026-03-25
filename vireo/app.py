@@ -4215,13 +4215,36 @@ def create_app(db_path, thumb_cache_dir=None):
         if not photo_ids:
             return jsonify({"error": "photo_ids is required"}), 400
 
-        # Create or find the species keyword
+        # Validate all photo_ids exist before mutating
+        placeholders = ",".join("?" for _ in photo_ids)
+        found = db.conn.execute(
+            f"SELECT id FROM photos WHERE id IN ({placeholders})", photo_ids
+        ).fetchall()
+        found_ids = {r["id"] for r in found}
+        missing = [pid for pid in photo_ids if pid not in found_ids]
+        if missing:
+            return jsonify({"error": f"Unknown photo_ids: {missing}"}), 400
+
+        # Create or find the species keyword (commits on its own)
         kid = db.add_keyword(species, is_species=True)
 
-        # Tag all photos and queue pending changes
+        # Tag all photos and queue pending changes in a single transaction
+        ws_id = db._ws_id()
         for pid in photo_ids:
-            db.tag_photo(pid, kid)
-            db.queue_change(pid, "keyword_add", species)
+            db.conn.execute(
+                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+                (pid, kid),
+            )
+            existing = db.conn.execute(
+                "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
+                (pid, "keyword_add", species, ws_id),
+            ).fetchone()
+            if not existing:
+                db.conn.execute(
+                    "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) VALUES (?, ?, ?, ?)",
+                    (pid, "keyword_add", species, ws_id),
+                )
+        db.conn.commit()
 
         return jsonify({
             "ok": True,
