@@ -223,8 +223,7 @@ loadDashboard();
 
 async function loadStats() {
   try {
-    var resp = await fetch('/api/stats');
-    var data = await resp.json();
+    var data = await safeFetch('/api/stats', {}, { toast: false });
     renderSpecies(data.top_keywords || []);
     renderMonths(data.photos_by_month || []);
     renderRatings(data.rating_distribution || []);
@@ -363,8 +362,7 @@ async function renderDetection(detected, total) {
   if (detected === 0) {
     // Check if MegaDetector is even installed
     try {
-      var resp = await fetch('/api/system/info');
-      var info = await resp.json();
+      var info = await safeFetch('/api/system/info', {}, { toast: false });
       if (info.megadetector !== 'installed') {
         container.innerHTML = '<div style="text-align:center;padding:16px 0;">' +
           '<div style="font-size:13px;color:#888;">Subject detection requires MegaDetector.</div>' +
@@ -450,13 +448,6 @@ function renderHours(hours) {
   container.innerHTML = html;
 }
 
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   var k = 1024;
@@ -467,9 +458,7 @@ function formatBytes(bytes) {
 
 async function loadDashboard() {
   try {
-    var resp = await fetch('/api/scan/status');
-    if (!resp.ok) return;
-    var d = await resp.json();
+    var d = await safeFetch('/api/scan/status', {}, { toast: false });
     document.getElementById('photoCount').textContent = d.photo_count.toLocaleString();
     document.getElementById('folderCount').textContent = d.folder_count.toLocaleString();
     document.getElementById('keywordCount').textContent = d.keyword_count.toLocaleString();
@@ -489,8 +478,7 @@ async function toggleFolderDetail() {
   panel.innerHTML = '<span style="color:#555;font-size:13px;">Loading...</span>';
   folderOpen = true;
   try {
-    var resp = await fetch('/api/folders');
-    var folders = await resp.json();
+    var folders = await safeFetch('/api/folders', {}, { toast: false });
     if (folders.length === 0) {
       panel.innerHTML = '<span style="color:#555;font-size:13px;">No folders scanned yet.</span>';
       return;
@@ -525,8 +513,7 @@ async function togglePendingDetail() {
   panel.innerHTML = '<span style="color:#555;font-size:13px;">Loading...</span>';
   pendingOpen = true;
   try {
-    var resp = await fetch('/api/sync/preview');
-    var data = await resp.json();
+    var data = await safeFetch('/api/sync/preview', {}, { toast: false });
     if (data.total_changes === 0) {
       panel.innerHTML = '<span style="color:#555;font-size:13px;">No pending changes.</span>';
       return;
@@ -551,8 +538,7 @@ async function togglePendingDetail() {
 
 async function loadStoragePanel() {
   try {
-    var resp = await fetch('/api/storage');
-    var s = await resp.json();
+    var s = await safeFetch('/api/storage', {}, { toast: false });
 
     document.getElementById('storageTotalSize').textContent = 'Total: ' + formatBytes(s.total);
 
@@ -614,8 +600,7 @@ async function openStorageModal(type) {
   document.getElementById('storageModal').classList.add('open');
 
   try {
-    var resp = await fetch('/api/storage/files?type=' + type);
-    var data = await resp.json();
+    var data = await safeFetch('/api/storage/files?type=' + type, {}, { toast: false });
     _modalFiles = data.files || [];
     document.getElementById('modalLoading').style.display = 'none';
     document.getElementById('modalFileList').style.display = 'block';
@@ -681,11 +666,13 @@ async function deleteSelectedFiles() {
   });
   if (names.length === 0) return;
   if (!confirm('Delete ' + names.length + ' file(s)?')) return;
-  await fetch('/api/storage/delete-files', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({type: _modalType, files: names}),
-  });
+  try {
+    await safeFetch('/api/storage/delete-files', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: _modalType, files: names}),
+    });
+  } catch(e) {}
   loadStoragePanel();
   openStorageModal(_modalType);
 }
@@ -693,11 +680,13 @@ async function deleteSelectedFiles() {
 async function deleteAllFiles() {
   var info = STORAGE_INFO[_modalType] || {title: _modalType};
   if (!confirm('Delete all ' + _modalFiles.length + ' ' + info.title.toLowerCase() + '? They will be regenerated as needed.')) return;
-  await fetch('/api/storage/clear', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({type: _modalType}),
-  });
+  try {
+    await safeFetch('/api/storage/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type: _modalType}),
+    });
+  } catch(e) {}
   loadStoragePanel();
   openStorageModal(_modalType);
 }

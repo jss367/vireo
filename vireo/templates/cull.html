@@ -232,8 +232,7 @@ body { padding-bottom: 36px; }
 // Load collections
 (async function() {
   try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
+    var collections = await safeFetch('/api/collections', {}, { toast: false });
     var sel = document.getElementById('cullCollection');
     collections.forEach(function(c) {
       var opt = document.createElement('option');
@@ -533,7 +532,7 @@ async function runCulling() {
   status.textContent = 'Analyzing...';
 
   try {
-    var resp = await fetch('/api/jobs/cull', {
+    var data = await safeFetch('/api/jobs/cull', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -543,25 +542,22 @@ async function runCulling() {
         phash_threshold: parseInt(document.getElementById('cullPhashThreshold').value),
         cross_bucket_merge: document.getElementById('cullCrossBucket').checked,
       }),
-    });
-    var data = await resp.json();
+    }, { toast: false });
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.current_file) status.textContent = p.current_file;
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        status.textContent = 'Analysis complete!';
-        status.style.color = 'var(--accent,#24E5CA)';
-        loadCullingResults();
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        status.style.color = 'var(--danger,#e74c3c)';
-      }
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          status.textContent = 'Analysis complete!';
+          status.style.color = 'var(--accent,#24E5CA)';
+          loadCullingResults();
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.style.color = 'var(--danger,#e74c3c)';
+        }
+      },
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
@@ -570,9 +566,7 @@ async function runCulling() {
 
 async function loadCullingResults() {
   try {
-    var resp = await fetch('/api/culling/results');
-    if (!resp.ok) return;
-    cullData = await resp.json();
+    cullData = await safeFetch('/api/culling/results', {}, { toast: false });
     renderCulling();
   } catch(e) {}
 }
@@ -738,11 +732,11 @@ async function applyCulling() {
   if (!confirm('Apply culling decisions?\n\n' + keepers.length + ' photos flagged as keepers\n' + rejects.length + ' photos flagged as rejected\n\nThis sets the flag on each photo. You can undo in the Browse view.')) return;
 
   try {
-    await fetch('/api/culling/apply', {
+    await safeFetch('/api/culling/apply', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({keepers: keepers, rejects: rejects}),
-    });
+    }, { toast: false });
     document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length + ' keepers, ' + rejects.length + ' rejected';
     document.getElementById('cullStatus').style.color = 'var(--accent,#24E5CA)';
   } catch(e) {
@@ -750,12 +744,7 @@ async function applyCulling() {
   }
 }
 
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
+
 </script>
 
 </body>
