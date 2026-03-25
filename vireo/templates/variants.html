@@ -234,8 +234,7 @@ var activeSpecies = null;
 
 async function loadSpecies() {
   try {
-    var resp = await fetch('/api/species');
-    allSpecies = await resp.json();
+    allSpecies = await safeFetch('/api/species', {}, { toast: false });
     renderSpeciesList(allSpecies);
   } catch(e) {
     document.getElementById('speciesList').innerHTML =
@@ -288,8 +287,7 @@ async function selectSpecies(name) {
 
   try {
     var threshold = 0.4;
-    var resp = await fetch('/api/species/' + encodeURIComponent(name) + '/clusters?threshold=' + threshold);
-    var data = await resp.json();
+    var data = await safeFetch('/api/species/' + encodeURIComponent(name) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
     area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed to analyze: ' + e.message + '</div>';
@@ -356,8 +354,7 @@ function renderClusters(data) {
 async function recluster(species, threshold) {
   var area = document.getElementById('clusterArea');
   try {
-    var resp = await fetch('/api/species/' + encodeURIComponent(species) + '/clusters?threshold=' + threshold);
-    var data = await resp.json();
+    var data = await safeFetch('/api/species/' + encodeURIComponent(species) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
     area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</div>';
@@ -370,12 +367,11 @@ async function labelCluster(clusterIndex, photoIds) {
   if (!label) { input.focus(); return; }
 
   try {
-    var resp = await fetch('/api/species/label-cluster', {
+    var data = await safeFetch('/api/species/label-cluster', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: photoIds, label: label}),
     });
-    var data = await resp.json();
     if (data.ok) {
       input.value = '';
       input.placeholder = 'Labeled!';

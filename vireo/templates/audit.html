@@ -124,8 +124,7 @@ async function runDriftCheck() {
   await new Promise(function(r) { setTimeout(r, 50); });
 
   try {
-    var resp = await fetch('/api/audit/drift');
-    driftData = await resp.json();
+    driftData = await safeFetch('/api/audit/drift', {}, { toast: false });
     document.getElementById('driftBadge').textContent = driftData.length;
     renderDrift();
     status.textContent = driftData.length > 0
@@ -158,21 +157,25 @@ function renderDrift() {
 }
 
 async function resolveDrift(photoId, direction) {
-  await fetch('/api/audit/resolve', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_id: photoId, direction: direction}),
-  });
+  try {
+    await safeFetch('/api/audit/resolve', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_id: photoId, direction: direction}),
+    });
+  } catch(e) {}
   runDriftCheck();
 }
 
 async function resolveAll(direction) {
   document.getElementById('driftStatus').textContent = 'Resolving...';
-  await fetch('/api/audit/resolve-all', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({direction: direction}),
-  });
+  try {
+    await safeFetch('/api/audit/resolve-all', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({direction: direction}),
+    });
+  } catch(e) {}
   runDriftCheck();
 }
 
@@ -185,8 +188,7 @@ async function runOrphanCheck() {
   status.style.color = '';
   await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    var resp = await fetch('/api/audit/orphans');
-    orphanData = await resp.json();
+    orphanData = await safeFetch('/api/audit/orphans', {}, { toast: false });
     document.getElementById('orphanBadge').textContent = orphanData.length;
     renderOrphans();
     status.textContent = orphanData.length > 0
@@ -215,22 +217,26 @@ function renderOrphans() {
 }
 
 async function removeOrphan(photoId) {
-  await fetch('/api/audit/remove-orphans', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: [photoId]}),
-  });
+  try {
+    await safeFetch('/api/audit/remove-orphans', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId]}),
+    });
+  } catch(e) {}
   runOrphanCheck();
 }
 
 async function removeAllOrphans() {
   if (orphanData.length === 0) return;
   var ids = orphanData.map(function(o) { return o.photo_id; });
-  await fetch('/api/audit/remove-orphans', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids}),
-  });
+  try {
+    await safeFetch('/api/audit/remove-orphans', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    });
+  } catch(e) {}
   runOrphanCheck();
 }
 
@@ -243,14 +249,12 @@ async function runUntrackedCheck() {
   status.style.color = '';
   await new Promise(function(r) { setTimeout(r, 50); });
   try {
-    var fResp = await fetch('/api/folders');
-    var folders = await fResp.json();
+    var folders = await safeFetch('/api/folders', {}, { toast: false });
     var roots = [];
     folders.forEach(function(f) { if (!f.parent_id) roots.push(f.path); });
 
     var params = roots.map(function(r) { return 'root=' + encodeURIComponent(r); }).join('&');
-    var resp = await fetch('/api/audit/untracked?' + params);
-    untrackedData = await resp.json();
+    untrackedData = await safeFetch('/api/audit/untracked?' + params, {}, { toast: false });
     document.getElementById('untrackedBadge').textContent = untrackedData.length;
     renderUntracked();
     status.textContent = untrackedData.length > 0
@@ -280,22 +284,26 @@ function renderUntracked() {
 }
 
 async function importFile(path) {
-  await fetch('/api/audit/import-untracked', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({paths: [path]}),
-  });
+  try {
+    await safeFetch('/api/audit/import-untracked', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: [path]}),
+    });
+  } catch(e) {}
   runUntrackedCheck();
 }
 
 async function importAllUntracked() {
   if (untrackedData.length === 0) return;
   var paths = untrackedData.map(function(u) { return u.path; });
-  await fetch('/api/audit/import-untracked', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({paths: paths}),
-  });
+  try {
+    await safeFetch('/api/audit/import-untracked', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({paths: paths}),
+    });
+  } catch(e) {}
   runUntrackedCheck();
 }
 

@@ -779,12 +779,11 @@ function onGroupingChange(slider) {
 
 function doReflow() {
   var config = getScoringConfig();
-  fetch('/api/pipeline/reflow', {
+  safeFetch('/api/pipeline/reflow', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({config: config}),
-  })
-  .then(function(r) { return r.json(); })
+  }, { toast: false })
   .then(function(data) {
     if (data.error) return;
     pipelineResults = data;
@@ -801,12 +800,11 @@ function doReflow() {
 
 function doRegroupLive() {
   var config = Object.assign({}, getGroupingConfig(), getScoringConfig());
-  fetch('/api/pipeline/regroup-live', {
+  safeFetch('/api/pipeline/regroup-live', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({config: config}),
-  })
-  .then(function(r) { return r.json(); })
+  }, { toast: false })
   .then(function(data) {
     if (data.error) return;
     pipelineResults = data;

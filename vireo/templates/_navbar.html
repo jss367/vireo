@@ -779,10 +779,8 @@ function closeWsDropdownOutside(e) {
 
 async function loadWorkspaceMenu() {
   try {
-    var resp = await fetch('/api/workspaces');
-    var workspaces = await resp.json();
-    var activeResp = await fetch('/api/workspaces/active');
-    var active = await activeResp.json();
+    var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
+    var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var list = document.getElementById('wsMenuList');
     list.innerHTML = '';
     workspaces.forEach(function(ws) {
@@ -801,12 +799,11 @@ async function loadWorkspaceMenu() {
 
 async function switchWorkspace(wsId, wsName) {
   try {
-    var resp = await fetch('/api/workspaces/' + wsId + '/activate', {
+    var data = await safeFetch('/api/workspaces/' + wsId + '/activate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ current_path: window.location.pathname })
     });
-    var data = await resp.json();
     document.getElementById('wsCurrentBtn').firstChild.textContent = wsName + ' ';
     document.getElementById('wsMenu').classList.remove('open');
     _wsDropdownOpen = false;
@@ -815,9 +812,7 @@ async function switchWorkspace(wsId, wsName) {
     sessionStorage.setItem('vireo_ws_switched', '1');
     // Redirect to the workspace's saved page, or reload current
     window.location.href = data.restore_path || window.location.pathname;
-  } catch(e) {
-    console.error('Failed to switch workspace', e);
-  }
+  } catch(e) {}
 }
 
 /* ---------- Create Workspace modal ---------- */
@@ -826,8 +821,7 @@ async function showCreateWorkspaceModal() {
   _wsDropdownOpen = false;
 
   try {
-    var resp = await fetch('/api/folders');
-    var folders = await resp.json();
+    var folders = await safeFetch('/api/folders', {}, { toast: false });
     var list = document.getElementById('newWsFolderList');
     list.innerHTML = '';
     if (folders.length === 0) {
@@ -866,21 +860,15 @@ async function createWorkspace() {
   var folderIds = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value); });
 
   try {
-    var resp = await fetch('/api/workspaces', {
+    var data = await safeFetch('/api/workspaces', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ name: name, folder_ids: folderIds })
-    });
-    var data = await resp.json();
-    if (resp.ok) {
-      hideCreateWsModal();
-      await switchWorkspace(data.id, data.name);
-    } else {
-      document.getElementById('newWsError').textContent = data.error || 'Failed to create';
-      document.getElementById('newWsError').style.display = 'block';
-    }
+    }, { toast: false });
+    hideCreateWsModal();
+    await switchWorkspace(data.id, data.name);
   } catch(e) {
-    document.getElementById('newWsError').textContent = 'Error: ' + e.message;
+    document.getElementById('newWsError').textContent = e.message || 'Failed to create';
     document.getElementById('newWsError').style.display = 'block';
   }
 }
@@ -889,21 +877,23 @@ async function createWorkspace() {
 (function() {
   if (sessionStorage.getItem('vireo_ws_switched')) {
     sessionStorage.removeItem('vireo_ws_switched');
-    fetch('/api/audit/drift').then(function(r) { return r.json(); }).then(function(drifts) {
+    document.addEventListener('DOMContentLoaded', function() {
+    safeFetch('/api/audit/drift', {}, { toast: false }).then(function(drifts) {
       if (drifts && drifts.length > 0) {
-        var toast = document.createElement('div');
-        toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-secondary,#0E2A3D);border:1px solid var(--warning,#f0c040);border-radius:8px;padding:12px 16px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:360px;font-size:13px;color:var(--text-primary,#E0F0F0);';
-        toast.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--warning,#f0c040);">XMP Drift Detected</div>'
+        var driftToast = document.createElement('div');
+        driftToast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-secondary,#0E2A3D);border:1px solid var(--warning,#f0c040);border-radius:8px;padding:12px 16px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:360px;font-size:13px;color:var(--text-primary,#E0F0F0);';
+        driftToast.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--warning,#f0c040);">XMP Drift Detected</div>'
           + '<div style="color:var(--text-secondary,#B0CCCC);">' + drifts.length + ' photo' + (drifts.length > 1 ? 's have' : ' has')
           + ' keywords that differ between the database and XMP sidecars.</div>'
           + '<div style="margin-top:8px;display:flex;gap:8px;">'
           + '<a href="/audit" style="color:var(--accent,#4ecca3);text-decoration:none;font-weight:500;">Review in Audit</a>'
           + '<span onclick="this.parentElement.parentElement.remove()" style="color:var(--text-muted,#666);cursor:pointer;margin-left:auto;">Dismiss</span>'
           + '</div>';
-        document.body.appendChild(toast);
-        setTimeout(function() { if (toast.parentElement) toast.remove(); }, 15000);
+        document.body.appendChild(driftToast);
+        setTimeout(function() { if (driftToast.parentElement) driftToast.remove(); }, 15000);
       }
     }).catch(function() {});
+    });
   }
 })();
 </script>
@@ -1064,8 +1054,7 @@ function closeLightbox(e) {
 }
 async function submitToInat(photoId) {
   try {
-    var resp = await fetch('/api/inat/prepare/' + photoId);
-    var data = await resp.json();
+    var data = await safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false });
     if (data.error) { alert(data.error); return; }
 
     // Always open iNaturalist in the browser — the user hits the final submit button
@@ -1136,8 +1125,7 @@ function openPipeline(photoId) {
   document.body.style.overflow = 'hidden';
   content.innerHTML = '<p style="color:#888;">Loading pipeline data...</p>';
 
-  fetch('/api/photos/' + photoId + '/pipeline')
-    .then(function(r) { return r.json(); })
+  safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
     .then(function(data) { renderPipeline(data, photoId); })
     .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + e.message + '</p>'; });
 }
@@ -1284,8 +1272,7 @@ function findSimilar(photoId) {
   document.body.style.overflow = 'hidden';
   content.innerHTML = '<p style="color:#888;">Searching for similar photos...</p>';
 
-  fetch('/api/photos/' + photoId + '/similar?limit=40')
-    .then(function(r) { return r.json(); })
+  safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
     .then(function(data) {
       if (data.error) {
         content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + data.error + '</p>';
@@ -1362,6 +1349,69 @@ function closeSimilar() {
 </div>
 
 <script>
+/* ---------- Toast Notifications ---------- */
+(function() {
+  var container = document.createElement('div');
+  container.id = 'toastContainer';
+  container.style.cssText = 'position:fixed;top:16px;right:16px;z-index:100000;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
+  document.body.appendChild(container);
+})();
+
+function showToast(msg, type) {
+  type = type || 'error';
+  var container = document.getElementById('toastContainer');
+  if (!container) return;
+  var toast = document.createElement('div');
+  var bg = type === 'error' ? 'var(--danger, #e74c3c)' : 'var(--accent, #24E5CA)';
+  var color = type === 'error' ? '#fff' : 'var(--accent-text, #0A1F2E)';
+  toast.style.cssText = 'pointer-events:auto;padding:10px 16px;border-radius:6px;font-size:14px;max-width:400px;word-break:break-word;background:' + bg + ';color:' + color + ';box-shadow:0 2px 8px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.2s;';
+  toast.textContent = msg;
+  container.appendChild(toast);
+  requestAnimationFrame(function() { toast.style.opacity = '1'; });
+  setTimeout(function() {
+    toast.style.opacity = '0';
+    setTimeout(function() { toast.remove(); }, 200);
+  }, 5000);
+}
+
+/* ---------- Safe Fetch ---------- */
+async function safeFetch(url, opts, options) {
+  var toast = (!options || options.toast !== false);
+  var resp = await fetch(url, opts);
+  if (!resp.ok) {
+    var body = {};
+    try { body = await resp.json(); } catch(e) {}
+    var msg = body.error || 'Request failed (' + resp.status + ')';
+    if (toast) showToast(msg, 'error');
+    var err = new Error(msg);
+    err.status = resp.status;
+    err.body = body;
+    throw err;
+  }
+  var text = await resp.text();
+  if (!text) return null;
+  return JSON.parse(text);
+}
+
+/* ---------- Safe EventSource ---------- */
+function safeEventSource(url, callbacks) {
+  callbacks = callbacks || {};
+  var source = new EventSource(url);
+  source.addEventListener('progress', function(e) {
+    if (callbacks.onProgress) callbacks.onProgress(JSON.parse(e.data));
+  });
+  source.addEventListener('complete', function(e) {
+    source.close();
+    if (callbacks.onComplete) callbacks.onComplete(JSON.parse(e.data));
+  });
+  source.onerror = function() {
+    source.close();
+    showToast('Connection lost', 'error');
+    if (callbacks.onError) callbacks.onError();
+  };
+  return source;
+}
+
 /* ---------- Bottom Panel ---------- */
 function formatDuration(seconds) {
   if (seconds == null) return '-';

@@ -120,8 +120,7 @@ loadWorkspaces();
 /* ---------- Folders ---------- */
 async function loadWsFolders() {
   try {
-    var resp = await fetch('/api/workspaces/active');
-    var ws = await resp.json();
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var container = document.getElementById('wsFoldersContent');
     if (!ws.folders || ws.folders.length === 0) {
       container.innerHTML = '<span style="color:#555;font-size:13px;">No folders in this workspace. Add one below.</span>';
@@ -142,8 +141,7 @@ async function loadWsFolders() {
 
 async function loadScanRootHints() {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     var list = document.getElementById('scanRootHints');
     list.innerHTML = '';
@@ -168,36 +166,32 @@ async function scanAndAddFolder() {
   status.style.color = 'var(--text-muted, #888)';
   status.textContent = 'Starting scan...';
 
+  var data;
   try {
-    var resp = await fetch('/api/jobs/scan', {
+    data = await safeFetch('/api/jobs/scan', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ root: path })
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.style.color = 'var(--danger, #e74c3c)';
-      status.textContent = err.error || 'Failed to start scan';
-      btn.disabled = false;
-      btn.textContent = 'Scan & Add';
-      return;
-    }
-    var data = await resp.json();
-    var jobId = data.job_id;
+    }, { toast: false });
+  } catch(e) {
+    status.style.color = 'var(--danger, #e74c3c)';
+    status.textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = 'Scan & Add';
+    return;
+  }
+  var jobId = data.job_id;
 
-    // Stream progress via SSE
-    var source = new EventSource('/api/jobs/' + jobId + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
+  // Stream progress via SSE
+  var source = safeEventSource('/api/jobs/' + jobId + '/stream', {
+    onProgress: function(p) {
       if (p.total > 0) {
         status.textContent = 'Scanning: ' + p.current + '/' + p.total + (p.current_file ? ' — ' + p.current_file : '');
       } else if (p.current_file) {
         status.textContent = 'Scanning: ' + p.current_file;
       }
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
+    },
+    onComplete: function(result) {
       if (result.status === 'completed') {
         status.style.color = 'var(--accent, #24E5CA)';
         status.textContent = 'Done! Folder added to workspace.';
@@ -210,32 +204,23 @@ async function scanAndAddFolder() {
       btn.disabled = false;
       btn.textContent = 'Scan & Add';
       setTimeout(function() { status.style.display = 'none'; }, 5000);
-    });
-    source.onerror = function() {
-      source.close();
-      status.style.color = 'var(--danger, #e74c3c)';
-      status.textContent = 'Connection lost';
+    },
+    onError: function() {
       btn.disabled = false;
       btn.textContent = 'Scan & Add';
-    };
-  } catch(e) {
-    status.style.color = 'var(--danger, #e74c3c)';
-    status.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
-    btn.textContent = 'Scan & Add';
-  }
+    }
+  });
 }
 
 async function removeFolderFromWs(wsId, folderId) {
-  await fetch('/api/workspaces/' + wsId + '/folders/' + folderId, { method: 'DELETE' });
+  try { await safeFetch('/api/workspaces/' + wsId + '/folders/' + folderId, { method: 'DELETE' }); } catch(e) {}
   loadWsFolders();
 }
 
 /* ---------- Workspace Config Overrides ---------- */
 async function loadWorkspaceConfig() {
   try {
-    var resp = await fetch('/api/workspaces/active/config');
-    var overrides = await resp.json();
+    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
     var keys = ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'];
     keys.forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
@@ -305,7 +290,7 @@ async function saveWorkspaceConfig() {
       }
     });
     try {
-      await fetch('/api/workspaces/active/config', {
+      await safeFetch('/api/workspaces/active/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(overrides)
@@ -317,8 +302,7 @@ async function saveWorkspaceConfig() {
 /* ---------- Recent Jobs ---------- */
 async function loadHistory() {
   try {
-    var resp = await fetch('/api/jobs/history?limit=10');
-    var rows = await resp.json();
+    var rows = await safeFetch('/api/jobs/history?limit=10', {}, { toast: false });
     if (rows.length === 0) {
       document.getElementById('historyContent').innerHTML = '<span style="color:#555;font-size:13px;">No jobs have run yet.</span>';
       return;
@@ -363,10 +347,8 @@ async function loadHistory() {
 /* ---------- All Workspaces ---------- */
 async function loadWorkspaces() {
   try {
-    var resp = await fetch('/api/workspaces');
-    var workspaces = await resp.json();
-    var activeResp = await fetch('/api/workspaces/active');
-    var active = await activeResp.json();
+    var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
+    var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var container = document.getElementById('workspacesContent');
 
     if (workspaces.length === 0) {
@@ -417,19 +399,13 @@ async function renameWorkspace(wsId, newName) {
   newName = newName.trim();
   if (!newName) return;
   try {
-    var resp = await fetch('/api/workspaces/' + wsId, {
+    await safeFetch('/api/workspaces/' + wsId, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ name: newName })
     });
-    if (!resp.ok) {
-      var data = await resp.json();
-      alert(data.error || 'Failed to rename');
-      loadWorkspaces();
-    }
     // Update navbar if this is the active workspace
-    var activeResp = await fetch('/api/workspaces/active');
-    var active = await activeResp.json();
+    var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     if (wsId === active.id) {
       var btn = document.getElementById('wsCurrentBtn');
       if (btn) btn.firstChild.textContent = newName + ' ';
@@ -437,23 +413,19 @@ async function renameWorkspace(wsId, newName) {
       if (pageName) pageName.textContent = newName;
     }
   } catch(e) {
-    alert('Error: ' + e.message);
     loadWorkspaces();
   }
 }
 
 async function activateWorkspace(wsId) {
   try {
-    var resp = await fetch('/api/workspaces/' + wsId + '/activate', {
+    var data = await safeFetch('/api/workspaces/' + wsId + '/activate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ current_path: window.location.pathname })
     });
-    var data = await resp.json();
     window.location.href = data.restore_path || window.location.pathname;
-  } catch(e) {
-    alert('Error: ' + e.message);
-  }
+  } catch(e) {}
 }
 
 async function deleteWorkspaceConfirm(wsId, name) {
@@ -461,16 +433,9 @@ async function deleteWorkspaceConfirm(wsId, name) {
     return;
   }
   try {
-    var resp = await fetch('/api/workspaces/' + wsId, { method: 'DELETE' });
-    if (resp.ok) {
-      loadWorkspaces();
-    } else {
-      var data = await resp.json();
-      alert(data.error || 'Failed to delete');
-    }
-  } catch(e) {
-    alert('Error: ' + e.message);
-  }
+    await safeFetch('/api/workspaces/' + wsId, { method: 'DELETE' });
+    loadWorkspaces();
+  } catch(e) {}
 }
 </script>
 </body>

@@ -321,13 +321,12 @@ updateCardStates();
 // -- Collection picker --
 async function loadCollections() {
   try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
+    var collections = await safeFetch('/api/collections', {}, { toast: false });
     var sel = document.getElementById('collectionPicker');
     collections.forEach(function(c) {
       sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
     });
-  } catch(e) { console.error('loadCollections error:', e); }
+  } catch(e) {}
 }
 
 function onCollectionChange() {
@@ -338,8 +337,7 @@ function onCollectionChange() {
     updateCardStates();
     return;
   }
-  fetch('/api/collections/' + collId + '/photos?per_page=1')
-    .then(function(r) { return r.json(); })
+  safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
     .then(function(data) {
       countEl.textContent = (data.total || 0) + ' photos';
     })
@@ -350,8 +348,7 @@ function onCollectionChange() {
 // -- Card 1: Classify --
 async function loadModels() {
   try {
-    var resp = await fetch('/api/models');
-    var data = await resp.json();
+    var data = await safeFetch('/api/models', {}, { toast: false });
     var div = document.getElementById('modelPicker');
     div.innerHTML = '';
     var downloaded = data.models.filter(function(m) { return m.downloaded; });
@@ -375,13 +372,12 @@ async function loadModels() {
       });
     }
     updateReadiness();
-  } catch(e) { console.error('loadModels error:', e); }
+  } catch(e) {}
 }
 
 async function loadLabels() {
   try {
-    var resp = await fetch('/api/labels');
-    var data = await resp.json();
+    var data = await safeFetch('/api/labels', {}, { toast: false });
     var div = document.getElementById('labelsPicker');
     var active = data.active || [];
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
@@ -401,14 +397,13 @@ async function loadLabels() {
     }
 
     // Load threshold from config
-    var cfgResp = await fetch('/api/classify/config');
-    var cfg = await cfgResp.json();
+    var cfg = await safeFetch('/api/classify/config', {}, { toast: false });
     if (cfg.default_threshold) {
       var pct = Math.round(cfg.default_threshold * 100);
       document.getElementById('cfgThreshold').value = pct;
       document.getElementById('cfgThresholdVal').textContent = pct + '%';
     }
-  } catch(e) { console.error('loadLabels error:', e); }
+  } catch(e) {}
 }
 
 async function updateReadiness() {
@@ -423,8 +418,7 @@ async function updateReadiness() {
     var params = [];
     if (modelId) params.push('model_id=' + encodeURIComponent(modelId));
     labelsFiles.forEach(function(f) { params.push('labels_files=' + encodeURIComponent(f)); });
-    var resp = await fetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''));
-    var r = await resp.json();
+    var r = await safeFetch('/api/classify/readiness' + (params.length ? '?' + params.join('&') : ''), {}, { toast: false });
 
     var items = [];
 
@@ -509,7 +503,7 @@ async function runClassify(reclassify) {
     status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + 'Starting ' + model.name + '...';
 
     try {
-      var resp = await fetch('/api/jobs/classify', {
+      var data = await safeFetch('/api/jobs/classify', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -519,51 +513,42 @@ async function runClassify(reclassify) {
           labels_files: labelsFiles,
           reclassify: !!reclass,
         }),
-      });
-      if (!resp.ok) {
-        var err = await resp.json();
-        status.textContent = 'Error (' + model.name + '): ' + (err.error || 'failed');
-        continue;
-      }
-      var data = await resp.json();
+      }, { toast: false });
 
       // Stream progress for this model's job
       await new Promise(function(resolve) {
-        var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-        source.addEventListener('progress', function(e) {
-          var p = JSON.parse(e.data);
-          // Progress within this model: scale to fraction of total
-          var modelPct = p.total > 0 ? p.current / p.total : 0;
-          var overallPct = Math.round(((completed + modelPct) / total) * 100);
-          fill.style.width = overallPct + '%';
-          var parts = [];
-          if (total > 1) parts.push(model.name);
-          if (p.phase) parts.push(p.phase);
-          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-          if (p.current_file) parts.push(p.current_file);
-          text.textContent = parts.join(' — ');
-          status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + parts.slice(total > 1 ? 1 : 0).join(' — ');
-        });
         var resolved = false;
         function done() { if (!resolved) { resolved = true; completed++; resolve(); } }
-        source.addEventListener('complete', function(e) {
-          source.close();
-          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-          var result = JSON.parse(e.data);
-          if (result.status === 'completed' && result.result) {
-            var r = result.result;
-            var parts = [model.name + ': ' + r.total + ' photos'];
-            if (r.predictions_stored) parts.push(r.predictions_stored + ' predictions');
-            if (result.duration) parts.push(formatDuration(result.duration));
-            status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ' — ' : '') + parts.join(', ');
-            totalPredictions += (r.predictions_stored || r.total || 0);
+        safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+          onProgress: function(p) {
+            // Progress within this model: scale to fraction of total
+            var modelPct = p.total > 0 ? p.current / p.total : 0;
+            var overallPct = Math.round(((completed + modelPct) / total) * 100);
+            fill.style.width = overallPct + '%';
+            var parts = [];
+            if (total > 1) parts.push(model.name);
+            if (p.phase) parts.push(p.phase);
+            if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+            if (p.current_file) parts.push(p.current_file);
+            text.textContent = parts.join(' — ');
+            status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + parts.slice(total > 1 ? 1 : 0).join(' — ');
+          },
+          onComplete: function(result) {
+            window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+            if (result.status === 'completed' && result.result) {
+              var r = result.result;
+              var parts = [model.name + ': ' + r.total + ' photos'];
+              if (r.predictions_stored) parts.push(r.predictions_stored + ' predictions');
+              if (result.duration) parts.push(formatDuration(result.duration));
+              status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ' — ' : '') + parts.join(', ');
+              totalPredictions += (r.predictions_stored || r.total || 0);
+            }
+            done();
+          },
+          onError: function() {
+            done();
           }
-          done();
         });
-        source.onerror = function() {
-          source.close();
-          done();
-        };
       });
     } catch(e) {
       status.textContent = 'Error (' + model.name + '): ' + e.message;
@@ -621,15 +606,15 @@ function onModelConfigChange() {
   };
 
   // Save to server
-  fetch('/api/pipeline/config', {
+  safeFetch('/api/pipeline/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(newCfg),
-  }).then(function(r) { return r.json(); }).then(function(data) {
+  }, { toast: false }).then(function(data) {
     if (data.status === 'saved') {
       _savedModelConfig = newCfg;
     }
-  });
+  }).catch(function() {});
 }
 
 async function runExtract() {
@@ -652,12 +637,11 @@ async function runExtract() {
   num.className = 'stage-num running';
 
   try {
-    var resp = await fetch('/api/jobs/extract-masks', {
+    var data = await safeFetch('/api/jobs/extract-masks', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({collection_id: parseInt(collId)}),
-    });
-    var data = await resp.json();
+    }, { toast: false });
     if (!data.job_id) {
       btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
@@ -666,53 +650,50 @@ async function runExtract() {
       return;
     }
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-      fill.style.width = pct + '%';
-      var parts = [];
-      if (p.phase) parts.push(p.phase);
-      if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-      if (p.current_file) parts.push(p.current_file);
-      text.textContent = parts.join(' — ');
-      status.textContent = parts.join(' — ');
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        fill.style.width = '100%';
-        text.textContent = 'Complete';
-        status.textContent = 'Done!';
-        status.className = 'status-msg ok';
-        if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
-        num.className = 'stage-num complete';
-        if (result.result) {
-          var r = result.result;
-          var summary = [];
-          if (r.masks_created) summary.push(r.masks_created + ' masks');
-          if (r.scored_count) summary.push(r.scored_count + ' sharpness');
-          document.getElementById('summaryExtract').textContent = summary.join(', ');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+        fill.style.width = pct + '%';
+        var parts = [];
+        if (p.phase) parts.push(p.phase);
+        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+        if (p.current_file) parts.push(p.current_file);
+        text.textContent = parts.join(' — ');
+        status.textContent = parts.join(' — ');
+      },
+      onComplete: function(result) {
+        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+        if (result.status === 'completed') {
+          fill.style.width = '100%';
+          text.textContent = 'Complete';
+          status.textContent = 'Done!';
+          status.className = 'status-msg ok';
+          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
+          num.className = 'stage-num complete';
+          if (result.result) {
+            var r = result.result;
+            var summary = [];
+            if (r.masks_created) summary.push(r.masks_created + ' masks');
+            if (r.scored_count) summary.push(r.scored_count + ' sharpness');
+            document.getElementById('summaryExtract').textContent = summary.join(', ');
+          }
+          // Mark downstream as stale
+          markStale('group');
+          // Enable downstream buttons
+          _pipelineState.hasMasks = true;
+          updateCardStates();
+        } else {
+          status.textContent = 'Failed';
+          num.className = 'stage-num';
         }
-        // Mark downstream as stale
-        markStale('group');
-        // Enable downstream buttons
-        _pipelineState.hasMasks = true;
-        updateCardStates();
-      } else {
-        status.textContent = 'Failed';
+        btn.disabled = false;
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        btn.disabled = false;
         num.className = 'stage-num';
       }
-      btn.disabled = false;
     });
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost';
-      btn.disabled = false;
-      num.className = 'stage-num';
-    };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;
@@ -743,12 +724,11 @@ async function runGroup() {
   num.className = 'stage-num running';
 
   try {
-    var resp = await fetch('/api/jobs/regroup', {
+    var data = await safeFetch('/api/jobs/regroup', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({collection_id: parseInt(collId)}),
-    });
-    var data = await resp.json();
+    }, { toast: false });
     if (!data.job_id) {
       btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
@@ -757,58 +737,55 @@ async function runGroup() {
       return;
     }
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-      fill.style.width = pct + '%';
-      var parts = [];
-      if (p.phase) parts.push(p.phase);
-      if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-      text.textContent = parts.join(' — ');
-      status.textContent = parts.join(' — ');
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        fill.style.width = '100%';
-        text.textContent = 'Complete';
-        status.textContent = 'Done!';
-        status.className = 'status-msg ok';
-        if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
-        num.className = 'stage-num complete';
-        if (result.result) {
-          var r = result.result;
-          var summary = [];
-          if (r.encounter_count != null) summary.push(r.encounter_count + ' encounters');
-          if (r.keep_count != null) summary.push(r.keep_count + 'K / ' + (r.review_count||0) + 'R / ' + (r.reject_count||0) + 'X');
-          document.getElementById('summaryGroup').textContent = summary.join(' — ');
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+        fill.style.width = pct + '%';
+        var parts = [];
+        if (p.phase) parts.push(p.phase);
+        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+        text.textContent = parts.join(' — ');
+        status.textContent = parts.join(' — ');
+      },
+      onComplete: function(result) {
+        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+        if (result.status === 'completed') {
+          fill.style.width = '100%';
+          text.textContent = 'Complete';
+          status.textContent = 'Done!';
+          status.className = 'status-msg ok';
+          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
+          num.className = 'stage-num complete';
+          if (result.result) {
+            var r = result.result;
+            var summary = [];
+            if (r.encounter_count != null) summary.push(r.encounter_count + ' encounters');
+            if (r.keep_count != null) summary.push(r.keep_count + 'K / ' + (r.review_count||0) + 'R / ' + (r.reject_count||0) + 'X');
+            document.getElementById('summaryGroup').textContent = summary.join(' — ');
+          }
+          // Show view results link
+          var existingLink = document.querySelector('#card-group .view-results-btn');
+          if (!existingLink) {
+            var body = document.querySelector('#card-group .stage-body');
+            var a = document.createElement('a');
+            a.href = '/pipeline/review';
+            a.className = 'view-results-btn';
+            a.textContent = 'View Results';
+            body.appendChild(a);
+          }
+          _pipelineState.hasResults = true;
+        } else {
+          status.textContent = 'Failed';
+          num.className = 'stage-num';
         }
-        // Show view results link
-        var existingLink = document.querySelector('#card-group .view-results-btn');
-        if (!existingLink) {
-          var body = document.querySelector('#card-group .stage-body');
-          var a = document.createElement('a');
-          a.href = '/pipeline/review';
-          a.className = 'view-results-btn';
-          a.textContent = 'View Results';
-          body.appendChild(a);
-        }
-        _pipelineState.hasResults = true;
-      } else {
-        status.textContent = 'Failed';
+        btn.disabled = false;
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        btn.disabled = false;
         num.className = 'stage-num';
       }
-      btn.disabled = false;
     });
-    source.onerror = function() {
-      source.close();
-      status.textContent = 'Connection lost';
-      btn.disabled = false;
-      num.className = 'stage-num';
-    };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;

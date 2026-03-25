@@ -390,9 +390,7 @@ loadThemePicker();
 var _saveTimer = null;
 async function loadConfig() {
   try {
-    var resp = await fetch('/api/config');
-    if (!resp.ok) return;
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     var pct = Math.round((cfg.classification_threshold || 0.4) * 100);
     document.getElementById('cfgThreshold').value = pct;
     document.getElementById('cfgThresholdVal').textContent = pct + '%';
@@ -423,7 +421,7 @@ function saveConfig() {
     var hfToken = document.getElementById('cfgHfToken').value.trim();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
     try {
-      await fetch('/api/config', {
+      await safeFetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -585,18 +583,16 @@ function resetContext(ctx) {
 }
 
 function saveShortcuts() {
-  fetch('/api/config', {
+  safeFetch('/api/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ keyboard_shortcuts: currentShortcuts }),
-  });
+  }).catch(function() {});
 }
 
 async function loadDarktableStatus() {
   try {
-    var resp = await fetch('/api/darktable/status');
-    if (!resp.ok) return;
-    var data = await resp.json();
+    var data = await safeFetch('/api/darktable/status', {}, { toast: false });
     var el = document.getElementById('darktableStatus');
     if (data.available) {
       el.innerHTML = '<span style="color:#24E5CA;font-size:13px;">&#10003; darktable-cli found</span>' +
@@ -610,9 +606,7 @@ async function loadDarktableStatus() {
 
 async function loadSystemInfo() {
   try {
-    var resp = await fetch('/api/system/info');
-    if (!resp.ok) return;
-    var d = await resp.json();
+    var d = await safeFetch('/api/system/info', {}, { toast: false });
     document.getElementById('deviceName').textContent = d.device;
     document.getElementById('deviceDetail').textContent = d.device_detail;
     document.getElementById('pythonVersion').textContent = d.python_version;
@@ -641,9 +635,7 @@ async function loadPipelineModels() {
   var container = document.getElementById('pipelineModelsContainer');
   if (!container) return;
   try {
-    var resp = await fetch('/api/models/pipeline');
-    if (!resp.ok) { container.textContent = 'Failed to load model status'; return; }
-    var data = await resp.json();
+    var data = await safeFetch('/api/models/pipeline', {}, { toast: false });
     var html = '<table style="width:100%;border-collapse:collapse;">';
     html += '<tr style="border-bottom:1px solid var(--border-primary,#14374E);font-size:11px;color:var(--text-dim,#5A8890);">';
     html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
@@ -681,27 +673,27 @@ async function loadPipelineModels() {
 async function downloadPipelineModel(modelId, btn) {
   if (btn) { btn.disabled = true; btn.textContent = 'Downloading...'; }
   try {
-    var resp = await fetch('/api/models/pipeline/download', {
+    var data = await safeFetch('/api/models/pipeline/download', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({model_id: modelId}),
-    });
-    var data = await resp.json();
+    }, { toast: false });
     if (data.job_id) {
-      var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-      source.addEventListener('progress', function(e) {
-        var p = JSON.parse(e.data);
-        if (btn) btn.textContent = p.phase || 'Downloading...';
-      });
-      source.addEventListener('complete', function(e) {
-        source.close();
-        var result = JSON.parse(e.data);
-        if (result.status === 'completed') {
-          if (btn) { btn.textContent = 'Done!'; btn.style.color = '#24E5CA'; }
-        } else {
-          if (btn) { btn.textContent = 'Failed'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (btn) btn.textContent = p.phase || 'Downloading...';
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (btn) { btn.textContent = 'Done!'; btn.style.color = '#24E5CA'; }
+          } else {
+            if (btn) { btn.textContent = 'Failed'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+          }
+          setTimeout(loadPipelineModels, 500);
+        },
+        onError: function() {
+          if (btn) { btn.textContent = 'Error'; btn.style.color = '#e74c3c'; btn.disabled = false; }
         }
-        setTimeout(loadPipelineModels, 500);
       });
     }
   } catch(e) {
@@ -712,16 +704,13 @@ async function downloadPipelineModel(modelId, btn) {
 async function deletePipelineModel(modelId, modelName) {
   if (!confirm('Delete ' + modelName + ' weights?')) return;
   try {
-    var resp = await fetch('/api/models/pipeline/delete', {
+    await safeFetch('/api/models/pipeline/delete', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({model_id: modelId}),
     });
-    await resp.json();
     loadPipelineModels();
-  } catch(e) {
-    alert('Error deleting model: ' + e);
-  }
+  } catch(e) {}
 }
 
 /* ---------- Labels ---------- */
@@ -735,8 +724,7 @@ loadObservationFilters();
 
 async function loadLabels() {
   try {
-    var resp = await fetch('/api/labels');
-    var data = await resp.json();
+    var data = await safeFetch('/api/labels', {}, { toast: false });
     var labels = data.labels || [];
     var active = data.active || [];
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
@@ -785,30 +773,31 @@ async function updateActiveLabels() {
   document.querySelectorAll('.label-active-cb:checked').forEach(function(cb) {
     paths.push(cb.value);
   });
-  await fetch('/api/labels/active', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({labels_files: paths}),
-  });
+  try {
+    await safeFetch('/api/labels/active', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({labels_files: paths}),
+    });
+  } catch(e) {}
   loadLabels();
 }
 
 async function deleteLabelSet(labelsFile, name) {
   if (!confirm('Delete label set "' + name + '"?')) return;
   try {
-    await fetch('/api/labels', {
+    await safeFetch('/api/labels', {
       method: 'DELETE',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({labels_file: labelsFile}),
     });
-    loadLabels();
   } catch(e) {}
+  loadLabels();
 }
 
 async function loadTaxonGroups() {
   try {
-    var resp = await fetch('/api/labels/taxon-groups');
-    var groups = await resp.json();
+    var groups = await safeFetch('/api/labels/taxon-groups', {}, { toast: false });
     var html = '';
     groups.forEach(function(g, i) {
       var checked = (g.key === 'birds') ? ' checked' : '';
@@ -822,8 +811,7 @@ async function loadTaxonGroups() {
 
 async function loadObservationFilters() {
   try {
-    var resp = await fetch('/api/labels/observation-filters');
-    var filters = await resp.json();
+    var filters = await safeFetch('/api/labels/observation-filters', {}, { toast: false });
     var html = '';
     filters.forEach(function(f) {
       var checked = (f.key === 'research') ? ' checked' : '';
@@ -855,8 +843,7 @@ async function searchPlaces() {
     return;
   }
   try {
-    var resp = await fetch('/api/labels/search-places?q=' + encodeURIComponent(q));
-    var places = await resp.json();
+    var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
     if (places.length === 0) {
       dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim,#555);">No places found</div>';
       return;
@@ -872,7 +859,7 @@ async function searchPlaces() {
     });
     dropdown.innerHTML = html;
   } catch(e) {
-    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger,#e74c3c);">Error: ' + escapeHtml(String(e)) + '</div>';
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger,#e74c3c);">Error: ' + escapeHtml(String(e.message || e)) + '</div>';
   }
 }
 
@@ -899,7 +886,7 @@ async function fetchLabels() {
   status.textContent = 'Starting download...';
 
   try {
-    var resp = await fetch('/api/jobs/fetch-labels', {
+    var data = await safeFetch('/api/jobs/fetch-labels', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -908,38 +895,38 @@ async function fetchLabels() {
         taxon_groups: groups,
         observation_filter: (document.querySelector('input[name="obs-filter"]:checked') || {}).value || 'research',
       }),
-    });
-    var data = await resp.json();
+    }, { toast: false });
     status.textContent = 'Fetching species...';
 
     var progressDiv = document.getElementById('fetchLabelsProgress');
     var progressFill = document.getElementById('fetchLabelsFill');
     progressDiv.style.display = '';
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.current_file) status.textContent = p.current_file;
-      if (p.total > 0 && p.current > 0) {
-        progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+        if (p.total > 0 && p.current > 0) {
+          progressFill.style.width = Math.round((p.current / p.total) * 100) + '%';
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed' && result.result) {
+          status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
+          status.style.color = '#24E5CA';
+          progressFill.style.width = '100%';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.style.color = '#e74c3c';
+        }
+        btn.disabled = false;
+        loadLabels();
+        setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        btn.disabled = false;
       }
     });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed' && result.result) {
-        status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
-        status.style.color = '#24E5CA';
-        progressFill.style.width = '100%';
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        status.style.color = '#e74c3c';
-      }
-      btn.disabled = false;
-      loadLabels();
-      setTimeout(function() { progressDiv.style.display = 'none'; }, 3000);
-    });
-    source.onerror = function() { source.close(); status.textContent = 'Connection lost'; btn.disabled = false; };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;
@@ -949,8 +936,7 @@ async function fetchLabels() {
 /* ---------- Models ---------- */
 async function loadModels() {
   try {
-    var resp = await fetch('/api/models');
-    var data = await resp.json();
+    var data = await safeFetch('/api/models', {}, { toast: false });
     var models = data.models || [];
     var activeId = data.active_id;
 
@@ -1009,12 +995,11 @@ async function loadModels() {
 
 async function downloadModel(modelId) {
   try {
-    var resp = await fetch('/api/jobs/download-model', {
+    var data = await safeFetch('/api/jobs/download-model', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({model_id: modelId}),
-    });
-    var data = await resp.json();
+    }, { toast: false });
 
     // Show inline progress
     var progressDiv = document.getElementById('modelProgress-' + modelId);
@@ -1022,30 +1007,34 @@ async function downloadModel(modelId) {
     var progressText = document.getElementById('modelProgressText-' + modelId);
     if (progressDiv) progressDiv.style.display = '';
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (progressFill && p.total > 0 && p.current > 0) {
-        var pct = Math.round((p.current / p.total) * 100);
-        progressFill.style.width = pct + '%';
-      }
-      if (progressText && p.current_file) {
-        progressText.textContent = p.current_file;
-      }
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        if (progressText) progressText.textContent = 'Download complete!';
-        if (progressFill) progressFill.style.width = '100%';
-      } else {
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (progressFill && p.total > 0 && p.current > 0) {
+          var pct = Math.round((p.current / p.total) * 100);
+          progressFill.style.width = pct + '%';
+        }
+        if (progressText && p.current_file) {
+          progressText.textContent = p.current_file;
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          if (progressText) progressText.textContent = 'Download complete!';
+          if (progressFill) progressFill.style.width = '100%';
+        } else {
+          if (progressText) {
+            progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+            progressText.style.color = '#e74c3c';
+          }
+        }
+        setTimeout(loadModels, 1000);
+      },
+      onError: function() {
         if (progressText) {
-          progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          progressText.textContent = 'Connection lost';
           progressText.style.color = '#e74c3c';
         }
       }
-      setTimeout(loadModels, 1000);
     });
   } catch(e) {}
 }
@@ -1053,19 +1042,21 @@ async function downloadModel(modelId) {
 async function removeModel(modelId) {
   if (!confirm('Remove this model and delete its weights from disk?')) return;
   try {
-    await fetch('/api/models/' + encodeURIComponent(modelId), {
+    await safeFetch('/api/models/' + encodeURIComponent(modelId), {
       method: 'DELETE',
     });
-    loadModels();
   } catch(e) {}
+  loadModels();
 }
 
 async function setActiveModel(modelId) {
-  await fetch('/api/models/active', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({model_id: modelId}),
-  });
+  try {
+    await safeFetch('/api/models/active', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model_id: modelId}),
+    });
+  } catch(e) {}
   loadModels();
 }
 
@@ -1080,39 +1071,32 @@ async function addHfModel() {
   status.style.color = '#888';
 
   try {
-    var resp = await fetch('/api/jobs/download-hf-model', {
+    var data = await safeFetch('/api/jobs/download-hf-model', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({repo_id: repoId}),
-    });
-    if (!resp.ok) {
-      var err = await resp.json();
-      status.textContent = 'Error: ' + (err.error || 'failed');
-      status.style.color = '#e74c3c';
-      return;
-    }
-    var data = await resp.json();
+    }, { toast: false });
     status.textContent = 'Downloading...';
 
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('progress', function(e) {
-      var p = JSON.parse(e.data);
-      if (p.current_file) status.textContent = p.current_file;
-    });
-    source.addEventListener('complete', function(e) {
-      source.close();
-      var result = JSON.parse(e.data);
-      if (result.status === 'completed') {
-        status.textContent = 'Downloaded! Model ready to use.';
-        status.style.color = '#24E5CA';
-        document.getElementById('hfRepoId').value = '';
-      } else {
-        status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-        status.style.color = '#e74c3c';
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          status.textContent = 'Downloaded! Model ready to use.';
+          status.style.color = '#24E5CA';
+          document.getElementById('hfRepoId').value = '';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+          status.style.color = '#e74c3c';
+        }
+        loadModels();
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
       }
-      loadModels();
     });
-    source.onerror = function() { source.close(); status.textContent = 'Connection lost'; };
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     status.style.color = '#e74c3c';
@@ -1123,21 +1107,22 @@ async function addCustomModel() {
   var name = document.getElementById('customModelName').value.trim();
   var path = document.getElementById('customModelPath').value.trim();
   if (!name || !path) return;
-  await fetch('/api/models/custom', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: name, weights_path: path}),
-  });
-  document.getElementById('customModelName').value = '';
-  document.getElementById('customModelPath').value = '';
+  try {
+    await safeFetch('/api/models/custom', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, weights_path: path}),
+    });
+    document.getElementById('customModelName').value = '';
+    document.getElementById('customModelPath').value = '';
+  } catch(e) {}
   loadModels();
 }
 
 /* ---------- Taxonomy ---------- */
 async function loadTaxonomy() {
   try {
-    var resp = await fetch('/api/taxonomy/info');
-    var d = await resp.json();
+    var d = await safeFetch('/api/taxonomy/info', {}, { toast: false });
     var html = '';
     if (d.available) {
       html += '<div style="display:flex;align-items:center;gap:12px;">';
@@ -1163,13 +1148,12 @@ async function loadTaxonomy() {
 
 async function downloadTaxonomy() {
   try {
-    var resp = await fetch('/api/jobs/download-taxonomy', { method: 'POST' });
-    var data = await resp.json();
+    var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
     document.getElementById('taxonomyContent').innerHTML = '<span style="color:#888;font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('complete', function() {
-      source.close();
-      loadTaxonomy();
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function() {
+        loadTaxonomy();
+      }
     });
   } catch(e) {}
 }
@@ -1187,8 +1171,7 @@ function formatBytes(b) {
 /* ---------- Embedding Matrix ---------- */
 async function loadEmbeddingMatrix() {
   try {
-    var resp = await fetch('/api/embedding-matrix');
-    var data = await resp.json();
+    var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
     var models = data.models || [];
     var matrix = data.matrix || [];
 
@@ -1232,22 +1215,16 @@ async function loadEmbeddingMatrix() {
 
 async function precomputeEmbeddings(modelId, labelsFile) {
   try {
-    var resp = await fetch('/api/jobs/precompute-embeddings', {
+    var data = await safeFetch('/api/jobs/precompute-embeddings', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({model_id: modelId, labels_file: labelsFile}),
     });
-    if (!resp.ok) {
-      var err = await resp.json();
-      alert('Error: ' + (err.error || 'failed'));
-      return;
-    }
-    var data = await resp.json();
     // Watch for completion and refresh matrix
-    var source = new EventSource('/api/jobs/' + data.job_id + '/stream');
-    source.addEventListener('complete', function() {
-      source.close();
-      loadEmbeddingMatrix();
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onComplete: function() {
+        loadEmbeddingMatrix();
+      }
     });
   } catch(e) {}
 }
@@ -1255,8 +1232,7 @@ async function precomputeEmbeddings(modelId, labelsFile) {
 /* ---------- Embedding Cache ---------- */
 async function loadEmbeddingCache() {
   try {
-    var resp = await fetch('/api/embedding-cache');
-    var d = await resp.json();
+    var d = await safeFetch('/api/embedding-cache', {}, { toast: false });
     document.getElementById('embeddingCacheSize').textContent = formatBytes(d.total_size);
     var count = (d.entries || []).length;
     document.getElementById('embeddingCacheCount').textContent = count > 0 ? count + ' cached label ' + (count === 1 ? 'set' : 'sets') : 'empty';
@@ -1266,15 +1242,16 @@ async function loadEmbeddingCache() {
 
 async function clearEmbeddingCache() {
   if (!confirm('Clear all cached label embeddings? The next classification run will recompute them (slow on CPU).')) return;
-  await fetch('/api/embedding-cache', { method: 'DELETE' });
+  try {
+    await safeFetch('/api/embedding-cache', { method: 'DELETE' });
+  } catch(e) {}
   loadEmbeddingCache();
 }
 
 /* ---------- Scan Roots ---------- */
 async function loadScanRoots() {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     if (roots.length === 0) {
       document.getElementById('scanRootsContent').innerHTML = '<span style="color:#666;font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
@@ -1295,17 +1272,16 @@ async function loadScanRoots() {
 
 async function removeScanRoot(index) {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     roots.splice(index, 1);
-    await fetch('/api/config', {
+    await safeFetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ scan_roots: roots }),
     });
-    loadScanRoots();
   } catch(e) {}
+  loadScanRoots();
 }
 
 async function cleanKeywords() {
@@ -1313,8 +1289,7 @@ async function cleanKeywords() {
   status.textContent = 'Checking...';
   status.style.color = '';
   try {
-    var resp = await fetch('/api/keywords/duplicates');
-    var dupes = await resp.json();
+    var dupes = await safeFetch('/api/keywords/duplicates', {}, { toast: false });
     if (dupes.length === 0) {
       status.textContent = 'No duplicates found';
       status.style.color = 'var(--text-dim,#888)';
@@ -1337,8 +1312,7 @@ async function cleanKeywords() {
       return;
     }
 
-    var mergeResp = await fetch('/api/keywords/clean', {method: 'POST'});
-    var data = await mergeResp.json();
+    var data = await safeFetch('/api/keywords/clean', {method: 'POST'}, { toast: false });
     status.textContent = 'Merged ' + data.merged + ' duplicate(s)';
     status.style.color = 'var(--accent,#24E5CA)';
   } catch(e) {
@@ -1350,8 +1324,7 @@ async function cleanKeywords() {
 /* ---------- Version ---------- */
 async function loadVersion() {
   try {
-    var resp = await fetch('/api/version');
-    var d = await resp.json();
+    var d = await safeFetch('/api/version', {}, { toast: false });
     document.getElementById('appVersion').textContent = 'v' + d.version;
   } catch(e) {}
 }

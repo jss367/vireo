@@ -148,6 +148,10 @@ def create_app(db_path, thumb_cache_dir=None):
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
+    def json_error(msg, status=400):
+        """Return a JSON error response. Standard shape: {"error": "msg"}."""
+        return jsonify({"error": msg}), status
+
     def _get_db():
         """Get a Database instance. Creates a new connection per request."""
         if not hasattr(app, "_db") or app._db is None:
@@ -383,7 +387,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         photo = db.get_photo(photo_id)
         if not photo:
-            return jsonify({"error": "not found"}), 404
+            return json_error("not found", 404)
 
         result = dict(photo)
         keywords = db.get_photo_keywords(photo_id)
@@ -508,7 +512,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         name = body.get("name", "").strip()
         if not name:
-            return jsonify({"error": "name required"}), 400
+            return json_error("name required")
         kid = db.add_keyword(name)
         db.tag_photo(photo_id, kid)
         db.queue_change(photo_id, "keyword_add", name)
@@ -556,7 +560,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
         rating = body.get("rating", 0)
         if not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
         old_values = {}
         for pid in photo_ids:
             old = db.get_photo(pid)
@@ -582,7 +586,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
         flag = body.get("flag", "none")
         if not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
         old_values = {}
         for pid in photo_ids:
             old = db.get_photo(pid)
@@ -608,7 +612,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
         name = body.get("name", "").strip()
         if not photo_ids or not name:
-            return jsonify({"error": "photo_ids and name required"}), 400
+            return json_error("photo_ids and name required")
         kid = db.add_keyword(name)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
@@ -629,7 +633,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/undo", methods=["POST"])
     def api_undo():
         if not _undo_stack:
-            return jsonify({"error": "nothing to undo"}), 400
+            return json_error("nothing to undo")
         db = _get_db()
         action = _undo_stack.pop()
 
@@ -729,7 +733,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         change_ids = body.get("change_ids", [])
         if not change_ids:
-            return jsonify({"error": "change_ids required"}), 400
+            return json_error("change_ids required")
         db.clear_pending(change_ids)
         log.info("Discarded %d pending changes", len(change_ids))
         return jsonify({"ok": True, "discarded": len(change_ids)})
@@ -751,7 +755,7 @@ def create_app(db_path, thumb_cache_dir=None):
         name = body.get("name", "").strip()
         rules = body.get("rules", [])
         if not name:
-            return jsonify({"error": "name required"}), 400
+            return json_error("name required")
         cid = db.add_collection(name, json.dumps(rules))
         return jsonify({"ok": True, "id": cid})
 
@@ -768,13 +772,13 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         if not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
 
         row = db.conn.execute(
             "SELECT rules FROM collections WHERE id = ?", (collection_id,)
         ).fetchone()
         if not row:
-            return jsonify({"error": "Collection not found"}), 404
+            return json_error("Collection not found", 404)
 
         rules = json.loads(row["rules"])
         # Find or create a photo_ids rule
@@ -830,7 +834,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         ws = db.get_workspace(db._active_workspace_id)
         if not ws:
-            return jsonify({"error": "No active workspace"}), 404
+            return json_error("No active workspace", 404)
         result = dict(ws)
         result["folders"] = [dict(f) for f in db.get_workspace_folders(ws["id"])]
         return jsonify(result)
@@ -841,7 +845,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         name = body.get("name", "").strip()
         if not name:
-            return jsonify({"error": "Name is required"}), 400
+            return json_error("Name is required")
         try:
             ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
             # Link selected folders if provided
@@ -850,7 +854,7 @@ def create_app(db_path, thumb_cache_dir=None):
             ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
-            return jsonify({"error": str(e)}), 400
+            return json_error(str(e))
 
     @app.route("/api/workspaces/<int:ws_id>", methods=["PUT"])
     def api_update_workspace(ws_id):
@@ -873,10 +877,10 @@ def create_app(db_path, thumb_cache_dir=None):
         # Prevent deleting the last workspace
         workspaces = db.get_workspaces()
         if len(workspaces) <= 1:
-            return jsonify({"error": "Cannot delete the only workspace"}), 400
+            return json_error("Cannot delete the only workspace")
         # Prevent deleting the active workspace
         if ws_id == db._active_workspace_id:
-            return jsonify({"error": "Cannot delete the active workspace. Switch first."}), 400
+            return json_error("Cannot delete the active workspace. Switch first.")
         db.delete_workspace(ws_id)
         return jsonify({"ok": True})
 
@@ -885,7 +889,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         ws = db.get_workspace(ws_id)
         if not ws:
-            return jsonify({"error": "Workspace not found"}), 404
+            return json_error("Workspace not found", 404)
         from datetime import datetime
 
         # Save current page path to the outgoing workspace's ui_state
@@ -928,7 +932,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         folder_id = body.get("folder_id")
         if not folder_id:
-            return jsonify({"error": "folder_id is required"}), 400
+            return json_error("folder_id is required")
         db.add_workspace_folder(ws_id, folder_id)
         return jsonify({"ok": True})
 
@@ -1364,7 +1368,7 @@ def create_app(db_path, thumb_cache_dir=None):
         }
         cache_dir = dirs.get(cache_type)
         if not cache_dir:
-            return jsonify({"error": "Unknown cache type"}), 400
+            return json_error("Unknown cache type")
 
         # Load embedding manifest for display names
         manifest = {}
@@ -1413,7 +1417,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 log.info("Embedding cache cleared")
             return jsonify({"ok": True})
         else:
-            return jsonify({"error": "Unknown cache type"}), 400
+            return json_error("Unknown cache type")
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
@@ -1432,9 +1436,9 @@ def create_app(db_path, thumb_cache_dir=None):
         }
         cache_dir = dirs.get(cache_type)
         if not cache_dir:
-            return jsonify({"error": "Unknown cache type"}), 400
+            return json_error("Unknown cache type")
         if not filenames:
-            return jsonify({"error": "No files specified"}), 400
+            return json_error("No files specified")
 
         deleted = 0
         for fname in filenames:
@@ -1524,7 +1528,7 @@ def create_app(db_path, thumb_cache_dir=None):
         model_id = body.get("model_id")
         labels_file = body.get("labels_file")
         if not model_id or not labels_file:
-            return jsonify({"error": "model_id and labels_file required"}), 400
+            return json_error("model_id and labels_file required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -1620,14 +1624,14 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         catalogs = body.get("catalogs", [])
         if not catalogs:
-            return jsonify({"error": "catalogs required"}), 400
+            return json_error("catalogs required")
         try:
             from importer import preview_import
 
             result = preview_import(catalogs, db)
             return jsonify(result)
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
+            return json_error(str(e), 500)
 
     # -- Audit API routes --
 
@@ -1721,14 +1725,14 @@ def create_app(db_path, thumb_cache_dir=None):
         if removed:
             log.info("Removed model: %s", model_id)
             return jsonify({"ok": True})
-        return jsonify({"error": "Model not found"}), 404
+        return json_error("Model not found", 404)
 
     @app.route("/api/models/active", methods=["POST"])
     def api_set_active_model():
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
-            return jsonify({"error": "model_id required"}), 400
+            return json_error("model_id required")
         from models import set_active_model
 
         set_active_model(model_id)
@@ -1741,7 +1745,7 @@ def create_app(db_path, thumb_cache_dir=None):
         weights_path = body.get("weights_path", "").strip()
         model_str = body.get("model_str", "ViT-B-16")
         if not name or not weights_path:
-            return jsonify({"error": "name and weights_path required"}), 400
+            return json_error("name and weights_path required")
         from models import register_model
 
         model_id = "custom-" + name.lower().replace(" ", "-")
@@ -1753,7 +1757,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
-            return jsonify({"error": "model_id required"}), 400
+            return json_error("model_id required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -1788,7 +1792,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         repo_id = body.get("repo_id", "").strip()
         if not repo_id:
-            return jsonify({"error": "repo_id required"}), 400
+            return json_error("repo_id required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -1894,7 +1898,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         labels_file = body.get("labels_file")
         if not labels_file:
-            return jsonify({"error": "labels_file required"}), 400
+            return json_error("labels_file required")
         delete_labels(labels_file)
         return jsonify({"ok": True})
 
@@ -1906,7 +1910,7 @@ def create_app(db_path, thumb_cache_dir=None):
         if labels_files is None:
             single = body.get("labels_file")
             if not single:
-                return jsonify({"error": "labels_files or labels_file required"}), 400
+                return json_error("labels_files or labels_file required")
             labels_files = [single]
         from labels import set_active_labels
 
@@ -1922,7 +1926,7 @@ def create_app(db_path, thumb_cache_dir=None):
         observation_filter = body.get("observation_filter", "research")
         name = body.get("name", "")
         if not place_id:
-            return jsonify({"error": "place_id required"}), 400
+            return json_error("place_id required")
         if observation_filter not in ("research", "wild", "all"):
             observation_filter = "research"
         if not name:
@@ -2027,7 +2031,7 @@ def create_app(db_path, thumb_cache_dir=None):
             (photo_id,),
         ).fetchone()
         if not photo:
-            return jsonify({"error": "Photo not found"}), 404
+            return json_error("Photo not found", 404)
 
         # Get species prediction
         pred = db.conn.execute(
@@ -2205,7 +2209,7 @@ def create_app(db_path, thumb_cache_dir=None):
             import torch
             hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
         except ImportError:
-            return jsonify({"error": "torch not installed"}), 400
+            return json_error("torch not installed")
 
         removed = []
         for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
@@ -2231,7 +2235,7 @@ def create_app(db_path, thumb_cache_dir=None):
             import torch
             hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
         except ImportError:
-            return jsonify({"error": "torch not installed"}), 400
+            return json_error("torch not installed")
 
         hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
 
@@ -2344,7 +2348,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
-            return jsonify({"error": "model_id required"}), 400
+            return json_error("model_id required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -2467,13 +2471,13 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
-            return jsonify({"error": "model_id required"}), 400
+            return json_error("model_id required")
 
         try:
             import torch
             hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
         except ImportError:
-            return jsonify({"error": "torch not installed"}), 400
+            return json_error("torch not installed")
 
         hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
         removed = []
@@ -2559,9 +2563,9 @@ def create_app(db_path, thumb_cache_dir=None):
         root = body.get("root", "")
         incremental = body.get("incremental", False)
         if not root:
-            return jsonify({"error": "root path required"}), 400
+            return json_error("root path required")
         if not os.path.isdir(root):
-            return jsonify({"error": f"directory not found: {root}"}), 400
+            return json_error(f"directory not found: {root}")
 
         # Remember this scan root (skip temp directories from tests)
         import tempfile
@@ -2759,7 +2763,7 @@ def create_app(db_path, thumb_cache_dir=None):
         strategy = body.get("strategy", "merge_all")
         write_xmp = body.get("write_xmp", False)
         if not catalogs:
-            return jsonify({"error": "catalogs required"}), 400
+            return json_error("catalogs required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -2920,7 +2924,7 @@ def create_app(db_path, thumb_cache_dir=None):
         reclassify = body.get("reclassify", False)
 
         if not collection_id:
-            return jsonify({"error": "collection_id required"}), 400
+            return json_error("collection_id required")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -3600,7 +3604,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_status(job_id):
         job = app._job_runner.get(job_id)
         if not job:
-            return jsonify({"error": "job not found"}), 404
+            return json_error("job not found", 404)
         return jsonify(job)
 
     @app.route("/api/jobs/<job_id>/stream")
@@ -3609,7 +3613,7 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         job = runner.get(job_id)
         if not job:
-            return jsonify({"error": "job not found"}), 404
+            return json_error("job not found", 404)
 
         q = runner.subscribe(job_id)
 
@@ -3832,7 +3836,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
         label = body.get("label", "").strip()
         if not photo_ids or not label:
-            return jsonify({"error": "photo_ids and label required"}), 400
+            return json_error("photo_ids and label required")
 
         kid = db.add_keyword(label)
         for pid in photo_ids:
@@ -3931,7 +3935,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         if not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
 
         import config as cfg
         from develop import find_darktable
@@ -3939,7 +3943,7 @@ def create_app(db_path, thumb_cache_dir=None):
         darktable_bin = cfg.get("darktable_bin")
         binary = find_darktable(darktable_bin)
         if not binary:
-            return jsonify({"error": "darktable-cli not found. Configure the path in Settings."}), 400
+            return json_error("darktable-cli not found. Configure the path in Settings.")
 
         style = body.get("style") or cfg.get("darktable_style") or ""
         output_format = body.get("output_format") or cfg.get("darktable_output_format") or "jpg"
@@ -4253,9 +4257,9 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
 
         if not species:
-            return jsonify({"error": "species is required"}), 400
+            return json_error("species is required")
         if not photo_ids:
-            return jsonify({"error": "photo_ids is required"}), 400
+            return json_error("photo_ids is required")
 
         # Validate all photo_ids exist before mutating
         placeholders = ",".join("?" for _ in photo_ids)
@@ -4265,7 +4269,7 @@ def create_app(db_path, thumb_cache_dir=None):
         found_ids = {r["id"] for r in found}
         missing = [pid for pid in photo_ids if pid not in found_ids]
         if missing:
-            return jsonify({"error": f"Unknown photo_ids: {missing}"}), 400
+            return json_error(f"Unknown photo_ids: {missing}")
 
         # Create or find the species keyword (commits on its own)
         kid = db.add_keyword(species, is_species=True)
@@ -4353,7 +4357,7 @@ def create_app(db_path, thumb_cache_dir=None):
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
         if results is None:
-            return jsonify({"error": "No pipeline results found. Run regroup first."}), 404
+            return json_error("No pipeline results found. Run regroup first.", 404)
         return jsonify(results)
 
     @app.route("/api/pipeline/photo/<int:photo_id>")
@@ -4370,7 +4374,7 @@ def create_app(db_path, thumb_cache_dir=None):
             (photo_id,),
         ).fetchone()
         if not row:
-            return jsonify({"error": "Photo not found"}), 404
+            return json_error("Photo not found", 404)
         return jsonify(dict(row))
 
     @app.route("/masks/<filename>")
@@ -4412,7 +4416,7 @@ def create_app(db_path, thumb_cache_dir=None):
         # (the cached JSON doesn't have embeddings)
         photos = load_photo_features(db)
         if not photos:
-            return jsonify({"error": "No photos with pipeline features"}), 404
+            return json_error("No photos with pipeline features", 404)
 
         encounters = run_grouping(photos, config=pipeline_cfg)
         results = reflow(encounters, config=pipeline_cfg)
@@ -4448,7 +4452,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         photos = load_photo_features(db)
         if not photos:
-            return jsonify({"error": "No photos with pipeline features"}), 404
+            return json_error("No photos with pipeline features", 404)
 
         results = run_full_pipeline(photos, config=pipeline_cfg)
 
@@ -4477,7 +4481,7 @@ def create_app(db_path, thumb_cache_dir=None):
         allowed_keys = {"sam2_variant", "dinov2_variant", "proxy_longest_edge"}
         pipeline_updates = {k: v for k, v in body.items() if k in allowed_keys}
         if not pipeline_updates:
-            return jsonify({"error": "No valid pipeline config keys provided"}), 400
+            return json_error("No valid pipeline config keys provided")
 
         # Load current overrides, merge pipeline updates
         ws = db.get_workspace(db._active_workspace_id)
@@ -4502,7 +4506,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         cache_path = os.path.join(os.path.dirname(db_path), f"culling_results_ws{db._active_workspace_id}.json")
         if not os.path.exists(cache_path):
-            return jsonify({"error": "No culling analysis found. Run one first."}), 404
+            return json_error("No culling analysis found. Run one first.", 404)
 
         with open(cache_path) as f:
             results = json.load(f)
@@ -4613,7 +4617,7 @@ def create_app(db_path, thumb_cache_dir=None):
             (photo_id,),
         ).fetchone()
         if not photo:
-            return jsonify({"error": "Photo not found"}), 404
+            return json_error("Photo not found", 404)
 
         result = dict(photo)
         # Remove binary embedding from response

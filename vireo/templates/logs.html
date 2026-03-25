@@ -88,12 +88,12 @@ var logLines = [];
 var LEVEL_ORDER = { 'DEBUG': 0, 'INFO': 1, 'WARNING': 2, 'ERROR': 3, 'CRITICAL': 4 };
 
 /* Load recent logs first */
-fetch('/api/logs/recent?count=500')
-  .then(function(r) { return r.json(); })
+safeFetch('/api/logs/recent?count=500', {}, { toast: false })
   .then(function(logs) {
     logs.forEach(function(l) { addLogLine(l); });
     applyFilter();
-  });
+  })
+  .catch(function() {});
 
 /* Connect to SSE stream */
 var source = new EventSource('/api/logs/stream');
@@ -102,6 +102,10 @@ source.addEventListener('log', function(e) {
   addLogLine(record);
   applyFilter();
 });
+source.onerror = function() {
+  source.close();
+  showToast('Log stream disconnected', 'error');
+};
 
 function addLogLine(record) {
   var time = new Date(record.time * 1000);
