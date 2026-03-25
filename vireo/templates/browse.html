@@ -568,8 +568,7 @@ var activeKeyword = null;
 var _shortcuts = null;
 (async function() {
   try {
-    var resp = await fetch('/api/config');
-    var cfg = await resp.json();
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
     _shortcuts = (cfg.keyboard_shortcuts || {}).browse || {
       rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
       flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
@@ -585,8 +584,7 @@ bootstrapBrowse();
 
 async function bootstrapBrowse() {
   try {
-    var resp = await fetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
-    var data = await resp.json();
+    var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
 
     // Populate everything from a single response
     photos = data.photos || [];
@@ -618,8 +616,7 @@ function renderCollectionList(collections) {
 /* ---------- Folder Tree ---------- */
 async function loadFolders() {
   try {
-    var resp = await fetch('/api/folders');
-    var data = await resp.json();
+    var data = await safeFetch('/api/folders', {}, { toast: false });
     renderFolderTree(data);
   } catch(e) {}
 }
@@ -682,8 +679,7 @@ function filterByFolder(folderId) {
 /* ---------- Keyword Tree ---------- */
 async function loadKeywords() {
   try {
-    var resp = await fetch('/api/keywords');
-    var data = await resp.json();
+    var data = await safeFetch('/api/keywords', {}, { toast: false });
     renderKeywordTree(data);
   } catch(e) {}
 }
@@ -733,9 +729,7 @@ function filterByKeyword(name) {
 /* ---------- Collections ---------- */
 async function loadCollections() {
   try {
-    var resp = await fetch('/api/collections');
-    if (!resp.ok) return;
-    var data = await resp.json();
+    var data = await safeFetch('/api/collections', {}, { toast: false });
     renderCollectionList(data);
   } catch(e) {}
 }
@@ -749,8 +743,7 @@ async function filterByCollection(id) {
   document.getElementById('grid').innerHTML = '';
 
   try {
-    var resp = await fetch('/api/collections/' + id + '/photos?per_page=200');
-    var data = await resp.json();
+    var data = await safeFetch('/api/collections/' + id + '/photos?per_page=200', {}, { toast: false });
     photos = data.photos;
     totalPhotos = photos.length;
     renderGrid();
@@ -829,7 +822,7 @@ async function saveCollection() {
   });
 
   try {
-    await fetch('/api/collections', {
+    await safeFetch('/api/collections', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: name, rules: rules}),
@@ -874,8 +867,7 @@ async function loadPhotos() {
   if (activeKeyword) params.set('keyword', activeKeyword);
 
   try {
-    var resp = await fetch('/api/photos?' + params.toString());
-    var data = await resp.json();
+    var data = await safeFetch('/api/photos?' + params.toString());
     totalPhotos = data.total;
 
     if (data.photos.length === 0) {
@@ -1081,10 +1073,12 @@ function updateBatchBar() {
 
 async function batchSetRating(rating) {
   var ids = Array.from(selectedPhotos);
-  await fetch('/api/batch/rating', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids, rating: rating}),
-  });
+  try {
+    await safeFetch('/api/batch/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, rating: rating}),
+    });
+  } catch(e) { return; }
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.rating = rating;
@@ -1095,10 +1089,12 @@ async function batchSetRating(rating) {
 
 async function batchSetFlag(flag) {
   var ids = Array.from(selectedPhotos);
-  await fetch('/api/batch/flag', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids, flag: flag}),
-  });
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, flag: flag}),
+    });
+  } catch(e) { return; }
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
@@ -1111,10 +1107,12 @@ async function batchAddKeyword() {
   var name = prompt('Keyword to add to ' + selectedPhotos.size + ' photos:');
   if (!name) return;
   var ids = Array.from(selectedPhotos);
-  await fetch('/api/batch/keyword', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids, name: name.trim()}),
-  });
+  try {
+    await safeFetch('/api/batch/keyword', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, name: name.trim()}),
+    });
+  } catch(e) { return; }
   showUndoToast();
 }
 
@@ -1122,9 +1120,9 @@ async function addToCollection() {
   if (selectedPhotos.size === 0) return;
 
   // Build a picker: existing collections + option to create new
+  var collections;
   try {
-    var resp = await fetch('/api/collections');
-    var collections = await resp.json();
+    collections = await safeFetch('/api/collections', {}, { toast: false });
   } catch(e) { return; }
 
   var options = collections.map(function(c) { return c.name + ' (id:' + c.id + ')'; });
@@ -1149,24 +1147,27 @@ async function addToCollection() {
   } else {
     // Create a new static collection
     collectionName = choice;
-    var createResp = await fetch('/api/collections', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        name: collectionName,
-        rules: [{"field": "photo_ids", "value": []}],
-      }),
-    });
-    var createData = await createResp.json();
-    collectionId = createData.id;
+    try {
+      var createData = await safeFetch('/api/collections', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          name: collectionName,
+          rules: [{"field": "photo_ids", "value": []}],
+        }),
+      });
+      collectionId = createData.id;
+    } catch(e) { return; }
   }
 
   // Add photos to the collection
-  await fetch('/api/collections/' + collectionId + '/add-photos', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: ids}),
-  });
+  try {
+    await safeFetch('/api/collections/' + collectionId + '/add-photos', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids}),
+    });
+  } catch(e) { return; }
 
   showToast('Added ' + ids.length + ' photos to "' + collectionName + '"');
   loadCollections();
@@ -1184,41 +1185,28 @@ function clearSelection() {
 /* ---------- Undo ---------- */
 async function undoLast() {
   try {
-    var resp = await fetch('/api/undo', { method: 'POST' });
-    if (!resp.ok) return;
-    var data = await resp.json();
+    var data = await safeFetch('/api/undo', { method: 'POST' });
     showToast('Undone: ' + data.undone);
     // Refresh grid
     resetAndLoad();
   } catch(e) {}
 }
 
-function showUndoToast() {
-  fetch('/api/undo/status').then(function(r) { return r.json(); }).then(function(data) {
+async function showUndoToast() {
+  try {
+    var data = await safeFetch('/api/undo/status', {}, { toast: false });
     if (data.available) showToast(data.description + ' — Ctrl+Z to undo');
-  });
+  } catch(e) {}
 }
 
-function showToast(msg) {
-  var toast = document.getElementById('undoToast');
-  if (!toast) return;
-  toast.textContent = msg;
-  toast.style.display = 'block';
-  toast.style.opacity = '1';
-  clearTimeout(toast._timer);
-  toast._timer = setTimeout(function() {
-    toast.style.opacity = '0';
-    setTimeout(function() { toast.style.display = 'none'; }, 300);
-  }, 4000);
-}
+/* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
   var panel = document.getElementById('detailPanel');
   panel.classList.add('open');
 
   try {
-    var resp = await fetch('/api/photos/' + id);
-    var photo = await resp.json();
+    var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
     renderDetail(photo);
   } catch(e) {}
 }
@@ -1304,7 +1292,7 @@ function closeDetail() {
 /* ---------- Edit Actions ---------- */
 async function setRating(photoId, rating) {
   try {
-    await fetch('/api/photos/' + photoId + '/rating', {
+    await safeFetch('/api/photos/' + photoId + '/rating', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rating: rating }),
@@ -1320,7 +1308,7 @@ async function setRating(photoId, rating) {
 async function setFlag(flag) {
   if (!selectedPhotoId) return;
   try {
-    await fetch('/api/photos/' + selectedPhotoId + '/flag', {
+    await safeFetch('/api/photos/' + selectedPhotoId + '/flag', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flag: flag }),
@@ -1338,7 +1326,7 @@ async function addKeyword() {
   var name = input.value.trim();
   if (!name) return;
   try {
-    await fetch('/api/photos/' + selectedPhotoId + '/keywords', {
+    await safeFetch('/api/photos/' + selectedPhotoId + '/keywords', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name }),
@@ -1351,7 +1339,7 @@ async function addKeyword() {
 
 async function removeKeyword(photoId, keywordId) {
   try {
-    await fetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
+    await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
     loadDetail(photoId);
@@ -1424,13 +1412,6 @@ function scrollToCard(idx) {
 }
 
 /* ---------- Utilities ---------- */
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 function escapeAttr(str) {
   if (str == null) return '';
   return String(str).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1442,55 +1423,41 @@ async function developSelected() {
 
   // Check darktable availability first
   try {
-    var statusResp = await fetch('/api/darktable/status');
-    var status = await statusResp.json();
+    var status = await safeFetch('/api/darktable/status', {}, { toast: false });
     if (!status.available) {
-      alert('darktable-cli not found. Configure it in Settings.');
+      showToast('darktable-cli not found. Configure it in Settings.');
       return;
     }
   } catch(e) {
-    alert('Could not check darktable availability.');
+    showToast('Could not check darktable availability.');
     return;
   }
 
   if (!confirm('Develop ' + ids.length + ' photo(s) with darktable?')) return;
 
   try {
-    var resp = await fetch('/api/jobs/develop', {
+    var data = await safeFetch('/api/jobs/develop', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({photo_ids: ids}),
     });
-    var data = await resp.json();
-    if (resp.ok && data.job_id) {
-      showToast('Developing ' + ids.length + ' photo(s)...');
-      // Monitor job progress via SSE
-      var evtSource = new EventSource('/api/jobs/' + data.job_id + '/stream');
-      evtSource.addEventListener('progress', function(e) {
-        var prog = JSON.parse(e.data);
+    showToast('Developing ' + ids.length + ' photo(s)...');
+    // Monitor job progress via SSE
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(prog) {
         showToast('Developing: ' + prog.current + '/' + prog.total + ' — ' + (prog.current_file || ''));
-      });
-      evtSource.addEventListener('complete', function(e) {
-        var result = JSON.parse(e.data);
-        evtSource.close();
+      },
+      onComplete: function(result) {
         showToast('Development complete: ' + (result.developed || 0) + ' developed, ' + (result.errors || 0) + ' errors');
-      });
-      evtSource.addEventListener('error', function(e) {
-        evtSource.close();
-      });
-    } else {
-      alert(data.error || 'Failed to start develop job');
-    }
+      },
+      onError: function() {}
+    });
   } catch(e) {
-    alert('Error starting develop job');
+    showToast(e.message || 'Error starting develop job');
   }
 }
 </script>
 
-<!-- Undo Toast -->
-<div id="undoToast" style="display:none;position:fixed;bottom:40px;left:50%;transform:translateX(-50%);
-  background:#0E2A3D;color:#E0F0F0;border:1px solid #14374E;border-radius:6px;padding:10px 20px;
-  font-size:13px;z-index:400;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.3);"></div>
 
 </body>
 </html>
