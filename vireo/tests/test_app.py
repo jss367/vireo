@@ -162,3 +162,27 @@ def test_pipeline_regroup_accepts_collection_id(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert "job_id" in data
+
+
+def test_static_css_served(app_and_db):
+    """vireo-base.css is served from /static/."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/static/vireo-base.css')
+    assert resp.status_code == 200
+    assert 'text/css' in resp.content_type
+    body = resp.data.decode()
+    assert 'box-sizing: border-box' in body
+
+
+def test_pages_link_base_css(app_and_db):
+    """Every page includes a <link> to vireo-base.css."""
+    app, _ = app_and_db
+    client = app.test_client()
+    pages = ['/browse', '/import', '/audit', '/logs',
+             '/settings', '/workspace', '/pipeline', '/stats']
+    for page in pages:
+        resp = client.get(page)
+        assert resp.status_code == 200, f"{page} returned {resp.status_code}"
+        html = resp.data.decode()
+        assert 'vireo-base.css' in html, f"{page} missing vireo-base.css link"
