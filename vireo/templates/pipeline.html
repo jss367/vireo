@@ -821,12 +821,6 @@ function markStale(name) {
   }
 }
 
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
 </script>
 </body>
 </html>

@@ -278,15 +278,6 @@ function filterSpecies() {
   renderSpeciesList(filtered);
 }
 
-function escapeHtml(s) {
-  var d = document.createElement('div');
-  d.textContent = s || '';
-  return d.innerHTML;
-}
-function escapeAttr(s) {
-  return (s || '').replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
-}
-
 async function selectSpecies(name) {
   activeSpecies = name;
   // Re-render sidebar to update active state

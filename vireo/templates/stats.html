@@ -450,13 +450,6 @@ function renderHours(hours) {
   container.innerHTML = html;
 }
 
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   var k = 1024;

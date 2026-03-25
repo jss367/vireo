@@ -622,13 +622,6 @@ function lrReset() {
   lrShowPhase(1);
 }
 
-function escapeHtml(str) {
-  if (str == null) return '';
-  var div = document.createElement('div');
-  div.appendChild(document.createTextNode(String(str)));
-  return div.innerHTML;
-}
-
 /* ==================== Import Wizard ==================== */
 var wizFolders = [];
 
