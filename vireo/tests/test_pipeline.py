@@ -295,3 +295,82 @@ def test_encounters_have_species(tmp_path):
     species_names = {enc["species"][0] for enc in encounters}
     assert "robin" in species_names
     assert "eagle" in species_names
+
+
+def test_load_photo_features_confirmed_species(tmp_path):
+    """Photos with species keywords get confirmed_species set."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    # Confirm species for first encounter's photos
+    kid = db.add_keyword("Robin", is_species=True)
+    for pid in ids[0]:
+        db.tag_photo(pid, kid)
+
+    photos = load_photo_features(db)
+    confirmed = [p for p in photos if p["confirmed_species"] is not None]
+    assert len(confirmed) == len(ids[0])
+    for p in confirmed:
+        assert p["confirmed_species"] == "Robin"
+
+    # Second encounter should have no confirmed species
+    unconfirmed = [p for p in photos if p["confirmed_species"] is None]
+    assert len(unconfirmed) == len(ids[1])
+
+
+def test_serialize_results_includes_species_votes(tmp_path):
+    """serialize_results includes species_votes and confirmed_species."""
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    # Confirm species for first encounter
+    kid = db.add_keyword("Robin", is_species=True)
+    for pid in ids[0]:
+        db.tag_photo(pid, kid)
+
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    for enc in serialized["encounters"]:
+        assert "species_votes" in enc
+        assert "confirmed_species" in enc
+        assert isinstance(enc["species_votes"], list)
+
+    # At least one encounter should have confirmed species
+    confirmed_encs = [e for e in serialized["encounters"]
+                      if e["confirmed_species"] is not None]
+    assert len(confirmed_encs) >= 1
+    assert confirmed_encs[0]["confirmed_species"] == "Robin"
+
+    # Species votes should have species/count/avg_confidence
+    for enc in serialized["encounters"]:
+        for vote in enc["species_votes"]:
+            assert "species" in vote
+            assert "count" in vote
+            assert "avg_confidence" in vote
+
+
+def test_load_photo_features_collection_scoped(tmp_path):
+    """load_photo_features with collection_id returns only collection photos."""
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    p1 = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, timestamp="2026-01-01T10:00:00")
+    p2 = db.add_photo(fid, "b.jpg", ".jpg", 1000, 1.0, timestamp="2026-01-01T11:00:00")
+
+    # Create a static collection with only p1
+    rules = json.dumps([{"field": "photo_ids", "value": [p1]}])
+    cid = db.add_collection("test-coll", rules)
+
+    # Without collection_id — returns both
+    all_photos = load_photo_features(db)
+    assert len(all_photos) == 2
+
+    # With collection_id — returns only p1
+    scoped = load_photo_features(db, collection_id=cid)
+    assert len(scoped) == 1
+    assert scoped[0]["id"] == p1
