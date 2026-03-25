@@ -1488,6 +1488,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify({"error": "model_id and labels_file required"}), 400
 
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from classifier import Classifier
@@ -1552,6 +1553,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "model_id": model_id,
                 "labels_file": labels_file,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -1715,6 +1717,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify({"error": "model_id required"}), 400
 
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from models import download_model
@@ -1738,7 +1741,7 @@ def create_app(db_path, thumb_cache_dir=None):
             path = download_model(model_id, progress_callback=progress_cb)
             return {"model_id": model_id, "weights_path": path}
 
-        job_id = runner.start("download-model", work, config={"model_id": model_id})
+        job_id = runner.start("download-model", work, config={"model_id": model_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/download-hf-model", methods=["POST"])
@@ -1749,6 +1752,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify({"error": "repo_id required"}), 400
 
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from models import download_hf_model
@@ -1769,7 +1773,7 @@ def create_app(db_path, thumb_cache_dir=None):
             result = download_hf_model(repo_id, progress_callback=progress_cb)
             return result
 
-        job_id = runner.start("download-model", work, config={"repo_id": repo_id})
+        job_id = runner.start("download-model", work, config={"repo_id": repo_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/taxonomy/info")
@@ -1781,6 +1785,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/jobs/download-taxonomy", methods=["POST"])
     def api_job_download_taxonomy():
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from taxonomy import download_taxonomy
@@ -1801,7 +1806,7 @@ def create_app(db_path, thumb_cache_dir=None):
             download_taxonomy(taxonomy_path, progress_callback=progress_cb)
             return {"ok": True}
 
-        job_id = runner.start("download-taxonomy", work)
+        job_id = runner.start("download-taxonomy", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     # -- Labels API routes --
@@ -1888,6 +1893,7 @@ def create_app(db_path, thumb_cache_dir=None):
             name = f"{place_name} {group_names} ({filter_label})".strip()
 
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from labels import fetch_species_list, save_labels, set_active_labels
@@ -1964,6 +1970,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "place_name": place_name,
                 "taxon_groups": taxon_groups,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -2103,6 +2110,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_megadetector_download():
         """Download MegaDetector weights as a background job."""
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             import torch
@@ -2146,7 +2154,7 @@ def create_app(db_path, thumb_cache_dir=None):
             size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
             return {"status": "downloaded", "size": f"{size_mb} MB", "path": dest}
 
-        job_id = runner.start("download-megadetector", work)
+        job_id = runner.start("download-megadetector", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/megadetector/delete", methods=["POST"])
@@ -2300,6 +2308,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify({"error": "model_id required"}), 400
 
         runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             import torch
@@ -2407,7 +2416,7 @@ def create_app(db_path, thumb_cache_dir=None):
             else:
                 raise ValueError(f"Unknown model: {model_id}")
 
-        job_id = runner.start(f"download-{model_id}", work, config={"model_id": model_id})
+        job_id = runner.start(f"download-{model_id}", work, config={"model_id": model_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/models/pipeline/delete", methods=["POST"])
@@ -2601,7 +2610,8 @@ def create_app(db_path, thumb_cache_dir=None):
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
         job_id = runner.start(
-            "scan", work, config={"root": root, "incremental": incremental}
+            "scan", work, config={"root": root, "incremental": incremental},
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -2636,7 +2646,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=progress_cb
             )
 
-        job_id = runner.start("thumbnails", work)
+        job_id = runner.start("thumbnails", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/previews", methods=["POST"])
@@ -2699,7 +2709,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             return {"generated": generated, "skipped": skipped, "total": total}
 
-        job_id = runner.start("previews", work, config={"collection_id": collection_id})
+        job_id = runner.start("previews", work, config={"collection_id": collection_id},
+                               workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/import", methods=["POST"])
@@ -2741,7 +2752,8 @@ def create_app(db_path, thumb_cache_dir=None):
             )
 
         job_id = runner.start(
-            "import", work, config={"catalogs": catalogs, "strategy": strategy}
+            "import", work, config={"catalogs": catalogs, "strategy": strategy},
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -2770,7 +2782,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
             return sync_to_xmp(thread_db, progress_callback=progress_cb)
 
-        job_id = runner.start("sync", work)
+        job_id = runner.start("sync", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/sharpness", methods=["POST"])
@@ -2845,6 +2857,7 @@ def create_app(db_path, thumb_cache_dir=None):
             config={
                 "collection_id": collection_id,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -3529,6 +3542,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "collection_id": collection_id,
                 "model_name": model_name,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -3865,7 +3879,8 @@ def create_app(db_path, thumb_cache_dir=None):
             }
 
         job_id = runner.start(
-            "cull", work, config={"collection_id": collection_id}
+            "cull", work, config={"collection_id": collection_id},
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -3960,6 +3975,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "style": style,
                 "output_format": output_format,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -4118,6 +4134,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
             },
+            workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
@@ -4178,7 +4195,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
             return results["summary"]
 
-        job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg})
+        job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/encounters/species", methods=["POST"])

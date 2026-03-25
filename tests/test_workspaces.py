@@ -295,9 +295,82 @@ def test_job_history_workspace_id(db_with_workspace):
     from jobs import JobRunner
     db, ws_id, _, _ = db_with_workspace
     runner = JobRunner(db=db)
-    # Verify the table has workspace_id column
-    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(job_history)").fetchall()]
-    assert "workspace_id" in cols
+
+    # Start a job with workspace_id
+    def noop(job):
+        return {"ok": True}
+
+    job_id = runner.start("test-job", noop, workspace_id=ws_id)
+
+    # Wait for job to complete
+    import time, sqlite3
+    for _ in range(100):
+        job = runner.get(job_id)
+        if job and job["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "completed", f"Job did not complete: {job}"
+
+    # Poll for persistence (written by background thread via separate connection)
+    db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    row = None
+    for _ in range(50):
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute(
+            "SELECT workspace_id FROM job_history WHERE id = ?", (job_id,)
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            break
+        time.sleep(0.05)
+
+    # Verify workspace_id was persisted
+    assert row is not None, "Job was not persisted to job_history"
+    assert row[0] == ws_id, f"Expected workspace_id={ws_id}, got {row[0]}"
+
+
+def test_job_history_filtered_by_workspace(db_with_workspace):
+    from jobs import JobRunner
+    import time, sqlite3
+
+    db, ws_id, _, _ = db_with_workspace
+    ws2_id = db.create_workspace("Other WS")
+    runner = JobRunner(db=db)
+
+    def noop(job):
+        return {"ok": True}
+
+    # Start jobs in two different workspaces
+    job1_id = runner.start("test-ws1", noop, workspace_id=ws_id)
+    job2_id = runner.start("test-ws2", noop, workspace_id=ws2_id)
+
+    # Wait for both to complete
+    for _ in range(100):
+        j1 = runner.get(job1_id)
+        j2 = runner.get(job2_id)
+        if (j1 and j1["status"] in ("completed", "failed") and
+                j2 and j2["status"] in ("completed", "failed")):
+            break
+        time.sleep(0.05)
+    assert j1["status"] == "completed", f"Job 1 did not complete: {j1}"
+    assert j2["status"] == "completed", f"Job 2 did not complete: {j2}"
+
+    # Poll for persistence (written by background thread via separate connection)
+    db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
+    for _ in range(50):
+        conn = sqlite3.connect(db_path, timeout=5)
+        count = conn.execute("SELECT COUNT(*) FROM job_history").fetchone()[0]
+        conn.close()
+        if count >= 2:
+            break
+        time.sleep(0.05)
+
+    # Query history scoped to ws_id
+    db.set_active_workspace(ws_id)
+    history = runner.get_history(db, limit=10)
+    job_ids = [h["id"] for h in history]
+    assert job1_id in job_ids
+    assert job2_id not in job_ids
 
 
 # -- Task 8: Migration test with pre-existing data --
