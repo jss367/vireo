@@ -218,6 +218,15 @@ def test_compare_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_compare_link_in_navbar(app_and_db):
+    """The navbar includes a link to /compare."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/compare')
+    assert b'/compare' in resp.data
+    assert b'Compare' in resp.data
+
+
 def test_compare_predictions_api(app_and_db):
     """GET /api/predictions/compare returns per-photo, per-model data."""
     app, db = app_and_db
