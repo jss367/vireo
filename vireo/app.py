@@ -3083,13 +3083,16 @@ def create_app(db_path, thumb_cache_dir=None):
                 "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
             )
 
-            # Clear existing predictions if re-classifying
+            # Clear existing predictions if re-classifying (scoped to this model)
             if reclassify:
                 photo_ids = [p["id"] for p in photos]
-                thread_db.clear_predictions(collection_photo_ids=photo_ids)
+                thread_db.clear_predictions(
+                    model=effective_name, collection_photo_ids=photo_ids
+                )
                 log.info(
-                    "Cleared existing predictions for %d photos (re-classify)",
+                    "Cleared existing predictions for %d photos, model=%s (re-classify)",
                     len(photo_ids),
+                    effective_name,
                 )
 
             # Phase 4: Initialize classifier

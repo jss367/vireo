@@ -573,15 +573,32 @@ async function runClassify(reclassify) {
   // All models done
   fill.style.width = '100%';
   text.textContent = 'Complete';
-  status.textContent = 'Done! ' + completed + '/' + total + ' models classified.';
-  status.className = 'status-msg ok';
-  num.className = 'stage-num complete';
-  document.getElementById('summaryClassify').textContent = totalPredictions + ' detections (' + completed + ' model' + (completed !== 1 ? 's' : '') + ')';
   btn.disabled = false;
-  _pipelineState.hasDetections = true;
-  markStale('extract');
-  markStale('group');
-  updateCardStates();
+
+  if (completed === 0) {
+    status.textContent = 'All models failed.';
+    status.className = 'status-msg';
+    num.className = 'stage-num';
+    progressWrap.style.display = 'none';
+  } else if (completed < total) {
+    status.textContent = 'Done! ' + completed + '/' + total + ' models classified (some failed).';
+    status.className = 'status-msg';
+    num.className = 'stage-num complete';
+    document.getElementById('summaryClassify').textContent = totalPredictions + ' detections (' + completed + '/' + total + ' models)';
+    _pipelineState.hasDetections = true;
+    markStale('extract');
+    markStale('group');
+    updateCardStates();
+  } else {
+    status.textContent = 'Done! ' + completed + '/' + total + ' models classified.';
+    status.className = 'status-msg ok';
+    num.className = 'stage-num complete';
+    document.getElementById('summaryClassify').textContent = totalPredictions + ' detections (' + completed + ' model' + (completed !== 1 ? 's' : '') + ')';
+    _pipelineState.hasDetections = true;
+    markStale('extract');
+    markStale('group');
+    updateCardStates();
+  }
 }
 
 // -- Card 2: Extract Features --
