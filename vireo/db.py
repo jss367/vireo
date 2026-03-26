@@ -61,6 +61,7 @@ class Database:
                 subject_size REAL,
                 quality_score REAL,
                 embedding BLOB,
+                embedding_model TEXT,
                 latitude REAL,
                 longitude REAL,
                 phash TEXT,
@@ -181,6 +182,10 @@ class Database:
             self.conn.execute("SELECT embedding FROM photos LIMIT 0")
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
+        try:
+            self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN embedding_model TEXT")
         try:
             self.conn.execute("SELECT latitude FROM photos LIMIT 0")
         except Exception:
@@ -1220,13 +1225,28 @@ class Database:
         ).fetchone()
         return row["embedding"] if row else None
 
-    def store_photo_embedding(self, photo_id, embedding_bytes):
-        """Store an embedding blob for a photo."""
+    def store_photo_embedding(self, photo_id, embedding_bytes, model=None):
+        """Store an embedding blob for a photo, optionally with model name."""
         self.conn.execute(
-            "UPDATE photos SET embedding = ? WHERE id = ?",
-            (embedding_bytes, photo_id),
+            "UPDATE photos SET embedding = ?, embedding_model = ? WHERE id = ?",
+            (embedding_bytes, model, photo_id),
         )
         self.conn.commit()
+
+    def get_embeddings_by_model(self, model_name):
+        """Return (photo_id, embedding_blob) pairs for photos with given model.
+
+        Only returns photos in folders visible to the active workspace.
+        """
+        rows = self.conn.execute(
+            """SELECT p.id, p.embedding FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.embedding IS NOT NULL
+                 AND p.embedding_model = ?
+                 AND wf.workspace_id = ?""",
+            (model_name, self._ws_id()),
+        ).fetchall()
+        return [(row["id"], row["embedding"]) for row in rows]
 
     def update_prediction_group_info(self, photo_id, model, group_id, vote_count, total_votes, individual):
         """Update group info on an existing prediction."""
