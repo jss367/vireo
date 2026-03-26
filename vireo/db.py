@@ -1605,7 +1605,7 @@ class Database:
             return {}
         placeholders = ",".join("?" * len(photo_ids))
         rows = self.conn.execute(
-            f"SELECT photo_id, observation_id, observation_url, submitted_at FROM inat_submissions WHERE photo_id IN ({placeholders})",
+            f"SELECT photo_id, observation_id, observation_url, submitted_at FROM inat_submissions WHERE photo_id IN ({placeholders}) ORDER BY submitted_at DESC",
             photo_ids,
         ).fetchall()
         return {r["photo_id"]: dict(r) for r in rows}

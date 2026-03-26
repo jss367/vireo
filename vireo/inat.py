@@ -4,7 +4,8 @@ import requests
 
 INAT_API = "https://api.inaturalist.org/v1"
 INAT_RAILS = "https://www.inaturalist.org"
-INAT_TIMEOUT = 30  # seconds
+INAT_TIMEOUT = 30  # seconds, for API calls
+INAT_UPLOAD_TIMEOUT = (10, 120)  # (connect, read) for photo uploads
 
 
 class InatAuthError(Exception):
@@ -71,7 +72,7 @@ def upload_photo(token, observation_id, photo_path):
             files={"file": f},
             data={"observation_photo[observation_id]": observation_id},
             headers=_headers(token),
-            timeout=INAT_TIMEOUT,
+            timeout=INAT_UPLOAD_TIMEOUT,
         )
     if resp.status_code == 401:
         raise InatAuthError("iNaturalist token is invalid or expired.")

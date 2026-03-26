@@ -958,7 +958,7 @@ async function createWorkspace() {
 <div class="modal-overlay" id="inatModal">
   <div class="modal inat-modal">
     <h3 id="inatModalTitle">Submit to iNaturalist</h3>
-    <div id="inatCards"></div>
+    <div id="inatCards" style="max-height:60vh;overflow-y:auto;"></div>
     <div class="inat-progress" id="inatProgress" style="display:none;">
       <div class="inat-progress-bar"><div class="inat-progress-fill" id="inatProgressFill"></div></div>
       <div class="inat-progress-text" id="inatProgressText"></div>
@@ -1119,8 +1119,8 @@ async function submitToInat(photoId) {
       photo_id: photoId,
       taxon_name: data.scientific_name || data.species,
       observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
-      latitude: data.latitude || '',
-      longitude: data.longitude || '',
+      latitude: data.latitude != null ? data.latitude : '',
+      longitude: data.longitude != null ? data.longitude : '',
       description: '',
       geoprivacy: 'open',
       filename: data.filename,
@@ -1144,8 +1144,8 @@ async function submitToInatBatch(photoIds) {
         photo_id: photoIds[i],
         taxon_name: data.scientific_name || data.species,
         observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
-        latitude: data.latitude || '',
-        longitude: data.longitude || '',
+        latitude: data.latitude != null ? data.latitude : '',
+        longitude: data.longitude != null ? data.longitude : '',
         description: '',
         geoprivacy: 'open',
         filename: data.filename,
