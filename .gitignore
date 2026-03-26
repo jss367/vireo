@@ -208,3 +208,4 @@ __marimo__/
 vireo/taxonomy.json
 /.vscode
 .worktrees/
+node_modules/

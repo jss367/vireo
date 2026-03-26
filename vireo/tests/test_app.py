@@ -479,6 +479,16 @@ def test_templates_jinja_free_except_includes():
     )
 
 
+def test_bottom_panel_has_history_tab(app_and_db):
+    """The bottom panel includes a History tab."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    html = resp.data.decode()
+    assert "switchBpTab('history')" in html
+    assert 'id="bpHistory"' in html
+
+
 def test_text_search_requires_query(app_and_db):
     """Text search returns 400 when no query provided."""
     app, _ = app_and_db
@@ -496,6 +506,15 @@ def test_text_search_no_active_model(app_and_db):
     data = resp.get_json()
     assert data["results"] == []
     assert data["total_matches"] == 0
+
+
+def test_settings_has_edit_history_config(app_and_db):
+    """Settings page includes the max_edit_history config field."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    html = resp.data.decode()
+    assert 'max_edit_history' in html
 
 
 def test_pipeline_detach_burst(app_and_db):

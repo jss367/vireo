@@ -1557,6 +1557,7 @@ function closeSimilar() {
   <div class="bp-drag-handle" id="bpDragHandle"></div>
   <div class="bp-tabs">
     <div class="bp-tab active" onclick="switchBpTab('jobs')">Jobs <span class="bp-tab-badge" id="jobsBadge">0</span></div>
+    <div class="bp-tab" onclick="switchBpTab('history')">History <span class="bp-tab-badge" id="historyBadge">0</span></div>
     <div class="bp-tab" onclick="switchBpTab('logs')">Logs <span class="bp-tab-badge" id="logsBadge">0</span></div>
   </div>
   <div class="bp-content">
@@ -1564,6 +1565,12 @@ function closeSimilar() {
     <div class="bp-pane active" id="bpJobs">
       <div class="bp-jobs-list" id="bpJobsList">
         <div class="bp-jobs-empty">No jobs running</div>
+      </div>
+    </div>
+    <!-- History Pane -->
+    <div class="bp-pane" id="bpHistory">
+      <div class="bp-history-list" id="bpHistoryList" style="overflow-y:auto;flex:1;"
+        <div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>
       </div>
     </div>
     <!-- Logs Pane -->
@@ -1756,6 +1763,14 @@ function formatDuration(seconds) {
     var savedTab = localStorage.getItem('vireo_panel_tab') || 'jobs';
     switchBpTab(savedTab);
 
+    // Infinite scroll for history pane
+    document.getElementById('bpHistoryList').addEventListener('scroll', function() {
+      var el = this;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20) {
+        loadEditHistory(true);
+      }
+    });
+
     // SSE for logs — only connect when panel is open
     var panelOpen = localStorage.getItem('vireo_panel_open') === 'true';
     if (panelOpen) { startLogStream(); }
@@ -1824,14 +1839,108 @@ function formatDuration(seconds) {
   /* ---------- Tab switching ---------- */
   window.switchBpTab = function(tab) {
     currentBpTab = tab;
+    var tabNames = ['jobs', 'history', 'logs'];
+    var paneIds = {'jobs': 'bpJobs', 'history': 'bpHistory', 'logs': 'bpLogs'};
     document.querySelectorAll('.bp-tab').forEach(function(t, i) {
-      t.classList.toggle('active', ['jobs', 'logs'][i] === tab);
+      t.classList.toggle('active', tabNames[i] === tab);
     });
     document.querySelectorAll('.bp-pane').forEach(function(p) {
-      p.classList.toggle('active', p.id === (tab === 'jobs' ? 'bpJobs' : 'bpLogs'));
+      p.classList.toggle('active', p.id === paneIds[tab]);
     });
     localStorage.setItem('vireo_panel_tab', tab);
+    if (tab === 'history') loadEditHistory();
   };
+
+  /* ---------- History tab ---------- */
+  var _historySessionCount = 0;
+
+  function loadEditHistory(append) {
+    var list = document.getElementById('bpHistoryList');
+    if (!list) return;
+    var offset = append ? list.querySelectorAll('.bp-history-row').length : 0;
+    safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false})
+      .then(function(data) {
+        if (!append) list.innerHTML = '';
+        if (!data || data.length === 0) {
+          if (!append) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
+          return;
+        }
+        var mostRecentId = null;
+        if (!append) {
+          var existing = list.querySelector('.bp-history-row');
+          if (!existing) mostRecentId = data[0].id;
+        }
+        data.forEach(function(entry, i) {
+          var row = document.createElement('div');
+          row.className = 'bp-history-row';
+          row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);';
+
+          var icon = entry.action_type === 'rating' ? '\u2605' :
+                     entry.action_type === 'flag' ? '\u2691' : '\uD83C\uDFF7';
+
+          var ago = _timeAgo(entry.created_at);
+          var isFirst = (offset === 0 && i === 0);
+
+          row.innerHTML = '<span style="opacity:0.5;min-width:70px;">' + ago + '</span>'
+            + '<span style="min-width:16px;text-align:center;">' + icon + '</span>'
+            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
+            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Undo</button>'
+                       : '<span style="min-width:42px;"></span>');
+          list.appendChild(row);
+        });
+      })
+      .catch(function() {});
+  }
+
+  function _escapeHtml(s) {
+    if (typeof escapeHtml === 'function') return escapeHtml(s);
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  window.doUndo = function(btn) {
+    btn.disabled = true;
+    safeFetch('/api/undo', {method: 'POST'})
+      .then(function(data) {
+        if (data && data.ok) {
+          showToast('Undone: ' + data.undone, 'success');
+          _historySessionCount = Math.max(0, _historySessionCount - 1);
+          document.getElementById('historyBadge').textContent = _historySessionCount || '';
+          loadEditHistory();
+        }
+      })
+      .catch(function() { btn.disabled = false; });
+  };
+
+  function _bumpHistoryBadge() {
+    _historySessionCount++;
+    var badge = document.getElementById('historyBadge');
+    if (badge) badge.textContent = _historySessionCount;
+    if (currentBpTab === 'history') loadEditHistory();
+  }
+
+  var _origSafeFetch = safeFetch;
+  safeFetch = function(url, opts, options) {
+    return _origSafeFetch(url, opts, options).then(function(data) {
+      if (data && data.ok && opts && opts.method && /^(POST|DELETE)$/i.test(opts.method)) {
+        if (/\/(rating|flag|keywords|batch\/)/.test(url)) {
+          _bumpHistoryBadge();
+        }
+      }
+      return data;
+    });
+  };
+
+  function _timeAgo(isoStr) {
+    var d = new Date(isoStr + 'Z');
+    var now = new Date();
+    var sec = Math.floor((now - d) / 1000);
+    if (sec < 60) return 'just now';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    return d.toLocaleDateString();
+  }
 
   window.toggleBottomPanel = function() {
     var panel = document.getElementById('bottomPanel');

@@ -146,6 +146,24 @@ class Database:
                 UNIQUE(photo_id, observation_id)
             );
 
+            CREATE TABLE IF NOT EXISTS edit_history (
+                id           INTEGER PRIMARY KEY,
+                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                action_type  TEXT NOT NULL,
+                description  TEXT NOT NULL,
+                new_value    TEXT,
+                is_batch     INTEGER DEFAULT 0,
+                created_at   TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS edit_history_items (
+                id        INTEGER PRIMARY KEY,
+                edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,
+                photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                old_value TEXT,
+                new_value TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -237,6 +255,29 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
+
+        # Edit history tables migration
+        try:
+            self.conn.execute("SELECT id FROM edit_history LIMIT 0")
+        except Exception:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS edit_history (
+                    id           INTEGER PRIMARY KEY,
+                    workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                    action_type  TEXT NOT NULL,
+                    description  TEXT NOT NULL,
+                    new_value    TEXT,
+                    is_batch     INTEGER DEFAULT 0,
+                    created_at   TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS edit_history_items (
+                    id        INTEGER PRIMARY KEY,
+                    edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,
+                    photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                    old_value TEXT,
+                    new_value TEXT
+                );
+            """)
 
         # Workspace migration for existing databases
         # Check if predictions has workspace_id (detects legacy DBs even though
@@ -1450,6 +1491,81 @@ class Database:
         self.conn.execute(
             f"DELETE FROM pending_changes WHERE id IN ({placeholders}) AND workspace_id = ?",
             list(change_ids) + [self._ws_id()],
+        )
+        self.conn.commit()
+
+    # -- Edit History --
+
+    def record_edit(self, action_type, description, new_value, items, is_batch=False):
+        """Record an edit action with per-photo before/after values."""
+        cur = self.conn.execute(
+            "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
+            (self._ws_id(), action_type, description, new_value, 1 if is_batch else 0),
+        )
+        edit_id = cur.lastrowid
+        for item in items:
+            self.conn.execute(
+                "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
+                (edit_id, item['photo_id'], item['old_value'], item['new_value']),
+            )
+        self.conn.commit()
+        self._prune_edit_history()
+        return edit_id
+
+    def get_edit_history(self, limit=50, offset=0):
+        """Return recent edit history entries (most recent first) with item counts."""
+        rows = self.conn.execute(
+            """SELECT eh.*, COUNT(ehi.id) as item_count
+               FROM edit_history eh
+               LEFT JOIN edit_history_items ehi ON ehi.edit_id = eh.id
+               WHERE eh.workspace_id = ?
+               GROUP BY eh.id
+               ORDER BY eh.created_at DESC, eh.id DESC
+               LIMIT ? OFFSET ?""",
+            (self._ws_id(), limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def undo_last_edit(self):
+        """Undo the most recent edit. Returns the undone entry dict, or None."""
+        entry = self.conn.execute(
+            "SELECT * FROM edit_history WHERE workspace_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (self._ws_id(),),
+        ).fetchone()
+        if not entry:
+            return None
+        entry = dict(entry)
+        items = self.conn.execute(
+            "SELECT * FROM edit_history_items WHERE edit_id = ?",
+            (entry['id'],),
+        ).fetchall()
+
+        for item in items:
+            old_val = item['old_value']
+            pid = item['photo_id']
+            if entry['action_type'] == 'rating':
+                self.update_photo_rating(pid, int(old_val))
+            elif entry['action_type'] == 'flag':
+                self.update_photo_flag(pid, old_val)
+            elif entry['action_type'] == 'keyword_add':
+                self.untag_photo(pid, int(entry['new_value']))
+            elif entry['action_type'] == 'keyword_remove':
+                self.tag_photo(pid, int(entry['new_value']))
+
+        self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry['id'],))
+        self.conn.commit()
+        return entry
+
+    def _prune_edit_history(self):
+        """Delete oldest entries beyond the configured max."""
+        import config as cfg
+        max_entries = cfg.get('max_edit_history') or 1000
+        self.conn.execute(
+            """DELETE FROM edit_history WHERE workspace_id = ? AND id NOT IN (
+                 SELECT id FROM edit_history WHERE workspace_id = ?
+                 ORDER BY created_at DESC, id DESC LIMIT ?
+               )""",
+            (self._ws_id(), self._ws_id(), max_entries),
         )
         self.conn.commit()
 

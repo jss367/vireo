@@ -22,6 +22,17 @@ def test_create_tables(tmp_path):
     assert 'pending_changes' in table_names
 
 
+def test_edit_history_tables_exist(tmp_path):
+    """edit_history and edit_history_items tables exist after init."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = [r['name'] for r in db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    assert 'edit_history' in tables
+    assert 'edit_history_items' in tables
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database
@@ -916,3 +927,178 @@ def test_get_embeddings_by_model(tmp_path):
     results = db.get_embeddings_by_model("BioCLIP")
     assert len(results) == 1
     assert results[0][0] == p1
+
+
+# -- Edit history --
+
+
+def _make_db_with_photos(tmp_path, n=3):
+    """Helper: create a Database with n photos and return (db, photo_ids)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pids = []
+    for i in range(n):
+        pid = db.add_photo(folder_id=fid, filename=f'IMG_{i:04d}.jpg',
+                           extension='.jpg', file_size=1000,
+                           file_mtime=1700000000.0 + i)
+        pids.append(pid)
+    return db, pids
+
+
+def test_record_edit_single(tmp_path):
+    """record_edit stores a single-photo edit with before/after values."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    db.record_edit(
+        action_type='rating',
+        description='Set rating to 5',
+        new_value='5',
+        items=[{'photo_id': pid, 'old_value': '0', 'new_value': '5'}],
+    )
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]['action_type'] == 'rating'
+    assert history[0]['description'] == 'Set rating to 5'
+    assert history[0]['is_batch'] == 0
+    assert history[0]['item_count'] == 1
+
+
+def test_record_edit_batch(tmp_path):
+    """record_edit stores a batch edit with multiple items."""
+    db, pids = _make_db_with_photos(tmp_path)
+
+    items = [
+        {'photo_id': pids[0], 'old_value': '3', 'new_value': '5'},
+        {'photo_id': pids[1], 'old_value': '0', 'new_value': '5'},
+    ]
+    db.record_edit(
+        action_type='rating',
+        description='Set rating to 5 on 2 photos',
+        new_value='5',
+        items=items,
+        is_batch=True,
+    )
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]['is_batch'] == 1
+    assert history[0]['item_count'] == 2
+
+
+def test_get_edit_history_order(tmp_path):
+    """get_edit_history returns most recent first."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    db.record_edit('rating', 'First edit', '1',
+                   [{'photo_id': pid, 'old_value': '0', 'new_value': '1'}])
+    db.record_edit('rating', 'Second edit', '2',
+                   [{'photo_id': pid, 'old_value': '1', 'new_value': '2'}])
+
+    history = db.get_edit_history()
+    assert history[0]['description'] == 'Second edit'
+    assert history[1]['description'] == 'First edit'
+
+
+def test_get_edit_history_pagination(tmp_path):
+    """get_edit_history supports limit and offset."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    for i in range(5):
+        db.record_edit('rating', f'Edit {i}', str(i),
+                       [{'photo_id': pid, 'old_value': str(i), 'new_value': str(i+1)}])
+
+    page1 = db.get_edit_history(limit=2, offset=0)
+    page2 = db.get_edit_history(limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert page1[0]['description'] == 'Edit 4'
+    assert page2[0]['description'] == 'Edit 2'
+
+
+def test_undo_last_edit_rating(tmp_path):
+    """undo_last_edit restores photo rating and removes the history entry."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+    original_rating = db.get_photo(pid)['rating']
+
+    db.update_photo_rating(pid, 5)
+    db.record_edit('rating', 'Set rating to 5', '5',
+                   [{'photo_id': pid, 'old_value': str(original_rating), 'new_value': '5'}])
+
+    result = db.undo_last_edit()
+    assert result is not None
+    assert result['description'] == 'Set rating to 5'
+    assert db.get_photo(pid)['rating'] == original_rating
+    assert len(db.get_edit_history()) == 0
+
+
+def test_undo_last_edit_flag(tmp_path):
+    """undo_last_edit restores photo flag."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    db.update_photo_flag(pid, 'flagged')
+    db.record_edit('flag', 'Set flag to flagged', 'flagged',
+                   [{'photo_id': pid, 'old_value': 'none', 'new_value': 'flagged'}])
+
+    result = db.undo_last_edit()
+    assert db.get_photo(pid)['flag'] == 'none'
+
+
+def test_undo_last_edit_keyword_add(tmp_path):
+    """undo_last_edit removes keyword that was added."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+    kid = db.add_keyword('Eagle')
+    db.tag_photo(pid, kid)
+    db.record_edit('keyword_add', 'Added keyword "Eagle"', str(kid),
+                   [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}])
+
+    db.undo_last_edit()
+    keywords = db.get_photo_keywords(pid)
+    assert not any(k['name'] == 'Eagle' for k in keywords)
+
+
+def test_undo_last_edit_keyword_remove(tmp_path):
+    """undo_last_edit re-adds keyword that was removed."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+    kid = db.add_keyword('Hawk')
+    db.tag_photo(pid, kid)
+    # Now remove it and record the edit
+    db.untag_photo(pid, kid)
+    db.record_edit('keyword_remove', 'Removed keyword "Hawk"', str(kid),
+                   [{'photo_id': pid, 'old_value': str(kid), 'new_value': ''}])
+
+    db.undo_last_edit()
+    keywords = db.get_photo_keywords(pid)
+    assert any(k['id'] == kid for k in keywords)
+
+
+def test_undo_last_edit_batch(tmp_path):
+    """undo_last_edit restores all photos in a batch operation."""
+    db, pids = _make_db_with_photos(tmp_path)
+    original_ratings = {}
+    for pid in pids[:2]:
+        original_ratings[pid] = db.get_photo(pid)['rating']
+
+    items = []
+    for pid, old_r in original_ratings.items():
+        db.update_photo_rating(pid, 5)
+        items.append({'photo_id': pid, 'old_value': str(old_r), 'new_value': '5'})
+    db.record_edit('rating', 'Set rating to 5 on 2 photos', '5', items, is_batch=True)
+
+    db.undo_last_edit()
+    for pid, old_r in original_ratings.items():
+        assert db.get_photo(pid)['rating'] == old_r
+
+
+def test_undo_last_edit_empty(tmp_path):
+    """undo_last_edit returns None when no history exists."""
+    db, pids = _make_db_with_photos(tmp_path)
+    assert db.undo_last_edit() is None

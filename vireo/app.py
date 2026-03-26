@@ -488,15 +488,6 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
-    # -- Undo stack (in-memory, session-only) --
-    _undo_stack = []
-    _max_undo = 50
-
-    def _push_undo(action):
-        _undo_stack.append(action)
-        if len(_undo_stack) > _max_undo:
-            _undo_stack.pop(0)
-
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -508,15 +499,8 @@ def create_app(db_path, thumb_cache_dir=None):
         old_rating = old["rating"] if old else 0
         db.update_photo_rating(photo_id, rating)
         db.queue_change(photo_id, "rating", str(rating))
-        _push_undo(
-            {
-                "type": "rating",
-                "photo_ids": [photo_id],
-                "old_value": old_rating,
-                "new_value": rating,
-                "description": f"Set rating to {rating}",
-            }
-        )
+        db.record_edit('rating', f'Set rating to {rating}', str(rating),
+                       [{'photo_id': photo_id, 'old_value': str(old_rating), 'new_value': str(rating)}])
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/flag", methods=["POST"])
@@ -528,15 +512,8 @@ def create_app(db_path, thumb_cache_dir=None):
         old_flag = old["flag"] if old else "none"
         db.update_photo_flag(photo_id, flag)
         db.queue_change(photo_id, "flag", flag)
-        _push_undo(
-            {
-                "type": "flag",
-                "photo_ids": [photo_id],
-                "old_value": old_flag,
-                "new_value": flag,
-                "description": f"Set flag to {flag}",
-            }
-        )
+        db.record_edit('flag', f'Set flag to {flag}', flag,
+                       [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
@@ -549,15 +526,8 @@ def create_app(db_path, thumb_cache_dir=None):
         kid = db.add_keyword(name)
         db.tag_photo(photo_id, kid)
         db.queue_change(photo_id, "keyword_add", name)
-        _push_undo(
-            {
-                "type": "keyword_add",
-                "photo_ids": [photo_id],
-                "keyword_id": kid,
-                "keyword_name": name,
-                "description": f'Added keyword "{name}"',
-            }
-        )
+        db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
+                       [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
         return jsonify({"ok": True, "keyword_id": kid})
 
     @app.route(
@@ -573,15 +543,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 break
         db.untag_photo(photo_id, keyword_id)
         db.queue_change(photo_id, "keyword_remove", kw_name)
-        _push_undo(
-            {
-                "type": "keyword_remove",
-                "photo_ids": [photo_id],
-                "keyword_id": keyword_id,
-                "keyword_name": kw_name,
-                "description": f'Removed keyword "{kw_name}"',
-            }
-        )
+        db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
+                       [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
 
     # -- Batch operations --
@@ -601,15 +564,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 old_values[pid] = old["rating"]
                 db.update_photo_rating(pid, rating)
                 db.queue_change(pid, "rating", str(rating))
-        _push_undo(
-            {
-                "type": "batch_rating",
-                "photo_ids": photo_ids,
-                "old_values": old_values,
-                "new_value": rating,
-                "description": f"Set rating to {rating} on {len(photo_ids)} photos",
-            }
-        )
+        items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
+        db.record_edit('rating', f'Set rating to {rating} on {len(photo_ids)} photos',
+                       str(rating), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(old_values)})
 
     @app.route("/api/batch/flag", methods=["POST"])
@@ -627,15 +584,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 old_values[pid] = old["flag"]
                 db.update_photo_flag(pid, flag)
                 db.queue_change(pid, "flag", flag)
-        _push_undo(
-            {
-                "type": "batch_flag",
-                "photo_ids": photo_ids,
-                "old_values": old_values,
-                "new_value": flag,
-                "description": f"Set flag to {flag} on {len(photo_ids)} photos",
-            }
-        )
+        items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
+        db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
+                       flag, items, is_batch=True)
         return jsonify({"ok": True, "updated": len(old_values)})
 
     @app.route("/api/batch/keyword", methods=["POST"])
@@ -650,61 +601,43 @@ def create_app(db_path, thumb_cache_dir=None):
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             db.queue_change(pid, "keyword_add", name)
-        _push_undo(
-            {
-                "type": "batch_keyword_add",
-                "photo_ids": photo_ids,
-                "keyword_id": kid,
-                "keyword_name": name,
-                "description": f'Added "{name}" to {len(photo_ids)} photos',
-            }
-        )
+        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in photo_ids]
+        db.record_edit('keyword_add', f'Added "{name}" to {len(photo_ids)} photos',
+                       str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(photo_ids)})
 
     # -- Undo --
 
     @app.route("/api/undo", methods=["POST"])
     def api_undo():
-        if not _undo_stack:
-            return json_error("nothing to undo")
         db = _get_db()
-        action = _undo_stack.pop()
-
-        if action["type"] == "rating":
-            for pid in action["photo_ids"]:
-                db.update_photo_rating(pid, action["old_value"])
-        elif action["type"] == "flag":
-            for pid in action["photo_ids"]:
-                db.update_photo_flag(pid, action["old_value"])
-        elif action["type"] == "keyword_add":
-            for pid in action["photo_ids"]:
-                db.untag_photo(pid, action["keyword_id"])
-        elif action["type"] == "keyword_remove":
-            for pid in action["photo_ids"]:
-                db.tag_photo(pid, action["keyword_id"])
-        elif action["type"] == "batch_rating":
-            for pid, old_val in action["old_values"].items():
-                db.update_photo_rating(int(pid), old_val)
-        elif action["type"] == "batch_flag":
-            for pid, old_val in action["old_values"].items():
-                db.update_photo_flag(int(pid), old_val)
-        elif action["type"] == "batch_keyword_add":
-            for pid in action["photo_ids"]:
-                db.untag_photo(pid, action["keyword_id"])
-
-        return jsonify({"ok": True, "undone": action["description"]})
+        result = db.undo_last_edit()
+        if result is None:
+            return json_error("nothing to undo")
+        return jsonify({"ok": True, "undone": result["description"]})
 
     @app.route("/api/undo/status")
     def api_undo_status():
-        if not _undo_stack:
-            return jsonify({"available": False, "description": ""})
-        return jsonify(
-            {
-                "available": True,
-                "description": _undo_stack[-1]["description"],
-                "count": len(_undo_stack),
-            }
-        )
+        db = _get_db()
+        history = db.get_edit_history(limit=1)
+        if not history:
+            return jsonify({"available": False, "description": "", "count": 0})
+        total = db.conn.execute(
+            "SELECT COUNT(*) FROM edit_history WHERE workspace_id = ?",
+            (db._ws_id(),),
+        ).fetchone()[0]
+        return jsonify({
+            "available": True,
+            "description": history[0]["description"],
+            "count": total,
+        })
+
+    @app.route("/api/edit-history")
+    def api_edit_history():
+        db = _get_db()
+        limit = request.args.get("limit", 50, type=int)
+        offset = request.args.get("offset", 0, type=int)
+        return jsonify(db.get_edit_history(limit=limit, offset=offset))
 
     # -- Statistics --
 

@@ -191,6 +191,18 @@
         <option value="lower">Sentence case (House fench)</option>
       </select>
     </div>
+    <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
+      <div class="setting-label">
+        Edit history limit
+        <small>Maximum number of undo-able edits to keep per workspace (default: 1000)</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgMaxEditHistory" min="100" max="10000" step="100" value="1000"
+               style="width:80px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+        <span style="font-size:13px;color:#888;">entries</span>
+      </div>
+    </div>
   </div>
 
   <!-- HuggingFace -->
@@ -424,6 +436,7 @@ async function loadConfig() {
     document.getElementById('cfgInatToken').value = cfg.inat_token || '';
     if (cfg.inat_token) validateInatToken();
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
+    document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history || 1000;
     // Load darktable settings
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
@@ -444,6 +457,7 @@ function saveConfig() {
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
     var hfToken = document.getElementById('cfgHfToken').value.trim();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
+    var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10) || 1000;
     try {
       await safeFetch('/api/config', {
         method: 'POST',
@@ -453,6 +467,7 @@ function saveConfig() {
           grouping_window_seconds: grouping,
           similarity_threshold: similarity,
           keyword_case: keywordCase,
+          max_edit_history: maxEditHistory,
           hf_token: hfToken,
           inat_token: document.getElementById('cfgInatToken').value.trim(),
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
