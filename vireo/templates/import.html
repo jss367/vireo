@@ -116,6 +116,7 @@ body { padding-bottom: 36px; }
       <div style="display:flex;gap:6px;margin-bottom:6px;">
         <input type="text" class="path-input" id="wizFolder" placeholder="/path/to/photos"
                onkeydown="if(event.key==='Enter')wizAddFolder()">
+        <button onclick="browseForWizFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
         <button class="btn btn-secondary" onclick="wizAddFolder()">Add</button>
       </div>
       <div id="wizFolderList" style="font-size:12px;color:var(--text-muted,#888);"></div>
@@ -193,6 +194,7 @@ body { padding-bottom: 36px; }
       <input type="text" class="path-input" id="scanRoot" list="scanRootList"
              placeholder="/Volumes/Photography/Raw Files">
       <datalist id="scanRootList"></datalist>
+      <button onclick="browseForScanRoot()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       <button class="btn btn-primary" id="scanBtn" onclick="startScanJob()">Scan</button>
       <button class="btn btn-secondary" id="rescanBtn" onclick="startScanJob(true)">Scan for changes</button>
     </div>
@@ -267,6 +269,7 @@ body { padding-bottom: 36px; }
       <div class="input-group">
         <input type="text" class="path-input" id="catalogInput" placeholder="/path/to/catalog.lrcat"
                onkeydown="if(event.key==='Enter')addCatalog()">
+        <button onclick="browseForCatalog()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
         <button class="btn btn-secondary" onclick="addCatalog()">Add</button>
       </div>
       <div class="catalog-list" id="catalogList"></div>
@@ -779,6 +782,35 @@ async function wizStart() {
   status.style.color = 'var(--accent,#24E5CA)';
   progressDetail.textContent = '';
   btn.disabled = false;
+}
+
+/* ---------- Native file pickers ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForWizFolder() {
+  var path = await pickDirectory('Select photo folder');
+  if (path) document.getElementById('wizFolder').value = path;
+}
+
+async function browseForScanRoot() {
+  var path = await pickDirectory('Select scan root folder');
+  if (path) document.getElementById('scanRoot').value = path;
+}
+
+async function browseForCatalog() {
+  var path = await pickFile({
+    title: 'Select Lightroom Catalog',
+    filters: [{ name: 'Lightroom Catalog', extensions: ['lrcat'] }],
+  });
+  if (path) {
+    document.getElementById('catalogInput').value = path;
+  }
 }
 </script>
 </body>
