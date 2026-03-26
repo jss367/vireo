@@ -314,6 +314,48 @@ def reflow(encounters, config=None):
     }
 
 
+def _build_species_predictions(photos):
+    """Build per-model species prediction breakdown from a list of photo dicts.
+
+    Returns a list of dicts sorted by total count descending, each with:
+        species, count, avg_confidence, models: [{model, confidence, photo_count}]
+    """
+    model_data = defaultdict(lambda: defaultdict(lambda: {"confs": [], "count": 0}))
+    for p in photos:
+        for entry in (p.get("species_top5") or []):
+            sp_name = entry[0]
+            sp_conf = entry[1]
+            sp_model = entry[2] if len(entry) > 2 else "unknown"
+            model_data[sp_name][sp_model]["confs"].append(sp_conf)
+            model_data[sp_name][sp_model]["count"] += 1
+
+    result = []
+    for sp_name in sorted(model_data, key=lambda s: sum(
+        d["count"] for d in model_data[s].values()
+    ), reverse=True):
+        models = []
+        total_count = 0
+        total_conf_sum = 0.0
+        total_conf_count = 0
+        for model_name, data in sorted(model_data[sp_name].items()):
+            avg_conf = sum(data["confs"]) / len(data["confs"])
+            models.append({
+                "model": model_name,
+                "confidence": round(avg_conf, 4),
+                "photo_count": data["count"],
+            })
+            total_count += data["count"]
+            total_conf_sum += sum(data["confs"])
+            total_conf_count += len(data["confs"])
+        result.append({
+            "species": sp_name,
+            "count": total_count,
+            "avg_confidence": round(total_conf_sum / total_conf_count, 4) if total_conf_count else 0,
+            "models": models,
+        })
+    return result
+
+
 def serialize_results(results):
     """Serialize pipeline results to a JSON-safe dict.
 
@@ -349,41 +391,7 @@ def serialize_results(results):
                 enc_confirmed = p["confirmed_species"]
                 break
 
-        # Build species vote summary with per-model breakdown
-        model_species_data = defaultdict(lambda: defaultdict(lambda: {"confs": [], "count": 0}))
-        for p in photos_list:
-            top5 = p.get("species_top5") or []
-            for entry in top5:
-                sp_name = entry[0]
-                sp_conf = entry[1]
-                sp_model = entry[2] if len(entry) > 2 else "unknown"
-                model_species_data[sp_name][sp_model]["confs"].append(sp_conf)
-                model_species_data[sp_name][sp_model]["count"] += 1
-
-        species_votes = []
-        for sp_name in sorted(model_species_data, key=lambda s: sum(
-            d["count"] for d in model_species_data[s].values()
-        ), reverse=True):
-            models = []
-            total_count = 0
-            total_conf_sum = 0.0
-            total_conf_count = 0
-            for model_name, data in sorted(model_species_data[sp_name].items()):
-                avg_conf = sum(data["confs"]) / len(data["confs"])
-                models.append({
-                    "model": model_name,
-                    "confidence": round(avg_conf, 4),
-                    "photo_count": data["count"],
-                })
-                total_count += data["count"]
-                total_conf_sum += sum(data["confs"])
-                total_conf_count += len(data["confs"])
-            species_votes.append({
-                "species": sp_name,
-                "count": total_count,
-                "avg_confidence": round(total_conf_sum / total_conf_count, 4) if total_conf_count else 0,
-                "models": models,
-            })
+        species_votes = _build_species_predictions(photos_list)
 
         s_enc = {
             "species": enc.get("species"),
@@ -399,37 +407,9 @@ def serialize_results(results):
             s_enc["bursts"] = []
             for burst in enc["bursts"]:
                 burst_ids = [p["id"] for p in burst]
-                # Build per-burst species predictions
-                burst_model_data = defaultdict(lambda: defaultdict(lambda: {"confs": [], "count": 0}))
-                for p in burst:
-                    for entry in (p.get("species_top5") or []):
-                        sp_name = entry[0]
-                        sp_conf = entry[1]
-                        sp_model = entry[2] if len(entry) > 2 else "unknown"
-                        burst_model_data[sp_name][sp_model]["confs"].append(sp_conf)
-                        burst_model_data[sp_name][sp_model]["count"] += 1
-                burst_species = []
-                for sp_name in sorted(burst_model_data, key=lambda s: sum(
-                    d["count"] for d in burst_model_data[s].values()
-                ), reverse=True):
-                    models = []
-                    total_count = 0
-                    for model_name, data in sorted(burst_model_data[sp_name].items()):
-                        avg_conf = sum(data["confs"]) / len(data["confs"])
-                        models.append({
-                            "model": model_name,
-                            "confidence": round(avg_conf, 4),
-                            "photo_count": data["count"],
-                        })
-                        total_count += data["count"]
-                    burst_species.append({
-                        "species": sp_name,
-                        "count": total_count,
-                        "models": models,
-                    })
                 s_enc["bursts"].append({
                     "photo_ids": burst_ids,
-                    "species_predictions": burst_species,
+                    "species_predictions": _build_species_predictions(burst),
                     "species_override": None,
                 })
         serialized_encounters.append(s_enc)
