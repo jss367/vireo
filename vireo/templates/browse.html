@@ -583,6 +583,8 @@ var _shortcuts = null;
 bootstrapBrowse();
 
 async function bootstrapBrowse() {
+  // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
+  if (new URLSearchParams(window.location.search).get('photo_id')) return;
   try {
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
 
@@ -1474,16 +1476,34 @@ async function developSelected() {
     closeDetail();
     document.getElementById('grid').innerHTML = '';
 
-    // Load photos and wait for render
-    await loadPhotos();
+    // Load pages until the target photo is found or all pages exhausted
+    // (bootstrapBrowse was skipped, so we also need folder/keyword trees)
+    var initData = await safeFetch('/api/browse/init?folder_id=' + photo.folder_id + '&per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value, {}, { toast: false });
+    if (initData) {
+      renderFolderTree(initData.folders || []);
+      renderKeywordTree(initData.keywords || []);
+      renderCollectionList(initData.collections || []);
+      photos = initData.photos || [];
+      totalPhotos = initData.total || 0;
+      currentPage = 2;
+      if (photos.length >= totalPhotos) allLoaded = true;
+      renderGrid();
+      document.getElementById('loadingState').style.display = 'none';
+    }
+
+    // Keep loading pages until we find the photo or run out
+    var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
+    while (!el && !allLoaded) {
+      await loadPhotos();
+      el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
+    }
 
     // Update folder tree active state
     document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
       el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
     });
 
-    // Find and scroll to the target photo
-    var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
+    // Scroll to and highlight the target photo
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.style.outline = '3px solid var(--accent, #24E5CA)';
