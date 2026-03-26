@@ -1920,6 +1920,18 @@ function formatDuration(seconds) {
     if (currentBpTab === 'history') loadEditHistory();
   }
 
+  var _origSafeFetch = safeFetch;
+  safeFetch = function(url, opts, options) {
+    return _origSafeFetch(url, opts, options).then(function(data) {
+      if (data && data.ok && opts && opts.method && /^(POST|DELETE)$/i.test(opts.method)) {
+        if (/\/(rating|flag|keywords|batch\/)/.test(url)) {
+          _bumpHistoryBadge();
+        }
+      }
+      return data;
+    });
+  };
+
   function _timeAgo(isoStr) {
     var d = new Date(isoStr + 'Z');
     var now = new Date();
