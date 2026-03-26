@@ -101,7 +101,7 @@ def test_sync_to_xmp_handles_missing_file(tmp_path):
 
 
 def test_sync_from_xmp_updates_db(tmp_path):
-    """sync_from_xmp re-reads XMP and updates DB keywords."""
+    """sync_from_xmp reconciles DB keywords to the current XMP keywords."""
     from db import Database
     from sync import sync_from_xmp
     from xmp_writer import write_xmp_sidecar
@@ -115,12 +115,60 @@ def test_sync_from_xmp_updates_db(tmp_path):
     kid = db.add_keyword('Sparrow')
     db.tag_photo(pid, kid)
 
-    # Externally modify XMP to add a keyword
+    # Replace the XMP sidecar with a different keyword set.
+    os.remove(xmp_path)
     write_xmp_sidecar(xmp_path, flat_keywords={'Cardinal'}, hierarchical_keywords=set())
 
     sync_from_xmp(db, [pid])
 
     keywords = db.get_photo_keywords(pid)
     kw_names = {k['name'] for k in keywords}
-    assert 'Sparrow' in kw_names
     assert 'Cardinal' in kw_names
+    assert 'Sparrow' not in kw_names
+
+
+def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
+    """Case-only differences between DB and XMP keyword names should not drop the tag."""
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp_writer import write_xmp_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'sparrow'})
+
+    kid = db.add_keyword('Sparrow')
+    db.tag_photo(pid, kid)
+
+    os.remove(xmp_path)
+    write_xmp_sidecar(xmp_path, flat_keywords={'sparrow'}, hierarchical_keywords=set())
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    assert {k['name'] for k in keywords} == {'Sparrow'}
+
+
+def test_sync_to_xmp_reports_unsupported_flag_changes(tmp_path):
+    """Legacy flag pending changes remain queued and are reported as unsupported."""
+    from db import Database
+    from sync import sync_to_xmp
+    from xml.etree import ElementTree as ET
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+
+    db.queue_change(pid, 'flag', 'flagged')
+
+    before = ET.tostring(ET.parse(xmp_path).getroot(), encoding='unicode')
+    result = sync_to_xmp(db)
+    after = ET.tostring(ET.parse(xmp_path).getroot(), encoding='unicode')
+
+    assert result['synced'] == 0
+    assert result['failed'] == 1
+    assert result['failures'][0]['error'] == 'unsupported change type: flag'
+    assert before == after
+    assert len(db.get_pending_changes()) == 1

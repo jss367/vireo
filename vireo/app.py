@@ -488,6 +488,20 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
+    def _queue_keyword_add(photo_id, keyword_name):
+        """Queue a keyword add unless it cancels a pending removal."""
+        db = _get_db()
+        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name)
+        if removed == 0:
+            db.queue_change(photo_id, "keyword_add", keyword_name)
+
+    def _queue_keyword_remove(photo_id, keyword_name):
+        """Queue a keyword removal unless it cancels a pending add."""
+        db = _get_db()
+        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name)
+        if removed == 0:
+            db.queue_change(photo_id, "keyword_remove", keyword_name)
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -511,7 +525,6 @@ def create_app(db_path, thumb_cache_dir=None):
         old = db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
         db.update_photo_flag(photo_id, flag)
-        db.queue_change(photo_id, "flag", flag)
         db.record_edit('flag', f'Set flag to {flag}', flag,
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
@@ -525,7 +538,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("name required")
         kid = db.add_keyword(name)
         db.tag_photo(photo_id, kid)
-        db.queue_change(photo_id, "keyword_add", name)
+        _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
                        [{'photo_id': photo_id, 'old_value': '', 'new_value': str(kid)}])
         return jsonify({"ok": True, "keyword_id": kid})
@@ -542,7 +555,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 kw_name = k["name"]
                 break
         db.untag_photo(photo_id, keyword_id)
-        db.queue_change(photo_id, "keyword_remove", kw_name)
+        _queue_keyword_remove(photo_id, kw_name)
         db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
@@ -583,7 +596,6 @@ def create_app(db_path, thumb_cache_dir=None):
             if old:
                 old_values[pid] = old["flag"]
                 db.update_photo_flag(pid, flag)
-                db.queue_change(pid, "flag", flag)
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -600,7 +612,7 @@ def create_app(db_path, thumb_cache_dir=None):
         kid = db.add_keyword(name)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
-            db.queue_change(pid, "keyword_add", name)
+            _queue_keyword_add(pid, name)
         items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in photo_ids]
         db.record_edit('keyword_add', f'Added "{name}" to {len(photo_ids)} photos',
                        str(kid), items, is_batch=True)

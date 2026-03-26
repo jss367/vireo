@@ -3,6 +3,8 @@
 import json
 import os
 import sqlite3
+import uuid
+import uuid
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
@@ -109,6 +111,7 @@ class Database:
                 photo_id    INTEGER REFERENCES photos(id),
                 change_type TEXT,
                 value       TEXT,
+                change_token TEXT,
                 created_at  TEXT DEFAULT (datetime('now')),
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
@@ -364,6 +367,13 @@ class Database:
                         f"UPDATE {table} SET workspace_id = ?", (default_id,)
                     )
 
+            self.conn.commit()
+
+        # Ensure change_token column exists (added after workspace migration)
+        try:
+            self.conn.execute("SELECT change_token FROM pending_changes LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE pending_changes ADD COLUMN change_token TEXT")
             self.conn.commit()
 
         # Ensure workspace indexes exist (for fresh DBs that skip migration)
@@ -1463,18 +1473,23 @@ class Database:
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value):
-        """Add a change to the sync queue (skips if already queued)."""
+        """Add a change to the sync queue (skips if already queued).
+
+        Returns the inserted pending change token, or None if an identical row already exists.
+        """
         existing = self.conn.execute(
             "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
             (photo_id, change_type, value, self._ws_id()),
         ).fetchone()
         if existing:
-            return
+            return None
+        change_token = str(uuid.uuid4())
         self.conn.execute(
-            "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) VALUES (?, ?, ?, ?)",
-            (photo_id, change_type, value, self._ws_id()),
+            "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
+            (photo_id, change_type, value, change_token, self._ws_id()),
         )
         self.conn.commit()
+        return change_token
 
     def get_pending_changes(self):
         """Return all pending changes ordered by creation time."""
@@ -1482,6 +1497,35 @@ class Database:
             "SELECT * FROM pending_changes WHERE workspace_id = ? ORDER BY created_at",
             (self._ws_id(),),
         ).fetchall()
+
+    def remove_pending_changes(self, photo_id, change_type=None, value=None):
+        """Delete matching pending changes. Returns rows removed."""
+        clauses = ["photo_id = ?", "workspace_id = ?"]
+        params = [photo_id, self._ws_id()]
+        if change_type is not None:
+            clauses.append("change_type = ?")
+            params.append(change_type)
+        if value is not None:
+            clauses.append("value = ?")
+            params.append(value)
+
+        cur = self.conn.execute(
+            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
+            params,
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def remove_pending_change_token(self, change_token):
+        """Delete a single pending change by immutable token. Returns rows removed."""
+        if not change_token:
+            return 0
+        cur = self.conn.execute(
+            "DELETE FROM pending_changes WHERE change_token = ? AND workspace_id = ?",
+            (change_token, self._ws_id()),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def clear_pending(self, change_ids):
         """Delete pending changes by id."""
@@ -1545,12 +1589,23 @@ class Database:
             pid = item['photo_id']
             if entry['action_type'] == 'rating':
                 self.update_photo_rating(pid, int(old_val))
+                if old_val != entry['new_value']:
+                    self.remove_pending_changes(pid, 'rating', entry['new_value'])
+                    self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val)
             elif entry['action_type'] == 'keyword_add':
                 self.untag_photo(pid, int(entry['new_value']))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
+                                       (int(entry['new_value']),)).fetchone()
+                if kw:
+                    self.remove_pending_changes(pid, 'keyword_add', kw['name'])
             elif entry['action_type'] == 'keyword_remove':
                 self.tag_photo(pid, int(entry['new_value']))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
+                                       (int(entry['new_value']),)).fetchone()
+                if kw:
+                    self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
 
         self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry['id'],))
         self.conn.commit()
