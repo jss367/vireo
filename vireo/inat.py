@@ -4,6 +4,7 @@ import requests
 
 INAT_API = "https://api.inaturalist.org/v1"
 INAT_RAILS = "https://www.inaturalist.org"
+INAT_TIMEOUT = 30  # seconds
 
 
 class InatAuthError(Exception):
@@ -22,7 +23,7 @@ def _headers(token):
 
 def validate_token(token):
     """Validate iNat API token. Returns user dict on success, None on failure."""
-    resp = requests.get(f"{INAT_RAILS}/users/edit.json", headers=_headers(token))
+    resp = requests.get(f"{INAT_RAILS}/users/edit.json", headers=_headers(token), timeout=INAT_TIMEOUT)
     if resp.status_code == 200:
         return resp.json()
     return None
@@ -49,6 +50,7 @@ def create_observation(token, taxon_name=None, observed_on=None,
         f"{INAT_RAILS}/observations.json",
         json={"observation": obs},
         headers=_headers(token),
+        timeout=INAT_TIMEOUT,
     )
     if resp.status_code == 401:
         raise InatAuthError("iNaturalist token is invalid or expired. Please refresh it in Settings.")
@@ -69,6 +71,7 @@ def upload_photo(token, observation_id, photo_path):
             files={"file": f},
             data={"observation_photo[observation_id]": observation_id},
             headers=_headers(token),
+            timeout=INAT_TIMEOUT,
         )
     if resp.status_code == 401:
         raise InatAuthError("iNaturalist token is invalid or expired.")
@@ -80,7 +83,11 @@ def upload_photo(token, observation_id, photo_path):
 def submit_observation(token, photo_path, taxon_name=None, observed_on=None,
                        latitude=None, longitude=None,
                        description=None, geoprivacy="open"):
-    """Create observation + upload photo. Returns (observation_id, observation_url)."""
+    """Create observation + upload photo. Returns (observation_id, observation_url).
+
+    Note: If create_observation succeeds but upload_photo fails, the observation
+    will exist on iNaturalist without a photo. The caller should handle this case.
+    """
     obs = create_observation(
         token, taxon_name=taxon_name, observed_on=observed_on,
         latitude=latitude, longitude=longitude,

@@ -51,7 +51,6 @@ def test_inat_submission_cascades_on_photo_delete(db):
 
 
 from unittest.mock import patch, MagicMock
-import json
 
 
 def test_validate_token_success():
@@ -112,3 +111,18 @@ def test_upload_photo_success():
         with patch("builtins.open", MagicMock()):
             result = upload_photo("fake-token", 99999, "/path/to/photo.jpg")
             assert result["id"] == 55555
+
+
+def test_submit_observation_success():
+    from inat import submit_observation
+    with patch("inat.create_observation", return_value={"id": 88888, "uri": "https://www.inaturalist.org/observations/88888"}) as mock_create:
+        with patch("inat.upload_photo", return_value={"id": 1}) as mock_upload:
+            obs_id, obs_url = submit_observation(
+                token="fake-token",
+                photo_path="/path/to/photo.jpg",
+                taxon_name="Cardinalis cardinalis",
+            )
+            assert obs_id == 88888
+            assert obs_url == "https://www.inaturalist.org/observations/88888"
+            mock_create.assert_called_once()
+            mock_upload.assert_called_once_with("fake-token", 88888, "/path/to/photo.jpg")
