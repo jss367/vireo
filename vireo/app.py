@@ -376,6 +376,20 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    @app.route("/api/photos/calendar")
+    def api_photos_calendar():
+        db = _get_db()
+        from datetime import date
+
+        year = request.args.get("year", date.today().year, type=int)
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        keyword = request.args.get("keyword", None)
+        data = db.get_calendar_data(
+            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword
+        )
+        return jsonify(data)
+
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
         db = _get_db()

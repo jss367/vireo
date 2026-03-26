@@ -328,7 +328,116 @@ body {
   margin-top: 6px;
 }
 
+/* Calendar heatmap */
+.calendar-container {
+  display: none;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-secondary, #0E2A3D);
+}
+.calendar-container.active { display: block; }
 
+.calendar-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.calendar-header button {
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-muted, #a0a0a0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.calendar-header button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.calendar-header .year-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #e0e0e0);
+  min-width: 40px;
+  text-align: center;
+}
+
+.calendar-months {
+  display: flex;
+  font-size: 10px;
+  color: var(--text-dim, #888);
+  padding-left: 28px;
+  margin-bottom: 2px;
+}
+.calendar-months span {
+  flex: 1;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: 24px repeat(54, 1fr);
+  grid-template-rows: repeat(7, 12px);
+  gap: 2px;
+  grid-auto-flow: column;
+}
+.calendar-grid .day-label {
+  font-size: 9px;
+  color: var(--text-dim, #888);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+.calendar-grid .day-cell {
+  border-radius: 2px;
+  background: var(--bg-tertiary, #14374E);
+  cursor: pointer;
+  position: relative;
+}
+.calendar-grid .day-cell:hover { outline: 1px solid var(--text-muted, #a0a0a0); }
+.calendar-grid .day-cell.selected { outline: 2px solid var(--accent, #24E5CA); }
+.calendar-grid .day-cell.empty { cursor: default; }
+.calendar-grid .day-cell.outside { visibility: hidden; }
+.calendar-grid .day-cell.level-1 { background: color-mix(in srgb, var(--accent, #24E5CA) 25%, var(--bg-tertiary, #14374E)); }
+.calendar-grid .day-cell.level-2 { background: color-mix(in srgb, var(--accent, #24E5CA) 45%, var(--bg-tertiary, #14374E)); }
+.calendar-grid .day-cell.level-3 { background: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--bg-tertiary, #14374E)); }
+.calendar-grid .day-cell.level-4 { background: var(--accent, #24E5CA); }
+
+.day-tooltip {
+  position: fixed;
+  background: var(--bg-primary, #091A27);
+  color: var(--text-primary, #e0e0e0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  pointer-events: none;
+  z-index: 1000;
+  display: none;
+}
+
+.calendar-selection {
+  display: none;
+  padding: 6px 20px;
+  font-size: 12px;
+  color: var(--text-primary, #e0e0e0);
+  background: var(--bg-tertiary, #14374E);
+  border-bottom: 1px solid var(--border-secondary, #1A4560);
+  align-items: center;
+  gap: 8px;
+}
+.calendar-selection.active { display: flex; }
+.calendar-selection .clear-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted, #a0a0a0);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+.calendar-selection .clear-btn:hover { color: var(--accent, #24E5CA); }
 
 /* ---------- Empty / Loading ---------- */
 .empty-state {
@@ -477,8 +586,28 @@ body {
               style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
         &#9634; Boxes
       </button>
+      <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
+              style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+        &#128197; Calendar
+      </button>
       <span class="filter-summary" id="filterSummary"></span>
     </div>
+
+    <!-- Calendar Heatmap (Timeline Mode) -->
+    <div class="calendar-container" id="calendarContainer">
+      <div class="calendar-header">
+        <button id="calYearPrev" onclick="calendarChangeYear(-1)">&larr;</button>
+        <span class="year-label" id="calYearLabel"></span>
+        <button id="calYearNext" onclick="calendarChangeYear(1)">&rarr;</button>
+      </div>
+      <div class="calendar-months" id="calMonthLabels"></div>
+      <div class="calendar-grid" id="calGrid"></div>
+    </div>
+    <div class="calendar-selection" id="calSelection">
+      <span id="calSelectionText"></span>
+      <button class="clear-btn" onclick="clearCalendarSelection()" title="Clear selection">&times;</button>
+    </div>
+    <div class="day-tooltip" id="dayTooltip"></div>
 
     <!-- Batch Action Bar -->
     <div id="batchBar" style="display:none;background:#0E2A3D;padding:8px 20px;border-bottom:1px solid #14374E;align-items:center;gap:10px;flex-shrink:0;">
@@ -593,6 +722,10 @@ var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
+var timelineMode = false;
+var calendarYear = new Date().getFullYear();
+var selectedDay = null;
+var calendarData = null;
 var clipSearchActive = false;
 
 var _shortcuts = null;
@@ -701,6 +834,7 @@ function filterByFolder(folderId) {
     activeFolderId = folderId;
   }
   activeKeyword = null;
+  if (timelineMode) loadCalendarData();
   resetAndLoad();
   // Update active state
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
@@ -755,6 +889,7 @@ function filterByKeyword(name) {
   }
   activeFolderId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
+  if (timelineMode) loadCalendarData();
   resetAndLoad();
 }
 
@@ -922,7 +1057,171 @@ async function loadPhotos() {
   document.getElementById('loadingState').style.display = 'none';
 }
 
+/* ---------- Calendar Heatmap ---------- */
+function toggleTimelineMode() {
+  timelineMode = !timelineMode;
+  var btn = document.getElementById('calToggle');
+  btn.style.color = timelineMode ? 'var(--accent, #24E5CA)' : 'var(--text-muted, #a0a0a0)';
+  btn.style.borderColor = timelineMode ? 'var(--accent, #24E5CA)' : 'var(--border-secondary, #1A4560)';
+
+  var container = document.getElementById('calendarContainer');
+  if (timelineMode) {
+    container.classList.add('active');
+    loadCalendarData();
+  } else {
+    container.classList.remove('active');
+    clearCalendarSelection();
+  }
+}
+
+async function loadCalendarData() {
+  var params = new URLSearchParams();
+  params.set('year', calendarYear);
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+
+  calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
+  renderCalendar();
+}
+
+function renderCalendar() {
+  if (!calendarData) return;
+
+  document.getElementById('calYearLabel').textContent = calendarData.year;
+  document.getElementById('calYearPrev').disabled = calendarData.year <= calendarData.min_year;
+  document.getElementById('calYearNext').disabled = calendarData.year >= calendarData.max_year;
+
+  // Compute intensity thresholds from data
+  var counts = Object.values(calendarData.days);
+  var maxCount = counts.length ? Math.max(...counts) : 0;
+  var t1 = Math.max(1, Math.ceil(maxCount * 0.15));
+  var t2 = Math.max(2, Math.ceil(maxCount * 0.40));
+  var t3 = Math.max(3, Math.ceil(maxCount * 0.70));
+
+  function getLevel(count) {
+    if (!count) return 0;
+    if (count <= t1) return 1;
+    if (count <= t2) return 2;
+    if (count <= t3) return 3;
+    return 4;
+  }
+
+  // Build month labels
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var monthLabels = document.getElementById('calMonthLabels');
+  monthLabels.innerHTML = months.map(function(m) { return '<span>' + m + '</span>'; }).join('');
+
+  // Build grid: 53 weeks x 7 days
+  var grid = document.getElementById('calGrid');
+  grid.innerHTML = '';
+
+  var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  for (var d = 0; d < 7; d++) {
+    var label = document.createElement('div');
+    label.className = 'day-label';
+    label.textContent = (d % 2 === 1) ? dayNames[d].charAt(0) : '';
+    label.style.gridRow = (d + 1);
+    label.style.gridColumn = 1;
+    grid.appendChild(label);
+  }
+
+  var jan1 = new Date(calendarData.year, 0, 1);
+  var startDow = jan1.getDay();
+  var isLeap = (calendarData.year % 4 === 0 && (calendarData.year % 100 !== 0 || calendarData.year % 400 === 0));
+  var daysInYear = isLeap ? 366 : 365;
+
+  for (var i = 0; i < daysInYear; i++) {
+    var dt = new Date(calendarData.year, 0, 1 + i);
+    var dow = dt.getDay();
+    var weekNum = Math.floor((i + startDow) / 7);
+    var dateStr = dt.getFullYear() + '-' +
+        String(dt.getMonth() + 1).padStart(2, '0') + '-' +
+        String(dt.getDate()).padStart(2, '0');
+    var count = calendarData.days[dateStr] || 0;
+    var level = getLevel(count);
+
+    var cell = document.createElement('div');
+    cell.className = 'day-cell' + (level ? ' level-' + level : ' empty') +
+        (selectedDay === dateStr ? ' selected' : '');
+    cell.style.gridRow = (dow + 1);
+    cell.style.gridColumn = (weekNum + 2);
+    cell.dataset.date = dateStr;
+    cell.dataset.count = count;
+
+    cell.addEventListener('click', function() {
+      var d = this.dataset.date;
+      if (selectedDay === d) {
+        clearCalendarSelection();
+      } else {
+        selectCalendarDay(d, parseInt(this.dataset.count));
+      }
+    });
+
+    cell.addEventListener('mouseenter', function(e) {
+      var tip = document.getElementById('dayTooltip');
+      var dateObj = new Date(this.dataset.date + 'T12:00:00');
+      var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      var c = parseInt(this.dataset.count);
+      tip.textContent = formatted + ' \u2014 ' + c + ' photo' + (c !== 1 ? 's' : '');
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 10) + 'px';
+      tip.style.top = (e.clientY - 30) + 'px';
+    });
+
+    cell.addEventListener('mousemove', function(e) {
+      var tip = document.getElementById('dayTooltip');
+      tip.style.left = (e.clientX + 10) + 'px';
+      tip.style.top = (e.clientY - 30) + 'px';
+    });
+
+    cell.addEventListener('mouseleave', function() {
+      document.getElementById('dayTooltip').style.display = 'none';
+    });
+
+    grid.appendChild(cell);
+  }
+}
+
+function selectCalendarDay(dateStr, count) {
+  selectedDay = dateStr;
+  var dateObj = new Date(dateStr + 'T12:00:00');
+  var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
+  document.getElementById('calSelection').classList.add('active');
+
+  // Update date inputs and reload
+  document.getElementById('dateFrom').value = dateStr;
+  document.getElementById('dateTo').value = dateStr + 'T23:59:59';
+  resetAndLoad();
+  renderCalendar(); // update selected state
+}
+
+function clearCalendarSelection() {
+  selectedDay = null;
+  document.getElementById('calSelection').classList.remove('active');
+  document.getElementById('dateFrom').value = '';
+  document.getElementById('dateTo').value = '';
+  resetAndLoad();
+  if (calendarData) renderCalendar();
+}
+
+function calendarChangeYear(delta) {
+  if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
+  if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
+  calendarYear += delta;
+  selectedDay = null;
+  document.getElementById('calSelection').classList.remove('active');
+  document.getElementById('dateFrom').value = '';
+  document.getElementById('dateTo').value = '';
+  loadCalendarData();
+  resetAndLoad();
+}
+
 function applyFilters() {
+  if (timelineMode) loadCalendarData();
   resetAndLoad();
 }
 

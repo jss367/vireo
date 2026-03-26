@@ -699,6 +699,58 @@ class Database:
             "detected_count": detected_count,
         }
 
+    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None):
+        """Return daily photo counts for a given year, scoped to active workspace."""
+        ws = self._ws_id()
+        conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
+                      "substr(p.timestamp, 1, 4) = ?"]
+        params = [ws, str(year)]
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        rows = self.conn.execute(
+            f"""SELECT substr(p.timestamp, 1, 10) as day, COUNT(DISTINCT p.id) as count
+            FROM photos p {join_clause} {where}
+            GROUP BY day ORDER BY day""",
+            params,
+        ).fetchall()
+
+        days = {r["day"]: r["count"] for r in rows}
+
+        # Year bounds from all workspace photos (unfiltered)
+        bounds = self.conn.execute(
+            """SELECT MIN(substr(p.timestamp, 1, 4)) as min_y,
+                      MAX(substr(p.timestamp, 1, 4)) as max_y
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ? AND p.timestamp IS NOT NULL""",
+            (ws,),
+        ).fetchone()
+
+        return {
+            "year": year,
+            "days": days,
+            "min_year": int(bounds["min_y"]) if bounds["min_y"] else year,
+            "max_year": int(bounds["max_y"]) if bounds["max_y"] else year,
+        }
+
     def get_photos(
         self,
         folder_id=None,
