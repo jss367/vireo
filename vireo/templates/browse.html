@@ -559,8 +559,28 @@ body {
               style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
         &#9634; Boxes
       </button>
+      <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
+              style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+        &#128197; Calendar
+      </button>
       <span class="filter-summary" id="filterSummary"></span>
     </div>
+
+    <!-- Calendar Heatmap (Timeline Mode) -->
+    <div class="calendar-container" id="calendarContainer">
+      <div class="calendar-header">
+        <button id="calYearPrev" onclick="calendarChangeYear(-1)">&larr;</button>
+        <span class="year-label" id="calYearLabel"></span>
+        <button id="calYearNext" onclick="calendarChangeYear(1)">&rarr;</button>
+      </div>
+      <div class="calendar-months" id="calMonthLabels"></div>
+      <div class="calendar-grid" id="calGrid"></div>
+    </div>
+    <div class="calendar-selection" id="calSelection">
+      <span id="calSelectionText"></span>
+      <button class="clear-btn" onclick="clearCalendarSelection()" title="Clear selection">&times;</button>
+    </div>
+    <div class="day-tooltip" id="dayTooltip"></div>
 
     <!-- Batch Action Bar -->
     <div id="batchBar" style="display:none;background:#0E2A3D;padding:8px 20px;border-bottom:1px solid #14374E;align-items:center;gap:10px;flex-shrink:0;">
