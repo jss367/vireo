@@ -509,3 +509,50 @@ def test_run_classify_job_full_pipeline(tmp_path):
     assert result["predictions_stored"] == 1
     assert result["failed"] == 0
     mock_db_instance.add_prediction.assert_called_once()
+
+
+# ── Task 7: Integration test — route delegates to run_classify_job ─────────
+
+
+def test_api_route_calls_run_classify_job(app_and_db):
+    """The /api/jobs/classify route delegates to run_classify_job."""
+    from classify_job import ClassifyParams
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create a collection so the request is valid
+    import json as _json
+    col_id = db.add_collection("Test", _json.dumps([{"type": "all"}]))
+
+    captured = {}
+
+    def fake_run(job, runner, db_path, workspace_id, params):
+        captured["params"] = params
+        captured["workspace_id"] = workspace_id
+        return {
+            "total": 0,
+            "predictions_stored": 0,
+            "burst_groups": 0,
+            "already_classified": 0,
+            "already_labeled": 0,
+            "detected": 0,
+            "failed": 0,
+        }
+
+    import classify_job
+
+    original = classify_job.run_classify_job
+    classify_job.run_classify_job = fake_run
+    try:
+        resp = client.post(
+            "/api/jobs/classify",
+            json={"collection_id": col_id, "model_name": "TestModel"},
+        )
+    finally:
+        classify_job.run_classify_job = original
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data
+    assert data["job_id"].startswith("classify-")
