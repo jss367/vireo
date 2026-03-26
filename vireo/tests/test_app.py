@@ -132,6 +132,52 @@ def test_encounter_species_rejects_invalid_photo_ids(app_and_db):
     assert not any(c["value"] == "Robin" for c in pending)
 
 
+def test_encounter_species_updates_pipeline_cache(app_and_db):
+    """POST /api/encounters/species updates species_confirmed in pipeline cache."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    photo_ids = [p["id"] for p in photos]
+
+    # Create pipeline cache with unconfirmed encounter
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Sparrow", 0.8],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": len(photo_ids),
+                "burst_count": 0,
+                "time_range": [None, None],
+                "photo_ids": photo_ids,
+            }
+        ],
+        "photos": [{"id": pid, "label": "KEEP", "filename": f"{pid}.jpg"} for pid in photo_ids],
+        "summary": {"total_photos": len(photo_ids), "encounter_count": 1, "burst_count": 0,
+                     "keep_count": len(photo_ids), "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    # Confirm species
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    # Read cache back and check
+    with open(path) as f:
+        updated = _json.load(f)
+    enc = updated["encounters"][0]
+    assert enc["species_confirmed"] is True
+    assert enc["confirmed_species"] == "Blue Jay"
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db

@@ -3866,6 +3866,33 @@ def create_app(db_path, thumb_cache_dir=None):
             db.conn.rollback()
             raise
 
+        # Update pipeline cache if it exists
+        from pipeline import load_results_raw, save_results_raw
+
+        cache_dir = os.path.dirname(db_path)
+        cached = load_results_raw(cache_dir, db._active_workspace_id)
+        if cached:
+            photo_id_set = set(photo_ids)
+            burst_index = body.get("burst_index")
+            for enc in cached.get("encounters", []):
+                enc_ids = set(enc.get("photo_ids", []))
+                if not photo_id_set.issubset(enc_ids):
+                    continue
+                if burst_index is not None and "bursts" in enc:
+                    # Burst-level confirmation
+                    if 0 <= burst_index < len(enc["bursts"]):
+                        burst = enc["bursts"][burst_index]
+                        burst["species_override"] = {
+                            "species": species,
+                            "confirmed": True,
+                        }
+                else:
+                    # Encounter-level confirmation
+                    enc["species_confirmed"] = True
+                    enc["confirmed_species"] = species
+                break
+            save_results_raw(cached, cache_dir, db._active_workspace_id)
+
         return jsonify({
             "ok": True,
             "species": species,
