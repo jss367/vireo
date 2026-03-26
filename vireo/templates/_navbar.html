@@ -689,7 +689,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
   <div class="ws-dropdown" id="wsDropdown">
     <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn">
-      {{ active_workspace.name if active_workspace else 'Default' }}
+      <span id="wsCurrentName">Default</span>
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
@@ -754,6 +754,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       navLinks[i].classList.add('active');
     }
   }
+})();
+
+/* ---------- Load active workspace name ---------- */
+(function() {
+  fetch('/api/workspaces/active')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(ws) {
+      if (ws && ws.name) {
+        var el = document.getElementById('wsCurrentName');
+        if (el) el.textContent = ws.name;
+      }
+    })
+    .catch(function() {});
 })();
 
 /* ---------- Workspace switcher ---------- */
