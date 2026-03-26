@@ -338,13 +338,13 @@ class _DownloadStalled(TimeoutError):
 
 def _download_with_byte_progress(repo_id, filename, file_size,
                                   progress_callback=None,
-                                  stall_timeout=120):
-    """Download a file into the HF cache with byte-level progress and stall detection.
+                                  stall_timeout=300):
+    """Download a file into the HF cache with byte-level progress.
 
-    Uses hf_hub_download's ``tqdm_class`` parameter to intercept progress
-    directly from the download backend (works with both HTTP and XET).
-    Runs the download in a daemon thread so the main thread can detect
-    stalls and raise ``_DownloadStalled`` for the caller to retry.
+    Disables XET (which stalls on large files and doesn't support resume)
+    so HuggingFace falls back to plain HTTP with .incomplete-file resume.
+    Intercepts progress via ``tqdm_class`` and runs the download in a
+    daemon thread for stall detection.
 
     Args:
         repo_id: HuggingFace repo (e.g. "timm/eva02_large...")
@@ -358,6 +358,12 @@ def _download_with_byte_progress(repo_id, filename, file_size,
     import threading
     import time as _time
 
+    # Disable XET: it downloads via a content-addressed chunk-cache that
+    # doesn't support resume across retries and doesn't reliably report
+    # progress.  Plain HTTP writes to .incomplete files and resumes.
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    import huggingface_hub.constants as _hf_constants
+    _hf_constants.HF_HUB_DISABLE_XET = True
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
     lock = threading.Lock()
@@ -368,13 +374,17 @@ def _download_with_byte_progress(repo_id, filename, file_size,
     }
 
     class _ProgressTqdm(base_tqdm):
-        """Intercepts tqdm updates from hf_hub_download / XET."""
+        """Intercepts tqdm updates from http_get."""
 
         _last_cb = 0.0
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             _ProgressTqdm._last_cb = 0.0
+            # If resuming, initial is already set by http_get
+            if self.initial:
+                with lock:
+                    state["bytes"] = int(self.initial)
 
         def update(self, n=1):
             super().update(n)
@@ -422,9 +432,6 @@ def _download_with_byte_progress(repo_id, filename, file_size,
         done.wait(2.0)
 
     if error[0]:
-        # Preserve tqdm-reported progress so the retry loop can tell
-        # whether data was flowing before the error (e.g. connection reset
-        # after partial XET transfer).
         if not hasattr(error[0], "bytes_downloaded"):
             with lock:
                 error[0].bytes_downloaded = state["bytes"]
