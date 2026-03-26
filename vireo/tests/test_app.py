@@ -1,3 +1,6 @@
+import os
+
+
 def test_index_redirects_to_browse(app_and_db):
     """GET / redirects to /browse."""
     app, _ = app_and_db
@@ -447,3 +450,100 @@ def test_text_search_no_active_model(app_and_db):
     data = resp.get_json()
     assert data["results"] == []
     assert data["total_matches"] == 0
+
+
+def test_pipeline_detach_burst(app_and_db):
+    """POST /api/pipeline/detach-burst moves a burst to a new encounter."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create fake pipeline results in cache
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [{"species": "Robin", "count": 3, "models": [{"model": "m1", "confidence": 0.9, "photo_count": 3}]}],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg"},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg"},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    # Original encounter should now have 1 burst, new encounter created
+    assert len(data["encounters"]) == 2
+    assert len(data["encounters"][0]["bursts"]) == 1
+    assert data["encounters"][1]["photo_ids"] == [3]
+
+
+def test_pipeline_detach_photo(app_and_db):
+    """POST /api/pipeline/detach-photo moves a photo to a new burst."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2, 3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg"},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg"},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0, "photo_id": 3})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    # Original burst should have 2 photos, new burst with 1 photo
+    enc = data["encounters"][0]
+    assert len(enc["bursts"]) == 2
+    assert enc["bursts"][0]["photo_ids"] == [1, 2]
+    assert enc["bursts"][1]["photo_ids"] == [3]

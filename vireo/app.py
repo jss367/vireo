@@ -4031,6 +4031,121 @@ def create_app(db_path, thumb_cache_dir=None):
 
         return jsonify(serialize_results(results))
 
+    @app.route("/api/pipeline/detach-burst", methods=["POST"])
+    def api_pipeline_detach_burst():
+        """Detach a burst from its encounter, creating a new standalone encounter."""
+        from pipeline import load_results_raw, save_results_raw
+
+        body = request.get_json(silent=True) or {}
+        enc_idx = body.get("encounter_index")
+        burst_idx = body.get("burst_index")
+        if enc_idx is None or burst_idx is None:
+            return json_error("encounter_index and burst_index are required")
+
+        db = _get_db()
+        cache_dir = os.path.dirname(db_path)
+        results = load_results_raw(cache_dir, db._active_workspace_id)
+        if results is None:
+            return json_error("No pipeline results found", 404)
+
+        encounters = results["encounters"]
+        if enc_idx < 0 or enc_idx >= len(encounters):
+            return json_error("Invalid encounter_index")
+        enc = encounters[enc_idx]
+        bursts = enc.get("bursts", [])
+        if burst_idx < 0 or burst_idx >= len(bursts):
+            return json_error("Invalid burst_index")
+
+        # Remove burst from encounter
+        detached = bursts.pop(burst_idx)
+        detached_ids = detached["photo_ids"]
+
+        if len(bursts) == 0:
+            # Last burst — remove the encounter entirely, detached becomes the encounter
+            encounters.pop(enc_idx)
+        else:
+            # Update encounter metadata
+            enc["photo_ids"] = [pid for pid in enc["photo_ids"] if pid not in detached_ids]
+            enc["photo_count"] = len(enc["photo_ids"])
+            enc["burst_count"] = len(bursts)
+
+        # Create new encounter from detached burst
+        new_enc = {
+            "species": enc.get("species") if len(bursts) > 0 else enc.get("species"),
+            "confirmed_species": detached.get("species_override", {}).get("species") if detached.get("species_override") else None,
+            "species_predictions": detached.get("species_predictions", []),
+            "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
+            "photo_count": len(detached_ids),
+            "burst_count": 1,
+            "time_range": [None, None],
+            "photo_ids": detached_ids,
+            "bursts": [detached],
+        }
+        encounters.append(new_enc)
+
+        # Update summary
+        results["summary"]["encounter_count"] = len(encounters)
+        results["summary"]["burst_count"] = sum(
+            e.get("burst_count", 0) for e in encounters
+        )
+
+        save_results_raw(results, cache_dir, db._active_workspace_id)
+        return jsonify({"ok": True, "encounters": encounters, "summary": results["summary"]})
+
+    @app.route("/api/pipeline/detach-photo", methods=["POST"])
+    def api_pipeline_detach_photo():
+        """Detach a photo from its burst, creating a new single-photo burst."""
+        from pipeline import load_results_raw, save_results_raw
+
+        body = request.get_json(silent=True) or {}
+        enc_idx = body.get("encounter_index")
+        burst_idx = body.get("burst_index")
+        photo_id = body.get("photo_id")
+        if enc_idx is None or burst_idx is None or photo_id is None:
+            return json_error("encounter_index, burst_index, and photo_id are required")
+
+        db = _get_db()
+        cache_dir = os.path.dirname(db_path)
+        results = load_results_raw(cache_dir, db._active_workspace_id)
+        if results is None:
+            return json_error("No pipeline results found", 404)
+
+        encounters = results["encounters"]
+        if enc_idx < 0 or enc_idx >= len(encounters):
+            return json_error("Invalid encounter_index")
+        enc = encounters[enc_idx]
+        bursts = enc.get("bursts", [])
+        if burst_idx < 0 or burst_idx >= len(bursts):
+            return json_error("Invalid burst_index")
+
+        burst = bursts[burst_idx]
+        if photo_id not in burst["photo_ids"]:
+            return json_error("photo_id not in burst")
+
+        # Remove photo from burst
+        burst["photo_ids"].remove(photo_id)
+
+        if len(burst["photo_ids"]) == 0:
+            # Last photo — remove the empty burst
+            bursts.pop(burst_idx)
+
+        # Create new single-photo burst in the same encounter
+        new_burst = {
+            "photo_ids": [photo_id],
+            "species_predictions": [],
+            "species_override": None,
+        }
+        bursts.append(new_burst)
+        enc["burst_count"] = len(bursts)
+
+        # Update summary
+        results["summary"]["burst_count"] = sum(
+            e.get("burst_count", 0) for e in encounters
+        )
+
+        save_results_raw(results, cache_dir, db._active_workspace_id)
+        return jsonify({"ok": True, "encounters": encounters, "summary": results["summary"]})
+
     @app.route("/api/pipeline/config", methods=["GET", "POST"])
     def api_pipeline_config():
         """Get or update pipeline model configuration.

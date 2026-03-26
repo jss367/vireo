@@ -455,3 +455,24 @@ def load_results(cache_dir, workspace_id):
         return None
     with open(path) as f:
         return json.load(f)
+
+
+def load_results_raw(cache_dir, workspace_id):
+    """Load raw (already serialized) pipeline results JSON dict.
+
+    Unlike load_results, this returns the dict exactly as stored on disk,
+    for in-place mutation by structural edits (detach, species confirm).
+    """
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_results_raw(results, cache_dir, workspace_id):
+    """Save an already-serialized results dict back to the JSON cache."""
+    path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    with open(path, "w") as f:
+        json.dump(results, f)
+    return path
