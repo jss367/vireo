@@ -712,7 +712,7 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
 
         rows = self.conn.execute(
-            f"""SELECT substr(p.timestamp, 1, 10) as day, COUNT(*) as count
+            f"""SELECT substr(p.timestamp, 1, 10) as day, COUNT(DISTINCT p.id) as count
             FROM photos p {join_clause} {where}
             GROUP BY day ORDER BY day""",
             params,
