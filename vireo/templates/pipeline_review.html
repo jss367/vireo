@@ -806,12 +806,11 @@ function renderResults() {
     if (!hasVisible) return;
 
     html += '<div class="encounter-card">';
-    html += '<div class="encounter-header" onclick="toggleEncounter(' + ei + ')">';
-    html += '<span class="encounter-species">' + speciesName + '</span>';
-    html += '<span class="encounter-meta">';
+    html += '<div class="encounter-header">';
+    html += renderSpeciesWidget(enc, ei, 'encounter', null);
+    html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
     html += '<span>' + enc.photo_count + ' photos</span>';
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
-    if (speciesConf) html += '<span>' + speciesConf + '</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += '</span></div>';
     html += '<div class="encounter-body" id="encBody' + ei + '">';
@@ -820,14 +819,24 @@ function renderResults() {
       enc.bursts.forEach(function(burst, bi) {
         var burstIds = burst.photo_ids || burst;
         html += '<div class="burst-strip">';
+        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
         if (enc.bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
+        // Burst-level species widget (only show if overridden or multiple bursts)
+        if (enc.bursts.length > 1 || (burst.species_override)) {
+          html += renderSpeciesWidget(enc, ei, 'burst', bi);
+        }
+        if (!burst.species_override && enc.bursts.length > 1) {
+          html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ')">&#9998;</span>';
+        }
+        html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
+        html += '</div>';
         burstIds.forEach(function(pid) {
           var p = photoMap[pid];
           if (!p) return;
           if (activeFilter !== 'all' && p.label !== activeFilter) return;
-          html += renderPhotoCard(p);
+          html += renderPhotoCard(p, ei, bi);
         });
         html += '</div>';
       });
@@ -837,7 +846,7 @@ function renderResults() {
         var p = photoMap[pid];
         if (!p) return;
         if (activeFilter !== 'all' && p.label !== activeFilter) return;
-        html += renderPhotoCard(p);
+        html += renderPhotoCard(p, null, null);
       });
     }
 
@@ -847,14 +856,17 @@ function renderResults() {
   container.innerHTML = html;
 }
 
-function renderPhotoCard(p) {
+function renderPhotoCard(p, encIdx, burstIdx) {
   var label = (p.label || '').toLowerCase();
   var q = p.quality_composite || 0;
   var qPct = Math.round(q * 100);
-  var html = '<div class="photo-card ' + label + '" onclick="openInspect(' + p.id + ')">';
-  html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="">';
+  var html = '<div class="photo-card ' + label + '">';
+  html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
+  if (encIdx != null && burstIdx != null) {
+    html += '<button class="detach-btn" onclick="event.stopPropagation();detachPhoto(' + encIdx + ',' + burstIdx + ',' + p.id + ')" title="Detach photo" style="position:absolute;top:2px;right:2px;">&times;</button>';
+  }
   html += '<div class="photo-score-bar"><div class="photo-score-fill" style="width:' + qPct + '%"></div></div>';
   html += '<div class="photo-info">' + (p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
   html += '</div>';
@@ -1116,7 +1128,7 @@ function openInspect(photoId) {
 
   // Encounter context filmstrip
   if (enc) {
-    var speciesName = enc.species ? (enc.species[0] || 'Unknown') : 'Unknown';
+    var speciesName = enc.confirmed_species || (enc.species ? (enc.species[0] || 'Unknown') : 'Unknown');
     html += '<div class="context-label">Encounter: ' + speciesName + ' (' + enc.photo_count + ' photos, ' + (enc.burst_count||0) + ' bursts)</div>';
     html += '<div class="context-filmstrip">';
     (enc.photo_ids || []).forEach(function(pid) {
