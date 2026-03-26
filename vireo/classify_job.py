@@ -313,6 +313,9 @@ def _classify_photos(
 
     from PIL import Image
 
+    if load_image is None:
+        raise ImportError("image_loader module is required for classification")
+
     raw_results = []
     failed = 0
     skipped_existing = 0
