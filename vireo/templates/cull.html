@@ -519,6 +519,21 @@ document.getElementById('cullPhashThreshold').addEventListener('input', debounce
 document.getElementById('cullCrossBucket').addEventListener('change', regroupScenes);
 window.addEventListener('devmodechange', function() { if (cullData) renderCulling(); });
 
+// Load config defaults for cull sliders
+(async function() {
+  try {
+    var cfg = await safeFetch('/api/config', {}, { toast: false });
+    if (cfg.cull_time_window != null) {
+      document.getElementById('cullTimeWindow').value = cfg.cull_time_window;
+      document.getElementById('cullTimeWindow').dispatchEvent(new Event('input'));
+    }
+    if (cfg.cull_phash_threshold != null) {
+      document.getElementById('cullPhashThreshold').value = cfg.cull_phash_threshold;
+      document.getElementById('cullPhashThreshold').dispatchEvent(new Event('input'));
+    }
+  } catch(e) {}
+})();
+
 function toggleCullSettings() {
   var panel = document.getElementById('cullSettings');
   panel.style.display = panel.style.display === 'none' ? '' : 'none';

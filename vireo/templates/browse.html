@@ -729,18 +729,32 @@ var calendarData = null;
 var clipSearchActive = false;
 
 var _shortcuts = null;
-(async function() {
+var _cfgPromise = (async function() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
     _shortcuts = (cfg.keyboard_shortcuts || {}).browse || {
       rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
       flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
+    return cfg;
   } catch(e) {
     _shortcuts = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
       flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
+    return null;
   }
 })();
+
+function applyBrowseConfig(cfg) {
+  if (!cfg) return;
+  if (cfg.photos_per_page) perPage = cfg.photos_per_page;
+  if (cfg.browse_thumb_default) {
+    var slider = document.getElementById('thumbSizeSlider');
+    if (slider) {
+      slider.value = cfg.browse_thumb_default;
+      slider.dispatchEvent(new Event('input'));
+    }
+  }
+}
 
 /* ---------- Bootstrap ---------- */
 bootstrapBrowse();
@@ -749,6 +763,7 @@ async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
   try {
+    applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
 
     // Populate everything from a single response
@@ -1868,6 +1883,7 @@ async function developSelected() {
   if (isNaN(photoId)) return;
 
   try {
+    applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
     if (!photo || !photo.folder_id) return;
 
