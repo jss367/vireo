@@ -428,6 +428,165 @@ input[type="range"]::-moz-range-thumb {
   margin-top: 12px;
 }
 .back-link:hover { color: var(--accent, #24E5CA); }
+
+/* -- Species confirmation widget -- */
+.species-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+.species-name {
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  transition: color 0.15s;
+}
+.species-name.unconfirmed {
+  color: var(--text-muted, #7FAAB0);
+}
+.species-name.confirmed {
+  color: var(--accent, #24E5CA);
+}
+.species-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.species-badge.unconfirmed {
+  background: rgba(127, 170, 176, 0.2);
+  color: var(--text-muted, #7FAAB0);
+}
+.species-badge.confirmed {
+  background: rgba(36, 229, 202, 0.2);
+  color: var(--accent, #24E5CA);
+}
+.species-confirm-btn {
+  background: none;
+  border: 1px solid var(--border-primary, #14374E);
+  color: var(--text-dim, #5A8890);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.species-confirm-btn:hover {
+  border-color: var(--accent, #24E5CA);
+  color: var(--accent, #24E5CA);
+}
+
+/* Species dropdown */
+.species-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  min-width: 320px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  margin-top: 4px;
+  display: none;
+}
+.species-dropdown.open { display: block; }
+.species-dropdown-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.species-dropdown-item:hover { background: rgba(255,255,255,0.04); }
+.species-dropdown-item:last-child { border-bottom: none; }
+.species-dropdown-item .sp-name { flex: 1; font-weight: 500; }
+.species-dropdown-item .sp-models { font-size: 11px; color: var(--text-dim, #5A8890); }
+.species-dropdown-search {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-secondary, #1A4560);
+}
+.species-dropdown-search input {
+  width: 100%;
+  background: var(--bg-input, #14374E);
+  color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* Burst-level species (smaller variant) */
+.burst-species-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 12px;
+}
+.burst-species-widget .species-name { font-size: 12px; }
+.burst-species-edit {
+  opacity: 0;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim, #5A8890);
+  transition: opacity 0.15s;
+}
+.burst-strip:hover .burst-species-edit { opacity: 1; }
+
+/* Detach icons */
+.detach-btn {
+  opacity: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim, #5A8890);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+.detach-btn:hover {
+  color: var(--warning, #F0C040);
+  background: rgba(240, 192, 64, 0.1);
+}
+.burst-strip:hover .detach-btn { opacity: 1; }
+.photo-card:hover .detach-btn { opacity: 1; }
+
+/* Undo toast */
+.undo-toast {
+  position: fixed;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 8px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  z-index: 200;
+  transition: opacity 0.3s;
+}
+.undo-toast.hidden { opacity: 0; pointer-events: none; }
+.undo-toast-btn {
+  background: var(--accent, #24E5CA);
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
 </style>
 </head>
 <body>
@@ -594,6 +753,11 @@ input[type="range"]::-moz-range-thumb {
 <!-- Inspection panel overlay -->
 <div class="inspect-overlay" id="inspectOverlay" onclick="if(event.target===this)closeInspect()">
   <div class="inspect-panel" id="inspectPanel"></div>
+</div>
+
+<div class="undo-toast hidden" id="undoToast">
+  <span id="undoMsg"></span>
+  <button class="undo-toast-btn" onclick="undoLastAction()">Undo</button>
 </div>
 
 <script>
