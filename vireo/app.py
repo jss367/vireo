@@ -3740,7 +3740,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 {"phase": "Loading features from database", "current": 0, "total": 3},
             )
 
-            photos = load_photo_features(thread_db, collection_id=collection_id)
+            photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
             if not photos:
                 return {"error": "No photos with pipeline features found. Run extract-masks first."}
 
@@ -3963,7 +3963,7 @@ def create_app(db_path, thumb_cache_dir=None):
         # Load features and re-group (grouping is fast, seconds)
         # We re-group to have the full photo dicts with numpy arrays
         # (the cached JSON doesn't have embeddings)
-        photos = load_photo_features(db)
+        photos = load_photo_features(db, config=effective_cfg)
         if not photos:
             return json_error("No photos with pipeline features", 404)
 
@@ -3999,7 +3999,7 @@ def create_app(db_path, thumb_cache_dir=None):
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 
-        photos = load_photo_features(db)
+        photos = load_photo_features(db, config=effective_cfg)
         if not photos:
             return json_error("No photos with pipeline features", 404)
 

@@ -821,18 +821,18 @@ var _saveTimer = null;
 async function loadConfig() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
-    var pct = Math.round((cfg.classification_threshold || 0.4) * 100);
+    var pct = Math.round((cfg.classification_threshold != null ? cfg.classification_threshold : 0.4) * 100);
     document.getElementById('cfgThreshold').value = pct;
     document.getElementById('cfgThresholdVal').textContent = pct + '%';
-    document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds || 10;
-    var simPct = Math.round((cfg.similarity_threshold || 0.85) * 100);
+    document.getElementById('cfgGroupingWindow').value = cfg.grouping_window_seconds != null ? cfg.grouping_window_seconds : 10;
+    var simPct = Math.round((cfg.similarity_threshold != null ? cfg.similarity_threshold : 0.85) * 100);
     document.getElementById('cfgSimilarity').value = simPct;
     document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
     document.getElementById('cfgHfToken').value = cfg.hf_token || '';
     document.getElementById('cfgInatToken').value = cfg.inat_token || '';
     if (cfg.inat_token) validateInatToken();
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
-    document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history || 1000;
+    document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
     // Load darktable settings
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
@@ -840,31 +840,31 @@ async function loadConfig() {
     document.getElementById('cfgDarktableOutputDir').value = cfg.darktable_output_dir || '';
     loadDarktableStatus();
     // Load display settings
-    document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page || 50;
-    var ts = cfg.thumbnail_size || 400;
+    document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
+    var ts = cfg.thumbnail_size != null ? cfg.thumbnail_size : 400;
     document.getElementById('cfgThumbSize').value = ts;
     document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
-    var tq = cfg.thumbnail_quality || 85;
+    var tq = cfg.thumbnail_quality != null ? cfg.thumbnail_quality : 85;
     document.getElementById('cfgThumbQuality').value = tq;
     document.getElementById('cfgThumbQualityVal').textContent = tq;
-    var pq = cfg.preview_quality || 90;
+    var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
     document.getElementById('cfgPreviewQuality').value = pq;
     document.getElementById('cfgPreviewQualityVal').textContent = pq;
-    var bt = cfg.browse_thumb_default || 220;
+    var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
     // Load detection settings
-    var dc = Math.round((cfg.detector_confidence || 0.20) * 100);
+    var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
     document.getElementById('cfgDetectorConfVal').textContent = (dc / 100).toFixed(2);
-    var dp = Math.round((cfg.detection_padding || 0.20) * 100);
+    var dp = Math.round((cfg.detection_padding != null ? cfg.detection_padding : 0.20) * 100);
     document.getElementById('cfgDetectionPadding').value = dp;
     document.getElementById('cfgDetectionPaddingVal').textContent = (dp / 100).toFixed(2);
-    document.getElementById('cfgTopK').value = cfg.top_k_predictions || 5;
-    var rd = Math.round((cfg.redundancy_threshold || 0.88) * 100);
+    document.getElementById('cfgTopK').value = cfg.top_k_predictions != null ? cfg.top_k_predictions : 5;
+    var rd = Math.round((cfg.redundancy_threshold != null ? cfg.redundancy_threshold : 0.88) * 100);
     document.getElementById('cfgRedundancy').value = rd;
     document.getElementById('cfgRedundancyVal').textContent = (rd / 100).toFixed(2);
-    document.getElementById('cfgCullTimeWindow').value = cfg.cull_time_window || 60;
+    document.getElementById('cfgCullTimeWindow').value = cfg.cull_time_window != null ? cfg.cull_time_window : 60;
     var cph = cfg.cull_phash_threshold != null ? cfg.cull_phash_threshold : 19;
     document.getElementById('cfgCullPhash').value = cph;
     document.getElementById('cfgCullPhashVal').textContent = cph;
@@ -909,17 +909,17 @@ async function loadConfig() {
     var bl = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
     document.getElementById('cfgBurstLambda').value = bl;
     document.getElementById('cfgBurstLambdaVal').textContent = bl + '%';
-    document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep || 3;
+    document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep != null ? p.burst_max_keep : 3;
     var el = Math.round((p.encounter_lambda != null ? p.encounter_lambda : 0.70) * 100);
     document.getElementById('cfgEncLambda').value = el;
     document.getElementById('cfgEncLambdaVal').textContent = el + '%';
-    document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep || 5;
+    document.getElementById('cfgEncMaxKeep').value = p.encounter_max_keep != null ? p.encounter_max_keep : 5;
     document.getElementById('cfgWTime').value = Math.round((p.w_time != null ? p.w_time : 0.35) * 100);
     document.getElementById('cfgWSubj').value = Math.round((p.w_subj != null ? p.w_subj : 0.35) * 100);
     document.getElementById('cfgWGlobal').value = Math.round((p.w_global != null ? p.w_global : 0.15) * 100);
     document.getElementById('cfgWSpecies').value = Math.round((p.w_species != null ? p.w_species : 0.10) * 100);
     document.getElementById('cfgWMeta').value = Math.round((p.w_meta != null ? p.w_meta : 0.05) * 100);
-    document.getElementById('cfgHardCutTime').value = p.hard_cut_time || 180;
+    document.getElementById('cfgHardCutTime').value = p.hard_cut_time != null ? p.hard_cut_time : 180;
     var hcs = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
     document.getElementById('cfgHardCutScore').value = hcs;
     document.getElementById('cfgHardCutScoreVal').textContent = hcs + '%';
@@ -929,7 +929,7 @@ async function loadConfig() {
     var ms = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
     document.getElementById('cfgMergeScore').value = ms;
     document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
-    document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap || 60;
+    document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap != null ? p.merge_max_gap : 60;
     // Load keyboard shortcuts
     currentShortcuts = cfg.keyboard_shortcuts || JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS));
     renderShortcutsEditor();
@@ -940,11 +940,13 @@ function saveConfig() {
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(async function() {
     var threshold = parseInt(document.getElementById('cfgThreshold').value, 10) / 100;
-    var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10) || 10;
+    var grouping = parseInt(document.getElementById('cfgGroupingWindow').value, 10);
+    if (isNaN(grouping)) grouping = 10;
     var similarity = parseInt(document.getElementById('cfgSimilarity').value, 10) / 100;
     var hfToken = document.getElementById('cfgHfToken').value.trim();
     var keywordCase = document.getElementById('cfgKeywordCase').value;
-    var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10) || 1000;
+    var maxEditHistory = parseInt(document.getElementById('cfgMaxEditHistory').value, 10);
+    if (isNaN(maxEditHistory)) maxEditHistory = 1000;
     try {
       await safeFetch('/api/config', {
         method: 'POST',
@@ -986,19 +988,19 @@ function saveConfig() {
             burst_phash_threshold: parseInt(document.getElementById('cfgBurstPhash').value, 10),
             burst_embedding_threshold: parseInt(document.getElementById('cfgBurstEmb').value, 10) / 100,
             burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
-            burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
+            burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10),
             encounter_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,
-            encounter_max_keep: parseInt(document.getElementById('cfgEncMaxKeep').value, 10) || 5,
+            encounter_max_keep: parseInt(document.getElementById('cfgEncMaxKeep').value, 10),
             w_time: parseInt(document.getElementById('cfgWTime').value, 10) / 100,
             w_subj: parseInt(document.getElementById('cfgWSubj').value, 10) / 100,
             w_global: parseInt(document.getElementById('cfgWGlobal').value, 10) / 100,
             w_species: parseInt(document.getElementById('cfgWSpecies').value, 10) / 100,
             w_meta: parseInt(document.getElementById('cfgWMeta').value, 10) / 100,
-            hard_cut_time: parseInt(document.getElementById('cfgHardCutTime').value, 10) || 180,
+            hard_cut_time: parseInt(document.getElementById('cfgHardCutTime').value, 10),
             hard_cut_score: parseInt(document.getElementById('cfgHardCutScore').value, 10) / 100,
             soft_cut_score: parseInt(document.getElementById('cfgSoftCutScore').value, 10) / 100,
             merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
-            merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
+            merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10),
           },
         }),
       });
