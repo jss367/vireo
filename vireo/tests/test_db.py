@@ -716,3 +716,59 @@ def test_is_keyword_species(tmp_path):
 
     assert db.is_keyword_species(kid_species) is True
     assert db.is_keyword_species(kid_location) is False
+
+
+# --- Cluster 5: Calendar Data ---
+
+def _make_calendar_db(tmp_path):
+    """Create a db with workspace, folders, and photos suitable for calendar tests."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos/2024', name='2024')
+    fid2 = db.add_folder('/photos/2024/January', name='January', parent_id=fid)
+
+    p1 = db.add_photo(folder_id=fid, filename='bird1.jpg', extension='.jpg',
+                      file_size=1000, file_mtime=1.0, timestamp='2024-01-15T10:00:00')
+    p2 = db.add_photo(folder_id=fid2, filename='bird2.jpg', extension='.jpg',
+                      file_size=2000, file_mtime=2.0, timestamp='2024-01-20T14:00:00')
+    p3 = db.add_photo(folder_id=fid, filename='bird3.jpg', extension='.jpg',
+                      file_size=3000, file_mtime=3.0, timestamp='2024-06-10T09:00:00')
+
+    db.update_photo_rating(p1, 3)
+    db.update_photo_rating(p3, 5)
+
+    return db
+
+
+def test_get_calendar_data_basic(tmp_path):
+    """get_calendar_data returns daily counts and year bounds."""
+    db = _make_calendar_db(tmp_path)
+    data = db.get_calendar_data(year=2024)
+    assert data["year"] == 2024
+    assert "2024-01-15" in data["days"]
+    assert "2024-06-10" in data["days"]
+    assert data["days"]["2024-01-15"] == 1
+    assert data["min_year"] == 2024
+    assert data["max_year"] == 2024
+
+
+def test_get_calendar_data_filters(tmp_path):
+    """get_calendar_data respects folder_id and rating_min filters."""
+    db = _make_calendar_db(tmp_path)
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f["name"] == "January"][0]
+    data = db.get_calendar_data(year=2024, folder_id=jan["id"])
+    assert list(data["days"].keys()) == ["2024-01-20"]
+
+    data = db.get_calendar_data(year=2024, rating_min=4)
+    assert list(data["days"].keys()) == ["2024-06-10"]
+
+
+def test_get_calendar_data_empty_year(tmp_path):
+    """get_calendar_data returns empty days for a year with no photos."""
+    db = _make_calendar_db(tmp_path)
+    data = db.get_calendar_data(year=2020)
+    assert data["days"] == {}
+    assert data["year"] == 2020
