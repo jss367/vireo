@@ -340,16 +340,22 @@ def test_health_endpoint(app_and_db):
 
 def test_shutdown_endpoint(app_and_db):
     """POST /api/shutdown returns 200 and signals shutdown."""
+    from unittest.mock import patch, MagicMock
+
     app, _ = app_and_db
     client = app.test_client()
     # GET should not be allowed
     resp = client.get("/api/shutdown")
     assert resp.status_code == 405
-    # POST triggers shutdown
-    resp = client.post("/api/shutdown")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert data["status"] == "shutting_down"
+    # POST triggers shutdown (mock threading.Timer so SIGTERM is never sent)
+    mock_timer = MagicMock()
+    with patch("threading.Timer", return_value=mock_timer) as mock_timer_cls:
+        resp = client.post("/api/shutdown")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "shutting_down"
+        mock_timer_cls.assert_called_once()
+        mock_timer.start.assert_called_once()
 
 
 def test_pipeline_page_init_api(app_and_db):

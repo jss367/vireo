@@ -747,12 +747,27 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 (function() {
   var path = location.pathname;
   var navLinks = document.querySelectorAll('.navbar > a[href]');
+  var exactMatch = null;
   for (var i = 0; i < navLinks.length; i++) {
-    var href = navLinks[i].getAttribute('href');
-    // Exact match, or path starts with href for nested routes
-    if (path === href || (href !== '/' && path.startsWith(href + '/'))) {
-      navLinks[i].classList.add('active');
+    if (path === navLinks[i].getAttribute('href')) {
+      exactMatch = navLinks[i];
+      break;
     }
+  }
+  if (exactMatch) {
+    exactMatch.classList.add('active');
+  } else {
+    // Fallback: longest prefix match
+    var best = null;
+    var bestLen = 0;
+    for (var i = 0; i < navLinks.length; i++) {
+      var href = navLinks[i].getAttribute('href');
+      if (href !== '/' && path.startsWith(href) && href.length > bestLen) {
+        best = navLinks[i];
+        bestLen = href.length;
+      }
+    }
+    if (best) best.classList.add('active');
   }
 })();
 

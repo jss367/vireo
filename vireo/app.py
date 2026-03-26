@@ -173,16 +173,6 @@ def create_app(db_path, thumb_cache_dir=None):
         threading.Timer(0.5, _shutdown).start()
         return jsonify({"status": "shutting_down"})
 
-    @app.context_processor
-    def inject_workspace():
-        """Make active workspace available to all templates."""
-        try:
-            db = _get_db()
-            ws = db.get_workspace(db._active_workspace_id)
-            return {"active_workspace": dict(ws) if ws else None}
-        except Exception:
-            return {"active_workspace": None}
-
     # Load user config (e.g. HF token) on startup
     import config as cfg
 
