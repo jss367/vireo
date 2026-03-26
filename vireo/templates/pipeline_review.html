@@ -654,11 +654,12 @@ function renderResults() {
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
+        var burstIds = burst.photo_ids || burst;
         html += '<div class="burst-strip">';
         if (enc.bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
-        burst.forEach(function(pid) {
+        burstIds.forEach(function(pid) {
           var p = photoMap[pid];
           if (!p) return;
           if (activeFilter !== 'all' && p.label !== activeFilter) return;

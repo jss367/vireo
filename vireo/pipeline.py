@@ -388,17 +388,50 @@ def serialize_results(results):
         s_enc = {
             "species": enc.get("species"),
             "confirmed_species": enc_confirmed,
-            "species_votes": species_votes,
+            "species_predictions": species_votes,
+            "species_confirmed": enc_confirmed is not None,
             "photo_count": enc.get("photo_count"),
             "burst_count": enc.get("burst_count"),
             "time_range": enc.get("time_range"),
             "photo_ids": [p["id"] for p in photos_list],
         }
         if "bursts" in enc:
-            s_enc["bursts"] = [
-                [p["id"] for p in burst]
-                for burst in enc["bursts"]
-            ]
+            s_enc["bursts"] = []
+            for burst in enc["bursts"]:
+                burst_ids = [p["id"] for p in burst]
+                # Build per-burst species predictions
+                burst_model_data = defaultdict(lambda: defaultdict(lambda: {"confs": [], "count": 0}))
+                for p in burst:
+                    for entry in (p.get("species_top5") or []):
+                        sp_name = entry[0]
+                        sp_conf = entry[1]
+                        sp_model = entry[2] if len(entry) > 2 else "unknown"
+                        burst_model_data[sp_name][sp_model]["confs"].append(sp_conf)
+                        burst_model_data[sp_name][sp_model]["count"] += 1
+                burst_species = []
+                for sp_name in sorted(burst_model_data, key=lambda s: sum(
+                    d["count"] for d in burst_model_data[s].values()
+                ), reverse=True):
+                    models = []
+                    total_count = 0
+                    for model_name, data in sorted(burst_model_data[sp_name].items()):
+                        avg_conf = sum(data["confs"]) / len(data["confs"])
+                        models.append({
+                            "model": model_name,
+                            "confidence": round(avg_conf, 4),
+                            "photo_count": data["count"],
+                        })
+                        total_count += data["count"]
+                    burst_species.append({
+                        "species": sp_name,
+                        "count": total_count,
+                        "models": models,
+                    })
+                s_enc["bursts"].append({
+                    "photo_ids": burst_ids,
+                    "species_predictions": burst_species,
+                    "species_override": None,
+                })
         serialized_encounters.append(s_enc)
 
     return {

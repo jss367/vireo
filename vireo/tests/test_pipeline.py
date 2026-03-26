@@ -338,8 +338,8 @@ def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
         assert photo["confirmed_species"] == "Blue Jay"
 
 
-def test_serialize_results_includes_species_votes(tmp_path):
-    """serialize_results includes species_votes and confirmed_species."""
+def test_serialize_results_includes_species_predictions(tmp_path):
+    """serialize_results includes species_predictions and confirmed_species."""
     from pipeline import load_photo_features, run_full_pipeline, serialize_results
 
     db, ids = _setup_db_with_photos(tmp_path)
@@ -353,22 +353,32 @@ def test_serialize_results_includes_species_votes(tmp_path):
     serialized = serialize_results(results)
 
     for enc in serialized["encounters"]:
-        assert "species_votes" in enc
+        assert "species_predictions" in enc
         assert "confirmed_species" in enc
-        assert isinstance(enc["species_votes"], list)
+        assert isinstance(enc["species_predictions"], list)
+        assert "species_confirmed" in enc
+        assert isinstance(enc["species_confirmed"], bool)
 
     # At least one encounter should have confirmed species
     confirmed_encs = [e for e in serialized["encounters"]
                       if e["confirmed_species"] is not None]
     assert len(confirmed_encs) >= 1
     assert confirmed_encs[0]["confirmed_species"] == "Robin"
+    assert confirmed_encs[0]["species_confirmed"] is True
 
-    # Species votes should have species/count/avg_confidence
+    # Unconfirmed encounters should have species_confirmed=False
+    unconfirmed_encs = [e for e in serialized["encounters"]
+                        if e["confirmed_species"] is None]
+    for e in unconfirmed_encs:
+        assert e["species_confirmed"] is False
+
+    # Species predictions should have species/count/models
     for enc in serialized["encounters"]:
-        for vote in enc["species_votes"]:
-            assert "species" in vote
-            assert "count" in vote
-            assert "avg_confidence" in vote
+        for pred in enc["species_predictions"]:
+            assert "species" in pred
+            assert "count" in pred
+            assert "models" in pred
+            assert "avg_confidence" in pred
 
 
 def test_load_photo_features_includes_model_in_species(tmp_path):
@@ -408,3 +418,45 @@ def test_load_photo_features_collection_scoped(tmp_path):
     scoped = load_photo_features(db, collection_id=cid)
     assert len(scoped) == 1
     assert scoped[0]["id"] == p1
+
+
+def test_serialize_results_has_species_predictions(tmp_path):
+    """Serialized encounters include species_predictions with model info."""
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    for enc in serialized["encounters"]:
+        assert "species_predictions" in enc
+        assert "species_confirmed" in enc
+        assert isinstance(enc["species_confirmed"], bool)
+        # species_predictions should have model breakdown
+        for sp in enc["species_predictions"]:
+            assert "species" in sp
+            assert "models" in sp
+            for m in sp["models"]:
+                assert "model" in m
+                assert "confidence" in m
+                assert "photo_count" in m
+
+
+def test_serialize_results_has_burst_species_predictions(tmp_path):
+    """Serialized bursts include species_predictions scoped to burst photos."""
+    from pipeline import load_photo_features, run_full_pipeline, serialize_results
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+
+    for enc in serialized["encounters"]:
+        if "bursts" not in enc:
+            continue
+        for burst in enc["bursts"]:
+            assert isinstance(burst, dict), "Bursts should be dicts, not lists of IDs"
+            assert "photo_ids" in burst
+            assert "species_predictions" in burst
+            assert "species_override" in burst
