@@ -199,39 +199,46 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 det_conf = primary["confidence"]
                 subject_size = det_box["w"] * det_box["h"]
 
-                overall_sharpness = compute_sharpness(image_path)
-                subject_sharpness = None
-                quality = 0
+                if compute_sharpness is not None:
+                    overall_sharpness = compute_sharpness(image_path)
+                    subject_sharpness = None
+                    quality = 0
 
-                try:
-                    from PIL import Image
+                    try:
+                        from PIL import Image
 
-                    img = Image.open(image_path)
-                    iw, ih = img.size
-                    px = int(det_box["x"] * iw)
-                    py = int(det_box["y"] * ih)
-                    pw = int(det_box["w"] * iw)
-                    ph = int(det_box["h"] * ih)
-                    subject_sharpness = compute_sharpness(
-                        image_path, region=(px, py, pw, ph)
+                        img = Image.open(image_path)
+                        iw, ih = img.size
+                        px = int(det_box["x"] * iw)
+                        py = int(det_box["y"] * ih)
+                        pw = int(det_box["w"] * iw)
+                        ph = int(det_box["h"] * ih)
+                        subject_sharpness = compute_sharpness(
+                            image_path, region=(px, py, pw, ph)
+                        )
+                    except Exception:
+                        subject_sharpness = overall_sharpness
+
+                    if subject_sharpness is not None and subject_size is not None:
+                        norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
+                        norm_size = min(1.0, subject_size * 4)
+                        quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
+
+                    db.update_photo_quality(
+                        photo["id"],
+                        detection_box=det_box,
+                        detection_conf=det_conf,
+                        subject_sharpness=subject_sharpness,
+                        subject_size=subject_size,
+                        quality_score=quality,
+                        sharpness=overall_sharpness,
                     )
-                except Exception:
-                    subject_sharpness = overall_sharpness
-
-                if subject_sharpness is not None and subject_size is not None:
-                    norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
-                    norm_size = min(1.0, subject_size * 4)
-                    quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
-
-                db.update_photo_quality(
-                    photo["id"],
-                    detection_box=det_box,
-                    detection_conf=det_conf,
-                    subject_sharpness=subject_sharpness,
-                    subject_size=subject_size,
-                    quality_score=quality,
-                    sharpness=overall_sharpness,
-                )
+                else:
+                    db.update_photo_quality(
+                        photo["id"],
+                        detection_box=det_box,
+                        detection_conf=det_conf,
+                    )
 
         log.info(
             "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
