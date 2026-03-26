@@ -772,3 +772,50 @@ def test_get_calendar_data_empty_year(tmp_path):
     data = db.get_calendar_data(year=2020)
     assert data["days"] == {}
     assert data["year"] == 2020
+
+
+def test_embedding_model_column_exists(tmp_path):
+    """The photos table has an embedding_model column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
+
+
+def test_store_photo_embedding_with_model(tmp_path):
+    """store_photo_embedding saves model name alongside the embedding."""
+    import numpy as np
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.conn.execute("INSERT INTO folders (path, name) VALUES ('/tmp', 'tmp')").lastrowid
+    pid = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)).lastrowid
+    db.conn.commit()
+    emb = np.random.randn(512).astype(np.float32)
+    db.store_photo_embedding(pid, emb.tobytes(), model="BioCLIP")
+    row = db.conn.execute("SELECT embedding_model FROM photos WHERE id = ?", (pid,)).fetchone()
+    assert row["embedding_model"] == "BioCLIP"
+
+
+def test_get_embeddings_by_model(tmp_path):
+    """get_embeddings_by_model returns only photos with matching model."""
+    import numpy as np
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.conn.execute("INSERT INTO folders (path, name) VALUES ('/tmp', 'tmp')").lastrowid
+    # Link folder to workspace
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._active_workspace_id, fid),
+    )
+    emb1 = np.random.randn(512).astype(np.float32)
+    emb2 = np.random.randn(512).astype(np.float32)
+    p1 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)).lastrowid
+    p2 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'b.jpg')", (fid,)).lastrowid
+    p3 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'c.jpg')", (fid,)).lastrowid
+    db.store_photo_embedding(p1, emb1.tobytes(), model="BioCLIP")
+    db.store_photo_embedding(p2, emb2.tobytes(), model="BioCLIP-2")
+    # p3 has no embedding
+    db.conn.commit()
+
+    results = db.get_embeddings_by_model("BioCLIP")
+    assert len(results) == 1
+    assert results[0][0] == p1

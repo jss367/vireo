@@ -180,6 +180,18 @@ body {
   border-radius: 2px;
   white-space: nowrap;
 }
+.clip-score-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(36, 229, 202, 0.85);
+  color: #000;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  pointer-events: none;
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -527,6 +539,16 @@ body {
     <!-- Filter Bar -->
     <div class="filter-bar">
       <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applyFilters()">
+      <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
+             style="flex:1;min-width:200px;"
+             onkeydown="if(event.key==='Enter')runClipSearch()">
+      <button id="clipSearchBtn" onclick="runClipSearch()"
+              style="background:var(--bg-tertiary,#14374E);color:var(--accent,#24E5CA);border:1px solid var(--accent,#24E5CA);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
+        Search
+      </button>
+      <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
+        Clear
+      </button>
       <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
       <input type="date" id="dateFrom" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
       <label>to</label>
@@ -697,6 +719,7 @@ var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
+var clipSearchActive = false;
 
 var _shortcuts = null;
 (async function() {
@@ -1219,7 +1242,57 @@ function toggleDetectionBoxes() {
   renderGrid();
 }
 
+async function runClipSearch() {
+  var query = document.getElementById('clipSearchInput').value.trim();
+  if (!query) return;
+
+  photos = [];
+  allLoaded = true;
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
+  document.getElementById('grid').innerHTML = '';
+  document.getElementById('loadingState').style.display = 'block';
+  document.getElementById('loadingState').textContent = 'Searching...';
+  clipSearchActive = true;
+  document.getElementById('clipClearBtn').style.display = '';
+
+  try {
+    var params = new URLSearchParams();
+    params.set('q', query);
+    params.set('limit', 100);
+    params.set('threshold', 0.15);
+    var data = await safeFetch('/api/photos/search?' + params.toString());
+
+    photos = data.results.map(function(r) {
+      var p = r.photo;
+      p._similarity = r.similarity;
+      return p;
+    });
+    totalPhotos = data.total_matches;
+    allLoaded = true;
+
+    renderGrid();
+    var summary = document.getElementById('filterSummary');
+    summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
+  } catch(e) {
+    document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
+    return;
+  }
+
+  document.getElementById('loadingState').style.display = 'none';
+}
+
+function clearClipSearch() {
+  clipSearchActive = false;
+  document.getElementById('clipSearchInput').value = '';
+  document.getElementById('clipClearBtn').style.display = 'none';
+  resetAndLoad();
+}
+
 function updateScrollPosition() {
+  if (clipSearchActive) return;
   var el = document.getElementById('filterSummary');
   if (photos.length === 0) {
     el.textContent = totalPhotos + ' photos';
@@ -1295,9 +1368,15 @@ function renderGrid() {
       }
     }
 
+    var clipBadge = '';
+    if (p._similarity !== undefined) {
+      clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
+    }
+
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
+        clipBadge +
         boxHtml +
       '</div>' +
       '<div class="grid-card-info">' +
