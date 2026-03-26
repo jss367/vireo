@@ -210,6 +210,29 @@
     </div>
   </div>
 
+  <!-- iNaturalist -->
+  <div class="section">
+    <div class="section-title">iNaturalist</div>
+    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+      Submit observations directly from Vireo.
+      Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" style="color:#24E5CA;text-decoration:none;">inaturalist.org/users/api_token</a>
+    </p>
+    <div class="setting-row">
+      <div class="setting-label">
+        API Token
+        <small>Paste your personal API token to enable direct uploads</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="password" id="cfgInatToken" placeholder="eyJhbGciOi..."
+               style="width:260px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig()">
+        <button onclick="toggleInatTokenVisibility()" style="background:#14374E;color:#888;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
+        <button onclick="validateInatToken()" style="background:#14374E;color:#24E5CA;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Validate</button>
+      </div>
+    </div>
+    <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
+  </div>
+
   <!-- darktable Development -->
   <div class="section">
     <div class="section-title">RAW Development (darktable)</div>
@@ -399,6 +422,8 @@ async function loadConfig() {
     document.getElementById('cfgSimilarity').value = simPct;
     document.getElementById('cfgSimilarityVal').textContent = simPct + '%';
     document.getElementById('cfgHfToken').value = cfg.hf_token || '';
+    document.getElementById('cfgInatToken').value = cfg.inat_token || '';
+    if (cfg.inat_token) validateInatToken();
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     // Load darktable settings
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
@@ -430,6 +455,7 @@ function saveConfig() {
           similarity_threshold: similarity,
           keyword_case: keywordCase,
           hf_token: hfToken,
+          inat_token: document.getElementById('cfgInatToken').value.trim(),
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
@@ -438,6 +464,32 @@ function saveConfig() {
       });
     } catch(e) {}
   }, 500);
+}
+
+function toggleInatTokenVisibility() {
+  var inp = document.getElementById('cfgInatToken');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+async function validateInatToken() {
+  var token = document.getElementById('cfgInatToken').value.trim();
+  var status = document.getElementById('inatTokenStatus');
+  if (!token) { status.innerHTML = ''; return; }
+  status.innerHTML = '<span style="color:#888;">Validating...</span>';
+  try {
+    var data = await safeFetch('/api/inat/validate-token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: token}),
+    }, { toast: false });
+    if (data.error) {
+      status.innerHTML = '<span style="color:#e74c3c;">&#10007; Invalid or expired token</span>';
+    } else {
+      status.innerHTML = '<span style="color:#24E5CA;">&#10003; Logged in as <strong>' + escapeHtml(data.login) + '</strong></span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:#e74c3c;">&#10007; ' + escapeHtml(e.message) + '</span>';
+  }
 }
 
 /* ---------- Keyboard Shortcuts Editor ---------- */
