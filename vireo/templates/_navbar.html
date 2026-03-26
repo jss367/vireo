@@ -646,6 +646,38 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-btn-cancel { background: var(--bg-tertiary, #14374E); color: var(--text-secondary, #B0CCCC); }
 .modal-error { color: var(--danger, #E74C3C); font-size: 13px; margin-top: 8px; display: none; }
 
+/* ---------- iNat Submission Modal ---------- */
+.inat-modal { width: 560px; }
+.inat-card {
+  background: var(--bg-tertiary, #14374E);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.inat-card-header { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.inat-card-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 4px; }
+.inat-card-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.inat-card-fields label { font-size: 11px; color: var(--text-muted, #7FAAB0); display: block; margin-bottom: 2px; }
+.inat-card-fields input, .inat-card-fields select, .inat-card-fields textarea {
+  width: 100%; background: var(--bg-secondary, #0E2A3D); color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border-secondary, #1A4560); border-radius: 3px;
+  padding: 5px 8px; font-size: 12px; outline: none; box-sizing: border-box;
+}
+.inat-card-fields textarea { grid-column: 1 / -1; resize: vertical; min-height: 36px; }
+.inat-card-status { font-size: 12px; margin-top: 6px; }
+.inat-card-status.success { color: #24E5CA; }
+.inat-card-status.error { color: #E74C3C; }
+.inat-card-status.warning { color: #f0c040; }
+.inat-progress { margin-top: 12px; }
+.inat-progress-bar {
+  height: 4px; background: var(--bg-tertiary, #14374E); border-radius: 2px; overflow: hidden;
+}
+.inat-progress-fill {
+  height: 100%; background: var(--accent, #24E5CA); width: 0%; transition: width 0.3s;
+}
+.inat-progress-text { font-size: 11px; color: var(--text-muted, #7FAAB0); margin-top: 4px; }
+
 /* ---------- Workspace switcher ---------- */
 .ws-dropdown { position: relative; }
 .ws-current {
@@ -922,6 +954,22 @@ async function createWorkspace() {
   </div>
 </div>
 
+<!-- iNat Submission Modal -->
+<div class="modal-overlay" id="inatModal">
+  <div class="modal inat-modal">
+    <h3 id="inatModalTitle">Submit to iNaturalist</h3>
+    <div id="inatCards" style="max-height:60vh;overflow-y:auto;"></div>
+    <div class="inat-progress" id="inatProgress" style="display:none;">
+      <div class="inat-progress-bar"><div class="inat-progress-fill" id="inatProgressFill"></div></div>
+      <div class="inat-progress-text" id="inatProgressText"></div>
+    </div>
+    <div class="modal-actions" id="inatActions">
+      <button class="modal-btn modal-btn-primary" id="inatSubmitBtn" onclick="inatDoSubmit()">Submit</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeInatModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lightboxCurrentId = null;
@@ -1052,20 +1100,170 @@ function closeLightbox(e) {
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   document.body.style.overflow = '';
 }
+/* ---------- iNat Submission ---------- */
+var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
+
 async function submitToInat(photoId) {
   try {
     var data = await safeFetch('/api/inat/prepare/' + photoId, {}, { toast: false });
     if (data.error) { alert(data.error); return; }
 
-    // Always open iNaturalist in the browser — the user hits the final submit button
-    window.open(data.upload_url, '_blank');
+    if (data.mode === 'quick') {
+      // Fallback: open iNat in browser
+      window.open(data.upload_url, '_blank');
+      return;
+    }
+
+    // Direct mode: open modal
+    inatQueue = [{
+      photo_id: photoId,
+      taxon_name: data.scientific_name || data.species,
+      observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
+      latitude: data.latitude != null ? data.latitude : '',
+      longitude: data.longitude != null ? data.longitude : '',
+      description: '',
+      geoprivacy: 'open',
+      filename: data.filename,
+      already_submitted: data.already_submitted,
+      existing_url: data.existing_observation_url,
+    }];
+    openInatModal();
   } catch(e) {
     alert('Error: ' + e.message);
   }
 }
 
+async function submitToInatBatch(photoIds) {
+  // Prepare all photos
+  inatQueue = [];
+  for (var i = 0; i < photoIds.length; i++) {
+    try {
+      var data = await safeFetch('/api/inat/prepare/' + photoIds[i], {}, { toast: false });
+      if (data.error) continue;
+      inatQueue.push({
+        photo_id: photoIds[i],
+        taxon_name: data.scientific_name || data.species,
+        observed_on: data.timestamp ? data.timestamp.substring(0, 10) : '',
+        latitude: data.latitude != null ? data.latitude : '',
+        longitude: data.longitude != null ? data.longitude : '',
+        description: '',
+        geoprivacy: 'open',
+        filename: data.filename,
+        already_submitted: data.already_submitted,
+        existing_url: data.existing_observation_url,
+      });
+    } catch(e) {}
+  }
+  if (inatQueue.length === 0) { alert('No photos to submit.'); return; }
+  openInatModal();
+}
+
+function openInatModal() {
+  var title = inatQueue.length === 1 ? 'Submit to iNaturalist' : 'Submit ' + inatQueue.length + ' observations to iNaturalist';
+  document.getElementById('inatModalTitle').textContent = title;
+  document.getElementById('inatProgress').style.display = 'none';
+  document.getElementById('inatSubmitBtn').disabled = false;
+  document.getElementById('inatSubmitBtn').textContent = inatQueue.length === 1 ? 'Submit' : 'Submit All';
+
+  var html = '';
+  inatQueue.forEach(function(item, idx) {
+    var warn = '';
+    if (item.already_submitted) {
+      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" style="color:#f0c040;">' + escapeHtml(item.existing_url) + '</a></div>';
+    }
+    html += '<div class="inat-card" id="inatCard' + idx + '">' +
+      '<div class="inat-card-header">' +
+        '<img class="inat-card-thumb" src="/thumbnails/' + item.photo_id + '.jpg" alt="">' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:13px;color:var(--text-primary,#E0F0F0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
+          warn +
+        '</div>' +
+      '</div>' +
+      '<div class="inat-card-fields">' +
+        '<div><label>Species / Taxon</label><input id="inatTaxon' + idx + '" value="' + escapeAttr(item.taxon_name) + '"></div>' +
+        '<div><label>Date observed</label><input id="inatDate' + idx + '" type="date" value="' + escapeAttr(item.observed_on) + '"></div>' +
+        '<div><label>Latitude</label><input id="inatLat' + idx + '" value="' + escapeAttr(String(item.latitude)) + '"></div>' +
+        '<div><label>Longitude</label><input id="inatLng' + idx + '" value="' + escapeAttr(String(item.longitude)) + '"></div>' +
+        '<div><label>Geoprivacy</label><select id="inatGeo' + idx + '"><option value="open">Open</option><option value="obscured">Obscured</option><option value="private">Private</option></select></div>' +
+        '<div></div>' +
+        '<textarea id="inatDesc' + idx + '" placeholder="Notes (optional)"></textarea>' +
+      '</div>' +
+      '<div class="inat-card-status" id="inatStatus' + idx + '"></div>' +
+    '</div>';
+  });
+  document.getElementById('inatCards').innerHTML = html;
+  document.getElementById('inatModal').classList.add('open');
+}
+
+function closeInatModal() {
+  document.getElementById('inatModal').classList.remove('open');
+  inatQueue = [];
+}
+
+async function inatDoSubmit() {
+  var btn = document.getElementById('inatSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  var progress = document.getElementById('inatProgress');
+  var fill = document.getElementById('inatProgressFill');
+  var text = document.getElementById('inatProgressText');
+  progress.style.display = 'block';
+
+  var total = inatQueue.length;
+  var done = 0;
+  var succeeded = 0;
+
+  for (var i = 0; i < total; i++) {
+    var item = inatQueue[i];
+    var statusEl = document.getElementById('inatStatus' + i);
+
+    // Read possibly-edited fields from the form
+    var submission = {
+      photo_id: item.photo_id,
+      taxon_name: document.getElementById('inatTaxon' + i).value.trim(),
+      observed_on: document.getElementById('inatDate' + i).value,
+      latitude: parseFloat(document.getElementById('inatLat' + i).value) || null,
+      longitude: parseFloat(document.getElementById('inatLng' + i).value) || null,
+      description: document.getElementById('inatDesc' + i).value.trim(),
+      geoprivacy: document.getElementById('inatGeo' + i).value,
+    };
+
+    statusEl.className = 'inat-card-status';
+    statusEl.textContent = 'Submitting...';
+
+    try {
+      var result = await safeFetch('/api/inat/submit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(submission),
+      }, { toast: false });
+
+      if (result.error) {
+        statusEl.className = 'inat-card-status error';
+        statusEl.textContent = '✗ ' + result.error;
+      } else {
+        statusEl.className = 'inat-card-status success';
+        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" style="color:#24E5CA;">View on iNaturalist</a>';
+        succeeded++;
+      }
+    } catch(e) {
+      statusEl.className = 'inat-card-status error';
+      statusEl.textContent = '✗ ' + e.message;
+    }
+
+    done++;
+    fill.style.width = Math.round((done / total) * 100) + '%';
+    text.textContent = done + ' / ' + total + ' processed (' + succeeded + ' succeeded)';
+  }
+
+  btn.textContent = 'Done';
+  // Change cancel to Close
+  document.querySelector('#inatActions .modal-btn-cancel').textContent = 'Close';
+}
+
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); }
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }

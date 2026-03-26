@@ -396,6 +396,12 @@ body {
 .modal-btn-primary { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
 .modal-btn-cancel { background: var(--bg-tertiary, #14374E); color: var(--text-secondary, #B0CCCC); }
 .modal-preview { font-size: 12px; color: var(--text-dim, #888); margin-top: 8px; }
+.inat-badge {
+  position: absolute; top: 4px; right: 4px;
+  background: rgba(116,172,0,0.85); color: #fff;
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  pointer-events: none; z-index: 2;
+}
 </style>
 </head>
 <body>
@@ -486,6 +492,7 @@ body {
       <button onclick="batchAddKeyword()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:#14374E;color:#7ec8e3;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
+      <button onclick="batchSubmitInat()" style="background:#14374E;color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="clearSelection()" style="background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
@@ -583,6 +590,7 @@ var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
 var showDetectionBoxes = false;
+var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
@@ -897,6 +905,8 @@ async function loadPhotos() {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
+      var newIds = data.photos.map(function(p) { return p.id; });
+      loadInatStatus(newIds);
       currentPage++;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
@@ -1025,6 +1035,23 @@ function updateScrollPosition() {
   el.textContent = first + '–' + last + ' of ' + totalPhotos.toLocaleString();
 }
 
+/* ---------- iNaturalist ---------- */
+async function loadInatStatus(photoIds) {
+  if (photoIds.length === 0) return;
+  try {
+    var data = await safeFetch('/api/inat/submissions?photo_ids=' + photoIds.join(','), {}, { toast: false });
+    if (!data.error) {
+      for (var k in data) inatSubmitted[k] = true;
+    }
+  } catch(e) {}
+}
+
+function batchSubmitInat() {
+  var ids = Array.from(selectedPhotos);
+  if (ids.length === 0) return;
+  submitToInatBatch(ids);
+}
+
 /* ---------- Grid Rendering ---------- */
 function renderGrid() {
   var grid = document.getElementById('grid');
@@ -1073,12 +1100,14 @@ function renderGrid() {
     if (p._similarity !== undefined) {
       clipBadge = '<span class="clip-score-badge">' + Math.round(p._similarity * 100) + '%</span>';
     }
+    var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
 
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
         clipBadge +
         boxHtml +
+        inatBadge +
       '</div>' +
       '<div class="grid-card-info">' +
         '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +

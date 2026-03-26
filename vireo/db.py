@@ -137,6 +137,15 @@ class Database:
                 UNIQUE(photo_id, model, workspace_id)
             );
 
+            CREATE TABLE IF NOT EXISTS inat_submissions (
+                id              INTEGER PRIMARY KEY,
+                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                observation_id  INTEGER NOT NULL,
+                observation_url TEXT NOT NULL,
+                submitted_at    TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(photo_id, observation_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -1597,3 +1606,26 @@ class Database:
         for name, rules in defaults:
             if name not in existing_names:
                 self.add_collection(name, json.dumps(rules))
+
+    # ------ iNaturalist submissions ------
+
+    def record_inat_submission(self, photo_id, observation_id, observation_url):
+        """Record a successful iNaturalist submission."""
+        self.conn.execute(
+            """INSERT OR IGNORE INTO inat_submissions
+               (photo_id, observation_id, observation_url)
+               VALUES (?, ?, ?)""",
+            (photo_id, observation_id, observation_url),
+        )
+        self.conn.commit()
+
+    def get_inat_submissions(self, photo_ids):
+        """Return {photo_id: {observation_id, observation_url, submitted_at}} for given IDs."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" * len(photo_ids))
+        rows = self.conn.execute(
+            f"SELECT photo_id, observation_id, observation_url, submitted_at FROM inat_submissions WHERE photo_id IN ({placeholders}) ORDER BY submitted_at DESC",
+            photo_ids,
+        ).fetchall()
+        return {r["photo_id"]: dict(r) for r in rows}

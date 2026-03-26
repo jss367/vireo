@@ -14,7 +14,6 @@ DEFAULTS = {
     "similarity_threshold": 0.85,
     "preview_max_size": 1920,
     "keyword_case": "auto",
-    "inat_mode": "quick",
     "inat_token": "",
     "hf_token": "",
     "scan_roots": [],
