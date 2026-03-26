@@ -371,6 +371,20 @@ def test_serialize_results_includes_species_votes(tmp_path):
             assert "avg_confidence" in vote
 
 
+def test_load_photo_features_includes_model_in_species(tmp_path):
+    """species_top5 entries include the model name."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+
+    # _setup_db_with_photos adds predictions — check model is present
+    for p in photos:
+        for entry in p.get("species_top5", []):
+            assert len(entry) == 3, f"Expected (species, confidence, model), got {entry}"
+            assert isinstance(entry[2], str), f"Model should be a string, got {type(entry[2])}"
+
+
 def test_load_photo_features_collection_scoped(tmp_path):
     """load_photo_features with collection_id returns only collection photos."""
     from db import Database

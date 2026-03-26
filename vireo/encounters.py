@@ -105,8 +105,8 @@ def sim_species(species_a, species_b):
     """
     if not species_a or not species_b:
         return 0.0
-    dict_a = dict(species_a)
-    dict_b = dict(species_b)
+    dict_a = {s[0]: s[1] for s in species_a}
+    dict_b = {s[0]: s[1] for s in species_b}
     shared = set(dict_a.keys()) & set(dict_b.keys())
     if not shared:
         return 0.0
@@ -304,8 +304,8 @@ def _segment_mean_species(segment):
     """
     species_scores = defaultdict(list)
     for p in segment:
-        for name, conf in (p.get("species_top5") or []):
-            species_scores[name].append(conf)
+        for entry in (p.get("species_top5") or []):
+            species_scores[entry[0]].append(entry[1])
     if not species_scores:
         return []
     return sorted(
@@ -414,8 +414,8 @@ def encounter_species_label(photos):
     """
     species_weights = defaultdict(float)
     for p in photos:
-        for name, conf in (p.get("species_top5") or []):
-            species_weights[name] += conf
+        for entry in (p.get("species_top5") or []):
+            species_weights[entry[0]] += entry[1]
 
     if not species_weights:
         return (None, 0.0)

@@ -95,7 +95,7 @@ def load_photo_features(db, collection_id=None):
 
     # Load species predictions (top-5 per photo, ordered by confidence)
     pred_rows = db.conn.execute(
-        """SELECT pr.photo_id, pr.species, pr.confidence
+        """SELECT pr.photo_id, pr.species, pr.confidence, pr.model
            FROM predictions pr
            JOIN photos p ON p.id = pr.photo_id
            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -109,7 +109,7 @@ def load_photo_features(db, collection_id=None):
     for pr in pred_rows:
         pid = pr["photo_id"]
         if len(species_by_photo[pid]) < 5:
-            species_by_photo[pid].append((pr["species"], pr["confidence"]))
+            species_by_photo[pid].append((pr["species"], pr["confidence"], pr["model"]))
 
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
@@ -349,23 +349,40 @@ def serialize_results(results):
                 enc_confirmed = p["confirmed_species"]
                 break
 
-        # Build species vote summary from predictions across all photos
-        vote_counts = defaultdict(int)
-        vote_conf_sums = defaultdict(float)
+        # Build species vote summary with per-model breakdown
+        model_species_data = defaultdict(lambda: defaultdict(lambda: {"confs": [], "count": 0}))
         for p in photos_list:
             top5 = p.get("species_top5") or []
-            if top5:
-                top_species = top5[0][0]
-                top_conf = top5[0][1]
-                vote_counts[top_species] += 1
-                vote_conf_sums[top_species] += top_conf
+            for entry in top5:
+                sp_name = entry[0]
+                sp_conf = entry[1]
+                sp_model = entry[2] if len(entry) > 2 else "unknown"
+                model_species_data[sp_name][sp_model]["confs"].append(sp_conf)
+                model_species_data[sp_name][sp_model]["count"] += 1
+
         species_votes = []
-        for sp in sorted(vote_counts, key=lambda s: vote_counts[s], reverse=True):
-            avg_conf = vote_conf_sums[sp] / vote_counts[sp] if vote_counts[sp] else 0
+        for sp_name in sorted(model_species_data, key=lambda s: sum(
+            d["count"] for d in model_species_data[s].values()
+        ), reverse=True):
+            models = []
+            total_count = 0
+            total_conf_sum = 0.0
+            total_conf_count = 0
+            for model_name, data in sorted(model_species_data[sp_name].items()):
+                avg_conf = sum(data["confs"]) / len(data["confs"])
+                models.append({
+                    "model": model_name,
+                    "confidence": round(avg_conf, 4),
+                    "photo_count": data["count"],
+                })
+                total_count += data["count"]
+                total_conf_sum += sum(data["confs"])
+                total_conf_count += len(data["confs"])
             species_votes.append({
-                "species": sp,
-                "count": vote_counts[sp],
-                "avg_confidence": round(avg_conf, 4),
+                "species": sp_name,
+                "count": total_count,
+                "avg_confidence": round(total_conf_sum / total_conf_count, 4) if total_conf_count else 0,
+                "models": models,
             })
 
         s_enc = {
