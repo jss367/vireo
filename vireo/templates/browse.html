@@ -949,6 +949,10 @@ async function runClipSearch() {
 
   photos = [];
   allLoaded = true;
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
+  closeDetail();
   document.getElementById('grid').innerHTML = '';
   document.getElementById('loadingState').style.display = 'block';
   document.getElementById('loadingState').textContent = 'Searching...';
@@ -975,6 +979,7 @@ async function runClipSearch() {
     summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
+    return;
   }
 
   document.getElementById('loadingState').style.display = 'none';
@@ -988,6 +993,7 @@ function clearClipSearch() {
 }
 
 function updateScrollPosition() {
+  if (clipSearchActive) return;
   var el = document.getElementById('filterSummary');
   if (photos.length === 0) {
     el.textContent = totalPhotos + ' photos';
