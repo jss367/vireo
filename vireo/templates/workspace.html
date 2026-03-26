@@ -37,6 +37,7 @@
                list="scanRootHints"
                onkeydown="if(event.key==='Enter')scanAndAddFolder()">
         <datalist id="scanRootHints"></datalist>
+        <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
         <button id="addFolderBtn" onclick="scanAndAddFolder()" style="background:var(--accent,#24E5CA);color:#0A1F2E;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;white-space:nowrap;">Scan &amp; Add</button>
       </div>
       <div id="addFolderStatus" style="font-size:12px;margin-top:6px;display:none;"></div>
@@ -443,6 +444,22 @@ async function deleteWorkspaceConfirm(wsId, name) {
     await safeFetch('/api/workspaces/' + wsId, { method: 'DELETE' });
     loadWorkspaces();
   } catch(e) {}
+}
+
+/* ---------- Native folder picker ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForFolder() {
+  var path = await pickDirectory('Select photo folder');
+  if (path) {
+    document.getElementById('addFolderPath').value = path;
+  }
 }
 </script>
 </body>
