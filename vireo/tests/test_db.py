@@ -927,3 +927,94 @@ def test_get_embeddings_by_model(tmp_path):
     results = db.get_embeddings_by_model("BioCLIP")
     assert len(results) == 1
     assert results[0][0] == p1
+
+
+# -- Edit history --
+
+
+def _make_db_with_photos(tmp_path, n=3):
+    """Helper: create a Database with n photos and return (db, photo_ids)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pids = []
+    for i in range(n):
+        pid = db.add_photo(folder_id=fid, filename=f'IMG_{i:04d}.jpg',
+                           extension='.jpg', file_size=1000,
+                           file_mtime=1700000000.0 + i)
+        pids.append(pid)
+    return db, pids
+
+
+def test_record_edit_single(tmp_path):
+    """record_edit stores a single-photo edit with before/after values."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    db.record_edit(
+        action_type='rating',
+        description='Set rating to 5',
+        new_value='5',
+        items=[{'photo_id': pid, 'old_value': '0', 'new_value': '5'}],
+    )
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]['action_type'] == 'rating'
+    assert history[0]['description'] == 'Set rating to 5'
+    assert history[0]['is_batch'] == 0
+    assert history[0]['item_count'] == 1
+
+
+def test_record_edit_batch(tmp_path):
+    """record_edit stores a batch edit with multiple items."""
+    db, pids = _make_db_with_photos(tmp_path)
+
+    items = [
+        {'photo_id': pids[0], 'old_value': '3', 'new_value': '5'},
+        {'photo_id': pids[1], 'old_value': '0', 'new_value': '5'},
+    ]
+    db.record_edit(
+        action_type='rating',
+        description='Set rating to 5 on 2 photos',
+        new_value='5',
+        items=items,
+        is_batch=True,
+    )
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]['is_batch'] == 1
+    assert history[0]['item_count'] == 2
+
+
+def test_get_edit_history_order(tmp_path):
+    """get_edit_history returns most recent first."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    db.record_edit('rating', 'First edit', '1',
+                   [{'photo_id': pid, 'old_value': '0', 'new_value': '1'}])
+    db.record_edit('rating', 'Second edit', '2',
+                   [{'photo_id': pid, 'old_value': '1', 'new_value': '2'}])
+
+    history = db.get_edit_history()
+    assert history[0]['description'] == 'Second edit'
+    assert history[1]['description'] == 'First edit'
+
+
+def test_get_edit_history_pagination(tmp_path):
+    """get_edit_history supports limit and offset."""
+    db, pids = _make_db_with_photos(tmp_path)
+    pid = pids[0]
+
+    for i in range(5):
+        db.record_edit('rating', f'Edit {i}', str(i),
+                       [{'photo_id': pid, 'old_value': str(i), 'new_value': str(i+1)}])
+
+    page1 = db.get_edit_history(limit=2, offset=0)
+    page2 = db.get_edit_history(limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert page1[0]['description'] == 'Edit 4'
+    assert page2[0]['description'] == 'Edit 2'

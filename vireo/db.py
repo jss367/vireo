@@ -1494,6 +1494,51 @@ class Database:
         )
         self.conn.commit()
 
+    # -- Edit History --
+
+    def record_edit(self, action_type, description, new_value, items, is_batch=False):
+        """Record an edit action with per-photo before/after values."""
+        cur = self.conn.execute(
+            "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
+            (self._ws_id(), action_type, description, new_value, 1 if is_batch else 0),
+        )
+        edit_id = cur.lastrowid
+        for item in items:
+            self.conn.execute(
+                "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
+                (edit_id, item['photo_id'], item['old_value'], item['new_value']),
+            )
+        self.conn.commit()
+        self._prune_edit_history()
+        return edit_id
+
+    def get_edit_history(self, limit=50, offset=0):
+        """Return recent edit history entries (most recent first) with item counts."""
+        rows = self.conn.execute(
+            """SELECT eh.*, COUNT(ehi.id) as item_count
+               FROM edit_history eh
+               LEFT JOIN edit_history_items ehi ON ehi.edit_id = eh.id
+               WHERE eh.workspace_id = ?
+               GROUP BY eh.id
+               ORDER BY eh.created_at DESC, eh.id DESC
+               LIMIT ? OFFSET ?""",
+            (self._ws_id(), limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def _prune_edit_history(self):
+        """Delete oldest entries beyond the configured max."""
+        import config as cfg
+        max_entries = cfg.get('max_edit_history') or 1000
+        self.conn.execute(
+            """DELETE FROM edit_history WHERE workspace_id = ? AND id NOT IN (
+                 SELECT id FROM edit_history WHERE workspace_id = ?
+                 ORDER BY created_at DESC, id DESC LIMIT ?
+               )""",
+            (self._ws_id(), self._ws_id(), max_entries),
+        )
+        self.conn.commit()
+
     # -- Collections --
 
     def add_collection(self, name, rules_json):
