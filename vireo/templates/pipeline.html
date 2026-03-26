@@ -167,7 +167,6 @@ body { padding-bottom: 36px; }
 </style>
 </head>
 <body>
-{% set active_page = 'pipeline' %}
 {% include '_navbar.html' %}
 
 <div class="content">
@@ -185,10 +184,10 @@ body { padding-bottom: 36px; }
   <!-- Card 1: Classify -->
   <div class="stage-card expanded" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num {{ 'complete' if has_detections else '' }}" id="numClassify">1</span>
+      <span class="stage-num" id="numClassify">1</span>
       <span class="stage-name">Classify</span>
       <span class="stage-summary" id="summaryClassify">
-        {% if has_detections %}{{ has_detections }} detections{% endif %}
+        <span id="txtDetections"></span>
       </span>
       <span class="stage-chevron">&#9656;</span>
     </div>
@@ -221,10 +220,10 @@ body { padding-bottom: 36px; }
   <!-- Card 2: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num {{ 'complete' if has_masks else '' }}" id="numExtract">2</span>
+      <span class="stage-num" id="numExtract">2</span>
       <span class="stage-name">Extract Features</span>
       <span class="stage-summary" id="summaryExtract">
-        {% if has_masks %}{{ has_masks }} masks{% if has_sharpness %}, {{ has_sharpness }} sharpness{% endif %}{% endif %}
+        <span id="txtMasks"></span>
       </span>
       <span class="stage-chevron">&#9656;</span>
     </div>
@@ -233,27 +232,27 @@ body { padding-bottom: 36px; }
         <div class="setting-item">
           <div class="setting-label">SAM2</div>
           <select class="setting-select" id="cfgSam2" onchange="onModelConfigChange()">
-            <option value="sam2-tiny" {{ 'selected' if pipeline_config.sam2_variant == 'sam2-tiny' }}>Tiny</option>
-            <option value="sam2-small" {{ 'selected' if pipeline_config.sam2_variant == 'sam2-small' }}>Small</option>
-            <option value="sam2-base-plus" {{ 'selected' if pipeline_config.sam2_variant == 'sam2-base-plus' }}>Base+</option>
-            <option value="sam2-large" {{ 'selected' if pipeline_config.sam2_variant == 'sam2-large' }}>Large</option>
+            <option value="sam2-tiny">Tiny</option>
+            <option value="sam2-small">Small</option>
+            <option value="sam2-base-plus">Base+</option>
+            <option value="sam2-large">Large</option>
           </select>
         </div>
         <div class="setting-item">
           <div class="setting-label">DINOv2</div>
           <select class="setting-select" id="cfgDinov2" onchange="onModelConfigChange()">
-            <option value="vit-s14" {{ 'selected' if pipeline_config.dinov2_variant == 'vit-s14' }}>ViT-S/14 (384d)</option>
-            <option value="vit-b14" {{ 'selected' if pipeline_config.dinov2_variant == 'vit-b14' }}>ViT-B/14 (768d)</option>
-            <option value="vit-l14" {{ 'selected' if pipeline_config.dinov2_variant == 'vit-l14' }}>ViT-L/14 (1024d)</option>
+            <option value="vit-s14">ViT-S/14 (384d)</option>
+            <option value="vit-b14">ViT-B/14 (768d)</option>
+            <option value="vit-l14">ViT-L/14 (1024d)</option>
           </select>
         </div>
         <div class="setting-item">
           <div class="setting-label">Proxy res.</div>
           <div style="display:flex;align-items:center;gap:8px;">
-            <input type="range" min="1024" max="2048" value="{{ pipeline_config.proxy_longest_edge }}" step="64"
+            <input type="range" min="1024" max="2048" value="1536" step="64"
                    id="cfgProxy" oninput="onModelConfigChange()"
                    style="width:120px;accent-color:var(--accent,#24E5CA);">
-            <span style="font-size:13px;" id="valProxy">{{ pipeline_config.proxy_longest_edge }}</span>
+            <span style="font-size:13px;" id="valProxy">1536</span>
           </div>
         </div>
       </div>
@@ -271,13 +270,10 @@ body { padding-bottom: 36px; }
   <!-- Card 3: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num {{ 'complete' if results else '' }}" id="numGroup">3</span>
+      <span class="stage-num" id="numGroup">3</span>
       <span class="stage-name">Group &amp; Score</span>
       <span class="stage-summary" id="summaryGroup">
-        {% if results %}
-          {{ results.summary.encounter_count }} encounters &mdash;
-          {{ results.summary.keep_count }}K / {{ results.summary.review_count }}R / {{ results.summary.reject_count }}X
-        {% endif %}
+        <span id="txtResults"></span>
       </span>
       <span class="stage-chevron">&#9656;</span>
     </div>
@@ -295,19 +291,74 @@ body { padding-bottom: 36px; }
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillGroup"></div></div>
         <div class="progress-text" id="textGroup"></div>
       </div>
-      {% if results %}
-      <a href="/pipeline/review" class="view-results-btn">View Results</a>
-      {% endif %}
+      <a id="viewResultsLink" href="/pipeline/review" class="view-results-btn" style="display:none;">View Results</a>
     </div>
   </div>
 </div>
 
 <script>
-// -- Init --
-loadCollections();
-loadModels();
-loadLabels();
-updateCardStates();
+// -- Page init: fetch pipeline data from API and populate the page --
+function initPipelinePage() {
+  fetch('/api/pipeline/page-init')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var cfg = data.pipeline_config;
+
+      // Stage 1: Classify
+      if (data.has_detections) {
+        document.getElementById('numClassify').classList.add('complete');
+        document.getElementById('txtDetections').textContent =
+          data.has_detections + ' detections';
+      }
+
+      // Stage 2: Extract
+      if (data.has_masks) {
+        document.getElementById('numExtract').classList.add('complete');
+        var txt = data.has_masks + ' masks';
+        if (data.has_sharpness) txt += ', ' + data.has_sharpness + ' sharpness';
+        document.getElementById('txtMasks').textContent = txt;
+      }
+
+      // Stage 3: Group
+      if (data.results) {
+        document.getElementById('numGroup').classList.add('complete');
+        var s = data.results.summary;
+        document.getElementById('txtResults').textContent =
+          s.encounter_count + ' encounters \u2014 ' +
+          s.keep_count + 'K / ' + s.review_count + 'R / ' + s.reject_count + 'X';
+        document.getElementById('viewResultsLink').style.display = '';
+      }
+
+      // Config selects and range
+      document.getElementById('cfgSam2').value = cfg.sam2_variant;
+      document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
+      document.getElementById('cfgProxy').value = cfg.proxy_longest_edge;
+      document.getElementById('valProxy').textContent = cfg.proxy_longest_edge;
+
+      // Update saved config defaults from server
+      _savedModelConfig.sam2_variant = cfg.sam2_variant;
+      _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
+      _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
+
+      // Update pipeline state
+      _pipelineState.hasDetections = !!data.has_detections;
+      _pipelineState.hasMasks = !!data.has_masks;
+      _pipelineState.hasResults = !!data.results;
+
+      updateCardStates();
+      if (typeof updateReadiness === 'function') updateReadiness();
+    })
+    .catch(function(e) {
+      console.error('Failed to load pipeline page data:', e);
+    });
+
+  // Load collections, models, labels in parallel
+  loadCollections();
+  loadModels();
+  loadLabels();
+}
+
+document.addEventListener('DOMContentLoaded', initPipelinePage);
 
 // -- Collection picker --
 async function loadCollections() {
@@ -571,9 +622,9 @@ async function runClassify(reclassify) {
 // -- Card 2: Extract Features --
 
 var _savedModelConfig = {
-  sam2_variant: '{{ pipeline_config.sam2_variant }}',
-  dinov2_variant: '{{ pipeline_config.dinov2_variant }}',
-  proxy_longest_edge: {{ pipeline_config.proxy_longest_edge }},
+  sam2_variant: 'sam2-small',
+  dinov2_variant: 'vit-b14',
+  proxy_longest_edge: 1536,
 };
 
 function onModelConfigChange() {
@@ -746,15 +797,8 @@ async function runGroup() {
             document.getElementById('summaryGroup').textContent = summary.join(' — ');
           }
           // Show view results link
-          var existingLink = document.querySelector('#card-group .view-results-btn');
-          if (!existingLink) {
-            var body = document.querySelector('#card-group .stage-body');
-            var a = document.createElement('a');
-            a.href = '/pipeline/review';
-            a.className = 'view-results-btn';
-            a.textContent = 'View Results';
-            body.appendChild(a);
-          }
+          var resultsLink = document.getElementById('viewResultsLink');
+          if (resultsLink) resultsLink.style.display = '';
           _pipelineState.hasResults = true;
         } else {
           status.textContent = 'Failed';
@@ -785,9 +829,9 @@ function toggleCard(name) {
 
 // Mutable pipeline state — updated after each job completes
 var _pipelineState = {
-  hasDetections: {{ has_detections|tojson }},
-  hasMasks: {{ has_masks|tojson }},
-  hasResults: {{ 'true' if results else 'false' }},
+  hasDetections: false,
+  hasMasks: false,
+  hasResults: false,
 };
 
 function updateCardStates() {

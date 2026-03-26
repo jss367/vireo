@@ -14,7 +14,6 @@
 </head>
 <body>
 
-{% set active_page = 'workspace' %}
 {% include '_navbar.html' %}
 
 <div class="content">
@@ -22,7 +21,7 @@
   <!-- Active Workspace -->
   <div class="section">
     <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
-      <span id="wsPageName">{{ active_workspace.name if active_workspace else 'Default' }}</span>
+      <span id="wsPageName">Default</span>
     </div>
   </div>
 
@@ -116,6 +115,14 @@ loadWsFolders();
 loadWorkspaceConfig();
 loadHistory();
 loadWorkspaces();
+
+/* Set workspace name in page heading */
+safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
+  if (ws && ws.name) {
+    var el = document.getElementById('wsPageName');
+    if (el) el.textContent = ws.name;
+  }
+}).catch(function() {});
 
 /* ---------- Folders ---------- */
 async function loadWsFolders() {

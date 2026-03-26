@@ -721,7 +721,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
   <div class="ws-dropdown" id="wsDropdown">
     <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn">
-      {{ active_workspace.name if active_workspace else 'Default' }}
+      <span id="wsCurrentName">Default</span>
       <span class="ws-arrow">&#9662;</span>
     </button>
     <div class="ws-menu" id="wsMenu">
@@ -731,19 +731,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/browse" {% if active_page == 'browse' %}class="active"{% endif %}>Browse</a>
-  <a href="/pipeline/review" {% if active_page == 'pipeline_review' %}class="active"{% endif %}>Pipeline Review</a>
-  <a href="/review" {% if active_page == 'review' %}class="active"{% endif %}>Review</a>
-  <a href="/import" {% if active_page == 'import' %}class="active"{% endif %}>Import</a>
-  <a href="/cull" {% if active_page == 'cull' %}class="active"{% endif %}>Cull</a>
-  <a href="/pipeline" {% if active_page == 'pipeline' %}class="active"{% endif %}>Pipeline</a>
-  <a href="/audit" {% if active_page == 'audit' %}class="active"{% endif %}>Audit</a>
-  <a href="/compare" {% if active_page == 'compare' %}class="active"{% endif %}>Compare</a>
-  <a href="/variants" {% if active_page == 'variants' %}class="active"{% endif %}>Variants</a>
-  <a href="/map" {% if active_page == 'map' %}class="active"{% endif %}>Map</a>
-  <a href="/dashboard" {% if active_page == 'dashboard' %}class="active"{% endif %}>Dashboard</a>
-  <a href="/workspace" {% if active_page == 'workspace' %}class="active"{% endif %}>Workspace</a>
-  <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
+  <a href="/browse">Browse</a>
+  <a href="/pipeline/review">Pipeline Review</a>
+  <a href="/review">Review</a>
+  <a href="/import">Import</a>
+  <a href="/cull">Cull</a>
+  <a href="/pipeline">Pipeline</a>
+  <a href="/audit">Audit</a>
+  <a href="/compare">Compare</a>
+  <a href="/variants">Variants</a>
+  <a href="/map">Map</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/workspace">Workspace</a>
+  <a href="/settings">Settings</a>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
@@ -776,6 +776,48 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 </div>
 
 <script>
+/* ---------- Active page highlighting ---------- */
+(function() {
+  var path = location.pathname;
+  // Skip the brand anchor (.brand) — only highlight actual nav items
+  var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
+  var exactMatch = null;
+  for (var i = 0; i < navLinks.length; i++) {
+    if (path === navLinks[i].getAttribute('href')) {
+      exactMatch = navLinks[i];
+      break;
+    }
+  }
+  if (exactMatch) {
+    exactMatch.classList.add('active');
+  } else {
+    // Fallback: longest prefix match
+    var best = null;
+    var bestLen = 0;
+    for (var i = 0; i < navLinks.length; i++) {
+      var href = navLinks[i].getAttribute('href');
+      if (href !== '/' && path.startsWith(href) && href.length > bestLen) {
+        best = navLinks[i];
+        bestLen = href.length;
+      }
+    }
+    if (best) best.classList.add('active');
+  }
+})();
+
+/* ---------- Load active workspace name ---------- */
+(function() {
+  fetch('/api/workspaces/active')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(ws) {
+      if (ws && ws.name) {
+        var el = document.getElementById('wsCurrentName');
+        if (el) el.textContent = ws.name;
+      }
+    })
+    .catch(function() {});
+})();
+
 /* ---------- Workspace switcher ---------- */
 var _wsDropdownOpen = false;
 

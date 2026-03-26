@@ -423,14 +423,12 @@ input[type="range"]::-moz-range-thumb {
 </style>
 </head>
 <body>
-{% set active_page = 'pipeline_review' %}
 {% include '_navbar.html' %}
 
 <div class="pipeline-layout">
   <!-- Sidebar -->
   <div class="pipeline-sidebar">
-    {% if results %}
-    <div class="sidebar-section">
+    <div class="sidebar-section" id="sidebarScoring" style="display:none">
       <div class="sidebar-title">Scoring Thresholds</div>
       <div class="reflow-indicator" id="reflowIndicator">Recomputing...</div>
 
@@ -485,7 +483,7 @@ input[type="range"]::-moz-range-thumb {
       <button class="reset-btn" onclick="resetScoringDefaults()">Reset to defaults</button>
     </div>
 
-    <div class="sidebar-section">
+    <div class="sidebar-section" id="sidebarGrouping" style="display:none">
       <div class="sidebar-title">Grouping Thresholds</div>
 
       <div class="slider-section-header">Encounters</div>
@@ -523,7 +521,6 @@ input[type="range"]::-moz-range-thumb {
 
       <button class="reset-btn" onclick="resetGroupingDefaults()">Reset to defaults</button>
     </div>
-    {% endif %}
 
     <div class="sidebar-section">
       <a href="/pipeline" class="back-link">&larr; Back to Pipeline</a>
@@ -532,43 +529,40 @@ input[type="range"]::-moz-range-thumb {
 
   <!-- Main area -->
   <div class="pipeline-main" id="mainArea">
-    {% if results %}
-    <!-- Summary bar -->
-    <div class="summary-bar">
+    <!-- Summary bar (hidden until data loads) -->
+    <div class="summary-bar" id="summaryBar" style="display:none">
       <div class="summary-stat">
-        <div class="num">{{ results.summary.total_photos }}</div>
+        <div class="num" id="statTotalPhotos">0</div>
         <div class="label">Photos</div>
       </div>
       <div class="summary-stat">
-        <div class="num">{{ results.summary.encounter_count }}</div>
+        <div class="num" id="statEncounterCount">0</div>
         <div class="label">Encounters</div>
       </div>
       <div class="summary-stat">
-        <div class="num">{{ results.summary.burst_count }}</div>
+        <div class="num" id="statBurstCount">0</div>
         <div class="label">Bursts</div>
       </div>
       <div class="summary-stat">
-        <div class="num" style="color:var(--accent,#24E5CA);">{{ results.summary.keep_count }}</div>
+        <div class="num" style="color:var(--accent,#24E5CA);" id="statKeepCount">0</div>
         <div class="label">Keep</div>
       </div>
       <div class="summary-stat">
-        <div class="num" style="color:var(--warning,#F0C040);">{{ results.summary.review_count }}</div>
+        <div class="num" style="color:var(--warning,#F0C040);" id="statReviewCount">0</div>
         <div class="label">Review</div>
       </div>
       <div class="summary-stat">
-        <div class="num" style="color:var(--danger,#E74C3C);">{{ results.summary.reject_count }}</div>
+        <div class="num" style="color:var(--danger,#E74C3C);" id="statRejectCount">0</div>
         <div class="label">Reject</div>
       </div>
-      {% if results.summary.rarity_protected %}
-      <div class="summary-stat">
-        <div class="num" style="color:var(--warning,#F0C040);">{{ results.summary.rarity_protected }}</div>
+      <div class="summary-stat" id="statProtectedWrap" style="display:none">
+        <div class="num" style="color:var(--warning,#F0C040);" id="statProtected">0</div>
         <div class="label">Protected</div>
       </div>
-      {% endif %}
     </div>
 
-    <!-- Filter bar -->
-    <div class="filter-bar" id="filterBar">
+    <!-- Filter bar (hidden until data loads) -->
+    <div class="filter-bar" id="filterBar" style="display:none">
       <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All<span class="count" id="countAll"></span></button>
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
@@ -578,12 +572,10 @@ input[type="range"]::-moz-range-thumb {
     <!-- Encounters rendered by JS -->
     <div id="encountersContainer"></div>
 
-    {% else %}
-    <div class="empty-state" id="emptyState">
+    <div class="empty-state" id="emptyState" style="display:none;">
       <h2>No pipeline results yet</h2>
       <p>Run the pipeline from the <a href="/pipeline" style="color:var(--accent);">Pipeline</a> page first.</p>
     </div>
-    {% endif %}
   </div>
 </div>
 
@@ -593,7 +585,7 @@ input[type="range"]::-moz-range-thumb {
 </div>
 
 <script>
-var pipelineResults = {{ results | tojson if results else 'null' }};
+var pipelineResults = null;
 var activeFilter = 'all';
 
 // -- Rendering --
@@ -820,15 +812,22 @@ function doRegroupLive() {
 }
 
 function updateSummaryBar(summary) {
-  // Update the summary stats in the bar
-  var stats = document.querySelectorAll('.summary-stat');
-  if (stats.length >= 6) {
-    stats[0].querySelector('.num').textContent = summary.total_photos;
-    stats[1].querySelector('.num').textContent = summary.encounter_count;
-    stats[2].querySelector('.num').textContent = summary.burst_count;
-    stats[3].querySelector('.num').textContent = summary.keep_count;
-    stats[4].querySelector('.num').textContent = summary.review_count;
-    stats[5].querySelector('.num').textContent = summary.reject_count;
+  var el;
+  el = document.getElementById('statTotalPhotos'); if (el) el.textContent = summary.total_photos;
+  el = document.getElementById('statEncounterCount'); if (el) el.textContent = summary.encounter_count;
+  el = document.getElementById('statBurstCount'); if (el) el.textContent = summary.burst_count;
+  el = document.getElementById('statKeepCount'); if (el) el.textContent = summary.keep_count;
+  el = document.getElementById('statReviewCount'); if (el) el.textContent = summary.review_count;
+  el = document.getElementById('statRejectCount'); if (el) el.textContent = summary.reject_count;
+  var protWrap = document.getElementById('statProtectedWrap');
+  if (protWrap) {
+    if (summary.rarity_protected) {
+      protWrap.style.display = '';
+      var pe = document.getElementById('statProtected');
+      if (pe) pe.textContent = summary.rarity_protected;
+    } else {
+      protWrap.style.display = 'none';
+    }
   }
 }
 
@@ -992,9 +991,42 @@ function toggleMask() {
 }
 
 // -- Init --
-if (pipelineResults) {
-  renderResults();
+
+function initPipelineReviewPage() {
+  safeFetch('/api/pipeline/page-init', {}, { toast: false })
+  .then(function(data) {
+    if (!data || !data.results) {
+      // No results — show empty state
+      var empty = document.getElementById('emptyState');
+      if (empty) empty.style.display = '';
+      return;
+    }
+    // Hide empty state, show results UI
+    var empty = document.getElementById('emptyState');
+    if (empty) empty.style.display = 'none';
+
+    pipelineResults = data.results;
+
+    // Show sidebar sections
+    var ss = document.getElementById('sidebarScoring');
+    if (ss) ss.style.display = '';
+    var sg = document.getElementById('sidebarGrouping');
+    if (sg) sg.style.display = '';
+
+    // Show summary bar and populate
+    var sb = document.getElementById('summaryBar');
+    if (sb) sb.style.display = '';
+    updateSummaryBar(data.results.summary);
+
+    // Show filter bar
+    var fb = document.getElementById('filterBar');
+    if (fb) fb.style.display = '';
+
+    renderResults();
+  });
 }
+
+initPipelineReviewPage();
 </script>
 </body>
 </html>

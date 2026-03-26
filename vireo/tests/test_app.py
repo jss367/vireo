@@ -336,6 +336,100 @@ def test_pages_no_inline_escapeHtml(app_and_db):
             f"{page} still has inline escapeHtml definition"
 
 
+def test_health_endpoint(app_and_db):
+    """GET /api/health returns 200 with status ok."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+
+
+def test_shutdown_endpoint(app_and_db):
+    """POST /api/shutdown returns 200 and signals shutdown."""
+    from unittest.mock import patch, MagicMock
+
+    app, _ = app_and_db
+    client = app.test_client()
+    # GET should not be allowed
+    resp = client.get("/api/shutdown")
+    assert resp.status_code == 405
+    # POST without X-Vireo-Shutdown header is rejected (CSRF protection)
+    resp = client.post("/api/shutdown")
+    assert resp.status_code == 403
+    # POST with header triggers shutdown (mock Timer so SIGTERM is never sent)
+    mock_timer = MagicMock()
+    with patch("threading.Timer", return_value=mock_timer) as mock_timer_cls:
+        resp = client.post(
+            "/api/shutdown", headers={"X-Vireo-Shutdown": "1"}
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "shutting_down"
+        mock_timer_cls.assert_called_once()
+        mock_timer.start.assert_called_once()
+
+
+def test_pipeline_page_init_api(app_and_db):
+    """GET /api/pipeline/page-init returns pipeline initialization data."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/pipeline/page-init')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'total_photos' in data
+    assert 'has_detections' in data
+    assert 'has_masks' in data
+    assert 'has_sharpness' in data
+    assert 'pipeline_config' in data
+    assert 'results' in data
+    # Verify pipeline_config has expected keys
+    pc = data['pipeline_config']
+    assert 'sam2_variant' in pc
+    assert 'dinov2_variant' in pc
+    assert 'proxy_longest_edge' in pc
+    # total_photos should match our fixture data (3 photos)
+    assert data['total_photos'] == 3
+
+
+def test_templates_jinja_free_except_includes():
+    """All .html templates must be free of Jinja2 syntax except {% include '...' %}."""
+    import os
+    import re
+
+    templates_dir = os.path.join(os.path.dirname(__file__), '..', 'templates')
+    templates_dir = os.path.normpath(templates_dir)
+
+    # Patterns that match Jinja2 block tags and expression tags
+    jinja_block_re = re.compile(r'\{%.*?%\}', re.DOTALL)
+    jinja_expr_re = re.compile(r'\{\{.*?\}\}', re.DOTALL)
+    # Allowed: {% include '...' %} or {% include "..." %}
+    include_re = re.compile(r"\{%\s*include\s+['\"].*?['\"]\s*%\}")
+
+    violations = []
+
+    for fname in sorted(os.listdir(templates_dir)):
+        if not fname.endswith('.html'):
+            continue
+        fpath = os.path.join(templates_dir, fname)
+        with open(fpath, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        for lineno, line in enumerate(lines, start=1):
+            # Check for {{ ... }} expressions — never allowed
+            for m in jinja_expr_re.finditer(line):
+                violations.append(f"{fname}:{lineno}: {m.group().strip()}")
+            # Check for {% ... %} blocks — only includes are allowed
+            for m in jinja_block_re.finditer(line):
+                if not include_re.fullmatch(m.group()):
+                    violations.append(f"{fname}:{lineno}: {m.group().strip()}")
+
+    assert violations == [], (
+        "Jinja2 syntax found in templates (only {% include '...' %} is allowed):\n"
+        + "\n".join(violations)
+    )
+
+
 def test_text_search_requires_query(app_and_db):
     """Text search returns 400 when no query provided."""
     app, _ = app_and_db

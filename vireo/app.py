@@ -158,15 +158,27 @@ def create_app(db_path, thumb_cache_dir=None):
             app._db = Database(db_path)
         return app._db
 
-    @app.context_processor
-    def inject_workspace():
-        """Make active workspace available to all templates."""
-        try:
-            db = _get_db()
-            ws = db.get_workspace(db._active_workspace_id)
-            return {"active_workspace": dict(ws) if ws else None}
-        except Exception:
-            return {"active_workspace": None}
+    @app.route("/api/health")
+    def api_health():
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/shutdown", methods=["POST"])
+    def api_shutdown():
+        # Require a non-simple header to block cross-site POSTs.
+        # Browsers won't send custom headers cross-origin without a CORS
+        # preflight, and we don't serve permissive CORS headers, so a
+        # malicious page cannot trigger this endpoint.
+        if not request.headers.get("X-Vireo-Shutdown"):
+            return json_error("Missing X-Vireo-Shutdown header", 403)
+
+        import signal
+        import threading
+
+        def _shutdown():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.5, _shutdown).start()
+        return jsonify({"status": "shutting_down"})
 
     # Load user config (e.g. HF token) on startup
     import config as cfg
@@ -234,56 +246,11 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/pipeline")
     def pipeline_page():
-        db = _get_db()
-        pipeline_counts = db.get_pipeline_feature_counts()
-        total_photos = db.count_photos()
-
-        from pipeline import load_results
-        import config as cfg
-        cache_dir = os.path.dirname(db_path)
-        results = load_results(cache_dir, db._active_workspace_id)
-        effective_cfg = db.get_effective_config(cfg.load())
-        pipeline_cfg = effective_cfg.get("pipeline", {})
-
-        return render_template(
-            "pipeline.html",
-            total_photos=total_photos,
-            has_detections=pipeline_counts["detections"],
-            has_masks=pipeline_counts["masks"],
-            has_sharpness=pipeline_counts["sharpness"],
-            results=results,
-            pipeline_config={
-                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
-                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
-                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
-            },
-        )
+        return render_template("pipeline.html")
 
     @app.route("/pipeline/review")
     def pipeline_review_page():
-        db = _get_db()
-        pipeline_counts = db.get_pipeline_feature_counts()
-        total_photos = db.count_photos()
-
-        from pipeline import load_results
-        import config as cfg
-        cache_dir = os.path.dirname(db_path)
-        results = load_results(cache_dir, db._active_workspace_id)
-        effective_cfg = db.get_effective_config(cfg.load())
-        pipeline_cfg = effective_cfg.get("pipeline", {})
-
-        return render_template(
-            "pipeline_review.html",
-            total_photos=total_photos,
-            has_detections=pipeline_counts["detections"],
-            has_masks=pipeline_counts["masks"],
-            results=results,
-            pipeline_config={
-                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
-                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
-                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
-            },
-        )
+        return render_template("pipeline_review.html")
 
     @app.route("/variants")
     def variants_page():
@@ -328,6 +295,33 @@ def create_app(db_path, thumb_cache_dir=None):
                 "collections": [dict(c) for c in collections],
             }
         )
+
+    @app.route("/api/pipeline/page-init")
+    def api_pipeline_page_init():
+        """Combined endpoint for pipeline page initial load."""
+        db = _get_db()
+        pipeline_counts = db.get_pipeline_feature_counts()
+        total_photos = db.count_photos()
+
+        from pipeline import load_results
+        import config as cfg
+        cache_dir = os.path.dirname(db_path)
+        results = load_results(cache_dir, db._active_workspace_id)
+        effective_cfg = db.get_effective_config(cfg.load())
+        pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        return jsonify({
+            "total_photos": total_photos,
+            "has_detections": pipeline_counts["detections"],
+            "has_masks": pipeline_counts["masks"],
+            "has_sharpness": pipeline_counts["sharpness"],
+            "pipeline_config": {
+                "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
+                "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
+                "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
+            },
+            "results": results,
+        })
 
     @app.route("/api/folders")
     def api_folders():
@@ -4404,13 +4398,28 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
+    # Resolve port: --port 0 means pick a random free port
+    port = args.port
+    if port == 0:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    # Write the port file when random port was requested (for Tauri to discover)
+    if args.port == 0:
+        port_file = os.path.join(os.path.expanduser("~/.vireo"), "port")
+        with open(port_file, "w") as f:
+            f.write(str(port))
+        log.info("Random port %d written to %s", port, port_file)
+
     app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
 
     # Startup banner
     import config as cfg
     startup_cfg = cfg.load()
     log.info("=" * 50)
-    log.info("Vireo starting on http://localhost:%d", args.port)
+    log.info("Vireo starting on http://localhost:%d", port)
     log.info("  Database: %s", args.db)
     log.info("  Thumbnails: %s", args.thumb_dir)
     log.info("  Threshold: %.0f%%  Grouping: %ds  Similarity: %.0f%%",
@@ -4427,7 +4436,7 @@ def main():
         import urllib.request
 
         def _open_browser():
-            url = f"http://localhost:{args.port}"
+            url = f"http://localhost:{port}"
             for _ in range(50):  # try for up to 5 seconds
                 try:
                     urllib.request.urlopen(url, timeout=0.1)
@@ -4438,7 +4447,7 @@ def main():
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
