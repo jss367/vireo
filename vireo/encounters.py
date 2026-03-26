@@ -97,8 +97,8 @@ def sim_species(species_a, species_b):
     """Species similarity via Bhattacharyya coefficient on shared top-5 species.
 
     Args:
-        species_a: list of (species_name, confidence) tuples
-        species_b: list of (species_name, confidence) tuples
+        species_a: list of (species_name, confidence[, model]) tuples
+        species_b: list of (species_name, confidence[, model]) tuples
 
     Returns:
         float in [0, 1]
@@ -153,7 +153,7 @@ def compute_s_enc(photo_a, photo_b, config=None):
             - timestamp: datetime or ISO string
             - dino_subject_embedding: numpy array or None
             - dino_global_embedding: numpy array or None
-            - species_top5: list of (name, confidence) or None
+            - species_top5: list of (name, confidence[, model]) tuples or None
             - latitude, longitude: float or None
             - focal_length: float or None
             - burst_id: str or None (camera burst ID)
