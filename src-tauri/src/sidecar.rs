@@ -11,6 +11,9 @@ pub struct SidecarState {
 }
 
 /// Find a free TCP port.
+/// NOTE: There is an inherent TOCTOU race between releasing this port and the
+/// sidecar binding to it. If another process grabs it first, the sidecar will
+/// fail to start and the health-check will surface the error.
 fn find_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -90,7 +93,7 @@ pub fn stop_sidecar(state: &SidecarState) {
     // Give the sidecar a moment to shut down gracefully
     std::thread::sleep(Duration::from_millis(500));
     // Force-kill if still running
-    if let Some(child) = state.child.lock().unwrap().take() {
+    if let Some(child) = state.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = child.kill();
     }
 }

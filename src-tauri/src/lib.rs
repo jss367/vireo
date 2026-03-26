@@ -27,24 +27,31 @@ pub fn run() {
                 });
             } else {
                 // Production: spawn the sidecar
-                let state = sidecar::start_sidecar(app.handle())
-                    .expect("Failed to start Python sidecar");
-                let port = state.port;
-                app.manage(state);
-
-                // Update the main window URL to the sidecar's port
-                if let Some(window) = app.get_webview_window("main") {
-                    let url = format!("http://127.0.0.1:{}", port);
-                    let _ = window.navigate(url.parse().unwrap());
+                match sidecar::start_sidecar(app.handle()) {
+                    Ok(state) => {
+                        let port = state.port;
+                        app.manage(state);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let url = format!("http://127.0.0.1:{}", port);
+                            let _ = window.navigate(url.parse().unwrap());
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start sidecar: {}", e);
+                        eprintln!("Vireo: Failed to start Python backend: {}", e);
+                        std::process::exit(1);
+                    }
                 }
             }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                let app = window.app_handle();
-                if let Some(state) = app.try_state::<SidecarState>() {
-                    sidecar::stop_sidecar(&state);
+                if window.label() == "main" {
+                    let app = window.app_handle();
+                    if let Some(state) = app.try_state::<SidecarState>() {
+                        sidecar::stop_sidecar(&state);
+                    }
                 }
             }
         })

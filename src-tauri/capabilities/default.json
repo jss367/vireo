@@ -12,7 +12,8 @@
       "allow": [
         {
           "name": "binaries/vireo-server",
-          "sidecar": true
+          "sidecar": true,
+          "args": true
         }
       ]
     },
