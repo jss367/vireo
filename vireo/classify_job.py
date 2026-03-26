@@ -25,6 +25,11 @@ try:
 except ImportError:
     compute_sharpness = None
 
+try:
+    from image_loader import load_image
+except ImportError:
+    load_image = None
+
 log = logging.getLogger(__name__)
 
 
@@ -292,6 +297,159 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         job["errors"].append(f"Detection failed: {str(e)[:200]}")
 
     return detection_map, detected
+
+
+def _classify_photos(
+    photos, folders, detection_map, existing_preds, clf, model_type,
+    model_name, runner, job, db,
+):
+    """Classify each photo, cropping to detected subject when available.
+
+    Returns:
+        (raw_results, failed_count, skipped_existing_count)
+    """
+    import tempfile
+    from datetime import datetime as dt
+
+    from PIL import Image
+
+    raw_results = []
+    failed = 0
+    skipped_existing = 0
+    total = len(photos)
+
+    start_time = time.time()
+
+    for i, photo in enumerate(photos):
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+
+        job["progress"]["current"] = i + 1
+        job["progress"]["current_file"] = photo["filename"]
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": i + 1,
+                "total": total,
+                "current_file": photo["filename"],
+                "rate": round((i + 1) / max(time.time() - start_time, 0.01), 1),
+                "phase": "Step 5/5: Classifying species",
+            },
+        )
+
+        if photo["id"] in existing_preds:
+            skipped_existing += 1
+            pred_row = db.get_prediction_for_photo(photo["id"], model_name)
+            if pred_row:
+                timestamp = None
+                if photo["timestamp"]:
+                    try:
+                        timestamp = dt.fromisoformat(photo["timestamp"])
+                    except Exception:
+                        pass
+                embedding = None
+                if model_type != "timm":
+                    emb_blob = db.get_photo_embedding(photo["id"])
+                    if emb_blob:
+                        import numpy as np
+
+                        embedding = np.frombuffer(emb_blob, dtype=np.float32)
+                raw_results.append(
+                    {
+                        "photo": photo,
+                        "folder_path": folder_path,
+                        "image_path": image_path,
+                        "prediction": pred_row["species"],
+                        "confidence": pred_row["confidence"],
+                        "timestamp": timestamp,
+                        "filename": photo["filename"],
+                        "embedding": embedding,
+                        "taxonomy": None,
+                        "_existing": True,
+                    }
+                )
+            continue
+
+        img = load_image(image_path, max_size=None)
+        if img is None:
+            failed += 1
+            continue
+
+        # Crop to detected subject with padding
+        primary = detection_map.get(photo["id"])
+        if primary:
+            iw, ih = img.size
+            box = primary["box"]
+            pad_w = box["w"] * 0.2
+            pad_h = box["h"] * 0.2
+            x1 = max(0, int((box["x"] - pad_w) * iw))
+            y1 = max(0, int((box["y"] - pad_h) * ih))
+            x2 = min(iw, int((box["x"] + box["w"] + pad_w) * iw))
+            y2 = min(ih, int((box["y"] + box["h"] + pad_h) * ih))
+            crop = img.crop((x1, y1, x2, y2))
+            if crop.size[0] >= 50 and crop.size[1] >= 50:
+                img = crop
+
+        img.thumbnail((1024, 1024), Image.LANCZOS)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+            img.save(tmp_path, quality=85)
+
+        try:
+            if model_type == "timm":
+                all_preds = clf.classify(tmp_path, threshold=0)
+                embedding = None
+            else:
+                all_preds, embedding = clf.classify_with_embedding(
+                    tmp_path, threshold=0
+                )
+        except Exception:
+            log.warning(
+                "Classification failed for %s", photo["filename"], exc_info=True
+            )
+            failed += 1
+            continue
+        finally:
+            os.unlink(tmp_path)
+
+        if embedding is not None:
+            db.store_photo_embedding(photo["id"], embedding.tobytes())
+
+        if not all_preds:
+            continue
+
+        top = all_preds[0]
+        log.info(
+            '%s: "%s" at %.0f%%',
+            photo["filename"],
+            top["species"],
+            top["score"] * 100,
+        )
+
+        timestamp = None
+        if photo["timestamp"]:
+            try:
+                timestamp = dt.fromisoformat(photo["timestamp"])
+            except Exception:
+                pass
+
+        raw_results.append(
+            {
+                "photo": photo,
+                "folder_path": folder_path,
+                "image_path": image_path,
+                "prediction": top["species"],
+                "confidence": top["score"],
+                "timestamp": timestamp,
+                "filename": photo["filename"],
+                "embedding": embedding,
+                "taxonomy": top.get("taxonomy"),
+            }
+        )
+
+    return raw_results, failed, skipped_existing
 
 
 def run_classify_job(job, runner, db_path, workspace_id, params):

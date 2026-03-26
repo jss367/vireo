@@ -253,3 +253,101 @@ def test_detect_subjects_graceful_on_import_error():
     )
     assert detection_map == {}
     assert detected == 0
+
+
+# ── Task 4: _classify_photos tests ───────────────────────────────────────────
+
+
+def test_classify_photos_new_photo(tmp_path):
+    """Phase 6: classifies a new photo and returns raw results."""
+    from unittest.mock import patch, MagicMock
+    import numpy as np
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Create a test image
+    img = Image.new("RGB", (200, 200), color="red")
+    img_path = tmp_path / "bird.jpg"
+    img.save(str(img_path))
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+    detection_map = {}
+    existing_preds = set()
+
+    fake_embedding = np.ones(512, dtype=np.float32)
+    fake_preds = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
+
+    mock_clf = MagicMock()
+    mock_clf.classify_with_embedding.return_value = (fake_preds, fake_embedding)
+
+    mock_db = MagicMock()
+    mock_db.get_photo_embedding.return_value = None
+
+    with patch("classify_job.load_image", return_value=Image.new("RGB", (200, 200))):
+        raw_results, failed, skipped = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=existing_preds,
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=mock_db,
+        )
+
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Northern Cardinal"
+    assert raw_results[0]["confidence"] == 0.95
+    assert failed == 0
+    assert skipped == 0
+    mock_db.store_photo_embedding.assert_called_once()
+
+
+def test_classify_photos_skips_existing(tmp_path):
+    """Phase 6: skips photos with existing predictions."""
+    from unittest.mock import MagicMock
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+    existing_preds = {1}  # photo 1 already classified
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    mock_db.get_prediction_for_photo.return_value = {
+        "species": "Northern Cardinal",
+        "confidence": 0.95,
+    }
+    mock_db.get_photo_embedding.return_value = None
+
+    raw_results, failed, skipped = _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map={},
+        existing_preds=existing_preds,
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+    )
+
+    assert skipped == 1
+    assert len(raw_results) == 1
+    assert raw_results[0]["_existing"] is True
+    mock_clf.classify_with_embedding.assert_not_called()
