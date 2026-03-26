@@ -48,3 +48,67 @@ def test_inat_submission_cascades_on_photo_delete(db):
     db.conn.commit()
     row = db.conn.execute("SELECT * FROM inat_submissions WHERE photo_id = ?", (pid,)).fetchone()
     assert row is None
+
+
+from unittest.mock import patch, MagicMock
+import json
+
+
+def test_validate_token_success():
+    from inat import validate_token
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"login": "birder42"}
+    with patch("inat.requests.get", return_value=mock_resp) as mock_get:
+        result = validate_token("fake-token")
+        assert result == {"login": "birder42"}
+        mock_get.assert_called_once()
+
+
+def test_validate_token_invalid():
+    from inat import validate_token
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    with patch("inat.requests.get", return_value=mock_resp):
+        result = validate_token("bad-token")
+        assert result is None
+
+
+def test_create_observation_success():
+    from inat import create_observation
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [{"id": 99999, "uri": "https://www.inaturalist.org/observations/99999"}]
+    with patch("inat.requests.post", return_value=mock_resp) as mock_post:
+        obs = create_observation(
+            token="fake-token",
+            taxon_name="Cardinalis cardinalis",
+            observed_on="2024-06-01",
+            latitude=38.9,
+            longitude=-77.0,
+            description="Test obs",
+            geoprivacy="open",
+        )
+        assert obs["id"] == 99999
+        mock_post.assert_called_once()
+
+
+def test_create_observation_auth_error():
+    from inat import create_observation, InatAuthError
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.text = "Unauthorized"
+    with patch("inat.requests.post", return_value=mock_resp):
+        with pytest.raises(InatAuthError):
+            create_observation(token="bad", taxon_name="Test")
+
+
+def test_upload_photo_success():
+    from inat import upload_photo
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"id": 55555}
+    with patch("inat.requests.post", return_value=mock_resp):
+        with patch("builtins.open", MagicMock()):
+            result = upload_photo("fake-token", 99999, "/path/to/photo.jpg")
+            assert result["id"] == 55555
