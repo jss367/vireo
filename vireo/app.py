@@ -2382,6 +2382,29 @@ def create_app(db_path, thumb_cache_dir=None):
             import torch
             import urllib.request
 
+            MAX_RETRIES = 3
+
+            def _retry(fn, description):
+                """Retry a download function up to MAX_RETRIES times with backoff."""
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        return fn()
+                    except Exception as exc:
+                        mro_names = [cls.__name__ for cls in type(exc).__mro__]
+                        is_network = isinstance(exc, (OSError, ConnectionError)) or \
+                            any(kw in name for name in mro_names for kw in ("Timeout", "Transport", "ReadError"))
+                        if not is_network or attempt == MAX_RETRIES:
+                            raise
+                        wait = 2 ** attempt
+                        log.warning("Download attempt %d/%d for %s failed (%s), retrying in %ds...",
+                                    attempt, MAX_RETRIES, description, exc, wait)
+                        runner.push_event(job["id"], "progress", {
+                            "phase": f"Connection error, retrying in {wait}s (attempt {attempt}/{MAX_RETRIES})...",
+                            "current": 0, "total": 1,
+                        })
+                        import time
+                        time.sleep(wait)
+
             def _download_url(url, dest, label):
                 """Download a URL with byte-level progress reporting."""
                 req = urllib.request.Request(url)
@@ -2417,7 +2440,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     if os.path.exists(f):
                         os.remove(f)
                 url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
-                _download_url(url, dest, "MegaDetector V6")
+                _retry(lambda: _download_url(url, dest, "MegaDetector V6"), "MegaDetector V6")
                 runner.push_event(job["id"], "progress", {
                     "phase": "Validating weights...", "current": 1, "total": 1,
                 })
@@ -2451,7 +2474,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": f"Downloading {model_id} from HuggingFace...",
                     "current": 0, "total": 1,
                 })
-                snapshot_download(hf_id)
+                _retry(lambda: snapshot_download(hf_id), model_id)
                 runner.push_event(job["id"], "progress", {
                     "phase": "Verifying model loads...", "current": 1, "total": 1,
                 })
@@ -2474,7 +2497,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "current": 0, "total": 1,
                 })
                 # torch.hub.load downloads repo + weights automatically
-                model = torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True)
+                model = _retry(lambda: torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True), model_id)
                 del model
                 runner.push_event(job["id"], "progress", {
                     "phase": "Model loaded and verified", "current": 1, "total": 1,
@@ -3921,6 +3944,78 @@ def create_app(db_path, thumb_cache_dir=None):
 
         log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
         return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
+
+    @app.route("/api/photos/search")
+    def api_photo_text_search():
+        """Search photos by text query using CLIP cosine similarity."""
+        import numpy as np
+
+        query = request.args.get("q", "").strip()
+        if not query:
+            return json_error("Missing query parameter 'q'")
+
+        limit = request.args.get("limit", 50, type=int)
+        threshold = request.args.get("threshold", 0.15, type=float)
+
+        db = _get_db()
+
+        # Determine current model
+        from models import get_active_model
+        active_model = get_active_model()
+        if not active_model:
+            return jsonify({"results": [], "total_matches": 0, "model_used": None})
+
+        model_name = active_model["name"]
+
+        # Load embeddings for current model
+        emb_pairs = db.get_embeddings_by_model(model_name)
+        if not emb_pairs:
+            return jsonify({"results": [], "total_matches": 0, "model_used": model_name})
+
+        # Encode query text
+        from text_encoder import encode_text
+        model_str = active_model["model_str"]
+        weights_path = active_model.get("weights_path", "")
+        try:
+            query_vec = encode_text(query, model_str=model_str, pretrained_str=weights_path)
+        except Exception as e:
+            log.exception("Text encoding failed for query=%r model=%s", query, model_name)
+            return json_error(f"Text encoding failed: {e}", status=500)
+
+        # Build matrix and compute similarities
+        photo_ids = [pid for pid, _ in emb_pairs]
+        emb_matrix = np.stack(
+            [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
+        )
+        similarities = emb_matrix @ query_vec
+
+        # Filter and sort
+        mask = similarities >= threshold
+        filtered_ids = [photo_ids[i] for i in range(len(photo_ids)) if mask[i]]
+        filtered_sims = similarities[mask]
+        total_matches = len(filtered_ids)
+
+        # Top-N by similarity
+        if total_matches > 0:
+            top_indices = np.argsort(filtered_sims)[::-1][:limit]
+            results = []
+            for idx in top_indices:
+                pid = filtered_ids[idx]
+                sim = float(filtered_sims[idx])
+                photo = db.get_photo(pid)
+                if photo:
+                    results.append({
+                        "photo": dict(photo),
+                        "similarity": round(sim, 4),
+                    })
+        else:
+            results = []
+
+        return jsonify({
+            "results": results,
+            "total_matches": total_matches,
+            "model_used": model_name,
+        })
 
     @app.route("/api/photos/<int:photo_id>/similar")
     def api_photo_similar(photo_id):
