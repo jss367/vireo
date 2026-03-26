@@ -145,16 +145,21 @@ def sync_to_xmp(db, progress_callback=None):
             keywords_to_add = set()
             keywords_to_remove = set()
             new_rating = None
+            supported_ids = []
+            unsupported_changes = []
 
             for c in photo_changes:
                 if c["change_type"] == "keyword_add":
                     keywords_to_add.add(c["value"])
+                    supported_ids.append(c["id"])
                 elif c["change_type"] == "keyword_remove":
                     keywords_to_remove.add(c["value"])
+                    supported_ids.append(c["id"])
                 elif c["change_type"] == "rating":
                     new_rating = int(c["value"])
+                    supported_ids.append(c["id"])
                 elif c["change_type"] == "flag":
-                    pass  # Flags aren't stored in XMP by default
+                    unsupported_changes.append(c)
 
             # Write keywords
             if keywords_to_add:
@@ -170,8 +175,19 @@ def sync_to_xmp(db, progress_callback=None):
             if new_rating is not None:
                 _write_rating_to_xmp(xmp_path, new_rating)
 
-            synced += 1
-            synced_ids.extend(c["id"] for c in photo_changes)
+            if supported_ids:
+                synced += 1
+                synced_ids.extend(supported_ids)
+
+            for c in unsupported_changes:
+                failed += 1
+                failures.append(
+                    {
+                        "photo_id": photo_id,
+                        "change_id": c["id"],
+                        "error": f"unsupported change type: {c['change_type']}",
+                    }
+                )
 
         except Exception as e:
             failed += 1
@@ -217,10 +233,14 @@ def sync_from_xmp(db, photo_ids):
         db_keywords = db.get_photo_keywords(photo_id)
         db_kw_names = {k["name"] for k in db_keywords}
 
-        # Add keywords from XMP that aren't in DB
+        # Reconcile DB keyword associations to match the current XMP file.
         for kw in xmp_keywords - db_kw_names:
             kid = db.add_keyword(kw)
             db.tag_photo(photo_id, kid)
+
+        for kw in db_keywords:
+            if kw["name"] not in xmp_keywords:
+                db.untag_photo(photo_id, kw["id"])
 
         # Update xmp_mtime
         xmp_mtime = os.path.getmtime(xmp_path)

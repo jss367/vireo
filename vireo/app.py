@@ -497,6 +497,20 @@ def create_app(db_path, thumb_cache_dir=None):
         if len(_undo_stack) > _max_undo:
             _undo_stack.pop(0)
 
+    def _queue_keyword_add(photo_id, keyword_name):
+        """Queue a keyword add unless it cancels a pending removal."""
+        db = _get_db()
+        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name)
+        if removed == 0:
+            db.queue_change(photo_id, "keyword_add", keyword_name)
+
+    def _queue_keyword_remove(photo_id, keyword_name):
+        """Queue a keyword removal unless it cancels a pending add."""
+        db = _get_db()
+        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name)
+        if removed == 0:
+            db.queue_change(photo_id, "keyword_remove", keyword_name)
+
     # -- Edit API routes --
 
     @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
@@ -527,7 +541,6 @@ def create_app(db_path, thumb_cache_dir=None):
         old = db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
         db.update_photo_flag(photo_id, flag)
-        db.queue_change(photo_id, "flag", flag)
         _push_undo(
             {
                 "type": "flag",
@@ -548,7 +561,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("name required")
         kid = db.add_keyword(name)
         db.tag_photo(photo_id, kid)
-        db.queue_change(photo_id, "keyword_add", name)
+        _queue_keyword_add(photo_id, name)
         _push_undo(
             {
                 "type": "keyword_add",
@@ -572,7 +585,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 kw_name = k["name"]
                 break
         db.untag_photo(photo_id, keyword_id)
-        db.queue_change(photo_id, "keyword_remove", kw_name)
+        _queue_keyword_remove(photo_id, kw_name)
         _push_undo(
             {
                 "type": "keyword_remove",
@@ -626,7 +639,6 @@ def create_app(db_path, thumb_cache_dir=None):
             if old:
                 old_values[pid] = old["flag"]
                 db.update_photo_flag(pid, flag)
-                db.queue_change(pid, "flag", flag)
         _push_undo(
             {
                 "type": "batch_flag",
@@ -649,7 +661,7 @@ def create_app(db_path, thumb_cache_dir=None):
         kid = db.add_keyword(name)
         for pid in photo_ids:
             db.tag_photo(pid, kid)
-            db.queue_change(pid, "keyword_add", name)
+            _queue_keyword_add(pid, name)
         _push_undo(
             {
                 "type": "batch_keyword_add",
@@ -673,24 +685,29 @@ def create_app(db_path, thumb_cache_dir=None):
         if action["type"] == "rating":
             for pid in action["photo_ids"]:
                 db.update_photo_rating(pid, action["old_value"])
+                db.remove_pending_changes(pid, "rating", str(action["new_value"]))
         elif action["type"] == "flag":
             for pid in action["photo_ids"]:
                 db.update_photo_flag(pid, action["old_value"])
         elif action["type"] == "keyword_add":
             for pid in action["photo_ids"]:
                 db.untag_photo(pid, action["keyword_id"])
+                db.remove_pending_changes(pid, "keyword_add", action["keyword_name"])
         elif action["type"] == "keyword_remove":
             for pid in action["photo_ids"]:
                 db.tag_photo(pid, action["keyword_id"])
+                db.remove_pending_changes(pid, "keyword_remove", action["keyword_name"])
         elif action["type"] == "batch_rating":
             for pid, old_val in action["old_values"].items():
                 db.update_photo_rating(int(pid), old_val)
+                db.remove_pending_changes(int(pid), "rating", str(action["new_value"]))
         elif action["type"] == "batch_flag":
             for pid, old_val in action["old_values"].items():
                 db.update_photo_flag(int(pid), old_val)
         elif action["type"] == "batch_keyword_add":
             for pid in action["photo_ids"]:
                 db.untag_photo(pid, action["keyword_id"])
+                db.remove_pending_changes(pid, "keyword_add", action["keyword_name"])
 
         return jsonify({"ok": True, "undone": action["description"]})
 

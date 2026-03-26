@@ -12,6 +12,7 @@ from PIL import Image
 def app_and_db(tmp_path):
     """Create a test app with sample data."""
     from db import Database
+    os.environ["HOME"] = str(tmp_path)
     from app import create_app
     import config as cfg
 

@@ -1442,6 +1442,24 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
+    def remove_pending_changes(self, photo_id, change_type=None, value=None):
+        """Delete matching pending changes. Returns rows removed."""
+        clauses = ["photo_id = ?", "workspace_id = ?"]
+        params = [photo_id, self._ws_id()]
+        if change_type is not None:
+            clauses.append("change_type = ?")
+            params.append(change_type)
+        if value is not None:
+            clauses.append("value = ?")
+            params.append(value)
+
+        cur = self.conn.execute(
+            f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
+            params,
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def clear_pending(self, change_ids):
         """Delete pending changes by id."""
         if not change_ids:
