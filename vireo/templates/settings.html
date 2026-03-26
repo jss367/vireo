@@ -57,6 +57,16 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
   }
+  .collapsible-header {
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer; user-select: none;
+  }
+  .collapsible-header .toggle-icon {
+    font-size: 14px; color: #888; transition: transform 0.2s;
+  }
+  .collapsible-header.open .toggle-icon { transform: rotate(90deg); }
+  .collapsible-body { display: none; }
+  .collapsible-body.open { display: block; }
 </style>
 </head>
 <body>
@@ -201,6 +211,386 @@
                style="width:80px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
         <span style="font-size:13px;color:#888;">entries</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Display -->
+  <div class="section">
+    <div class="section-title">Display</div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Photos per page
+        <small>Number of photos shown per page in Browse view.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="number" id="cfgPhotosPerPage" min="10" max="200" step="10" value="50"
+               style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Thumbnail size
+        <small>Maximum dimension in pixels for cached thumbnails.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
+               style="width:120px;accent-color:#24E5CA;"
+               oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveConfig()">
+        <span style="font-size:13px;color:#E0F0F0;min-width:42px;" id="cfgThumbSizeVal">400px</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Thumbnail quality
+        <small>JPEG quality for cached thumbnails (higher = larger files).</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
+               style="width:120px;accent-color:#24E5CA;"
+               oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveConfig()">
+        <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgThumbQualityVal">85</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Preview quality
+        <small>JPEG quality for full-size preview images.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
+               style="width:120px;accent-color:#24E5CA;"
+               oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveConfig()">
+        <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgPreviewQualityVal">90</span>
+      </div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Default browse thumbnail
+        <small>Default thumbnail size in Browse grid (pixels).</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="range" id="cfgBrowseThumbDefault" min="100" max="400" step="10" value="220"
+               style="width:120px;accent-color:#24E5CA;"
+               oninput="document.getElementById('cfgBrowseThumbVal').textContent = this.value + 'px'; saveConfig()">
+        <span style="font-size:13px;color:#E0F0F0;min-width:42px;" id="cfgBrowseThumbVal">220px</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Detection & Classification -->
+  <div class="section">
+    <div class="section-title collapsible-header" onclick="toggleSection(this)">
+      Detection &amp; Classification
+      <span class="toggle-icon">&#9654;</span>
+    </div>
+    <div class="collapsible-body">
+      <div class="setting-row">
+        <div class="setting-label">
+          Detector confidence
+          <small>Minimum confidence for MegaDetector animal detections.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgDetectorConf" min="5" max="50" step="1" value="20"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgDetectorConfVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgDetectorConfVal">0.20</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Detection box padding
+          <small>Fraction of padding added around detected bounding boxes.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgDetectionPadding" min="0" max="50" step="1" value="20"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgDetectionPaddingVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgDetectionPaddingVal">0.20</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Top-K predictions
+          <small>Number of top classification predictions to keep per photo.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgTopK" min="1" max="20" value="5"
+                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Redundancy threshold
+          <small>Cosine similarity above which two predictions are considered redundant.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgRedundancy" min="50" max="99" step="1" value="88"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgRedundancyVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRedundancyVal">0.88</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Cull time window
+          <small>Photos within this many seconds are candidates for culling.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgCullTimeWindow" min="5" max="600" step="5" value="60"
+                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+          <span style="font-size:13px;color:#888;">seconds</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Cull pHash threshold
+          <small>Perceptual hash distance below which photos are considered near-duplicates.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgCullPhash" min="0" max="32" step="1" value="19"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgCullPhashVal').textContent = this.value; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:24px;" id="cfgCullPhashVal">19</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pipeline Tuning -->
+  <div class="section">
+    <div class="section-title collapsible-header" onclick="toggleSection(this)">
+      Pipeline Tuning
+      <span class="toggle-icon">&#9654;</span>
+    </div>
+    <div class="collapsible-body">
+
+      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:12px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Quality Scoring Weights</div>
+      <div class="setting-row">
+        <div class="setting-label">Focus</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgWFocus" min="0" max="100" value="45"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgWFocusVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWFocusVal">45%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Exposure</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgWExposure" min="0" max="100" value="20"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgWExposureVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWExposureVal">20%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Composition</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgWComposition" min="0" max="100" value="15"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgWCompositionVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWCompositionVal">15%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Subject area</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgWArea" min="0" max="100" value="10"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgWAreaVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWAreaVal">10%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Noise</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgWNoise" min="0" max="100" value="10"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgWNoiseVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWNoiseVal">10%</span>
+        </div>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Rejection Thresholds</div>
+      <div class="setting-row">
+        <div class="setting-label">Crop completeness</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgRejectCrop" min="0" max="100" value="60"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgRejectCropVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectCropVal">60%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Focus</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgRejectFocus" min="0" max="100" value="35"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgRejectFocusVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectFocusVal">35%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Highlight clipping</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgRejectClip" min="0" max="100" value="30"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgRejectClipVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectClipVal">30%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Composite quality floor</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgRejectComposite" min="0" max="100" value="40"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgRejectCompositeVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectCompositeVal">40%</span>
+        </div>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Burst Detection</div>
+      <div class="setting-row">
+        <div class="setting-label">Time gap</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgBurstTimeGap" min="1" max="30" value="3"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgBurstTimeGapVal').textContent = this.value + 's'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgBurstTimeGapVal">3s</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">pHash threshold</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgBurstPhash" min="1" max="32" value="12"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgBurstPhashVal').textContent = this.value; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:24px;" id="cfgBurstPhashVal">12</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Embedding similarity</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgBurstEmb" min="50" max="99" value="80"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgBurstEmbVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgBurstEmbVal">80%</span>
+        </div>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Selection (MMR)</div>
+      <div class="setting-row">
+        <div class="setting-label">Burst quality bias (lambda)</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgBurstLambda" min="0" max="100" value="85"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgBurstLambdaVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgBurstLambdaVal">85%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Burst max keep</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgBurstMaxKeep" min="1" max="10" value="3"
+                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Encounter quality bias (lambda)</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgEncLambda" min="0" max="100" value="70"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgEncLambdaVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgEncLambdaVal">70%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Encounter max keep</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgEncMaxKeep" min="1" max="20" value="5"
+                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+        </div>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Encounter Segmentation</div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Encounter weights
+          <small>Relative importance of time / subject / global / species / meta similarity.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="number" id="cfgWTime" min="0" max="100" value="35" title="Time"
+                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 onchange="saveConfig()">
+          <input type="number" id="cfgWSubj" min="0" max="100" value="35" title="Subject"
+                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 onchange="saveConfig()">
+          <input type="number" id="cfgWGlobal" min="0" max="100" value="15" title="Global"
+                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 onchange="saveConfig()">
+          <input type="number" id="cfgWSpecies" min="0" max="100" value="10" title="Species"
+                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 onchange="saveConfig()">
+          <input type="number" id="cfgWMeta" min="0" max="100" value="5" title="Meta"
+                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 onchange="saveConfig()">
+          <span style="font-size:11px;color:#888;">T/S/G/Sp/M</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Hard cut time</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgHardCutTime" min="30" max="600" value="180"
+                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+          <span style="font-size:13px;color:#888;">seconds</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Hard cut score</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgHardCutScore" min="0" max="100" value="42"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgHardCutScoreVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgHardCutScoreVal">42%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Soft cut score</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgSoftCutScore" min="0" max="100" value="52"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgSoftCutScoreVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgSoftCutScoreVal">52%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Merge score</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgMergeScore" min="0" max="100" value="62"
+                 style="width:120px;accent-color:#24E5CA;"
+                 oninput="document.getElementById('cfgMergeScoreVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgMergeScoreVal">62%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">Merge max gap</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="cfgMergeMaxGap" min="10" max="300" value="60"
+                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 onchange="saveConfig()">
+          <span style="font-size:13px;color:#888;">seconds</span>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid #14374E;">
+        <button onclick="resetPipelineDefaults()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Reset to defaults</button>
       </div>
     </div>
   </div>
@@ -421,6 +811,12 @@ loadScanRoots();
 loadVersion();
 loadThemePicker();
 
+function toggleSection(header) {
+  header.classList.toggle('open');
+  var body = header.nextElementSibling;
+  body.classList.toggle('open');
+}
+
 var _saveTimer = null;
 async function loadConfig() {
   try {
@@ -443,6 +839,97 @@ async function loadConfig() {
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
     document.getElementById('cfgDarktableOutputDir').value = cfg.darktable_output_dir || '';
     loadDarktableStatus();
+    // Load display settings
+    document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page || 50;
+    var ts = cfg.thumb_size || 400;
+    document.getElementById('cfgThumbSize').value = ts;
+    document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
+    var tq = cfg.thumb_quality || 85;
+    document.getElementById('cfgThumbQuality').value = tq;
+    document.getElementById('cfgThumbQualityVal').textContent = tq;
+    var pq = cfg.preview_quality || 90;
+    document.getElementById('cfgPreviewQuality').value = pq;
+    document.getElementById('cfgPreviewQualityVal').textContent = pq;
+    var bt = cfg.browse_thumb_default || 220;
+    document.getElementById('cfgBrowseThumbDefault').value = bt;
+    document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
+    // Load detection settings
+    var dc = Math.round((cfg.detector_confidence || 0.20) * 100);
+    document.getElementById('cfgDetectorConf').value = dc;
+    document.getElementById('cfgDetectorConfVal').textContent = (dc / 100).toFixed(2);
+    var dp = Math.round((cfg.detection_padding || 0.20) * 100);
+    document.getElementById('cfgDetectionPadding').value = dp;
+    document.getElementById('cfgDetectionPaddingVal').textContent = (dp / 100).toFixed(2);
+    document.getElementById('cfgTopK').value = cfg.top_k || 5;
+    var rd = Math.round((cfg.redundancy_threshold || 0.88) * 100);
+    document.getElementById('cfgRedundancy').value = rd;
+    document.getElementById('cfgRedundancyVal').textContent = (rd / 100).toFixed(2);
+    document.getElementById('cfgCullTimeWindow').value = cfg.cull_time_window || 60;
+    var cph = cfg.cull_phash_threshold != null ? cfg.cull_phash_threshold : 19;
+    document.getElementById('cfgCullPhash').value = cph;
+    document.getElementById('cfgCullPhashVal').textContent = cph;
+    // Load pipeline settings
+    var p = cfg.pipeline || {};
+    var wf = Math.round((p.w_focus != null ? p.w_focus : 0.45) * 100);
+    document.getElementById('cfgWFocus').value = wf;
+    document.getElementById('cfgWFocusVal').textContent = wf + '%';
+    var we = Math.round((p.w_exposure != null ? p.w_exposure : 0.20) * 100);
+    document.getElementById('cfgWExposure').value = we;
+    document.getElementById('cfgWExposureVal').textContent = we + '%';
+    var wc = Math.round((p.w_composition != null ? p.w_composition : 0.15) * 100);
+    document.getElementById('cfgWComposition').value = wc;
+    document.getElementById('cfgWCompositionVal').textContent = wc + '%';
+    var wa = Math.round((p.w_area != null ? p.w_area : 0.10) * 100);
+    document.getElementById('cfgWArea').value = wa;
+    document.getElementById('cfgWAreaVal').textContent = wa + '%';
+    var wn = Math.round((p.w_noise != null ? p.w_noise : 0.10) * 100);
+    document.getElementById('cfgWNoise').value = wn;
+    document.getElementById('cfgWNoiseVal').textContent = wn + '%';
+    var rc = Math.round((p.reject_crop != null ? p.reject_crop : 0.60) * 100);
+    document.getElementById('cfgRejectCrop').value = rc;
+    document.getElementById('cfgRejectCropVal').textContent = rc + '%';
+    var rf = Math.round((p.reject_focus != null ? p.reject_focus : 0.35) * 100);
+    document.getElementById('cfgRejectFocus').value = rf;
+    document.getElementById('cfgRejectFocusVal').textContent = rf + '%';
+    var rcl = Math.round((p.reject_clip != null ? p.reject_clip : 0.30) * 100);
+    document.getElementById('cfgRejectClip').value = rcl;
+    document.getElementById('cfgRejectClipVal').textContent = rcl + '%';
+    var rco = Math.round((p.reject_composite != null ? p.reject_composite : 0.40) * 100);
+    document.getElementById('cfgRejectComposite').value = rco;
+    document.getElementById('cfgRejectCompositeVal').textContent = rco + '%';
+    var btg = p.burst_time_gap != null ? p.burst_time_gap : 3;
+    document.getElementById('cfgBurstTimeGap').value = btg;
+    document.getElementById('cfgBurstTimeGapVal').textContent = btg + 's';
+    var bph = p.burst_phash != null ? p.burst_phash : 12;
+    document.getElementById('cfgBurstPhash').value = bph;
+    document.getElementById('cfgBurstPhashVal').textContent = bph;
+    var bemb = Math.round((p.burst_emb != null ? p.burst_emb : 0.80) * 100);
+    document.getElementById('cfgBurstEmb').value = bemb;
+    document.getElementById('cfgBurstEmbVal').textContent = bemb + '%';
+    var bl = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
+    document.getElementById('cfgBurstLambda').value = bl;
+    document.getElementById('cfgBurstLambdaVal').textContent = bl + '%';
+    document.getElementById('cfgBurstMaxKeep').value = p.burst_max_keep || 3;
+    var el = Math.round((p.enc_lambda != null ? p.enc_lambda : 0.70) * 100);
+    document.getElementById('cfgEncLambda').value = el;
+    document.getElementById('cfgEncLambdaVal').textContent = el + '%';
+    document.getElementById('cfgEncMaxKeep').value = p.enc_max_keep || 5;
+    document.getElementById('cfgWTime').value = p.w_time != null ? p.w_time : 35;
+    document.getElementById('cfgWSubj').value = p.w_subj != null ? p.w_subj : 35;
+    document.getElementById('cfgWGlobal').value = p.w_global != null ? p.w_global : 15;
+    document.getElementById('cfgWSpecies').value = p.w_species != null ? p.w_species : 10;
+    document.getElementById('cfgWMeta').value = p.w_meta != null ? p.w_meta : 5;
+    document.getElementById('cfgHardCutTime').value = p.hard_cut_time || 180;
+    var hcs = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
+    document.getElementById('cfgHardCutScore').value = hcs;
+    document.getElementById('cfgHardCutScoreVal').textContent = hcs + '%';
+    var scs = Math.round((p.soft_cut_score != null ? p.soft_cut_score : 0.52) * 100);
+    document.getElementById('cfgSoftCutScore').value = scs;
+    document.getElementById('cfgSoftCutScoreVal').textContent = scs + '%';
+    var ms = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
+    document.getElementById('cfgMergeScore').value = ms;
+    document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
+    document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap || 60;
     // Load keyboard shortcuts
     currentShortcuts = cfg.keyboard_shortcuts || JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS));
     renderShortcutsEditor();
@@ -474,10 +961,77 @@ function saveConfig() {
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
           darktable_output_dir: document.getElementById('cfgDarktableOutputDir').value.trim(),
+          photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
+          thumb_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
+          thumb_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
+          preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
+          browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
+          detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
+          detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,
+          top_k: parseInt(document.getElementById('cfgTopK').value, 10) || 5,
+          redundancy_threshold: parseInt(document.getElementById('cfgRedundancy').value, 10) / 100,
+          cull_time_window: parseInt(document.getElementById('cfgCullTimeWindow').value, 10) || 60,
+          cull_phash_threshold: parseInt(document.getElementById('cfgCullPhash').value, 10),
+          pipeline: {
+            w_focus: parseInt(document.getElementById('cfgWFocus').value, 10) / 100,
+            w_exposure: parseInt(document.getElementById('cfgWExposure').value, 10) / 100,
+            w_composition: parseInt(document.getElementById('cfgWComposition').value, 10) / 100,
+            w_area: parseInt(document.getElementById('cfgWArea').value, 10) / 100,
+            w_noise: parseInt(document.getElementById('cfgWNoise').value, 10) / 100,
+            reject_crop: parseInt(document.getElementById('cfgRejectCrop').value, 10) / 100,
+            reject_focus: parseInt(document.getElementById('cfgRejectFocus').value, 10) / 100,
+            reject_clip: parseInt(document.getElementById('cfgRejectClip').value, 10) / 100,
+            reject_composite: parseInt(document.getElementById('cfgRejectComposite').value, 10) / 100,
+            burst_time_gap: parseInt(document.getElementById('cfgBurstTimeGap').value, 10),
+            burst_phash: parseInt(document.getElementById('cfgBurstPhash').value, 10),
+            burst_emb: parseInt(document.getElementById('cfgBurstEmb').value, 10) / 100,
+            burst_lambda: parseInt(document.getElementById('cfgBurstLambda').value, 10) / 100,
+            burst_max_keep: parseInt(document.getElementById('cfgBurstMaxKeep').value, 10) || 3,
+            enc_lambda: parseInt(document.getElementById('cfgEncLambda').value, 10) / 100,
+            enc_max_keep: parseInt(document.getElementById('cfgEncMaxKeep').value, 10) || 5,
+            w_time: parseInt(document.getElementById('cfgWTime').value, 10),
+            w_subj: parseInt(document.getElementById('cfgWSubj').value, 10),
+            w_global: parseInt(document.getElementById('cfgWGlobal').value, 10),
+            w_species: parseInt(document.getElementById('cfgWSpecies').value, 10),
+            w_meta: parseInt(document.getElementById('cfgWMeta').value, 10),
+            hard_cut_time: parseInt(document.getElementById('cfgHardCutTime').value, 10) || 180,
+            hard_cut_score: parseInt(document.getElementById('cfgHardCutScore').value, 10) / 100,
+            soft_cut_score: parseInt(document.getElementById('cfgSoftCutScore').value, 10) / 100,
+            merge_score: parseInt(document.getElementById('cfgMergeScore').value, 10) / 100,
+            merge_max_gap: parseInt(document.getElementById('cfgMergeMaxGap').value, 10) || 60,
+          },
         }),
       });
     } catch(e) {}
   }, 500);
+}
+
+function resetPipelineDefaults() {
+  var defs = {
+    cfgWFocus: [45, '%'], cfgWExposure: [20, '%'], cfgWComposition: [15, '%'],
+    cfgWArea: [10, '%'], cfgWNoise: [10, '%'],
+    cfgRejectCrop: [60, '%'], cfgRejectFocus: [35, '%'], cfgRejectClip: [30, '%'],
+    cfgRejectComposite: [40, '%'],
+    cfgBurstTimeGap: [3, 's'], cfgBurstPhash: [12, ''], cfgBurstEmb: [80, '%'],
+    cfgBurstLambda: [85, '%'], cfgEncLambda: [70, '%'],
+    cfgHardCutScore: [42, '%'], cfgSoftCutScore: [52, '%'], cfgMergeScore: [62, '%'],
+  };
+  for (var id in defs) {
+    var val = defs[id][0], suffix = defs[id][1];
+    document.getElementById(id).value = val;
+    var span = document.getElementById(id + 'Val');
+    if (span) span.textContent = val + suffix;
+  }
+  document.getElementById('cfgBurstMaxKeep').value = 3;
+  document.getElementById('cfgEncMaxKeep').value = 5;
+  document.getElementById('cfgWTime').value = 35;
+  document.getElementById('cfgWSubj').value = 35;
+  document.getElementById('cfgWGlobal').value = 15;
+  document.getElementById('cfgWSpecies').value = 10;
+  document.getElementById('cfgWMeta').value = 5;
+  document.getElementById('cfgHardCutTime').value = 180;
+  document.getElementById('cfgMergeMaxGap').value = 60;
+  saveConfig();
 }
 
 function toggleInatTokenVisibility() {
