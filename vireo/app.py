@@ -3897,6 +3897,76 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Culling applied: %d keepers, %d rejects", len(keepers), len(rejects))
         return jsonify({"ok": True, "keepers": len(keepers), "rejects": len(rejects)})
 
+    @app.route("/api/photos/search")
+    def api_photo_text_search():
+        """Search photos by text query using CLIP cosine similarity."""
+        import numpy as np
+
+        query = request.args.get("q", "").strip()
+        if not query:
+            return json_error("Missing query parameter 'q'")
+
+        limit = request.args.get("limit", 50, type=int)
+        threshold = request.args.get("threshold", 0.15, type=float)
+
+        db = _get_db()
+        import config as cfg
+        effective = db.get_effective_config(cfg.load())
+
+        # Determine current model
+        from models import get_active_model
+        active_model = get_active_model()
+        if not active_model:
+            return jsonify({"results": [], "total_matches": 0, "model_used": None})
+
+        model_name = active_model["name"]
+
+        # Load embeddings for current model
+        emb_pairs = db.get_embeddings_by_model(model_name)
+        if not emb_pairs:
+            return jsonify({"results": [], "total_matches": 0, "model_used": model_name})
+
+        # Encode query text
+        from text_encoder import encode_text
+        model_str = active_model["model_str"]
+        weights_path = active_model.get("weights_path", "")
+        query_vec = encode_text(query, model_str=model_str, pretrained_str=weights_path)
+
+        # Build matrix and compute similarities
+        photo_ids = [pid for pid, _ in emb_pairs]
+        emb_matrix = np.stack(
+            [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
+        )
+        similarities = emb_matrix @ query_vec
+
+        # Filter and sort
+        mask = similarities >= threshold
+        filtered_ids = [photo_ids[i] for i in range(len(photo_ids)) if mask[i]]
+        filtered_sims = similarities[mask]
+        total_matches = len(filtered_ids)
+
+        # Top-N by similarity
+        if total_matches > 0:
+            top_indices = np.argsort(filtered_sims)[::-1][:limit]
+            results = []
+            for idx in top_indices:
+                pid = filtered_ids[idx]
+                sim = float(filtered_sims[idx])
+                photo = db.get_photo(pid)
+                if photo:
+                    results.append({
+                        "photo": dict(photo),
+                        "similarity": round(sim, 4),
+                    })
+        else:
+            results = []
+
+        return jsonify({
+            "results": results,
+            "total_matches": total_matches,
+            "model_used": model_name,
+        })
+
     @app.route("/api/photos/<int:photo_id>/similar")
     def api_photo_similar(photo_id):
         """Find photos with similar embeddings to the given photo."""

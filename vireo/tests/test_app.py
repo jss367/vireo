@@ -326,3 +326,22 @@ def test_pages_no_inline_escapeHtml(app_and_db):
         # The <script src="...vireo-utils.js"> tag won't contain the function text.
         assert html.count('function escapeHtml') == 0, \
             f"{page} still has inline escapeHtml definition"
+
+
+def test_text_search_requires_query(app_and_db):
+    """Text search returns 400 when no query provided."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/photos/search")
+    assert resp.status_code == 400
+
+
+def test_text_search_no_embeddings(app_and_db):
+    """Text search returns empty results when no embeddings exist."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/photos/search?q=bird+in+flight")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total_matches"] == 0
