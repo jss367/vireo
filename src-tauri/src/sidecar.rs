@@ -43,7 +43,7 @@ pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
 
     let (mut rx, child) = app
         .shell()
-        .sidecar("binaries/vireo-server")
+        .sidecar("vireo-server")
         .map_err(|e| format!("Failed to create sidecar command: {}", e))?
         .args([
             "--port", &port.to_string(),
