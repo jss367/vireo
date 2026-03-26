@@ -336,3 +336,17 @@ def test_health_endpoint(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["status"] == "ok"
+
+
+def test_shutdown_endpoint(app_and_db):
+    """POST /api/shutdown returns 200 and signals shutdown."""
+    app, _ = app_and_db
+    client = app.test_client()
+    # GET should not be allowed
+    resp = client.get("/api/shutdown")
+    assert resp.status_code == 405
+    # POST triggers shutdown
+    resp = client.post("/api/shutdown")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "shutting_down"

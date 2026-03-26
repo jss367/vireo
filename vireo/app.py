@@ -162,6 +162,17 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_health():
         return jsonify({"status": "ok"})
 
+    @app.route("/api/shutdown", methods=["POST"])
+    def api_shutdown():
+        import signal
+        import threading
+
+        def _shutdown():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.5, _shutdown).start()
+        return jsonify({"status": "shutting_down"})
+
     @app.context_processor
     def inject_workspace():
         """Make active workspace available to all templates."""
