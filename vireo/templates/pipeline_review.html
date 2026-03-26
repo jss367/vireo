@@ -1203,6 +1203,174 @@ function initPipelineReviewPage() {
   });
 }
 
+// -- Species confirmation --
+
+var activeDropdown = null;
+
+function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
+  // level: 'encounter' or 'burst'
+  var isConfirmed, displayName, predictions;
+  if (level === 'burst') {
+    var burst = enc.bursts[burstIdx];
+    var ovr = burst.species_override;
+    isConfirmed = ovr && ovr.confirmed;
+    displayName = (ovr && ovr.species) || (enc.species ? enc.species[0] : 'Unknown');
+    predictions = burst.species_predictions || [];
+  } else {
+    isConfirmed = enc.species_confirmed;
+    displayName = enc.confirmed_species || (enc.species ? enc.species[0] : 'Unknown');
+    predictions = enc.species_predictions || [];
+  }
+
+  var cls = isConfirmed ? 'confirmed' : 'unconfirmed';
+  var badge = isConfirmed ? '&#10003;' : '?';
+  var widgetCls = level === 'burst' ? 'burst-species-widget' : 'species-widget';
+
+  var html = '<span class="' + widgetCls + '" data-enc="' + encIdx + '" data-burst="' + (burstIdx != null ? burstIdx : '') + '">';
+  html += '<span class="species-name ' + cls + '" onclick="toggleSpeciesDropdown(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')">' + escapeHtml(displayName) + '</span>';
+  html += '<span class="species-badge ' + cls + '">' + badge + '</span>';
+  if (!isConfirmed) {
+    html += '<button class="species-confirm-btn" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',null)" title="Confirm as ' + escapeHtml(displayName) + '">&#10003;</button>';
+  }
+
+  // Dropdown
+  html += '<div class="species-dropdown" id="spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '">';
+  html += '<div class="species-dropdown-search"><input type="text" placeholder="Search species..." oninput="searchSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ')"></div>';
+
+  // "Use encounter label" option for burst level
+  if (level === 'burst' && enc.species) {
+    html += '<div class="species-dropdown-item" onclick="clearBurstOverride(event, ' + encIdx + ',' + burstIdx + ')">';
+    html += '<span class="sp-name" style="color:var(--text-dim);">Use encounter label (' + escapeHtml(enc.species[0] || '') + ')</span>';
+    html += '</div>';
+  }
+
+  // Prediction rows
+  predictions.forEach(function(sp) {
+    var modelParts = (sp.models || []).map(function(m) {
+      return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
+    });
+    html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + escapeHtml(sp.species).replace(/'/g, "\\'") + '\')">';
+    html += '<span class="sp-name">' + escapeHtml(sp.species) + '</span>';
+    html += '<span class="sp-models">' + modelParts.join(', ') + '</span>';
+    html += '</div>';
+  });
+
+  // Search results container
+  html += '<div id="spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc') + '"></div>';
+  html += '</div>';
+  html += '</span>';
+  return html;
+}
+
+function toggleSpeciesDropdown(event, encIdx, burstIdx) {
+  event.stopPropagation();
+  var id = 'spDrop_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc');
+  var el = document.getElementById(id);
+  if (!el) return;
+  var isOpen = el.classList.contains('open');
+  // Close any open dropdown
+  closeAllDropdowns();
+  if (!isOpen) {
+    el.classList.add('open');
+    activeDropdown = el;
+    var input = el.querySelector('input');
+    if (input) setTimeout(function() { input.focus(); }, 50);
+  }
+}
+
+function closeAllDropdowns() {
+  document.querySelectorAll('.species-dropdown.open').forEach(function(d) {
+    d.classList.remove('open');
+  });
+  activeDropdown = null;
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', function(e) {
+  if (activeDropdown && !activeDropdown.contains(e.target) &&
+      !e.target.classList.contains('species-name')) {
+    closeAllDropdowns();
+  }
+});
+
+var _searchTimer = null;
+function searchSpecies(event, encIdx, burstIdx) {
+  var q = event.target.value.trim();
+  var targetId = 'spSearch_' + encIdx + '_' + (burstIdx != null ? burstIdx : 'enc');
+  var container = document.getElementById(targetId);
+  if (!container) return;
+  if (q.length < 2) { container.innerHTML = ''; return; }
+
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(async function() {
+    var results = await safeFetch('/api/species/search?q=' + encodeURIComponent(q), {}, { toast: false });
+    if (!results || !Array.isArray(results)) return;
+    var html = '';
+    results.forEach(function(name) {
+      html += '<div class="species-dropdown-item" onclick="confirmSpecies(event, ' + encIdx + ',' + (burstIdx != null ? burstIdx : 'null') + ',\'' + escapeHtml(name).replace(/'/g, "\\'") + '\')">';
+      html += '<span class="sp-name">' + escapeHtml(name) + '</span>';
+      html += '<span class="sp-models" style="color:var(--text-dim);">search</span>';
+      html += '</div>';
+    });
+    container.innerHTML = html;
+  }, 250);
+}
+
+async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
+  event.stopPropagation();
+  closeAllDropdowns();
+
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc) return;
+
+  // Determine which species to confirm
+  if (!speciesName) {
+    if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+      var ovr = enc.bursts[burstIdx].species_override;
+      speciesName = (ovr && ovr.species) || (enc.species ? enc.species[0] : null);
+    } else {
+      speciesName = enc.confirmed_species || (enc.species ? enc.species[0] : null);
+    }
+  }
+  if (!speciesName) return;
+
+  // Determine photo IDs
+  var photoIds;
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+    photoIds = enc.bursts[burstIdx].photo_ids;
+  } else {
+    photoIds = enc.photo_ids;
+  }
+
+  var body = { species: speciesName, photo_ids: photoIds };
+  if (burstIdx != null) body.burst_index = burstIdx;
+
+  var resp = await safeFetch('/api/encounters/species', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp || !resp.ok) return;
+
+  // Update local state optimistically
+  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+    enc.bursts[burstIdx].species_override = { species: speciesName, confirmed: true };
+  } else {
+    enc.species_confirmed = true;
+    enc.confirmed_species = speciesName;
+  }
+  renderResults();
+}
+
+async function clearBurstOverride(event, encIdx, burstIdx) {
+  event.stopPropagation();
+  closeAllDropdowns();
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc || !enc.bursts || !enc.bursts[burstIdx]) return;
+  enc.bursts[burstIdx].species_override = null;
+  renderResults();
+}
+
 initPipelineReviewPage();
 </script>
 </body>
