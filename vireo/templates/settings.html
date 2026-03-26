@@ -259,9 +259,12 @@
         darktable-cli path
         <small>Leave empty to auto-detect from PATH. Set explicitly if darktable is installed in a non-standard location.</small>
       </div>
-      <input type="text" id="cfgDarktableBin" placeholder="auto-detect"
-             style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
-             onchange="saveConfig()">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="text" id="cfgDarktableBin" placeholder="auto-detect"
+               style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig()">
+        <button onclick="browseForDarktable()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+      </div>
     </div>
     <div class="setting-row">
       <div class="setting-label">
@@ -288,9 +291,12 @@
         Output directory
         <small>Where developed photos are saved. Leave empty to create a "developed" subfolder next to originals.</small>
       </div>
-      <input type="text" id="cfgDarktableOutputDir" placeholder="alongside originals"
-             style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
-             onchange="saveConfig()">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="text" id="cfgDarktableOutputDir" placeholder="alongside originals"
+               style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig()">
+        <button onclick="browseForOutputDir()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+      </div>
     </div>
   </div>
 
@@ -1415,6 +1421,31 @@ function loadThemePicker() {
     '</button>';
   });
   picker.innerHTML = html;
+}
+
+/* ---------- Native file picker ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForDarktable() {
+  var path = await pickFile({ title: 'Select darktable-cli binary' });
+  if (path) {
+    document.getElementById('cfgDarktableBin').value = path;
+    saveConfig();
+  }
+}
+
+async function browseForOutputDir() {
+  var path = await pickDirectory('Select output directory');
+  if (path) {
+    document.getElementById('cfgDarktableOutputDir').value = path;
+    saveConfig();
+  }
 }
 </script>
 </body>
