@@ -98,6 +98,13 @@ def test_get_models_no_downloads(tmp_path, monkeypatch):
     import models
 
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    # Stub os.path.exists within models so the legacy /tmp path check
+    # doesn't leak host filesystem state into the test.
+    _real_exists = os.path.exists
+    monkeypatch.setattr(
+        os.path, "exists",
+        lambda p: _real_exists(p) if p.startswith(str(tmp_path)) else False,
+    )
     result = models.get_models()
     assert len(result) >= len(models.KNOWN_MODELS)
     for m in result:
