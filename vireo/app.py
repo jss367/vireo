@@ -4120,6 +4120,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def logs_page():
         return render_template("logs.html")
 
+    @app.route("/map")
+    def map_page():
+        return render_template("map.html", active_page="map")
+
     @app.route("/dashboard")
     def dashboard_page():
         return render_template("stats.html")

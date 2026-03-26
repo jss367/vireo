@@ -308,6 +308,14 @@ def test_pages_include_vireo_utils(app_and_db):
         assert 'vireo-utils.js' in html, f"{page} missing vireo-utils.js script tag"
 
 
+def test_map_page(app_and_db):
+    """GET /map returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/map')
+    assert resp.status_code == 200
+
+
 def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
