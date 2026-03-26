@@ -1224,6 +1224,21 @@ class Database:
         )
         self.conn.commit()
 
+    def get_embeddings_by_model(self, model_name):
+        """Return (photo_id, embedding_blob) pairs for photos with given model.
+
+        Only returns photos in folders visible to the active workspace.
+        """
+        rows = self.conn.execute(
+            """SELECT p.id, p.embedding FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.embedding IS NOT NULL
+                 AND p.embedding_model = ?
+                 AND wf.workspace_id = ?""",
+            (model_name, self._ws_id()),
+        ).fetchall()
+        return [(row["id"], row["embedding"]) for row in rows]
+
     def update_prediction_group_info(self, photo_id, model, group_id, vote_count, total_votes, individual):
         """Update group info on an existing prediction."""
         self.conn.execute(
