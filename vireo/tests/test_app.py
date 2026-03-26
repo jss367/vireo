@@ -326,3 +326,13 @@ def test_pages_no_inline_escapeHtml(app_and_db):
         # The <script src="...vireo-utils.js"> tag won't contain the function text.
         assert html.count('function escapeHtml') == 0, \
             f"{page} still has inline escapeHtml definition"
+
+
+def test_health_endpoint(app_and_db):
+    """GET /api/health returns 200 with status ok."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"

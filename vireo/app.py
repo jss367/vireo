@@ -158,6 +158,10 @@ def create_app(db_path, thumb_cache_dir=None):
             app._db = Database(db_path)
         return app._db
 
+    @app.route("/api/health")
+    def api_health():
+        return jsonify({"status": "ok"})
+
     @app.context_processor
     def inject_workspace():
         """Make active workspace available to all templates."""
