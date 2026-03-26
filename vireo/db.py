@@ -764,6 +764,67 @@ class Database:
         """
         return self.conn.execute(query, params).fetchall()
 
+    def get_geolocated_photos(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+    ):
+        """Return all geolocated photos with optional species, scoped to active workspace.
+
+        Returns photos that have non-null latitude and longitude. No pagination —
+        returns all matching photos for map rendering. Includes the highest-confidence
+        accepted prediction species name (or NULL if none).
+        """
+        conditions = ["wf.workspace_id = ?",
+                      "p.latitude IS NOT NULL",
+                      "p.longitude IS NOT NULL"]
+        params = [self._ws_id()]
+
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            params.append(date_to)
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
+                   p.timestamp, p.rating, p.folder_id,
+                   (SELECT pr.species FROM predictions pr
+                    WHERE pr.photo_id = p.id
+                      AND pr.workspace_id = ?
+                      AND pr.status = 'accepted'
+                    ORDER BY pr.confidence DESC LIMIT 1) AS species
+            FROM photos p
+            {join_clause}
+            {where}
+            GROUP BY p.id
+            ORDER BY p.timestamp ASC
+        """
+        params.insert(0, self._ws_id())  # for the subquery
+        return self.conn.execute(query, params).fetchall()
+
     def update_photo_rating(self, photo_id, rating):
         """Set photo rating (0-5)."""
         self.conn.execute(

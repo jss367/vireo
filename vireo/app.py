@@ -418,6 +418,31 @@ def create_app(db_path, thumb_cache_dir=None):
 
         return jsonify(result)
 
+    @app.route("/api/photos/geo")
+    def api_photos_geo():
+        db = _get_db()
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+
+        photos = db.get_geolocated_photos(
+            folder_id=folder_id,
+            rating_min=rating_min,
+            date_from=date_from,
+            date_to=date_to,
+            keyword=keyword,
+        )
+
+        total_photos = db.count_photos()
+
+        return jsonify({
+            "photos": [dict(p) for p in photos],
+            "total_geo": len(photos),
+            "total_photos": total_photos,
+        })
+
     @app.route("/api/keywords")
     def api_keywords():
         db = _get_db()
@@ -4347,6 +4372,10 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/logs")
     def logs_page():
         return render_template("logs.html")
+
+    @app.route("/map")
+    def map_page():
+        return render_template("map.html", active_page="map")
 
     @app.route("/dashboard")
     def dashboard_page():

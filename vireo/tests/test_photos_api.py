@@ -88,3 +88,50 @@ def test_thumbnail_serving(app_and_db):
     resp = client.get(f'/thumbnails/{pid}.jpg')
     assert resp.status_code == 200
     assert resp.content_type in ('image/jpeg', 'image/jpg')
+
+
+def test_api_photos_geo_returns_geolocated(app_and_db):
+    """GET /api/photos/geo returns only geolocated photos."""
+    app, db = app_and_db
+    # Set GPS on bird1 only
+    db.conn.execute("UPDATE photos SET latitude=37.77, longitude=-122.42 WHERE filename='bird1.jpg'")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'photos' in data
+    assert 'total_geo' in data
+    assert 'total_photos' in data
+    assert data['total_geo'] == 1
+    assert data['total_photos'] == 3
+    assert len(data['photos']) == 1
+    assert data['photos'][0]['latitude'] == 37.77
+    assert data['photos'][0]['longitude'] == -122.42
+
+
+def test_api_photos_geo_with_filters(app_and_db):
+    """GET /api/photos/geo passes through rating filter."""
+    app, db = app_and_db
+    # Set GPS on bird1 (rating 3) and bird3 (rating 5)
+    db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE filename IN ('bird1.jpg','bird3.jpg')")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/photos/geo?rating_min=4')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data['photos']) == 1
+    assert data['photos'][0]['filename'] == 'bird3.jpg'
+
+
+def test_api_photos_geo_empty(app_and_db):
+    """GET /api/photos/geo returns empty list when no geolocated photos."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['photos'] == []
+    assert data['total_geo'] == 0

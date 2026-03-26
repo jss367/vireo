@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+<title>Vireo - Map</title>
+<style>
+body { padding-bottom: 36px; }
+
+.map-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 44px);
+}
+
+.map-filters {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary, #0a2a3a);
+  border-bottom: 1px solid var(--border, #1a4a5a);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.map-filters label {
+  font-size: 12px;
+  color: var(--text-secondary, #B0CCCC);
+}
+
+.map-filters select,
+.map-filters input {
+  font-size: 12px;
+  padding: 4px 6px;
+  background: var(--bg-primary, #061a24);
+  color: var(--text-primary, #E0F0F0);
+  border: 1px solid var(--border, #1a4a5a);
+  border-radius: 4px;
+}
+
+.map-filters input[type="text"] { width: 120px; }
+.map-filters input[type="date"] { width: 130px; }
+
+#map {
+  flex: 1;
+  min-height: 0;
+}
+
+.map-status {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  background: var(--bg-secondary, #0a2a3a);
+  border-top: 1px solid var(--border, #1a4a5a);
+}
+
+/* Popup styling */
+.photo-popup { width: 220px; }
+.photo-popup img {
+  width: 100%;
+  height: 140px;
+  object-fit: cover;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  background: var(--bg-tertiary, #14374E);
+}
+.photo-popup .popup-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.photo-popup .popup-meta {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 2px;
+}
+.photo-popup .popup-species {
+  font-size: 11px;
+  color: #24E5CA;
+  font-style: italic;
+  margin-bottom: 4px;
+}
+.photo-popup .popup-link {
+  font-size: 11px;
+  color: #7ec8e3;
+  text-decoration: none;
+}
+.photo-popup .popup-link:hover { text-decoration: underline; }
+
+.popup-stars { color: #f0c040; font-size: 11px; }
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<div class="map-wrapper">
+  <div class="map-filters">
+    <label>Folder:</label>
+    <select id="filterFolder"><option value="">All folders</option></select>
+
+    <label>Min rating:</label>
+    <select id="filterRating">
+      <option value="">Any</option>
+      <option value="1">1+</option>
+      <option value="2">2+</option>
+      <option value="3">3+</option>
+      <option value="4">4+</option>
+      <option value="5">5</option>
+    </select>
+
+    <label>Keyword:</label>
+    <input type="text" id="filterKeyword" placeholder="Search...">
+
+    <label>From:</label>
+    <input type="date" id="filterDateFrom">
+    <label>To:</label>
+    <input type="date" id="filterDateTo">
+  </div>
+
+  <div id="map"></div>
+
+  <div class="map-status" id="mapStatus">Loading...</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script>
+var map = L.map('map').setView([20, 0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 19,
+}).addTo(map);
+
+var markers = L.markerClusterGroup();
+map.addLayer(markers);
+
+function buildStars(rating) {
+  if (!rating) return '';
+  var s = '';
+  for (var i = 0; i < 5; i++) s += i < rating ? '\u2605' : '\u2606';
+  return '<span class="popup-stars">' + s + '</span>';
+}
+
+function formatDate(ts) {
+  if (!ts) return '';
+  return ts.replace('T', ' ').substring(0, 16);
+}
+
+async function loadPhotos() {
+  var params = new URLSearchParams();
+  var folder = document.getElementById('filterFolder').value;
+  var rating = document.getElementById('filterRating').value;
+  var keyword = document.getElementById('filterKeyword').value;
+  var dateFrom = document.getElementById('filterDateFrom').value;
+  var dateTo = document.getElementById('filterDateTo').value;
+
+  if (folder) params.set('folder_id', folder);
+  if (rating) params.set('rating_min', rating);
+  if (keyword) params.set('keyword', keyword);
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+
+  var qs = params.toString();
+  var url = '/api/photos/geo' + (qs ? '?' + qs : '');
+
+  try {
+    var data = await safeFetch(url);
+    markers.clearLayers();
+
+    if (data.photos.length === 0) {
+      document.getElementById('mapStatus').textContent =
+        'No geolocated photos found. Photos with GPS data in their EXIF metadata will appear here.';
+      return;
+    }
+
+    data.photos.forEach(function(p) {
+      var thumbSrc = p.thumb_path ? '/thumbnails/' + encodeURIComponent(p.thumb_path) : '';
+      var imgTag = thumbSrc
+        ? '<img src="' + escapeAttr(thumbSrc) + '" alt="" onerror="this.style.display=\'none\'">'
+        : '';
+      var speciesLine = p.species
+        ? '<div class="popup-species">' + escapeHtml(p.species) + '</div>'
+        : '';
+
+      var popup = '<div class="photo-popup">'
+        + imgTag
+        + '<div class="popup-title">' + escapeHtml(p.filename) + '</div>'
+        + '<div class="popup-meta">' + escapeHtml(formatDate(p.timestamp)) + ' ' + buildStars(p.rating) + '</div>'
+        + speciesLine
+        + '<a class="popup-link" href="/browse?photo_id=' + p.id + '">View in Browse &rarr;</a>'
+        + '</div>';
+
+      var marker = L.marker([p.latitude, p.longitude]);
+      marker.bindPopup(popup);
+      markers.addLayer(marker);
+    });
+
+    map.fitBounds(markers.getBounds(), {padding: [30, 30]});
+    document.getElementById('mapStatus').textContent =
+      'Showing ' + data.total_geo + ' geolocated photos (' + data.total_photos + ' total)';
+  } catch (e) {
+    document.getElementById('mapStatus').textContent = 'Failed to load photos.';
+  }
+}
+
+/* Load folder list for filter dropdown */
+async function loadFolders() {
+  try {
+    var data = await safeFetch('/api/folders');
+    var sel = document.getElementById('filterFolder');
+    (data.folders || data || []).forEach(function(f) {
+      var opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.name || f.path;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+/* Debounce for keyword input */
+var _keywordTimer;
+document.getElementById('filterKeyword').addEventListener('input', function() {
+  clearTimeout(_keywordTimer);
+  _keywordTimer = setTimeout(loadPhotos, 400);
+});
+
+/* Filter change handlers */
+document.getElementById('filterFolder').addEventListener('change', loadPhotos);
+document.getElementById('filterRating').addEventListener('change', loadPhotos);
+document.getElementById('filterDateFrom').addEventListener('change', loadPhotos);
+document.getElementById('filterDateTo').addEventListener('change', loadPhotos);
+
+loadFolders();
+loadPhotos();
+</script>
+</body>
+</html>
