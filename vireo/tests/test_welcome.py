@@ -115,3 +115,46 @@ def test_settings_page_has_setup_link(app_and_db):
     resp = client.get("/settings")
     assert resp.status_code == 200
     assert b"/welcome?force=1" in resp.data
+
+
+def test_download_model_endpoint_exists(app_and_db):
+    """POST /api/jobs/download-model returns 400 when model_id missing (not 404)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/download-model", json={})
+    assert resp.status_code == 400
+    assert "model_id" in resp.get_json().get("error", "")
+
+
+def test_pipeline_download_endpoint_exists(app_and_db):
+    """POST /api/models/pipeline/download returns 400 when model_id missing (not 404)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/models/pipeline/download", json={})
+    assert resp.status_code == 400
+
+
+def test_welcome_page_contains_download_button(app_and_db, monkeypatch):
+    """Welcome page contains the download button."""
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/welcome")
+    assert resp.status_code == 200
+    assert b"downloadBtn" in resp.data
+    assert b"Download" in resp.data
+
+
+def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
+    """Welcome page contains skip link to /browse."""
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/welcome")
+    assert resp.status_code == 200
+    assert b"/browse" in resp.data
+    assert b"skip" in resp.data.lower() or b"Skip" in resp.data
