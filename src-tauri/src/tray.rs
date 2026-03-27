@@ -21,6 +21,11 @@ struct JobInfo {
     _job_type: String,
 }
 
+/// State for the tray polling thread's stop signal.
+pub struct TrayPollState {
+    pub stop: Arc<AtomicBool>,
+}
+
 /// Menu item IDs
 const SHOW_WINDOW: &str = "show_window";
 const HIDE_WINDOW: &str = "hide_window";
@@ -55,6 +60,7 @@ pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
 
     // Start the background polling thread
     let stop = Arc::new(AtomicBool::new(false));
+    app.manage(TrayPollState { stop: stop.clone() });
     start_job_polling(app.clone(), port, stop);
 
     Ok(())
@@ -78,6 +84,10 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         SHOW_WINDOW => show_main_window(app),
         HIDE_WINDOW => hide_main_window(app),
         QUIT => {
+            // Stop the polling thread
+            if let Some(poll_state) = app.try_state::<TrayPollState>() {
+                poll_state.stop.store(true, Ordering::Relaxed);
+            }
             // Clean up sidecar before quitting
             if let Some(state) = app.try_state::<crate::sidecar::SidecarState>() {
                 crate::sidecar::stop_sidecar(&state);
@@ -207,5 +217,6 @@ pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
+        log::info!("Tray job polling thread stopped");
     });
 }
