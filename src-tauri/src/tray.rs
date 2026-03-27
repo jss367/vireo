@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
+    image::Image,
     AppHandle, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -141,6 +142,21 @@ fn update_tray_menu(app: &AppHandle, job_status: &str) {
     }
 }
 
+/// Load the default tray icon (no badge).
+fn load_icon_idle(app: &AppHandle) -> Image<'static> {
+    let icon = app.default_window_icon().unwrap();
+    Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height())
+}
+
+/// Create a "busy" tray icon by loading the badge variant.
+/// Falls back to the default icon if the badge icon is missing.
+fn load_icon_busy(app: &AppHandle) -> Image<'static> {
+    match Image::from_path("icons/tray-busy.png") {
+        Ok(img) => img,
+        Err(_) => load_icon_idle(app),
+    }
+}
+
 /// Start a background thread that polls /api/jobs every 5 seconds
 /// and updates the tray menu with the current job count.
 pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
@@ -159,6 +175,27 @@ pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
                     format!("{} jobs running", count)
                 };
                 update_tray_menu(&app, &status);
+
+                // Update tooltip
+                let tooltip = if count == 0 {
+                    "Vireo".to_string()
+                } else {
+                    format!("Vireo - {}", status)
+                };
+                if let Some(tray) = app.tray_by_id("main-tray") {
+                    let _ = tray.set_tooltip(Some(&tooltip));
+                }
+
+                // Switch tray icon based on job activity
+                if let Some(tray) = app.tray_by_id("main-tray") {
+                    let icon = if count > 0 {
+                        load_icon_busy(&app)
+                    } else {
+                        load_icon_idle(&app)
+                    };
+                    let _ = tray.set_icon(Some(icon));
+                }
+
                 last_count = Some(count);
             }
 
