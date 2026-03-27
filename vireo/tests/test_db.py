@@ -198,6 +198,15 @@ def test_keyword_hierarchy(tmp_path):
     raptors = db.add_keyword('Raptors', parent_id=birds)
     hawk = db.add_keyword('Red-tailed hawk', parent_id=raptors)
 
+    # Keywords need photos in the workspace to appear in the tree
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.tag_photo(pid, birds)
+    db.tag_photo(pid, raptors)
+    db.tag_photo(pid, hawk)
+
     tree = db.get_keyword_tree()
     assert len(tree) == 3
 
