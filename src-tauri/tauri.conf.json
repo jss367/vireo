@@ -35,6 +35,15 @@
     ],
     "externalBin": [
       "binaries/vireo-server"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/jss367/vireo/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_PUBLIC_KEY_FROM_TASK_1"
+    }
   }
 }
