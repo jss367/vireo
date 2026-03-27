@@ -1,0 +1,108 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+
+<section class="hero section section--dark">
+  <div class="hero__inner container">
+    <div class="hero__text">
+      <h1 class="hero__headline">
+        Triage thousands of wildlife photos<br />in minutes, not hours.
+      </h1>
+      <p class="hero__subtitle">
+        Vireo uses on-device AI to classify, cull, and organize your wildlife
+        photography — no cloud uploads, no subscriptions.
+      </p>
+      <div class="hero__actions">
+        <a href={`${base}download/`} class="btn btn--primary btn--large">
+          Download for Free
+        </a>
+        <a
+          href="https://github.com/jss367/vireo"
+          target="_blank"
+          rel="noopener"
+          class="btn btn--outline btn--large"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </div>
+    <div class="hero__image">
+      <img
+        src={`${base}images/placeholder-hero.png`}
+        alt="Vireo application screenshot showing AI-powered wildlife photo classification"
+        class="screenshot"
+      />
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero {
+    min-height: calc(100vh - var(--nav-height));
+    display: flex;
+    align-items: center;
+  }
+
+  .hero__inner {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-4xl);
+    align-items: center;
+  }
+
+  .hero__headline {
+    font-size: var(--text-5xl);
+    line-height: var(--leading-tight);
+    margin-bottom: var(--space-lg);
+  }
+
+  .hero__subtitle {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+    line-height: var(--leading-normal);
+    max-width: 520px;
+    margin-bottom: var(--space-2xl);
+  }
+
+  .hero__actions {
+    display: flex;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+  }
+
+  .hero__image {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+
+  .hero__image img {
+    width: 100%;
+    max-width: 560px;
+  }
+
+  @media (max-width: 768px) {
+    .hero__inner {
+      grid-template-columns: 1fr;
+      gap: var(--space-2xl);
+      text-align: center;
+    }
+
+    .hero__subtitle {
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .hero__actions {
+      justify-content: center;
+    }
+
+    .hero__image {
+      order: -1;
+    }
+
+    .hero__image img {
+      max-width: 320px;
+    }
+  }
+</style>
