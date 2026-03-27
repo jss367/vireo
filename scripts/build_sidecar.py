@@ -2,10 +2,11 @@
 """Build the Vireo sidecar binary for Tauri.
 
 Usage:
-    python scripts/build_sidecar.py
+    python scripts/build_sidecar.py [--ci]
 
 Produces: src-tauri/binaries/vireo-server-<target-triple>
 """
+import argparse
 import os
 import platform
 import shutil
@@ -56,6 +57,13 @@ def get_target_triple():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Build sidecar binary")
+    parser.add_argument(
+        "--ci", action="store_true",
+        help="Apply CI optimizations (strip debug symbols, exclude test packages)",
+    )
+    args = parser.parse_args()
+
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target = get_target_triple()
     print(f"Building sidecar for target: {target}")
@@ -64,53 +72,63 @@ def main():
     sep = ";" if platform.system() == "Windows" else ":"
     vireo_dir = os.path.join(repo_root, "vireo")
 
+    pyinstaller_args = [
+        sys.executable, "-m", "PyInstaller",
+        "--onefile",
+        "--name", "vireo-server",
+        "--paths", vireo_dir,
+        # Bundle Flask templates and static assets — destinations are
+        # relative to _MEIPASS, and Flask resolves them relative to
+        # os.path.dirname(__file__) which is _MEIPASS for the entry script.
+        "--add-data", f"{os.path.join(vireo_dir, 'templates')}{sep}templates",
+        "--add-data", f"{os.path.join(vireo_dir, 'static')}{sep}static",
+        "--hidden-import", "config",
+        "--hidden-import", "db",
+        "--hidden-import", "jobs",
+        "--hidden-import", "scanner",
+        "--hidden-import", "classifier",
+        "--hidden-import", "thumbnails",
+        "--hidden-import", "pipeline",
+        "--hidden-import", "audit",
+        "--hidden-import", "sync",
+        "--hidden-import", "importer",
+        "--hidden-import", "labels",
+        "--hidden-import", "taxonomy",
+        "--hidden-import", "models",
+        "--hidden-import", "quality",
+        "--hidden-import", "sharpness",
+        "--hidden-import", "culling",
+        "--hidden-import", "selection",
+        "--hidden-import", "encounters",
+        "--hidden-import", "grouping",
+        "--hidden-import", "masking",
+        "--hidden-import", "scoring",
+        "--hidden-import", "compare",
+        "--hidden-import", "develop",
+        "--hidden-import", "dino_embed",
+        "--hidden-import", "image_loader",
+        "--hidden-import", "label_photos",
+        "--hidden-import", "analyze",
+        "--hidden-import", "bursts",
+        "--hidden-import", "detector",
+        "--hidden-import", "timm_classifier",
+    ]
+
+    if args.ci:
+        # Exclude packages that bloat the binary but aren't needed at runtime
+        pyinstaller_args += [
+            "--exclude-module", "tkinter",
+            "--exclude-module", "matplotlib",
+            "--exclude-module", "notebook",
+            "--exclude-module", "jupyter",
+            "--exclude-module", "IPython",
+            "--strip",
+        ]
+
+    pyinstaller_args.append(os.path.join(repo_root, "vireo", "app.py"))
+
     # Run PyInstaller
-    subprocess.run(
-        [
-            sys.executable, "-m", "PyInstaller",
-            "--onefile",
-            "--name", "vireo-server",
-            "--paths", vireo_dir,
-            # Bundle Flask templates and static assets — destinations are
-            # relative to _MEIPASS, and Flask resolves them relative to
-            # os.path.dirname(__file__) which is _MEIPASS for the entry script.
-            "--add-data", f"{os.path.join(vireo_dir, 'templates')}{sep}templates",
-            "--add-data", f"{os.path.join(vireo_dir, 'static')}{sep}static",
-            "--hidden-import", "config",
-            "--hidden-import", "db",
-            "--hidden-import", "jobs",
-            "--hidden-import", "scanner",
-            "--hidden-import", "classifier",
-            "--hidden-import", "thumbnails",
-            "--hidden-import", "pipeline",
-            "--hidden-import", "audit",
-            "--hidden-import", "sync",
-            "--hidden-import", "importer",
-            "--hidden-import", "labels",
-            "--hidden-import", "taxonomy",
-            "--hidden-import", "models",
-            "--hidden-import", "quality",
-            "--hidden-import", "sharpness",
-            "--hidden-import", "culling",
-            "--hidden-import", "selection",
-            "--hidden-import", "encounters",
-            "--hidden-import", "grouping",
-            "--hidden-import", "masking",
-            "--hidden-import", "scoring",
-            "--hidden-import", "compare",
-            "--hidden-import", "develop",
-            "--hidden-import", "dino_embed",
-            "--hidden-import", "image_loader",
-            "--hidden-import", "label_photos",
-            "--hidden-import", "analyze",
-            "--hidden-import", "bursts",
-            "--hidden-import", "detector",
-            "--hidden-import", "timm_classifier",
-            os.path.join(repo_root, "vireo", "app.py"),
-        ],
-        cwd=repo_root,
-        check=True,
-    )
+    subprocess.run(pyinstaller_args, cwd=repo_root, check=True)
 
     # Copy to Tauri binaries directory with target triple suffix
     src = os.path.join(repo_root, "dist", "vireo-server")
@@ -127,7 +145,10 @@ def main():
 
     shutil.copy2(src, dest)
     os.chmod(dest, 0o755)
-    print(f"Sidecar binary: {dest}")
+
+    # Report size
+    size_mb = os.path.getsize(dest) / (1024 * 1024)
+    print(f"Sidecar binary: {dest} ({size_mb:.1f} MB)")
 
     # Sign the sidecar with hardened runtime
     entitlements = os.path.join(repo_root, "src-tauri", "Entitlements.plist")

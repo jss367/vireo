@@ -1,3 +1,4 @@
+mod menu;
 mod sidecar;
 mod tray;
 mod updater;
@@ -48,6 +49,11 @@ pub fn run() {
                     }
                 }
             }
+
+            // Build and attach the native menu bar
+            let menu = menu::build_menu(app.handle())?;
+            app.set_menu(menu)?;
+
             let port = app.state::<SidecarState>().port;
             tray::create_tray(app.handle(), port)?;
             Ok(())
@@ -70,6 +76,19 @@ pub fn run() {
                     }
                 }
                 _ => {}
+            }
+        })
+        .on_menu_event(|app, event| {
+            let id = event.id().0.as_str();
+
+            // Navigation items — evaluate JS in the main webview
+            if let Some(route) = menu::route_for_id(id) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let js = format!("window.location.href = '{}'", route);
+                    if let Err(e) = window.eval(&js) {
+                        log::error!("Failed to navigate to {}: {}", route, e);
+                    }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

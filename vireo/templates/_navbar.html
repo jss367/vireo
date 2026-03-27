@@ -1305,6 +1305,11 @@ async function inatDoSubmit() {
   document.querySelector('#inatActions .modal-btn-cancel').textContent = 'Close';
 }
 
+// NOTE: Page navigation shortcuts (Cmd+1..0, Cmd+Shift+D/W/L, Cmd+,) are
+// handled by the native menu bar when running inside the Tauri desktop shell.
+// See src-tauri/src/menu.rs for the menu definition.
+// If adding JS-based navigation shortcuts, guard with:
+//   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;

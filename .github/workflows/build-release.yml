@@ -1,0 +1,227 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. v0.1.0). Leave blank for artifact-only build."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            rust-target: aarch64-apple-darwin
+            label: macos-arm64
+          - os: macos-13
+            rust-target: x86_64-apple-darwin
+            label: macos-x86_64
+          - os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+          - os: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.label }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Version sync ──────────────────────────────────────
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != ''
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ inputs.tag_name }}"
+          fi
+          python scripts/sync_version.py "$TAG"
+
+      # ── Python & sidecar ──────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install PyTorch (CPU only)
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e ".[dev]"
+
+      - name: Build sidecar binary
+        run: python scripts/build_sidecar.py --ci
+
+      - name: Smoke-test sidecar binary
+        shell: bash
+        run: |
+          TRIPLE=$(rustc --print host-tuple)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}.exe"
+          else
+            SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}"
+          fi
+
+          echo "Testing sidecar: $SIDECAR"
+          ls -lh "$SIDECAR"
+
+          # Start the sidecar on a random port
+          PORT=18937
+          "$SIDECAR" --port $PORT --no-browser --db ":memory:" &
+          PID=$!
+
+          # Wait for it to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:${PORT}/api/health" > /dev/null 2>&1; then
+              echo "Sidecar is healthy after ${i}s"
+              kill $PID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "ERROR: Sidecar did not become healthy within 30s"
+          kill $PID 2>/dev/null || true
+          exit 1
+
+      # ── Static HTML frontend ──────────────────────────────
+      - name: Build static frontend
+        run: python scripts/build_static.py
+
+      # ── Node.js (for Tauri CLI) ───────────────────────────
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      # ── Rust toolchain ────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ matrix.label }}
+
+      # ── Platform-specific system deps (Linux) ─────────────
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      # ── Tauri build ───────────────────────────────────────
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing (optional — builds succeed without these)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tauriScript: npx tauri
+          args: --target ${{ matrix.rust-target }}
+
+      # ── Upload artifacts ──────────────────────────────────
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireo-${{ matrix.label }}
+          path: |
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.dmg
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.app
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Release job ─────────────────────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != ''
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( \
+            -name "*.dmg" -o \
+            -name "*.msi" -o \
+            -name "*.exe" -o \
+            -name "*.AppImage" -o \
+            -name "*.deb" \
+          \) -exec cp {} release-files/ \;
+          ls -lh release-files/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Vireo ${{ steps.tag.outputs.tag }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          files: release-files/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
