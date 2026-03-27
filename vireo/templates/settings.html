@@ -805,6 +805,26 @@
     </div>
   </div>
 
+  <!-- About & Updates -->
+  <div class="section" id="updateSection" style="display:none;">
+    <div class="section-title">About & Updates</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+      <span style="font-size:13px;color:#B0CCCC;">Vireo v<span id="currentVersion">0.1.0</span></span>
+      <button class="btn-sm" id="checkUpdateBtn" onclick="doCheckForUpdate()">Check for Updates</button>
+      <span id="updateStatus" style="font-size:12px;color:#888;"></span>
+    </div>
+    <div id="updateAvailable" style="display:none;background:var(--bg-tertiary,#14374E);border:1px solid var(--border-secondary,#1A4560);border-radius:6px;padding:12px;margin-top:8px;">
+      <div style="font-size:13px;color:#24E5CA;margin-bottom:6px;">
+        Update available: v<span id="updateVersion"></span>
+      </div>
+      <div id="updateNotes" style="font-size:12px;color:#B0CCCC;margin-bottom:10px;white-space:pre-line;"></div>
+      <button class="btn-sm" id="installUpdateBtn" onclick="doInstallUpdate()" style="background:#24E5CA;color:#0A1C28;border-color:#24E5CA;">
+        Download & Install
+      </button>
+      <span id="installStatus" style="font-size:12px;color:#888;margin-left:8px;"></span>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -2001,6 +2021,54 @@ async function browseForOutputDir() {
   if (path) {
     document.getElementById('cfgDarktableOutputDir').value = path;
     saveConfig();
+  }
+}
+
+/* ---------- Auto-Update (Tauri only) ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    var section = document.getElementById('updateSection');
+    if (section) section.style.display = '';
+  }
+})();
+
+async function doCheckForUpdate() {
+  var btn = document.getElementById('checkUpdateBtn');
+  var status = document.getElementById('updateStatus');
+  var panel = document.getElementById('updateAvailable');
+  btn.disabled = true;
+  status.textContent = 'Checking...';
+  panel.style.display = 'none';
+
+  var result = await checkForAppUpdate();
+  btn.disabled = false;
+  if (!result) {
+    status.textContent = 'Could not reach update server.';
+    return;
+  }
+  if (!result.available) {
+    status.textContent = 'You are on the latest version.';
+    return;
+  }
+  status.textContent = '';
+  document.getElementById('updateVersion').textContent = result.version || '?';
+  document.getElementById('updateNotes').textContent = result.notes || '';
+  panel.style.display = '';
+}
+
+async function doInstallUpdate() {
+  var btn = document.getElementById('installUpdateBtn');
+  var status = document.getElementById('installStatus');
+  btn.disabled = true;
+  status.textContent = 'Downloading and installing...';
+
+  var ok = await downloadAndInstallUpdate();
+  if (ok) {
+    status.textContent = 'Installed! Restarting...';
+    setTimeout(function() { relaunchApp(); }, 1000);
+  } else {
+    btn.disabled = false;
+    status.textContent = 'Install failed. Check logs for details.';
   }
 }
 </script>
