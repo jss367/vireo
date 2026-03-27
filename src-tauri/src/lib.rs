@@ -49,13 +49,23 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if window.label() == "main" {
-                    let app = window.app_handle();
-                    if let Some(state) = app.try_state::<SidecarState>() {
-                        sidecar::stop_sidecar(&state);
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        // Don't close — just hide the window (minimize to tray)
+                        api.prevent_close();
+                        let _ = window.hide();
                     }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    if window.label() == "main" {
+                        let app = window.app_handle();
+                        if let Some(state) = app.try_state::<SidecarState>() {
+                            sidecar::stop_sidecar(&state);
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![get_server_port])
