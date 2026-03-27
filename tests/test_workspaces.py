@@ -641,6 +641,50 @@ def test_dashboard_top_keywords_scoped_by_workspace(db):
     assert "Robin" not in kw_names
 
 
+def test_keyword_tree_scoped_by_workspace(db):
+    """get_keyword_tree returns only keywords used by photos in the active workspace."""
+    ws_a = db.create_workspace("A")
+    fid_a = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws_a, fid_a)
+    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    k1 = db.add_keyword("Robin")
+    k2 = db.add_keyword("Jay")
+    db.tag_photo(pid_a, k1)
+    db.tag_photo(pid_a, k2)
+
+    ws_b = db.create_workspace("B")
+    fid_b = db.add_folder("/photos/b", name="b")
+    db.add_workspace_folder(ws_b, fid_b)
+    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    k3 = db.add_keyword("Hawk")
+    db.tag_photo(pid_b, k3)
+
+    db.set_active_workspace(ws_a)
+    tree = db.get_keyword_tree()
+    names = [kw["name"] for kw in tree]
+    assert "Robin" in names
+    assert "Jay" in names
+    assert "Hawk" not in names
+
+    db.set_active_workspace(ws_b)
+    tree = db.get_keyword_tree()
+    names = [kw["name"] for kw in tree]
+    assert "Hawk" in names
+    assert "Robin" not in names
+    assert "Jay" not in names
+
+
+def test_keyword_tree_empty_workspace(db):
+    """Empty workspace returns no keywords even if keywords exist globally."""
+    ws = db.create_workspace("Empty")
+    db.add_keyword("Robin")
+    db.set_active_workspace(ws)
+    tree = db.get_keyword_tree()
+    assert len(tree) == 0
+
+
 def test_get_collection_photos_scoped_to_workspace_folders(db):
     """Collection should only return photos from workspace folders."""
     ws = db.create_workspace("Test")

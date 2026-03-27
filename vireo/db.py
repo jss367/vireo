@@ -1217,9 +1217,16 @@ class Database:
         return merged
 
     def get_keyword_tree(self):
-        """Return all keywords as a list of Row objects."""
+        """Return keywords used by photos in the active workspace."""
         return self.conn.execute(
-            "SELECT id, name, parent_id FROM keywords ORDER BY name"
+            """SELECT DISTINCT k.id, k.name, k.parent_id
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ?
+               ORDER BY k.name""",
+            (self._ws_id(),),
         ).fetchall()
 
     def tag_photo(self, photo_id, keyword_id):
