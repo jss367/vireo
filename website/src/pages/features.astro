@@ -1,0 +1,197 @@
+---
+import Base from '../layouts/Base.astro';
+import FeatureSection from '../components/FeatureSection.astro';
+
+const base = import.meta.env.BASE_URL;
+---
+
+<Base title="Features — Vireo" description="Explore Vireo's AI classification, smart triage, interactive map, and ecosystem integration.">
+
+  <!-- Page Header -->
+  <section class="section section--dark features-header">
+    <div class="container">
+      <h1 class="features-header__title">Features</h1>
+      <p class="features-header__subtitle">Everything you need to organize thousands of wildlife photos efficiently.</p>
+    </div>
+  </section>
+
+  <!-- AI Classification -->
+  <section class="section">
+    <div class="container">
+      <FeatureSection
+        title="AI Species Classification"
+        description="Multiple specialized models identify over 10,000 species. Compare predictions side by side, see confidence scores, and override when your expertise says otherwise. BioCLIP, iNaturalist-trained classifiers, and MegaDetector work together to give you accurate, transparent results."
+        image={`${base}images/placeholder-classify.png`}
+        imageAlt="Pipeline view showing multi-model species predictions with confidence scores"
+      />
+    </div>
+  </section>
+
+  <!-- Smart Triage -->
+  <section class="section section--light">
+    <div class="container">
+      <FeatureSection
+        title="Smart Triage"
+        description="Every photo is automatically labeled keep, review, or reject based on quality scoring — sharpness, exposure, composition, noise. Photos are grouped into encounters and bursts so you can compare similar frames. Rapid-cull through a keyboard-driven interface to make final decisions fast."
+        image={`${base}images/placeholder-cull.png`}
+        imageAlt="Cull interface showing keep/review/reject workflow with quality scores"
+        reverse
+      />
+    </div>
+  </section>
+
+  <!-- Browse & Review -->
+  <section class="section">
+    <div class="container">
+      <FeatureSection
+        title="Browse & Review"
+        description="Filter and search your entire library by species, rating, flag, keyword, or folder. Inspect any photo's metadata, AI predictions, and edit history. The review interface gives you everything at a glance — no clicking through menus."
+        image={`${base}images/placeholder-browse.png`}
+        imageAlt="Browse view with active filters showing wildlife photo library"
+      />
+    </div>
+  </section>
+
+  <!-- Map View -->
+  <section class="section section--light">
+    <div class="container">
+      <FeatureSection
+        title="Map View"
+        description="See where your photos were taken on an interactive map. Geotagged photos are clustered by location — zoom in to explore individual shots, click to preview. A natural way to browse when location matters as much as species."
+        image={`${base}images/placeholder-map.png`}
+        imageAlt="Interactive map view with photo clusters and location markers"
+        reverse
+      />
+    </div>
+  </section>
+
+  <!-- Ecosystem Integration -->
+  <section class="section section--navy">
+    <div class="container ecosystem">
+      <h2 class="ecosystem__title">Works With Your Tools</h2>
+      <p class="ecosystem__subtitle">Vireo doesn't replace your workflow — it fits into it.</p>
+      <div class="ecosystem__grid">
+        <div class="ecosystem__card">
+          <h3>XMP Sidecars</h3>
+          <p>All metadata is stored in standard XMP files alongside your photos. Nothing is locked in a proprietary database.</p>
+        </div>
+        <div class="ecosystem__card">
+          <h3>Lightroom</h3>
+          <p>Import keyword hierarchies from your Lightroom catalog. Migrate without losing years of organization work.</p>
+        </div>
+        <div class="ecosystem__card">
+          <h3>iNaturalist</h3>
+          <p>Look up taxonomy directly from Vireo. Upload observations to iNaturalist when you're ready to share with the community.</p>
+        </div>
+        <div class="ecosystem__card">
+          <h3>Darktable</h3>
+          <p>XMP sidecar compatibility means your edits and metadata flow between Vireo and Darktable seamlessly.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Workspaces -->
+  <section class="section">
+    <div class="container">
+      <FeatureSection
+        title="Workspaces"
+        description="Run multiple independent projects side by side. Each workspace has its own predictions, collections, and settings — but photos and keywords are shared. Switch between a trip to Costa Rica and your backyard feeder without mixing data."
+        image={`${base}images/placeholder-workspaces.png`}
+        imageAlt="Workspace switcher showing multiple project workspaces"
+      />
+    </div>
+  </section>
+
+  <!-- Bottom CTA -->
+  <section class="section section--dark features-cta">
+    <div class="container features-cta__inner">
+      <h2>Ready to try it?</h2>
+      <p>Free, open source, and built for photographers who care about their files.</p>
+      <a href={`${base}download/`} class="btn btn--primary btn--large">Download Vireo</a>
+    </div>
+  </section>
+
+</Base>
+
+<style>
+  .features-header {
+    text-align: center;
+    padding-bottom: var(--space-3xl);
+  }
+
+  .features-header__title {
+    font-size: var(--text-4xl);
+    margin-bottom: var(--space-md);
+  }
+
+  .features-header__subtitle {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+  }
+
+  /* Ecosystem section */
+  .ecosystem {
+    text-align: center;
+  }
+
+  .ecosystem__title {
+    font-size: var(--text-3xl);
+    color: var(--color-warm-white);
+    margin-bottom: var(--space-sm);
+  }
+
+  .ecosystem__subtitle {
+    font-size: var(--text-lg);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-3xl);
+  }
+
+  .ecosystem__grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-xl);
+    text-align: left;
+  }
+
+  .ecosystem__card {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(36, 229, 202, 0.15);
+    border-radius: var(--border-radius-lg);
+    padding: var(--space-xl);
+  }
+
+  .ecosystem__card h3 {
+    font-size: var(--text-lg);
+    color: var(--color-accent);
+    margin-bottom: var(--space-sm);
+  }
+
+  .ecosystem__card p {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+  }
+
+  @media (max-width: 768px) {
+    .ecosystem__grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* Bottom CTA */
+  .features-cta__inner {
+    text-align: center;
+  }
+
+  .features-cta__inner h2 {
+    font-size: var(--text-3xl);
+    color: var(--color-warm-white);
+    margin-bottom: var(--space-md);
+  }
+
+  .features-cta__inner p {
+    font-size: var(--text-lg);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-2xl);
+  }
+</style>
