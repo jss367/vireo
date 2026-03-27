@@ -1,8 +1,24 @@
+use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::{
     AppHandle, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+
+#[derive(Deserialize)]
+struct JobsResponse {
+    active: Vec<JobInfo>,
+}
+
+#[derive(Deserialize)]
+struct JobInfo {
+    status: String,
+    #[serde(rename = "type")]
+    _job_type: String,
+}
 
 /// Menu item IDs
 const SHOW_WINDOW: &str = "show_window";
@@ -10,8 +26,8 @@ const HIDE_WINDOW: &str = "hide_window";
 const JOB_STATUS: &str = "job_status";
 const QUIT: &str = "quit";
 
-/// Build the tray icon with its context menu.
-pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
+/// Build the tray icon with its context menu and start job polling.
+pub fn create_tray(app: &AppHandle, port: u16) -> tauri::Result<()> {
     let menu = build_menu(app, "No active jobs")?;
 
     TrayIconBuilder::with_id("main-tray")
@@ -35,6 +51,10 @@ pub fn create_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+
+    // Start the background polling thread
+    let stop = Arc::new(AtomicBool::new(false));
+    start_job_polling(app.clone(), port, stop);
 
     Ok(())
 }
@@ -81,4 +101,74 @@ fn hide_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+}
+
+/// Query the Flask backend for running jobs.
+fn fetch_running_job_count(port: u16) -> usize {
+    let url = format!("http://127.0.0.1:{}/api/jobs", port);
+    match ureq::get(&url).call() {
+        Ok(resp) => match resp.into_string() {
+            Ok(body) => match serde_json::from_str::<JobsResponse>(&body) {
+                Ok(data) => data.active.iter().filter(|j| j.status == "running").count(),
+                Err(e) => {
+                    log::warn!("Failed to parse /api/jobs response: {}", e);
+                    0
+                }
+            },
+            Err(e) => {
+                log::warn!("Failed to read /api/jobs body: {}", e);
+                0
+            }
+        },
+        Err(e) => {
+            log::debug!("Failed to reach /api/jobs: {}", e);
+            0
+        }
+    }
+}
+
+/// Rebuild the tray menu with updated job status text.
+fn update_tray_menu(app: &AppHandle, job_status: &str) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        match build_menu(app, job_status) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => {
+                log::warn!("Failed to rebuild tray menu: {}", e);
+            }
+        }
+    }
+}
+
+/// Start a background thread that polls /api/jobs every 5 seconds
+/// and updates the tray menu with the current job count.
+pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut last_count: Option<usize> = None;
+        while !stop.load(Ordering::Relaxed) {
+            let count = fetch_running_job_count(port);
+
+            // Only update the menu if the count changed
+            if last_count != Some(count) {
+                let status = if count == 0 {
+                    "No active jobs".to_string()
+                } else if count == 1 {
+                    "1 job running".to_string()
+                } else {
+                    format!("{} jobs running", count)
+                };
+                update_tray_menu(&app, &status);
+                last_count = Some(count);
+            }
+
+            // Sleep in 500ms increments so we can check the stop flag
+            for _ in 0..10 {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    });
 }

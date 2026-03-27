@@ -45,7 +45,8 @@ pub fn run() {
                     }
                 }
             }
-            tray::create_tray(app.handle())?;
+            let port = app.state::<SidecarState>().port;
+            tray::create_tray(app.handle(), port)?;
             Ok(())
         })
         .on_window_event(|window, event| {
