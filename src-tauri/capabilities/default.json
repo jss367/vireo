@@ -19,6 +19,9 @@
     },
     "shell:allow-spawn",
     "shell:allow-kill",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "core:tray:default",
+    "core:tray:allow-set-icon",
+    "core:tray:allow-set-tooltip"
   ]
 }
