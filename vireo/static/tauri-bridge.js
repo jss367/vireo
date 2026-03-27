@@ -38,3 +38,46 @@ async function pickFile(opts) {
   });
   return result || null;
 }
+
+/**
+ * Check for an available update via the Rust command.
+ * @returns {Promise<{available: boolean, version: string|null, notes: string|null, date: string|null}|null>}
+ *   Returns null if not running in Tauri or on error.
+ */
+async function checkForAppUpdate() {
+  if (!isTauri()) return null;
+  try {
+    return await window.__TAURI_INTERNALS__.invoke('check_for_update');
+  } catch (e) {
+    console.error('Update check failed:', e);
+    return null;
+  }
+}
+
+/**
+ * Download and install an available update via the Rust command.
+ * @returns {Promise<boolean>} true if install succeeded
+ */
+async function downloadAndInstallUpdate() {
+  if (!isTauri()) return false;
+  try {
+    await window.__TAURI_INTERNALS__.invoke('install_update');
+    return true;
+  } catch (e) {
+    console.error('Update install failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Relaunch the application after installing an update.
+ * @returns {Promise<void>}
+ */
+async function relaunchApp() {
+  if (!isTauri()) return;
+  try {
+    await window.__TAURI_INTERNALS__.invoke('plugin:process|restart', {});
+  } catch (e) {
+    console.error('Relaunch failed:', e);
+  }
+}
