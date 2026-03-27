@@ -21,6 +21,24 @@ def update_json_file(path, version):
     print(f"  {path}: {old} -> {version}")
 
 
+def update_astro_version(path, version):
+    """Update the version constant in an Astro file."""
+    with open(path) as f:
+        content = f.read()
+    new_content, count = re.subn(
+        r"const version = '[^']*'",
+        f"const version = '{version}'",
+        content,
+        count=1,
+    )
+    if count == 0:
+        print(f"  {path}: WARNING - no version constant found")
+        return
+    with open(path, "w") as f:
+        f.write(new_content)
+    print(f"  {path}: updated to {version}")
+
+
 def update_toml_file(path, version):
     """Update the version in a TOML file (simple regex replacement)."""
     with open(path) as f:
@@ -52,6 +70,7 @@ def main():
     update_json_file("package.json", version)
     update_toml_file("src-tauri/Cargo.toml", version)
     update_toml_file("pyproject.toml", version)
+    update_astro_version("website/src/pages/download.astro", version)
     print("Done.")
 
 

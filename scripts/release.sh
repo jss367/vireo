@@ -60,7 +60,7 @@ echo ""
 
 # --- Commit version bump ---
 echo "==> Committing version bump..."
-git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock website/src/pages/download.astro
 git commit -m "release: v$NEW_VERSION" || true
 echo ""
 
