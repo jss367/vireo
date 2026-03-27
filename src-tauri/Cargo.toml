@@ -1,6 +1,6 @@
 [package]
 name = "vireo"
-version = "0.1.0"
+version = "0.2.1"
 description = "AI-powered wildlife photo organizer"
 authors = []
 license = "MIT"
@@ -14,7 +14,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.5.6" }
+tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
 serde_json = "1.0"
