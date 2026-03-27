@@ -19,6 +19,8 @@
     },
     "shell:allow-spawn",
     "shell:allow-kill",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "updater:default",
+    "process:allow-restart"
   ]
 }
