@@ -72,7 +72,12 @@ fi
 
 echo ""
 echo "=== Step 4/4: Notarize and staple ==="
-DMG_PATH=$(find "$REPO_ROOT/src-tauri/target/release/bundle/dmg" -name "*.dmg" | head -1)
+DMG_DIR="$REPO_ROOT/src-tauri/target/release/bundle/dmg"
+if [ -d "$DMG_DIR" ]; then
+    DMG_PATH=$(find "$DMG_DIR" -name "*.dmg" | head -1)
+else
+    DMG_PATH=""
+fi
 if [ -z "$DMG_PATH" ]; then
     echo "ERROR: No .dmg found in target/release/bundle/dmg/"
     exit 1
