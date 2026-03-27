@@ -71,3 +71,36 @@ Workspace management: `workspaces`, `workspace_folders`
 - Slow page navigation? Check if the bottom panel's SSE log stream or job polling is consuming Flask threads. The SSE stream and polling only run when the panel is open.
 - Request timing is logged for all API calls at INFO level and slow requests (>0.5s) at WARNING level.
 - The Flask dev server is single-process with threading. Long-running SSE connections can exhaust the thread pool.
+
+## PR Agent System
+
+Automated review cycle managed by `.github/workflows/pr-agent.yml`.
+
+### How it works
+
+1. Someone comments `/claude-fix` on a PR to activate the agent.
+2. Claude reads review comments, creates a **new fix PR** targeting the original PR's branch.
+3. The fix PR gets the `claude-agent` label automatically.
+4. When a review is submitted on a `claude-agent` PR (not an approval), Claude creates another fix PR.
+5. When an **approving review** is submitted or someone comments **👍**, the merge chain starts.
+6. The chain squash-merges from leaf to root, running tests between each merge.
+7. Branches are deleted after merge.
+
+### PR chain structure
+
+Each fix PR includes `Parent PR: #N` in its body. This is how the merge chain traces the ancestry:
+
+```
+main ← feature-v1 (PR A, original)
+         ← feature-v1-fix-1 (PR B, fixes round 1)
+            ← feature-v1-fix-1-fix-2 (PR C, fixes round 2)
+```
+
+### Conflict detection
+
+When `main` receives a push, the workflow checks all open `claude-agent` PRs for merge conflicts and resolves them automatically.
+
+### Key files
+
+- `.github/workflows/pr-agent.yml` — Workflow with all jobs
+- `.github/scripts/merge-chain.sh` — Squash-merge chain logic
