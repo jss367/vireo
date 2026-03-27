@@ -733,6 +733,20 @@ def test_set_workspace_active_labels_preserves_other_overrides(db):
     assert overrides["threshold"] == 0.5
 
 
+def test_empty_workspace_labels_does_not_fallback_to_global(db):
+    """An explicit empty active_labels [] should NOT fall back to global labels."""
+    ws = db.create_workspace("Empty Labels")
+    db.set_active_workspace(ws)
+    db.set_workspace_active_labels([])  # explicitly no labels
+
+    result = db.get_workspace_active_labels()
+    assert result == []  # should be empty list, not None
+
+    # Simulate what _load_labels does: ws_labels is not None should be True
+    ws_labels = db.get_workspace_active_labels()
+    assert ws_labels is not None  # must distinguish [] from None
+
+
 def test_keyword_tree_includes_ancestors(db):
     """get_keyword_tree includes untagged ancestor keywords so hierarchy is navigable."""
     ws = db.create_workspace("Hier")

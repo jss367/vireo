@@ -1215,7 +1215,7 @@ def create_app(db_path, thumb_cache_dir=None):
         else:
             db = _get_db()
             ws_labels = db.get_workspace_active_labels()
-            if ws_labels:
+            if ws_labels is not None:
                 saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
                 active_sets = [saved_by_file.get(p, {"labels_file": p}) for p in ws_labels if os.path.exists(p)]
             else:

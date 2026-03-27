@@ -104,7 +104,7 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     else:
         # Try workspace-scoped active labels first
         ws_labels = db.get_workspace_active_labels() if db else None
-        if ws_labels:
+        if ws_labels is not None:
             saved = get_saved_labels()
             saved_by_file = {s["labels_file"]: s for s in saved}
             active_sets = []
