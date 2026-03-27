@@ -81,6 +81,13 @@ pub fn run() {
         .on_menu_event(|app, event| {
             let id = event.id().0.as_str();
 
+            // "Report an Issue" — open GitHub issues in the default browser
+            if id == menu::ids::REPORT_ISSUE {
+                use tauri_plugin_shell::ShellExt;
+                let _ = app.shell().open("https://github.com/jss367/vireo/issues", None::<&str>);
+                return;
+            }
+
             // Navigation items — evaluate JS in the main webview
             if let Some(route) = menu::route_for_id(id) {
                 if let Some(window) = app.get_webview_window("main") {
