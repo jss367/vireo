@@ -700,3 +700,34 @@ def test_get_collection_photos_scoped_to_workspace_folders(db):
     photos = db.get_collection_photos(cid, per_page=100)
     assert len(photos) == 1
     assert photos[0]["filename"] == "lion.jpg"
+
+
+# -- Task 5: Workspace-scoped active labels helpers --
+
+
+def test_get_workspace_active_labels_default_empty(db):
+    """Workspace with no active_labels in config_overrides returns None."""
+    ws = db.create_workspace("Fresh")
+    db.set_active_workspace(ws)
+    assert db.get_workspace_active_labels() is None
+
+
+def test_set_and_get_workspace_active_labels(db):
+    """set/get workspace active labels round-trips through config_overrides."""
+    ws = db.create_workspace("Labeled")
+    db.set_active_workspace(ws)
+    paths = ["/home/user/.vireo/labels/ca-birds.txt", "/home/user/.vireo/labels/ca-reptiles.txt"]
+    db.set_workspace_active_labels(paths)
+    assert db.get_workspace_active_labels() == paths
+
+
+def test_set_workspace_active_labels_preserves_other_overrides(db):
+    """Setting active labels doesn't clobber other config_overrides."""
+    ws = db.create_workspace("WithConfig", config_overrides={"threshold": 0.5})
+    db.set_active_workspace(ws)
+    db.set_workspace_active_labels(["/path/to/labels.txt"])
+    result = db.get_workspace_active_labels()
+    assert result == ["/path/to/labels.txt"]
+    # Check threshold is still there
+    overrides = json.loads(db.get_workspace(ws)["config_overrides"])
+    assert overrides["threshold"] == 0.5

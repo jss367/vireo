@@ -475,6 +475,30 @@ class Database:
         except (json.JSONDecodeError, TypeError):
             return global_config
 
+    def get_workspace_active_labels(self):
+        """Return the active_labels list from workspace config_overrides, or None."""
+        ws = self.get_workspace(self._ws_id())
+        if not ws or not ws["config_overrides"]:
+            return None
+        try:
+            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            labels = overrides.get("active_labels")
+            return labels if isinstance(labels, list) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def set_workspace_active_labels(self, labels_files):
+        """Store active_labels in the workspace's config_overrides."""
+        ws = self.get_workspace(self._ws_id())
+        overrides = {}
+        if ws and ws["config_overrides"]:
+            try:
+                overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+        overrides["active_labels"] = labels_files
+        self.update_workspace(self._ws_id(), config_overrides=overrides)
+
     def delete_workspace(self, workspace_id):
         """Delete a workspace and all its scoped data (cascade)."""
         self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
