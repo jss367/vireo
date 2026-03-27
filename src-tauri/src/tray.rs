@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{
     AppHandle, Manager,
-    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -152,21 +151,6 @@ fn update_tray_menu(app: &AppHandle, job_status: &str) {
     }
 }
 
-/// Busy-state tray icon PNG, embedded at compile time so it works in
-/// packaged installs where the source `icons/` directory is absent.
-const TRAY_BUSY_PNG: &[u8] = include_bytes!("../icons/tray-busy.png");
-
-/// Load the default tray icon (no badge).
-fn load_icon_idle(app: &AppHandle) -> Image<'static> {
-    let icon = app.default_window_icon().unwrap();
-    Image::new_owned(icon.rgba().to_vec(), icon.width(), icon.height())
-}
-
-/// Create a "busy" tray icon from the compile-time-embedded PNG.
-fn load_icon_busy() -> Image<'static> {
-    Image::from_bytes(TRAY_BUSY_PNG).expect("embedded tray-busy.png is a valid PNG")
-}
-
 /// Start a background thread that polls /api/jobs every 5 seconds
 /// and updates the tray menu with the current job count.
 pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
@@ -194,16 +178,6 @@ pub fn start_job_polling(app: AppHandle, port: u16, stop: Arc<AtomicBool>) {
                 };
                 if let Some(tray) = app.tray_by_id("main-tray") {
                     let _ = tray.set_tooltip(Some(&tooltip));
-                }
-
-                // Switch tray icon based on job activity
-                if let Some(tray) = app.tray_by_id("main-tray") {
-                    let icon = if count > 0 {
-                        load_icon_busy()
-                    } else {
-                        load_icon_idle(&app)
-                    };
-                    let _ = tray.set_icon(Some(icon));
                 }
 
                 last_count = Some(count);
