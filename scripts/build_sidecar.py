@@ -13,6 +13,39 @@ import subprocess
 import sys
 
 
+def sign_binary(binary_path, entitlements_path=None):
+    """Sign the binary with the hardened runtime for macOS notarization."""
+    if platform.system() != "Darwin":
+        return
+
+    identity = os.environ.get("APPLE_SIGNING_IDENTITY")
+    if not identity:
+        print("WARNING: APPLE_SIGNING_IDENTITY not set, skipping code signing")
+        return
+
+    cmd = [
+        "codesign",
+        "--sign", identity,
+        "--options", "runtime",       # Enable hardened runtime
+        "--timestamp",                # Use Apple's timestamp server
+        "--force",                    # Replace any existing signature
+    ]
+    if entitlements_path and os.path.exists(entitlements_path):
+        cmd.extend(["--entitlements", entitlements_path])
+    cmd.append(binary_path)
+
+    print(f"Signing: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    print(f"Signed: {binary_path}")
+
+    # Verify the signature
+    subprocess.run(
+        ["codesign", "--verify", "--verbose", binary_path],
+        check=True,
+    )
+    print(f"Signature verified: {binary_path}")
+
+
 def get_target_triple():
     """Get the Rust target triple for the current platform."""
     result = subprocess.run(
@@ -95,6 +128,10 @@ def main():
     shutil.copy2(src, dest)
     os.chmod(dest, 0o755)
     print(f"Sidecar binary: {dest}")
+
+    # Sign the sidecar with hardened runtime
+    entitlements = os.path.join(repo_root, "src-tauri", "Entitlements.plist")
+    sign_binary(dest, entitlements)
 
 
 if __name__ == "__main__":
