@@ -1,0 +1,253 @@
+---
+import Base from '../layouts/Base.astro';
+
+const base = import.meta.env.BASE_URL;
+---
+
+<Base title="Docs — Vireo" description="Getting started with Vireo, FAQ, and keyboard shortcuts.">
+
+  <section class="section section--dark docs-header">
+    <div class="container">
+      <h1>Documentation</h1>
+      <p class="docs-header__subtitle">Everything you need to get started with Vireo.</p>
+    </div>
+  </section>
+
+  <!-- Getting Started -->
+  <section class="section" id="getting-started">
+    <div class="container docs-section">
+      <h2>Getting Started</h2>
+
+      <div class="docs-step">
+        <h3>1. Install Vireo</h3>
+        <p>Download the installer for your platform from the <a href={`${base}download/`}>download page</a> and run it. On macOS, drag Vireo to your Applications folder. On Windows, run the setup wizard. On Linux, install the .deb package.</p>
+      </div>
+
+      <div class="docs-step">
+        <h3>2. Add your photo folders</h3>
+        <p>Open Vireo and click <strong>Add Folder</strong> in the sidebar. Navigate to any directory containing your wildlife photos. Vireo reads your files in place — nothing is moved or copied. You can add multiple folders.</p>
+      </div>
+
+      <div class="docs-step">
+        <h3>3. Run your first scan</h3>
+        <p>Click <strong>Scan</strong> to start the classification pipeline. Vireo will detect subjects, classify species, and score quality for every photo. Progress streams in real time — you can watch the log panel for details. First runs download models (~500 MB), so give it a few minutes.</p>
+      </div>
+
+      <div class="docs-step">
+        <h3>4. Review results</h3>
+        <p>Once the scan completes, every photo has a label: <strong>keep</strong>, <strong>review</strong>, or <strong>reject</strong>. Open the <strong>Cull</strong> page to rapidly sort through them. Use keyboard shortcuts to move through photos and make decisions.</p>
+      </div>
+
+      <div class="docs-step">
+        <h3>5. Sync to XMP</h3>
+        <p>When you're happy with your decisions, sync changes to XMP sidecars. This writes standard metadata that Lightroom, Darktable, and other tools can read. Your decisions travel with your files.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section section--light" id="faq">
+    <div class="container docs-section">
+      <h2>FAQ</h2>
+
+      <div class="faq-item">
+        <h3>Where are my photos stored?</h3>
+        <p>On your filesystem, exactly where you put them. Vireo reads photos in place and never moves, copies, or uploads them. The database is just a cache — you can rebuild it anytime from your files.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>Does Vireo modify my photo files?</h3>
+        <p>No. Metadata is written to XMP sidecar files (<code>.xmp</code>) alongside your photos. Your original image files are never touched.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>Do I need an internet connection?</h3>
+        <p>Only for downloading AI models on first use. After that, everything runs locally on your machine. No cloud processing, no uploads, no accounts.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>Do I need a GPU?</h3>
+        <p>No, but it helps. Classification runs on CPU if no GPU is available — it's just slower. A CUDA-compatible NVIDIA GPU will significantly speed up large scans.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>Can I use Vireo with Lightroom?</h3>
+        <p>Yes. Vireo can import keyword hierarchies from Lightroom catalogs (<code>.lrcat</code> files), and its XMP sidecars are compatible with Lightroom. You can use both tools on the same photo library.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>What species can it identify?</h3>
+        <p>Over 10,000 species, depending on the model. The iNaturalist-trained classifier covers the broadest range. You can run multiple models and compare predictions.</p>
+      </div>
+
+      <div class="faq-item">
+        <h3>Is it free?</h3>
+        <p>Yes. Vireo is free and open source under the MIT license. You can use it, modify it, and contribute to it.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Keyboard Shortcuts -->
+  <section class="section" id="shortcuts">
+    <div class="container docs-section">
+      <h2>Keyboard Shortcuts</h2>
+      <p class="docs-section__intro">These shortcuts work in the cull and review interfaces for rapid triage.</p>
+
+      <table class="shortcuts-table">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><kbd>K</kbd></td><td>Mark as Keep</td></tr>
+          <tr><td><kbd>R</kbd></td><td>Mark as Review</td></tr>
+          <tr><td><kbd>X</kbd></td><td>Mark as Reject</td></tr>
+          <tr><td><kbd>&rarr;</kbd> / <kbd>J</kbd></td><td>Next photo</td></tr>
+          <tr><td><kbd>&larr;</kbd> / <kbd>H</kbd></td><td>Previous photo</td></tr>
+          <tr><td><kbd>1</kbd>-<kbd>5</kbd></td><td>Set star rating</td></tr>
+          <tr><td><kbd>0</kbd></td><td>Clear rating</td></tr>
+          <tr><td><kbd>P</kbd></td><td>Toggle flag (pick)</td></tr>
+          <tr><td><kbd>Z</kbd></td><td>Undo last action</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- GitHub Callout -->
+  <section class="section section--navy">
+    <div class="container github-callout">
+      <h2>Looking for more?</h2>
+      <p>For technical documentation, troubleshooting, API details, and contributing guidelines, visit the project on GitHub.</p>
+      <a href="https://github.com/jss367/vireo" class="btn btn--primary btn--large" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </section>
+
+</Base>
+
+<style>
+  .docs-header {
+    text-align: center;
+    padding-bottom: var(--space-3xl);
+  }
+
+  .docs-header h1 {
+    font-size: var(--text-4xl);
+    margin-bottom: var(--space-md);
+  }
+
+  .docs-header__subtitle {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+  }
+
+  /* Docs sections */
+  .docs-section h2 {
+    font-size: var(--text-3xl);
+    margin-bottom: var(--space-2xl);
+  }
+
+  .docs-section__intro {
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-xl);
+  }
+
+  /* Getting Started steps */
+  .docs-step {
+    margin-bottom: var(--space-xl);
+  }
+
+  .docs-step h3 {
+    font-size: var(--text-lg);
+    margin-bottom: var(--space-sm);
+  }
+
+  .docs-step p {
+    color: var(--color-text-muted);
+    max-width: 700px;
+  }
+
+  /* FAQ */
+  .faq-item {
+    margin-bottom: var(--space-xl);
+    padding-bottom: var(--space-xl);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .faq-item:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+  }
+
+  .faq-item h3 {
+    font-size: var(--text-lg);
+    margin-bottom: var(--space-sm);
+  }
+
+  .faq-item p {
+    color: var(--color-text-muted);
+    max-width: 700px;
+  }
+
+  .faq-item code {
+    background: rgba(0, 0, 0, 0.06);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  /* Keyboard shortcuts table */
+  .shortcuts-table {
+    width: 100%;
+    max-width: 500px;
+    border-collapse: collapse;
+  }
+
+  .shortcuts-table th {
+    text-align: left;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    padding: var(--space-sm) var(--space-md);
+    border-bottom: 2px solid rgba(0, 0, 0, 0.1);
+  }
+
+  .shortcuts-table td {
+    padding: var(--space-sm) var(--space-md);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  .shortcuts-table kbd {
+    display: inline-block;
+    background: var(--color-bg-light);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    min-width: 28px;
+    text-align: center;
+  }
+
+  /* GitHub callout */
+  .github-callout {
+    text-align: center;
+  }
+
+  .github-callout h2 {
+    font-size: var(--text-3xl);
+    color: var(--color-warm-white);
+    margin-bottom: var(--space-md);
+  }
+
+  .github-callout p {
+    font-size: var(--text-lg);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-2xl);
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+</style>

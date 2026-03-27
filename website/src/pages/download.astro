@@ -1,0 +1,328 @@
+---
+import Base from '../layouts/Base.astro';
+import DownloadButton from '../components/DownloadButton.astro';
+
+const base = import.meta.env.BASE_URL;
+const version = '0.2.1';
+const releaseBase = `https://github.com/jss367/vireo/releases/download/v${version}`;
+---
+
+<Base title="Download — Vireo" description="Download Vireo for macOS, Windows, or Linux. Free, open source, no account required.">
+
+  <!-- Hero -->
+  <section class="section section--dark download-hero">
+    <div class="container download-hero__inner">
+      <h1 class="download-hero__title">Download Vireo</h1>
+      <p class="download-hero__subtitle">
+        Free, open source, and runs entirely on your machine. No account, no cloud, no subscription.
+      </p>
+
+      <div class="download-hero__buttons">
+        <DownloadButton
+          platform="macos"
+          label="Download for macOS"
+          href={`${releaseBase}/Vireo_${version}_aarch64.dmg`}
+          version={version}
+        />
+        <DownloadButton
+          platform="windows"
+          label="Download for Windows"
+          href={`${releaseBase}/Vireo_${version}_x64-setup.exe`}
+          version={version}
+        />
+        <DownloadButton
+          platform="linux"
+          label="Download for Linux"
+          href={`${releaseBase}/Vireo_${version}_amd64.deb`}
+          version={version}
+        />
+      </div>
+
+      <p class="download-hero__alt-arch">
+        macOS button is for Apple Silicon. <a href={`${releaseBase}/Vireo_${version}_x64.dmg`}>Download for Intel Mac</a>
+      </p>
+
+      <p class="download-hero__releases">
+        <a href="https://github.com/jss367/vireo/releases" target="_blank" rel="noopener">
+          View all releases on GitHub &rarr;
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <!-- System Requirements -->
+  <section class="section section--light">
+    <div class="container">
+      <h2 class="sysreq__title">System Requirements</h2>
+      <div class="sysreq__grid">
+        <div class="sysreq__card">
+          <h3>macOS</h3>
+          <ul>
+            <li>macOS 12 Monterey or later</li>
+            <li>Apple Silicon or Intel</li>
+            <li>4 GB RAM minimum</li>
+            <li>500 MB disk space</li>
+          </ul>
+        </div>
+        <div class="sysreq__card">
+          <h3>Windows</h3>
+          <ul>
+            <li>Windows 10 (64-bit) or later</li>
+            <li>x86-64 processor</li>
+            <li>4 GB RAM minimum</li>
+            <li>500 MB disk space</li>
+          </ul>
+        </div>
+        <div class="sysreq__card">
+          <h3>Linux</h3>
+          <ul>
+            <li>Ubuntu 22.04+ / Debian 12+</li>
+            <li>x86-64 processor</li>
+            <li>4 GB RAM minimum</li>
+            <li>500 MB disk space</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section class="section">
+    <div class="container quickstart">
+      <h2 class="quickstart__title">Quick Start</h2>
+      <p class="quickstart__subtitle">Up and running in under five minutes.</p>
+      <div class="quickstart__steps">
+        <div class="quickstart__step">
+          <span class="quickstart__number">1</span>
+          <div>
+            <h3>Install</h3>
+            <p>Download the installer for your platform and run it. No admin privileges required on macOS.</p>
+          </div>
+        </div>
+        <div class="quickstart__step">
+          <span class="quickstart__number">2</span>
+          <div>
+            <h3>Add folders</h3>
+            <p>Point Vireo at one or more folders of wildlife photos. It reads your files in place — nothing is moved or copied.</p>
+          </div>
+        </div>
+        <div class="quickstart__step">
+          <span class="quickstart__number">3</span>
+          <div>
+            <h3>Scan &amp; classify</h3>
+            <p>Vireo downloads the AI model on first launch, then scans and classifies your photos locally.</p>
+          </div>
+        </div>
+        <div class="quickstart__step">
+          <span class="quickstart__number">4</span>
+          <div>
+            <h3>Review &amp; organize</h3>
+            <p>Browse predictions, cull rejects, assign keywords, and export XMP sidecars — all from one interface.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</Base>
+
+<style>
+  /* Hero */
+  .download-hero {
+    text-align: center;
+    padding-bottom: var(--space-5xl);
+  }
+
+  .download-hero__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .download-hero__title {
+    font-size: var(--text-4xl);
+    margin-bottom: var(--space-md);
+  }
+
+  .download-hero__subtitle {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+    max-width: 560px;
+    margin-bottom: var(--space-3xl);
+  }
+
+  .download-hero__buttons {
+    display: flex;
+    gap: var(--space-xl);
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: var(--space-2xl);
+  }
+
+  .download-hero__alt-arch {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-lg);
+  }
+
+  .download-hero__alt-arch a {
+    color: var(--color-text-muted);
+    text-decoration: underline;
+    transition: color var(--transition-fast);
+  }
+
+  .download-hero__alt-arch a:hover {
+    color: var(--color-accent);
+  }
+
+  .download-hero__releases {
+    font-size: var(--text-sm);
+  }
+
+  .download-hero__releases a {
+    color: var(--color-text-muted);
+    transition: color var(--transition-fast);
+  }
+
+  .download-hero__releases a:hover {
+    color: var(--color-accent);
+  }
+
+  /* System Requirements */
+  .sysreq__title {
+    font-size: var(--text-3xl);
+    text-align: center;
+    margin-bottom: var(--space-3xl);
+    color: var(--color-text-on-light);
+  }
+
+  .sysreq__grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-xl);
+  }
+
+  .sysreq__card {
+    background: var(--color-bg-white);
+    border: 1px solid #e2e8f0;
+    border-radius: var(--border-radius-lg);
+    padding: var(--space-xl);
+  }
+
+  .sysreq__card h3 {
+    font-size: var(--text-lg);
+    color: var(--color-teal-mid);
+    margin-bottom: var(--space-md);
+  }
+
+  .sysreq__card ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .sysreq__card li {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    padding: var(--space-xs) 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .sysreq__card li:last-child {
+    border-bottom: none;
+  }
+
+  /* Quick Start */
+  .quickstart {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  .quickstart__title {
+    font-size: var(--text-3xl);
+    text-align: center;
+    margin-bottom: var(--space-sm);
+  }
+
+  .quickstart__subtitle {
+    font-size: var(--text-lg);
+    color: var(--color-text-muted);
+    text-align: center;
+    margin-bottom: var(--space-3xl);
+  }
+
+  .quickstart__steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xl);
+  }
+
+  .quickstart__step {
+    display: flex;
+    gap: var(--space-xl);
+    align-items: flex-start;
+  }
+
+  .quickstart__number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: var(--color-navy-deep);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .quickstart__step h3 {
+    font-size: var(--text-lg);
+    margin-bottom: var(--space-xs);
+  }
+
+  .quickstart__step p {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    line-height: var(--leading-normal);
+  }
+
+  @media (max-width: 768px) {
+    .sysreq__grid {
+      grid-template-columns: 1fr;
+    }
+
+    .download-hero__buttons {
+      flex-direction: column;
+      align-items: center;
+    }
+  }
+</style>
+
+<script>
+  // OS detection: highlight the download button matching the user's platform
+  function detectPlatform(): string | null {
+    const ua = navigator.userAgent.toLowerCase();
+    const platform = (navigator as any).userAgentData?.platform?.toLowerCase() ?? navigator.platform?.toLowerCase() ?? '';
+
+    if (platform.includes('mac') || ua.includes('macintosh') || ua.includes('mac os')) {
+      return 'macos';
+    }
+    if (platform.includes('win') || ua.includes('windows')) {
+      return 'windows';
+    }
+    if (platform.includes('linux') || ua.includes('linux')) {
+      return 'linux';
+    }
+    return null;
+  }
+
+  const detected = detectPlatform();
+  if (detected) {
+    const btn = document.querySelector(`[data-platform="${detected}"]`);
+    if (btn) {
+      btn.classList.add('download-btn--highlighted');
+    }
+  }
+</script>

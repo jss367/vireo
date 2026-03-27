@@ -1,0 +1,160 @@
+---
+const currentPath = Astro.url.pathname;
+const base = import.meta.env.BASE_URL;
+
+const links = [
+  { href: `${base}`, label: 'Home' },
+  { href: `${base}features/`, label: 'Features' },
+  { href: `${base}download/`, label: 'Download' },
+  { href: `${base}docs/`, label: 'Docs' },
+];
+
+function isActive(href: string): boolean {
+  if (href === base || href === `${base}/`) {
+    return currentPath === base || currentPath === `${base}/` || currentPath === '/';
+  }
+  return currentPath.startsWith(href);
+}
+---
+
+<nav class="nav">
+  <div class="nav__inner container">
+    <a href={base} class="nav__logo">
+      <img src={`${base}images/logo.png`} alt="Vireo" width="32" height="32" />
+      <span>Vireo</span>
+    </a>
+
+    <button class="nav__toggle" aria-label="Toggle menu" aria-expanded="false">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+
+    <div class="nav__links">
+      {links.map(link => (
+        <a
+          href={link.href}
+          class:list={['nav__link', { 'nav__link--active': isActive(link.href) }]}
+        >
+          {link.label}
+        </a>
+      ))}
+      <a href={`${base}download/`} class="btn btn--primary nav__cta">Download</a>
+    </div>
+  </div>
+</nav>
+
+<style>
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    height: var(--nav-height);
+    background: rgba(0, 27, 41, 0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(36, 229, 202, 0.1);
+  }
+
+  .nav__inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 100%;
+  }
+
+  .nav__logo {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    font-size: var(--text-lg);
+    font-weight: 700;
+    color: var(--color-warm-white);
+    text-decoration: none;
+  }
+
+  .nav__logo:hover {
+    color: var(--color-accent);
+  }
+
+  .nav__logo img {
+    border-radius: 4px;
+  }
+
+  .nav__links {
+    display: flex;
+    align-items: center;
+    gap: var(--space-lg);
+  }
+
+  .nav__link {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition: color var(--transition-fast);
+  }
+
+  .nav__link:hover,
+  .nav__link--active {
+    color: var(--color-warm-white);
+  }
+
+  .nav__cta {
+    padding: var(--space-sm) var(--space-lg);
+    font-size: var(--text-sm);
+  }
+
+  .nav__toggle {
+    display: none;
+    flex-direction: column;
+    gap: 5px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: var(--space-sm);
+  }
+
+  .nav__toggle span {
+    display: block;
+    width: 24px;
+    height: 2px;
+    background: var(--color-warm-white);
+    transition: all var(--transition-fast);
+  }
+
+  @media (max-width: 768px) {
+    .nav__toggle {
+      display: flex;
+    }
+
+    .nav__links {
+      display: none;
+      position: absolute;
+      top: var(--nav-height);
+      left: 0;
+      right: 0;
+      flex-direction: column;
+      background: rgba(0, 27, 41, 0.98);
+      padding: var(--space-lg);
+      gap: var(--space-md);
+      border-bottom: 1px solid rgba(36, 229, 202, 0.1);
+    }
+
+    .nav__links--open {
+      display: flex;
+    }
+  }
+</style>
+
+<script>
+  const toggle = document.querySelector('.nav__toggle');
+  const links = document.querySelector('.nav__links');
+  if (toggle && links) {
+    toggle.addEventListener('click', () => {
+      const open = links.classList.toggle('nav__links--open');
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+  }
+</script>

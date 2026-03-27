@@ -1,0 +1,86 @@
+---
+const base = import.meta.env.BASE_URL;
+---
+
+<footer class="footer">
+  <div class="footer__inner container">
+    <div class="footer__brand">
+      <a href={base} class="footer__logo">
+        <img src={`${base}images/logo.png`} alt="Vireo" width="24" height="24" />
+        <span>Vireo</span>
+      </a>
+      <p class="footer__tagline">AI-powered wildlife photo organizer</p>
+    </div>
+
+    <div class="footer__links">
+      <a href="https://github.com/jss367/vireo" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/jss367/vireo/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/jss367/vireo/issues" target="_blank" rel="noopener">Issues</a>
+    </div>
+
+    <p class="footer__copy">
+      v0.2.1 &middot; MIT License
+    </p>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    background: var(--color-bg-dark);
+    color: var(--color-text-muted);
+    padding: var(--space-3xl) 0;
+    border-top: 1px solid rgba(36, 229, 202, 0.1);
+  }
+
+  .footer__inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-lg);
+    text-align: center;
+  }
+
+  .footer__brand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-xs);
+  }
+
+  .footer__logo {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    color: var(--color-warm-white);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .footer__logo img {
+    border-radius: 4px;
+  }
+
+  .footer__tagline {
+    font-size: var(--text-sm);
+  }
+
+  .footer__links {
+    display: flex;
+    gap: var(--space-xl);
+  }
+
+  .footer__links a {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    text-decoration: none;
+    transition: color var(--transition-fast);
+  }
+
+  .footer__links a:hover {
+    color: var(--color-accent);
+  }
+
+  .footer__copy {
+    font-size: var(--text-xs);
+  }
+</style>

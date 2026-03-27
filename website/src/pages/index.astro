@@ -1,0 +1,228 @@
+---
+import Base from '../layouts/Base.astro';
+import Hero from '../components/Hero.astro';
+import FeatureSection from '../components/FeatureSection.astro';
+
+const base = import.meta.env.BASE_URL;
+---
+
+<Base title="Vireo — AI-Powered Wildlife Photo Organizer">
+
+  <!-- Hero -->
+  <Hero />
+
+  <!-- How It Works -->
+  <section class="section section--light">
+    <div class="container">
+      <h2 class="hiw__heading">How It Works</h2>
+      <div class="hiw__grid">
+        <div class="hiw__step">
+          <div class="hiw__number">1</div>
+          <h3 class="hiw__title">Add Your Folders</h3>
+          <p class="hiw__desc">
+            Point Vireo at your photo directories. It scans and indexes images
+            instantly — no importing or copying files.
+          </p>
+        </div>
+        <div class="hiw__step">
+          <div class="hiw__number">2</div>
+          <h3 class="hiw__title">AI Classifies</h3>
+          <p class="hiw__desc">
+            On-device models identify species, detect duplicates, and score
+            image quality — all without uploading a single photo.
+          </p>
+        </div>
+        <div class="hiw__step">
+          <div class="hiw__number">3</div>
+          <h3 class="hiw__title">Review &amp; Export</h3>
+          <p class="hiw__desc">
+            Browse predictions, accept or reject with a click, and export
+            your curated selections to Darktable or your editor of choice.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Key Benefits -->
+  <section class="section">
+    <div class="container">
+      <h2 class="benefits__heading">Key Benefits</h2>
+      <FeatureSection
+        title="Cull Faster Than Ever"
+        description="Quickly separate keepers from rejects. Vireo's AI scores every shot so you spend your time on the best frames, not sifting through thousands of mediocre ones."
+        image={`${base}images/placeholder-cull.png`}
+        imageAlt="Screenshot of Vireo's culling interface with AI confidence scores"
+      />
+      <FeatureSection
+        title="Automatic Species Classification"
+        description="Powered by state-of-the-art vision models running entirely on your machine. Identify birds, mammals, reptiles, and more — no internet connection required."
+        image={`${base}images/placeholder-classify.png`}
+        imageAlt="Screenshot of Vireo classifying bird species with AI predictions"
+        reverse
+      />
+      <FeatureSection
+        title="Browse &amp; Organize Effortlessly"
+        description="Filter by species, confidence, rating, or collection. Create workspaces for different projects and keep everything organized without touching the file system."
+        image={`${base}images/placeholder-browse.png`}
+        imageAlt="Screenshot of Vireo's browse view with filters and collections"
+      />
+    </div>
+  </section>
+
+  <!-- Philosophy Teaser -->
+  <section class="section section--navy philosophy">
+    <div class="container philosophy__inner">
+      <h2 class="philosophy__heading">Your Photos, Your Machine</h2>
+      <p class="philosophy__text">
+        Vireo runs entirely on your computer. No cloud uploads, no
+        subscriptions, no telemetry. Your photos never leave your hard drive
+        — and the AI models run locally too.
+      </p>
+      <a href={`${base}features/`} class="philosophy__link">
+        Learn more about our approach &rarr;
+      </a>
+    </div>
+  </section>
+
+  <!-- Bottom CTA -->
+  <section class="section section--dark cta">
+    <div class="container cta__inner">
+      <h2 class="cta__heading">Ready to Organize Your Wildlife Photos?</h2>
+      <p class="cta__text">
+        Free, open-source, and built for photographers who care about privacy.
+      </p>
+      <div class="cta__actions">
+        <a href={`${base}download/`} class="btn btn--primary btn--large">
+          Download for Free
+        </a>
+        <a
+          href="https://github.com/jss367/vireo"
+          target="_blank"
+          rel="noopener"
+          class="btn btn--outline btn--large"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+</Base>
+
+<style>
+  /* ---- How It Works ---- */
+  .hiw__heading {
+    text-align: center;
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+    margin-bottom: var(--space-3xl);
+    color: var(--color-text-on-light);
+  }
+
+  .hiw__grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-2xl);
+  }
+
+  .hiw__step {
+    text-align: center;
+    padding: var(--space-xl);
+  }
+
+  .hiw__number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: var(--color-navy-deep);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    margin-bottom: var(--space-lg);
+  }
+
+  .hiw__title {
+    font-size: var(--text-xl);
+    margin-bottom: var(--space-sm);
+    color: var(--color-text-on-light);
+  }
+
+  .hiw__desc {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    line-height: var(--leading-normal);
+  }
+
+  @media (max-width: 768px) {
+    .hiw__grid {
+      grid-template-columns: 1fr;
+      gap: var(--space-xl);
+    }
+  }
+
+  /* ---- Key Benefits ---- */
+  .benefits__heading {
+    text-align: center;
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+    margin-bottom: var(--space-2xl);
+    color: var(--color-text-on-light);
+  }
+
+  /* ---- Philosophy Teaser ---- */
+  .philosophy__inner {
+    text-align: center;
+    max-width: 680px;
+  }
+
+  .philosophy__heading {
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+    margin-bottom: var(--space-lg);
+  }
+
+  .philosophy__text {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+    line-height: var(--leading-normal);
+    margin-bottom: var(--space-xl);
+  }
+
+  .philosophy__link {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-accent);
+  }
+
+  .philosophy__link:hover {
+    color: var(--color-accent-hover);
+  }
+
+  /* ---- Bottom CTA ---- */
+  .cta__inner {
+    text-align: center;
+  }
+
+  .cta__heading {
+    font-size: var(--text-4xl);
+    line-height: var(--leading-tight);
+    margin-bottom: var(--space-md);
+  }
+
+  .cta__text {
+    font-size: var(--text-xl);
+    color: var(--color-text-muted);
+    margin-bottom: var(--space-2xl);
+  }
+
+  .cta__actions {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-md);
+    flex-wrap: wrap;
+  }
+</style>

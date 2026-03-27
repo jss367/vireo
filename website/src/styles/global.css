@@ -1,0 +1,206 @@
+/* ============================================
+   Vireo Website — Design Tokens & Base Styles
+   Brand reference: /BRAND.md
+   ============================================ */
+
+:root {
+  /* Brand colors */
+  --color-teal-bright: #24E5CA;
+  --color-teal: #12C3B5;
+  --color-teal-mid: #038A96;
+  --color-slate-blue: #0D5B79;
+  --color-navy: #0A2F4D;
+  --color-navy-deep: #001B29;
+  --color-warm-white: #E0F0F0;
+
+  /* Semantic colors */
+  --color-bg-dark: var(--color-navy-deep);
+  --color-bg-navy: var(--color-navy);
+  --color-bg-light: #F8FAFA;
+  --color-bg-white: #FFFFFF;
+  --color-text-on-dark: var(--color-warm-white);
+  --color-text-on-light: #1A2A3A;
+  --color-text-muted: #6B7B8D;
+  --color-accent: var(--color-teal-bright);
+  --color-accent-hover: var(--color-teal);
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+  --text-4xl: 2.5rem;
+  --text-5xl: 3.5rem;
+
+  --leading-tight: 1.15;
+  --leading-normal: 1.6;
+
+  /* Spacing */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4rem;
+  --space-4xl: 6rem;
+  --space-5xl: 8rem;
+
+  /* Layout */
+  --max-width: 1200px;
+  --nav-height: 64px;
+  --border-radius: 8px;
+  --border-radius-lg: 12px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.2);
+  --shadow-screenshot: 0 8px 40px rgba(0, 0, 0, 0.3);
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-base: 250ms ease;
+}
+
+/* ============================================
+   Reset & Base
+   ============================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text-on-light);
+  background: var(--color-bg-white);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--color-accent-hover);
+}
+
+/* ============================================
+   Utility Classes
+   ============================================ */
+
+.container {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--space-xl);
+}
+
+.section {
+  padding: var(--space-5xl) 0;
+}
+
+.section--dark {
+  background: var(--color-bg-dark);
+  color: var(--color-text-on-dark);
+}
+
+.section--navy {
+  background: var(--color-bg-navy);
+  color: var(--color-text-on-dark);
+}
+
+.section--light {
+  background: var(--color-bg-light);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-xl);
+  font-size: var(--text-base);
+  font-weight: 600;
+  border-radius: var(--border-radius);
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  line-height: 1;
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: var(--color-navy-deep);
+  border-color: var(--color-accent);
+}
+
+.btn--primary:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: var(--color-navy-deep);
+}
+
+.btn--outline {
+  background: transparent;
+  color: var(--color-warm-white);
+  border-color: var(--color-warm-white);
+}
+
+.btn--outline:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--color-warm-white);
+}
+
+.btn--large {
+  padding: var(--space-lg) var(--space-2xl);
+  font-size: var(--text-lg);
+}
+
+/* Screenshot styling */
+.screenshot {
+  border-radius: var(--border-radius-lg);
+  box-shadow: var(--shadow-screenshot);
+}
+
+/* ============================================
+   Responsive
+   ============================================ */
+
+@media (max-width: 768px) {
+  :root {
+    --text-5xl: 2.25rem;
+    --text-4xl: 1.75rem;
+    --text-3xl: 1.5rem;
+    --space-5xl: 4rem;
+    --space-4xl: 3rem;
+  }
+
+  .container {
+    padding: 0 var(--space-md);
+  }
+}
