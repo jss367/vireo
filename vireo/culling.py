@@ -21,10 +21,10 @@ log = logging.getLogger(__name__)
 def analyze_for_culling(
     db,
     collection_id=None,
-    redundancy_threshold=0.88,
+    redundancy_threshold=None,
     separate_file_types=True,
-    time_window=60,
-    phash_threshold=19,
+    time_window=None,
+    phash_threshold=None,
     cross_bucket_merge=False,
     progress_callback=None,
 ):
@@ -35,8 +35,8 @@ def analyze_for_culling(
         collection_id: optional collection to scope to (None = all photos)
         redundancy_threshold: similarity threshold for redundancy (higher = stricter)
         separate_file_types: whether to separate RAW from non-RAW
-        time_window: max seconds gap for time bucketing (default 60)
-        phash_threshold: max Hamming distance for "same scene" (default 10)
+        time_window: max seconds gap for time bucketing (None = read from config)
+        phash_threshold: max Hamming distance for "same scene" (None = read from config)
         cross_bucket_merge: whether to merge time buckets by pHash similarity
         progress_callback: optional callable(message) for status updates
 
@@ -47,6 +47,15 @@ def analyze_for_culling(
             suggested_keepers: int
             suggested_rejects: int
     """
+    import config as cfg
+    user_cfg = cfg.load()
+    if redundancy_threshold is None:
+        redundancy_threshold = user_cfg.get("redundancy_threshold", 0.88)
+    if time_window is None:
+        time_window = user_cfg.get("cull_time_window", 60)
+    if phash_threshold is None:
+        phash_threshold = user_cfg.get("cull_phash_threshold", 19)
+
     # Get photos with predictions and embeddings
     if collection_id:
         photos = db.get_collection_photos(collection_id, per_page=999999)

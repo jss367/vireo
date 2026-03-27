@@ -902,6 +902,31 @@ var GROUPING_DEFAULTS = {
   burst_time_gap: 3, burst_phash_threshold: 12, burst_embedding_threshold: 80,
 };
 
+/* Load slider defaults from server config (overrides hard-coded values above) */
+(async function() {
+  try {
+    var cfg = await safeFetch('/api/config');
+    var p = cfg.pipeline || {};
+    SCORING_DEFAULTS.reject_crop_complete = Math.round((p.reject_crop_complete != null ? p.reject_crop_complete : 0.60) * 100);
+    SCORING_DEFAULTS.reject_focus = Math.round((p.reject_focus != null ? p.reject_focus : 0.35) * 100);
+    SCORING_DEFAULTS.reject_clip_high = Math.round((p.reject_clip_high != null ? p.reject_clip_high : 0.30) * 100);
+    SCORING_DEFAULTS.reject_composite = Math.round((p.reject_composite != null ? p.reject_composite : 0.40) * 100);
+    SCORING_DEFAULTS.burst_lambda = Math.round((p.burst_lambda != null ? p.burst_lambda : 0.85) * 100);
+    SCORING_DEFAULTS.burst_max_keep = p.burst_max_keep != null ? p.burst_max_keep : 3;
+    SCORING_DEFAULTS.encounter_lambda = Math.round((p.encounter_lambda != null ? p.encounter_lambda : 0.70) * 100);
+    SCORING_DEFAULTS.encounter_max_keep = p.encounter_max_keep != null ? p.encounter_max_keep : 5;
+    GROUPING_DEFAULTS.hard_cut_score = Math.round((p.hard_cut_score != null ? p.hard_cut_score : 0.42) * 100);
+    GROUPING_DEFAULTS.merge_score = Math.round((p.merge_score != null ? p.merge_score : 0.62) * 100);
+    GROUPING_DEFAULTS.burst_time_gap = p.burst_time_gap != null ? p.burst_time_gap : 3;
+    GROUPING_DEFAULTS.burst_phash_threshold = p.burst_phash_threshold != null ? p.burst_phash_threshold : 12;
+    GROUPING_DEFAULTS.burst_embedding_threshold = Math.round((p.burst_embedding_threshold != null ? p.burst_embedding_threshold : 0.80) * 100);
+    resetScoringDefaults();
+    resetGroupingDefaults();
+  } catch(e) {
+    console.warn('Could not load pipeline config, using built-in defaults:', e);
+  }
+})();
+
 function sliderVal(id) {
   var el = document.getElementById(id);
   return el ? parseFloat(el.value) : 0;

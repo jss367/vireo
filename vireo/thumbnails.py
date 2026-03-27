@@ -11,7 +11,7 @@ DEFAULT_CACHE_DIR = os.path.expanduser("~/.vireo/thumbnails")
 THUMB_SIZE = 400
 
 
-def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE):
+def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85):
     """Generate a JPEG thumbnail for a photo.
 
     Args:
@@ -19,6 +19,7 @@ def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE):
         source_path: path to the original image file
         cache_dir: directory to store thumbnails
         size: max dimension in pixels
+        quality: JPEG quality (1-95)
 
     Returns:
         path to the thumbnail file, or None on failure
@@ -34,7 +35,7 @@ def generate_thumbnail(photo_id, source_path, cache_dir, size=THUMB_SIZE):
         return None
 
     os.makedirs(cache_dir, exist_ok=True)
-    img.save(thumb_path, "JPEG", quality=85)
+    img.save(thumb_path, "JPEG", quality=quality)
     return thumb_path
 
 
@@ -46,7 +47,7 @@ def get_thumb_path(photo_id, cache_dir):
     return None
 
 
-def generate_all(db, cache_dir, progress_callback=None):
+def generate_all(db, cache_dir, progress_callback=None, config=None):
     """Generate thumbnails for photos that don't have one yet.
 
     Only processes photos missing thumbnails, so re-running is fast.
@@ -55,7 +56,13 @@ def generate_all(db, cache_dir, progress_callback=None):
         db: Database instance
         cache_dir: thumbnail cache directory
         progress_callback: optional callable(current, total)
+        config: optional config dict; if None, loads from disk
     """
+    import config as cfg
+    user_cfg = config or cfg.load()
+    thumb_size = user_cfg.get("thumbnail_size", THUMB_SIZE)
+    thumb_quality = user_cfg.get("thumbnail_quality", 85)
+
     os.makedirs(cache_dir, exist_ok=True)
 
     photos = db.get_photos(per_page=999999)
@@ -82,7 +89,7 @@ def generate_all(db, cache_dir, progress_callback=None):
     for i, photo in enumerate(needed):
         folder_path = folders.get(photo["folder_id"], "")
         source_path = os.path.join(folder_path, photo["filename"])
-        if generate_thumbnail(photo["id"], source_path, cache_dir) is not None:
+        if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:
             generated += 1
         else:
             failed += 1

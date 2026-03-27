@@ -1,5 +1,6 @@
 mod menu;
 mod sidecar;
+mod tray;
 
 use sidecar::SidecarState;
 use tauri::Manager;
@@ -50,16 +51,28 @@ pub fn run() {
             let menu = menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
 
+            let port = app.state::<SidecarState>().port;
+            tray::create_tray(app.handle(), port)?;
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if window.label() == "main" {
-                    let app = window.app_handle();
-                    if let Some(state) = app.try_state::<SidecarState>() {
-                        sidecar::stop_sidecar(&state);
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if window.label() == "main" {
+                        // Don't close — just hide the window (minimize to tray)
+                        api.prevent_close();
+                        let _ = window.hide();
                     }
                 }
+                tauri::WindowEvent::Destroyed => {
+                    if window.label() == "main" {
+                        let app = window.app_handle();
+                        if let Some(state) = app.try_state::<SidecarState>() {
+                            sidecar::stop_sidecar(&state);
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .on_menu_event(|app, event| {

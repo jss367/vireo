@@ -1,8 +1,12 @@
 import os
 
 
-def test_index_redirects_to_browse(app_and_db):
-    """GET / redirects to /browse."""
+def test_index_redirects_to_browse(app_and_db, monkeypatch):
+    """GET / redirects to /browse when a model is available."""
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "test", "name": "Test", "downloaded": True
+    })
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get('/')

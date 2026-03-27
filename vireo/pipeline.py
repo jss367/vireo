@@ -49,7 +49,7 @@ def _resolve_collection_photo_ids(db, collection_id):
     return {r["id"] for r in rows} if rows else set()
 
 
-def load_photo_features(db, collection_id=None):
+def load_photo_features(db, collection_id=None, config=None):
     """Load all pipeline-relevant features for workspace photos from the database.
 
     Returns a list of photo dicts ready for the pipeline stages, with:
@@ -60,6 +60,7 @@ def load_photo_features(db, collection_id=None):
     Args:
         db: Database instance with active workspace
         collection_id: optional collection ID to scope results
+        config: optional dict with settings (e.g. top_k_predictions)
 
     Returns:
         list of photo dicts
@@ -104,11 +105,12 @@ def load_photo_features(db, collection_id=None):
         (ws_id, ws_id),
     ).fetchall()
 
-    # Group predictions by photo_id, keep top 5
+    # Group predictions by photo_id, keep top K
+    top_k = (config or {}).get("top_k_predictions", 5)
     species_by_photo = defaultdict(list)
     for pr in pred_rows:
         pid = pr["photo_id"]
-        if len(species_by_photo[pid]) < 5:
+        if len(species_by_photo[pid]) < top_k:
             species_by_photo[pid].append((pr["species"], pr["confidence"], pr["model"]))
 
     # Load user-confirmed species keywords (alphabetically first wins

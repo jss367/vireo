@@ -172,6 +172,9 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
 
+        import config as cfg
+        det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
+
         start_time = job.get("_start_time", time.time())
         skipped_det = 0
         for i, photo in enumerate(photos):
@@ -206,7 +209,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 skipped_det += 1
                 continue
 
-            detections = detect_animals(image_path)
+            detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
             primary = get_primary_detection(detections)
 
             if primary:
