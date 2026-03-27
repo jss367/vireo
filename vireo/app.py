@@ -1213,7 +1213,13 @@ def create_app(db_path, thumb_cache_dir=None):
             names = [s.get("name", os.path.basename(s["labels_file"])) for s in active_sets]
             label_name = ", ".join(names)
         else:
-            active_sets = get_active_labels()
+            db = _get_db()
+            ws_labels = db.get_workspace_active_labels()
+            if ws_labels:
+                saved_by_file = {s["labels_file"]: s for s in get_saved_labels()}
+                active_sets = [saved_by_file.get(p, {"labels_file": p}) for p in ws_labels if os.path.exists(p)]
+            else:
+                active_sets = get_active_labels()
             if active_sets:
                 labels = load_merged_labels(active_sets)
                 label_count = len(labels)

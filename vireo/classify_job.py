@@ -75,7 +75,7 @@ def _load_taxonomy(taxonomy_path):
         return None
 
 
-def _load_labels(model_type, model_str, labels_file, labels_files):
+def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     """Resolve labels for classification.
 
     Returns:
@@ -102,15 +102,32 @@ def _load_labels(model_type, model_str, labels_file, labels_files):
             labels = [line.strip() for line in f if line.strip()]
         log.info("Using %d labels from file: %s", len(labels), labels_file)
     else:
-        active_sets = get_active_labels()
-        if active_sets:
+        # Try workspace-scoped active labels first
+        ws_labels = db.get_workspace_active_labels() if db else None
+        if ws_labels:
+            saved = get_saved_labels()
+            saved_by_file = {s["labels_file"]: s for s in saved}
+            active_sets = []
+            for p in ws_labels:
+                meta = saved_by_file.get(p, {"labels_file": p})
+                active_sets.append(meta)
             labels = load_merged_labels(active_sets)
             names = [s.get("name", "?") for s in active_sets]
             log.info(
-                "Using %d merged labels from active sets: %s",
+                "Using %d merged labels from workspace active sets: %s",
                 len(labels),
                 ", ".join(names),
             )
+        else:
+            active_sets = get_active_labels()
+            if active_sets:
+                labels = load_merged_labels(active_sets)
+                names = [s.get("name", "?") for s in active_sets]
+                log.info(
+                    "Using %d merged labels from global active sets: %s",
+                    len(labels),
+                    ", ".join(names),
+                )
 
     if labels:
         log.info(
@@ -660,6 +677,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         model_str=model_str,
         labels_file=params.labels_file,
         labels_files=params.labels_files,
+        db=thread_db,
     )
 
     # Phase 3: Get photos from collection
