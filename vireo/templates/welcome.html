@@ -2,9 +2,381 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Vireo - Welcome</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Setup</title>
+<style>
+  body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 40px 20px;
+  }
+  .setup-card {
+    max-width: 640px;
+    width: 100%;
+    background: var(--bg-secondary, #0E2A3D);
+    border: 1px solid var(--border-primary, #14374E);
+    border-radius: 12px;
+    padding: 40px;
+  }
+  .setup-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text-primary, #E0F0F0);
+    margin-bottom: 8px;
+  }
+  .setup-subtitle {
+    font-size: 14px;
+    color: var(--text-secondary, #7FA8A8);
+    margin-bottom: 32px;
+    line-height: 1.5;
+  }
+  .section-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary, #E0F0F0);
+    margin-bottom: 12px;
+  }
+  .model-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid var(--border-primary, #14374E);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .model-option:hover { border-color: var(--accent, #24E5CA); }
+  .model-option.selected { border-color: var(--accent, #24E5CA); background: rgba(36,229,202,0.05); }
+  .model-option input[type="radio"],
+  .model-option input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent, #24E5CA); }
+  .model-name { font-size: 13px; font-weight: 600; color: var(--text-primary, #E0F0F0); }
+  .model-desc { font-size: 12px; color: var(--text-secondary, #7FA8A8); margin-top: 2px; }
+  .model-size { font-size: 11px; color: var(--text-dim, #5A8890); margin-top: 2px; }
+  .model-badge {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E);
+    font-weight: 600; margin-left: 8px;
+  }
+
+  .progress-container { display: none; margin-top: 8px; }
+  .progress-bar-track {
+    height: 6px; background: var(--bg-tertiary, #14374E); border-radius: 3px; overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; background: var(--accent, #24E5CA); border-radius: 3px;
+    width: 0%; transition: width 0.3s;
+  }
+  .progress-label { font-size: 11px; color: var(--text-secondary, #7FA8A8); margin-top: 4px; }
+
+  .btn-primary {
+    display: inline-block; padding: 12px 32px; border: none; border-radius: 8px;
+    background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E);
+    font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 24px;
+    transition: opacity 0.2s;
+  }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .skip-link {
+    display: inline-block; margin-top: 12px; font-size: 12px;
+    color: var(--text-dim, #5A8890); text-decoration: none;
+  }
+  .skip-link:hover { color: var(--text-secondary, #7FA8A8); }
+
+  .download-status {
+    margin-top: 24px; padding: 16px; border-radius: 8px;
+    background: var(--bg-tertiary, #14374E); display: none;
+  }
+  .status-item { margin-bottom: 12px; }
+  .status-item:last-child { margin-bottom: 0; }
+  .status-name { font-size: 12px; font-weight: 500; color: var(--text-primary, #E0F0F0); margin-bottom: 4px; }
+
+  .done-icon { color: var(--accent, #24E5CA); margin-left: 8px; }
+  .error-icon { color: var(--danger, #E74C3C); margin-left: 8px; }
+</style>
 </head>
 <body>
-<h1>Welcome to Vireo</h1>
+
+<div class="setup-card">
+  <div class="setup-title">Welcome to Vireo</div>
+  <div class="setup-subtitle">
+    Vireo uses machine learning models to identify wildlife in your photos.
+    Choose a classification model to get started. You can download additional
+    models later from Settings.
+  </div>
+
+  <!-- Classification Model (required) -->
+  <div class="section-label">Classification Model (required)</div>
+  <div id="classificationModels">Loading...</div>
+
+  <!-- Pipeline Models (optional) -->
+  <div class="section-label" style="margin-top:24px;">
+    Pipeline Models (optional)
+    <span style="font-weight:400;color:var(--text-dim,#5A8890);font-size:11px;margin-left:8px;">
+      Used for advanced culling features
+    </span>
+  </div>
+  <div id="pipelineModels">Loading...</div>
+
+  <!-- Actions -->
+  <div style="display:flex;flex-direction:column;align-items:flex-start;">
+    <button class="btn-primary" id="downloadBtn" onclick="startDownloads()">
+      Download &amp; Get Started
+    </button>
+    <a href="#" class="skip-link" onclick="skipSetup(); return false;">Skip for now — I'll set up models later</a>
+  </div>
+
+  <!-- Download Status -->
+  <div class="download-status" id="downloadStatus"></div>
+</div>
+
+<script src="/static/vireo-utils.js"></script>
+<script>
+/* Inline safeFetch/safeEventSource fallback for standalone welcome page */
+if (typeof safeFetch === 'undefined') {
+  async function safeFetch(url, opts, cfg) {
+    cfg = cfg || {};
+    var resp = await fetch(url, opts);
+    if (!resp.ok) {
+      var body = {};
+      try { body = await resp.json(); } catch(e) {}
+      throw new Error(body.error || 'Request failed (' + resp.status + ')');
+    }
+    var text = await resp.text();
+    if (!text) return null;
+    return JSON.parse(text);
+  }
+}
+if (typeof safeEventSource === 'undefined') {
+  function safeEventSource(url, callbacks) {
+    callbacks = callbacks || {};
+    var source = new EventSource(url);
+    source.addEventListener('progress', function(e) {
+      if (callbacks.onProgress) callbacks.onProgress(JSON.parse(e.data));
+    });
+    source.addEventListener('complete', function(e) {
+      source.close();
+      if (callbacks.onComplete) callbacks.onComplete(JSON.parse(e.data));
+    });
+    source.onerror = function() {
+      source.close();
+      if (callbacks.onError) callbacks.onError();
+    };
+    return source;
+  }
+}
+
+var selectedClassificationModel = 'bioclip-vit-b-16';
+var selectedPipelineModels = [];
+var downloadQueue = [];
+var isDownloading = false;
+
+async function loadModels() {
+  try {
+    var data = await safeFetch('/api/models/status', {}, { toast: false });
+
+    // Render classification models
+    var classDiv = document.getElementById('classificationModels');
+    var classHtml = '';
+    var classModels = data.available_models.filter(function(m) {
+      return m.model_type === 'bioclip' || m.model_type === 'timm';
+    });
+    classModels.forEach(function(m) {
+      var checked = m.id === selectedClassificationModel ? 'checked' : '';
+      var selected = m.id === selectedClassificationModel ? ' selected' : '';
+      var badge = m.id === 'bioclip-vit-b-16' ? '<span class="model-badge">Recommended</span>' : '';
+      var downloadedTag = m.downloaded ? '<span class="done-icon">Downloaded</span>' : '';
+      classHtml += '<label class="model-option' + selected + '" data-model="' + m.id + '">';
+      classHtml += '<input type="radio" name="classModel" value="' + m.id + '" ' + checked + ' onchange="selectClassModel(this)">';
+      classHtml += '<div>';
+      classHtml += '<div class="model-name">' + m.name + badge + downloadedTag + '</div>';
+      classHtml += '<div class="model-desc">' + m.description + '</div>';
+      classHtml += '<div class="model-size">' + m.size_mb + ' MB</div>';
+      classHtml += '<div class="progress-container" id="progress-' + m.id + '">';
+      classHtml += '<div class="progress-bar-track"><div class="progress-bar-fill" id="bar-' + m.id + '"></div></div>';
+      classHtml += '<div class="progress-label" id="label-' + m.id + '"></div>';
+      classHtml += '</div>';
+      classHtml += '</div>';
+      classHtml += '</label>';
+    });
+    classDiv.innerHTML = classHtml;
+
+    // Render pipeline models (optional)
+    var pipeDiv = document.getElementById('pipelineModels');
+    var pipeHtml = '';
+    var pipeModels = [
+      { id: 'megadetector-v6', name: 'MegaDetector V6', desc: 'Animal detection — finds and crops animals in your photos', size: '~50 MB' },
+      { id: 'sam2-tiny', name: 'SAM2 Tiny', desc: 'Mask generation for subject isolation', size: '~40 MB' },
+      { id: 'vit-s14', name: 'DINOv2 ViT-S/14', desc: 'Visual embeddings for grouping similar photos', size: '~85 MB' },
+    ];
+    pipeModels.forEach(function(m) {
+      pipeHtml += '<label class="model-option" data-model="' + m.id + '">';
+      pipeHtml += '<input type="checkbox" value="' + m.id + '" onchange="togglePipeModel(this)">';
+      pipeHtml += '<div>';
+      pipeHtml += '<div class="model-name">' + m.name + '</div>';
+      pipeHtml += '<div class="model-desc">' + m.desc + '</div>';
+      pipeHtml += '<div class="model-size">' + m.size + '</div>';
+      pipeHtml += '<div class="progress-container" id="progress-' + m.id + '">';
+      pipeHtml += '<div class="progress-bar-track"><div class="progress-bar-fill" id="bar-' + m.id + '"></div></div>';
+      pipeHtml += '<div class="progress-label" id="label-' + m.id + '"></div>';
+      pipeHtml += '</div>';
+      pipeHtml += '</div>';
+      pipeHtml += '</label>';
+    });
+    pipeDiv.innerHTML = pipeHtml;
+
+    // If classification model is already downloaded, pre-check and note it
+    if (data.classification.ready) {
+      selectedClassificationModel = data.classification.model_id;
+    }
+  } catch(e) {
+    document.getElementById('classificationModels').textContent = 'Error loading models: ' + e;
+  }
+}
+
+function selectClassModel(radio) {
+  selectedClassificationModel = radio.value;
+  document.querySelectorAll('#classificationModels .model-option').forEach(function(el) {
+    el.classList.toggle('selected', el.dataset.model === radio.value);
+  });
+}
+
+function togglePipeModel(checkbox) {
+  var id = checkbox.value;
+  var label = checkbox.closest('.model-option');
+  if (checkbox.checked) {
+    if (selectedPipelineModels.indexOf(id) === -1) selectedPipelineModels.push(id);
+    label.classList.add('selected');
+  } else {
+    selectedPipelineModels = selectedPipelineModels.filter(function(m) { return m !== id; });
+    label.classList.remove('selected');
+  }
+}
+
+async function startDownloads() {
+  var btn = document.getElementById('downloadBtn');
+  btn.disabled = true;
+  btn.textContent = 'Downloading...';
+  isDownloading = true;
+
+  var statusDiv = document.getElementById('downloadStatus');
+  statusDiv.style.display = 'block';
+
+  // Build download queue: classification model first, then pipeline models
+  downloadQueue = [];
+
+  // Check if classification model needs download
+  var classResponse = await safeFetch('/api/models/status', {}, { toast: false });
+  var classModel = classResponse.available_models.find(function(m) { return m.id === selectedClassificationModel; });
+  if (classModel && !classModel.downloaded) {
+    downloadQueue.push({ type: 'classification', id: selectedClassificationModel, name: classModel.name });
+  }
+
+  // Add pipeline models
+  selectedPipelineModels.forEach(function(id) {
+    var names = { 'megadetector-v6': 'MegaDetector V6', 'sam2-tiny': 'SAM2 Tiny', 'vit-s14': 'DINOv2 ViT-S/14' };
+    downloadQueue.push({ type: 'pipeline', id: id, name: names[id] || id });
+  });
+
+  if (downloadQueue.length === 0) {
+    // Nothing to download, go straight to browse
+    await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
+    window.location.href = '/browse';
+    return;
+  }
+
+  // Process downloads sequentially
+  for (var i = 0; i < downloadQueue.length; i++) {
+    var item = downloadQueue[i];
+    await downloadModel(item);
+  }
+
+  // All done
+  await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
+  btn.textContent = 'Setup Complete!';
+  setTimeout(function() { window.location.href = '/browse'; }, 1000);
+}
+
+function downloadModel(item) {
+  return new Promise(function(resolve, reject) {
+    var progressEl = document.getElementById('progress-' + item.id);
+    var barEl = document.getElementById('bar-' + item.id);
+    var labelEl = document.getElementById('label-' + item.id);
+    if (progressEl) progressEl.style.display = 'block';
+
+    var endpoint, body;
+    if (item.type === 'classification') {
+      endpoint = '/api/jobs/download-model';
+      body = { model_id: item.id };
+    } else {
+      endpoint = '/api/models/pipeline/download';
+      body = { model_id: item.id };
+    }
+
+    safeFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, { toast: false }).then(function(data) {
+      if (!data.job_id) {
+        if (labelEl) labelEl.textContent = 'Error: no job started';
+        resolve();
+        return;
+      }
+
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (barEl && p.total > 0) {
+            var pct = Math.round((p.current / p.total) * 100);
+            barEl.style.width = pct + '%';
+          }
+          if (labelEl) {
+            labelEl.textContent = p.phase || p.current_file || ('Downloading ' + item.name + '...');
+          }
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (barEl) barEl.style.width = '100%';
+            if (labelEl) labelEl.textContent = item.name + ' downloaded successfully';
+          } else {
+            if (labelEl) {
+              labelEl.textContent = 'Failed: ' + (result.errors && result.errors[0] || 'Unknown error');
+              labelEl.style.color = 'var(--danger, #E74C3C)';
+            }
+          }
+          resolve();
+        },
+        onError: function() {
+          if (labelEl) {
+            labelEl.textContent = 'Connection lost during download';
+            labelEl.style.color = 'var(--danger, #E74C3C)';
+          }
+          resolve();
+        }
+      });
+    }).catch(function(e) {
+      if (labelEl) {
+        labelEl.textContent = 'Error: ' + e.message;
+        labelEl.style.color = 'var(--danger, #E74C3C)';
+      }
+      resolve();
+    });
+  });
+}
+
+async function skipSetup() {
+  await safeFetch('/api/setup/complete', { method: 'POST' }, { toast: false });
+  window.location.href = '/browse';
+}
+
+/* safeFetch/safeEventSource are loaded from vireo-utils.js or inline fallbacks above */
+loadModels();
+</script>
 </body>
 </html>
