@@ -19,6 +19,7 @@ pub mod ids {
     pub const NAV_WORKSPACE: &str = "nav_workspace";
     pub const NAV_SETTINGS: &str = "nav_settings";
     pub const NAV_LOGS: &str = "nav_logs";
+    pub const REPORT_ISSUE: &str = "report_issue";
 }
 
 /// Map a menu item ID to its Flask route path.
@@ -193,10 +194,14 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     #[allow(unused_mut)]
     let mut help_builder = SubmenuBuilder::new(app, "Help");
 
+    let report_issue = MenuItemBuilder::with_id(ids::REPORT_ISSUE, "Report an Issue...")
+        .build(app)?;
+    help_builder = help_builder.item(&report_issue);
+
     #[cfg(not(target_os = "macos"))]
     {
         let about = PredefinedMenuItem::about(app, Some("About Vireo"), Some(build_about_metadata()))?;
-        help_builder = help_builder.item(&about);
+        help_builder = help_builder.separator().item(&about);
     }
 
     let help_menu = help_builder.build()?;
