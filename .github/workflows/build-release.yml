@@ -44,6 +44,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── Version sync ──────────────────────────────────────
+      - name: Sync version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/sync_version.py ${GITHUB_REF#refs/tags/}
+
       # ── Python & sidecar ──────────────────────────────────
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
