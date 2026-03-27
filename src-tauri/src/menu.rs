@@ -55,6 +55,17 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .quit()
         .build()?;
 
+    // -- Edit menu (required for Cmd+C/V/X/A/Z to work on macOS) --
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
     // -- View menu (page navigation) --
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(
@@ -158,6 +169,7 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     // -- Assemble the full menu bar --
     MenuBuilder::new(app)
         .item(&file_menu)
+        .item(&edit_menu)
         .item(&view_menu)
         .item(&window_menu)
         .item(&help_menu)
