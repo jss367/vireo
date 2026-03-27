@@ -1330,7 +1330,7 @@ document.addEventListener('keydown', function(e) {
   if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
   e.preventDefault();
   var navLinks = Array.prototype.slice.call(
-    document.querySelectorAll('.navbar > a[href]:not(.brand)')
+    document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)')
   );
   if (!navLinks.length) return;
   var activeIdx = -1;
