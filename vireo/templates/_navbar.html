@@ -1325,6 +1325,23 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
+/* ---------- Ctrl+Tab / Ctrl+Shift+Tab — cycle navbar tabs ---------- */
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
+  e.preventDefault();
+  var navLinks = Array.prototype.slice.call(
+    document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)')
+  );
+  if (!navLinks.length) return;
+  var activeIdx = -1;
+  for (var i = 0; i < navLinks.length; i++) {
+    if (navLinks[i].classList.contains('active')) { activeIdx = i; break; }
+  }
+  var dir = e.shiftKey ? -1 : 1;
+  var next = (activeIdx + dir + navLinks.length) % navLinks.length;
+  window.location.href = navLinks[next].getAttribute('href');
+});
+
 /* ---------- Keyboard Shortcut Helpers (global) ---------- */
 function parseShortcut(str) {
   var parts = str.toLowerCase().split('+');
