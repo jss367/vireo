@@ -257,6 +257,9 @@ def create_app(db_path, thumb_cache_dir=None):
         active = get_active_model()
         if active and active.get("downloaded"):
             return redirect("/browse")
+        user_cfg = cfg.load()
+        if user_cfg.get("setup_complete"):
+            return redirect("/browse")
         return redirect("/welcome")
 
     @app.route("/welcome")
@@ -266,6 +269,14 @@ def create_app(db_path, thumb_cache_dir=None):
         if active and active.get("downloaded") and not request.args.get("force"):
             return redirect("/browse")
         return render_template("welcome.html")
+
+    @app.route("/api/setup/complete", methods=["POST"])
+    def api_setup_complete():
+        """Mark first-launch setup as done (called after download or skip)."""
+        user_cfg = cfg.load()
+        user_cfg["setup_complete"] = True
+        cfg.save(user_cfg)
+        return jsonify({"ok": True})
 
     @app.route("/browse")
     def browse():

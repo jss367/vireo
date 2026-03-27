@@ -158,3 +158,36 @@ def test_welcome_page_contains_skip_link(app_and_db, monkeypatch):
     assert resp.status_code == 200
     assert b"/browse" in resp.data
     assert b"skip" in resp.data.lower() or b"Skip" in resp.data
+
+
+def test_setup_complete_flag_default(tmp_path, monkeypatch):
+    """setup_complete defaults to False."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    assert cfg.load().get("setup_complete") is False
+
+
+def test_index_respects_setup_complete_flag(app_and_db, monkeypatch):
+    """GET / goes to /browse when setup_complete is True, even without model."""
+    import models
+    import config as cfg
+
+    monkeypatch.setattr(models, "get_active_model", lambda: None)
+    cfg.set("setup_complete", True)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/")
+    assert resp.status_code == 302
+    assert "/browse" in resp.headers["Location"]
+
+
+def test_welcome_sets_setup_complete_on_skip(app_and_db, monkeypatch):
+    """GET /welcome/complete sets the setup_complete flag."""
+    import config as cfg
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/setup/complete")
+    assert resp.status_code == 200
+    assert cfg.load().get("setup_complete") is True
