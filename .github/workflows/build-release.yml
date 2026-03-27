@@ -50,6 +50,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Install PyTorch (CPU only)
+        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
