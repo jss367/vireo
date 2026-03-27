@@ -1984,7 +1984,10 @@ async function cleanKeywords() {
 async function loadVersion() {
   try {
     var d = await safeFetch('/api/version', {}, { toast: false });
-    document.getElementById('appVersion').textContent = 'v' + d.version;
+    var ver = 'v' + d.version;
+    document.getElementById('appVersion').textContent = ver;
+    var cv = document.getElementById('currentVersion');
+    if (cv) cv.textContent = d.version;
   } catch(e) {}
 }
 

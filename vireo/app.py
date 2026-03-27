@@ -1652,7 +1652,12 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/version")
     def api_version():
-        return jsonify({"version": "26.3.1"})
+        try:
+            from importlib.metadata import version as pkg_version
+            ver = pkg_version("vireo")
+        except Exception:
+            ver = "0.1.0"
+        return jsonify({"version": ver})
 
     # -- Import API routes --
 
