@@ -731,3 +731,27 @@ def test_set_workspace_active_labels_preserves_other_overrides(db):
     # Check threshold is still there
     overrides = json.loads(db.get_workspace(ws)["config_overrides"])
     assert overrides["threshold"] == 0.5
+
+
+def test_keyword_tree_includes_ancestors(db):
+    """get_keyword_tree includes untagged ancestor keywords so hierarchy is navigable."""
+    ws = db.create_workspace("Hier")
+    fid = db.add_folder("/photos/h", name="h")
+    db.add_workspace_folder(ws, fid)
+    pid = db.add_photo(folder_id=fid, filename="h.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+
+    # Create hierarchy: Birds > Raptors > Red-tailed Hawk
+    birds = db.add_keyword("Birds")
+    raptors = db.add_keyword("Raptors", parent_id=birds)
+    hawk = db.add_keyword("Red-tailed Hawk", parent_id=raptors)
+
+    # Only tag the leaf (mimics scanner behavior)
+    db.tag_photo(pid, hawk)
+
+    db.set_active_workspace(ws)
+    tree = db.get_keyword_tree()
+    names = {kw["name"] for kw in tree}
+    assert "Red-tailed Hawk" in names
+    assert "Raptors" in names  # ancestor must be included
+    assert "Birds" in names    # root ancestor must be included
