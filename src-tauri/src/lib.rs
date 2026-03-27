@@ -1,4 +1,5 @@
 mod sidecar;
+mod tray;
 
 use sidecar::SidecarState;
 use tauri::Manager;
@@ -44,6 +45,7 @@ pub fn run() {
                     }
                 }
             }
+            tray::create_tray(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
