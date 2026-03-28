@@ -495,6 +495,49 @@ def test_pairing_transfers_inat_submissions(tmp_path):
     assert subs_after[raw_id_after]["observation_id"] == 12345
 
 
+def test_pairing_deduplicates_inat_submissions(tmp_path):
+    """When both raw and JPEG have iNat submissions for the same observation, pairing doesn't crash."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG_001.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG_001.cr3", extension=".cr3",
+                          file_size=2000, file_mtime=1.0)
+
+    # Both photos submitted for the same observation (e.g., user submitted JPEG,
+    # then raw was auto-submitted via a script)
+    db.record_inat_submission(jpeg_id, observation_id=12345,
+                              observation_url="https://inaturalist.org/observations/12345")
+    db.record_inat_submission(raw_id, observation_id=12345,
+                              observation_url="https://inaturalist.org/observations/12345")
+    # JPEG also has a different observation
+    db.record_inat_submission(jpeg_id, observation_id=67890,
+                              observation_url="https://inaturalist.org/observations/67890")
+
+    # Should NOT raise IntegrityError
+    _pair_raw_jpeg_companions(db)
+
+    photos = db.conn.execute("SELECT id, filename FROM photos").fetchall()
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "IMG_001.cr3"
+
+    raw_id_after = photos[0]["id"]
+    # Both observations should be preserved on the primary
+    subs = db.conn.execute(
+        "SELECT observation_id FROM inat_submissions WHERE photo_id = ? ORDER BY observation_id",
+        (raw_id_after,),
+    ).fetchall()
+    obs_ids = [s["observation_id"] for s in subs]
+    assert 12345 in obs_ids
+    assert 67890 in obs_ids
+
+
 def test_scan_stores_file_hash(tmp_path):
     """Scanning a folder computes and stores SHA-256 file_hash for each photo."""
     from db import Database

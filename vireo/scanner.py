@@ -160,7 +160,15 @@ def _pair_raw_jpeg_companions(db):
             "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
             (primary["id"], companion["id"]),
         )
-        # Transfer iNaturalist submissions before CASCADE deletes them
+        # Transfer iNaturalist submissions: deduplicate on (photo_id, observation_id)
+        # before reassigning to avoid UNIQUE constraint violation.
+        db.conn.execute(
+            """DELETE FROM inat_submissions
+               WHERE photo_id = ? AND observation_id IN (
+                   SELECT observation_id FROM inat_submissions WHERE photo_id = ?
+               )""",
+            (companion["id"], primary["id"]),
+        )
         db.conn.execute(
             "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
             (primary["id"], companion["id"]),
