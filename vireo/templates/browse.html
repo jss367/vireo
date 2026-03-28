@@ -316,16 +316,84 @@ body {
   outline: none;
 }
 .add-kw-input:focus { border-color: var(--accent, #24E5CA); }
-.detail-exif {
+.detail-summary {
   font-size: 12px;
-  color: #999;
-  line-height: 1.6;
+  color: var(--text-dim, #999);
+  line-height: 1.8;
+}
+.detail-summary .summary-camera {
+  color: var(--text-primary, #e0e0e0);
+  font-weight: 500;
+}
+.detail-summary .summary-lens {
+  color: var(--text-secondary, #ccc);
+  font-style: italic;
+}
+.detail-summary .summary-exposure {
+  font-family: monospace;
+  letter-spacing: 0.5px;
 }
 .detail-path {
   font-size: 11px;
   color: var(--text-faint, #555);
   word-break: break-all;
   margin-top: 6px;
+}
+.meta-group {
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.meta-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #ccc);
+  background: var(--bg-tertiary, #14374E);
+  border-radius: 4px;
+  user-select: none;
+}
+.meta-group-header:hover {
+  background: var(--bg-hover, #1A4560);
+}
+.meta-group-count {
+  font-size: 11px;
+  color: var(--text-dim, #888);
+}
+.meta-group-body {
+  display: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.meta-group.open .meta-group-body {
+  display: block;
+}
+.meta-group.open .meta-group-header {
+  border-radius: 4px 4px 0 0;
+}
+.meta-tag-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.meta-tag-row:last-child {
+  border-bottom: none;
+}
+.meta-tag-name {
+  color: var(--text-dim, #888);
+  min-width: 120px;
+  flex-shrink: 0;
+  word-break: break-word;
+}
+.meta-tag-value {
+  color: var(--text-primary, #e0e0e0);
+  word-break: break-all;
 }
 
 /* Calendar heatmap */
@@ -674,8 +742,17 @@ body {
 
     <div class="detail-section">
       <div class="detail-section-title">Info</div>
-      <div class="detail-exif" id="detailExif"></div>
+      <div class="detail-summary" id="detailSummary"></div>
       <div class="detail-path" id="detailPath"></div>
+    </div>
+
+    <div class="detail-section" id="detailMetadataSection" style="display:none;">
+      <div class="detail-section-title">All Metadata</div>
+      <input type="text" id="metadataSearch" class="add-kw-input"
+             placeholder="Search metadata..."
+             oninput="filterMetadata(this.value)"
+             style="margin-bottom:8px;">
+      <div id="metadataGroups"></div>
     </div>
 
     <div class="detail-section" style="display:flex;gap:8px;">
@@ -1692,15 +1769,155 @@ function renderDetail(photo) {
     xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">XMP file exists but has no keywords</span>';
   }
 
-  // EXIF info
-  var exif = '';
-  if (photo.timestamp) exif += 'Date: ' + photo.timestamp + '<br>';
-  if (photo.width && photo.height) exif += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
-  if (photo.file_size) exif += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
-  document.getElementById('detailExif').innerHTML = exif;
+  // Quick summary
+  var summary = '';
+  var meta = photo.metadata;
+  if (meta) {
+    var exifTags = meta.EXIF || {};
+    var composite = meta.Composite || {};
+
+    // Camera (remove make from model if model already starts with it)
+    var make = exifTags.Make || '';
+    var model = exifTags.Model || '';
+    var camera = model.startsWith(make) ? model : (make + ' ' + model).trim();
+    if (camera) summary += '<div class="summary-camera">' + escapeHtml(camera) + '</div>';
+
+    // Lens
+    var lens = composite.LensID || exifTags.LensModel || composite.Lens || '';
+    if (lens) summary += '<div class="summary-lens">' + escapeHtml(String(lens)) + '</div>';
+
+    // Exposure line: focal | aperture | shutter | ISO
+    var parts = [];
+    if (exifTags.FocalLength) parts.push(Math.round(exifTags.FocalLength) + 'mm');
+    if (exifTags.FNumber) parts.push('f/' + exifTags.FNumber);
+    if (exifTags.ExposureTime) {
+      if (exifTags.ExposureTime < 1) {
+        parts.push('1/' + Math.round(1 / exifTags.ExposureTime) + 's');
+      } else {
+        parts.push(exifTags.ExposureTime + 's');
+      }
+    }
+    if (exifTags.ISO) parts.push('ISO ' + exifTags.ISO);
+    if (parts.length) summary += '<div class="summary-exposure">' + parts.join('&nbsp;&nbsp;') + '</div>';
+  }
+
+  // Date, dimensions, file size (always from photo fields)
+  if (photo.timestamp) summary += 'Date: ' + photo.timestamp + '<br>';
+  if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
+  if (photo.file_size) summary += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
+  document.getElementById('detailSummary').innerHTML = summary;
 
   // Path
   document.getElementById('detailPath').textContent = photo.filename;
+
+  // Clear search and render metadata groups
+  var searchInput = document.getElementById('metadataSearch');
+  if (searchInput) searchInput.value = '';
+  renderMetadataGroups(photo.metadata);
+}
+
+function renderMetadataGroups(metadata) {
+  var container = document.getElementById('metadataGroups');
+  var section = document.getElementById('detailMetadataSection');
+  container.innerHTML = '';
+
+  if (!metadata) {
+    section.style.display = 'none';
+    return;
+  }
+
+  // Sort groups: EXIF first, then alphabetical, _meta last
+  var groups = Object.keys(metadata).sort(function(a, b) {
+    if (a === 'EXIF') return -1;
+    if (b === 'EXIF') return 1;
+    if (a === '_meta') return 1;
+    if (b === '_meta') return -1;
+    return a.localeCompare(b);
+  });
+
+  // Skip groups with 0 tags
+  groups = groups.filter(function(g) {
+    return Object.keys(metadata[g]).length > 0;
+  });
+
+  if (groups.length === 0) {
+    section.style.display = 'none';
+    return;
+  }
+
+  section.style.display = '';
+
+  groups.forEach(function(group) {
+    var tags = metadata[group];
+    var tagNames = Object.keys(tags).sort();
+
+    var div = document.createElement('div');
+    div.className = 'meta-group';
+    div.setAttribute('data-group', group);
+
+    var header = document.createElement('div');
+    header.className = 'meta-group-header';
+    header.innerHTML = '<span>' + escapeHtml(group) + '</span><span class="meta-group-count">' + tagNames.length + '</span>';
+    header.onclick = function() { div.classList.toggle('open'); };
+
+    var body = document.createElement('div');
+    body.className = 'meta-group-body';
+
+    tagNames.forEach(function(tag) {
+      var val = tags[tag];
+      if (typeof val === 'object' && val !== null) val = JSON.stringify(val);
+      var row = document.createElement('div');
+      row.className = 'meta-tag-row';
+      row.setAttribute('data-tag', tag.toLowerCase());
+      row.setAttribute('data-value', String(val).toLowerCase());
+      row.innerHTML = '<span class="meta-tag-name">' + escapeHtml(tag) + '</span><span class="meta-tag-value">' + escapeHtml(String(val)) + '</span>';
+      body.appendChild(row);
+    });
+
+    div.appendChild(header);
+    div.appendChild(body);
+    container.appendChild(div);
+  });
+}
+
+function filterMetadata(query) {
+  var q = query.toLowerCase().trim();
+  var groups = document.querySelectorAll('#metadataGroups .meta-group');
+
+  groups.forEach(function(group) {
+    if (!q) {
+      // Reset: show all groups, collapse all
+      group.style.display = '';
+      group.classList.remove('open');
+      group.querySelectorAll('.meta-tag-row').forEach(function(row) {
+        row.style.display = '';
+      });
+      return;
+    }
+
+    var rows = group.querySelectorAll('.meta-tag-row');
+    var hasMatch = false;
+
+    rows.forEach(function(row) {
+      var tag = row.getAttribute('data-tag') || '';
+      var val = row.getAttribute('data-value') || '';
+      var matches = tag.indexOf(q) !== -1 || val.indexOf(q) !== -1;
+      row.style.display = matches ? '' : 'none';
+      if (matches) hasMatch = true;
+    });
+
+    // Also check if group name matches
+    var groupName = (group.getAttribute('data-group') || '').toLowerCase();
+    if (groupName.indexOf(q) !== -1) {
+      hasMatch = true;
+      rows.forEach(function(row) { row.style.display = ''; });
+    }
+
+    group.style.display = hasMatch ? '' : 'none';
+    if (hasMatch && q) {
+      group.classList.add('open');
+    }
+  });
 }
 
 function closeDetail() {
