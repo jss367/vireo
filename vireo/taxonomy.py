@@ -1,21 +1,44 @@
 """iNaturalist taxonomy: download, parse, and lookup.
 
+Includes two loading approaches:
+1. DWCA-based: Downloads the DarwinCore Archive zip and builds a JSON lookup file.
+2. AWS open-data based: Downloads taxa.csv.gz and loads taxa into the SQLite
+   database for structured querying. This is the newer approach used by
+   load_taxa_from_file() and load_taxonomy().
+
+Data source (AWS): https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz
+Format: Tab-separated, 6 columns: taxon_id, ancestry, rank_level, rank, name, active
+
 Usage:
     python vireo/taxonomy.py --download [--output taxonomy.json]
 """
 
 import argparse
 import csv
+import gzip
 import io
 import json
 import logging
 import os
+import urllib.request
 import zipfile
 from datetime import date
 
 log = logging.getLogger(__name__)
 
 DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
+
+# --- AWS open-data taxa.csv.gz loader constants ---
+TAXA_URL = "https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz"
+
+TARGET_KINGDOMS = {"Animalia", "Plantae", "Fungi"}
+TARGET_KINGDOM_INAT_IDS = {1, 47126, 47170}  # Animalia, Plantae, Fungi
+
+MAJOR_RANK_LEVELS = {70, 60, 50, 40, 30, 20, 10}  # kingdom through species
+RANK_LEVEL_TO_NAME = {
+    70: "kingdom", 60: "phylum", 50: "class", 40: "order",
+    30: "family", 20: "genus", 10: "species",
+}
 
 # Ranks we care about, in order from broad to specific
 RANK_ORDER = [
@@ -225,6 +248,147 @@ class Taxonomy:
                 return "sibling"
 
         return "unrelated"
+
+
+# --- AWS open-data taxa.csv.gz loader functions ---
+
+
+def download_taxa(dest_path):
+    """Download the iNat taxa.csv.gz file from AWS open data."""
+    log.info("Downloading iNat taxonomy from %s ...", TAXA_URL)
+    urllib.request.urlretrieve(TAXA_URL, dest_path)
+    log.info("Downloaded to %s", dest_path)
+    return dest_path
+
+
+def load_taxa_from_file(db, gz_path):
+    """Parse taxa.csv.gz and insert filtered taxa into the database.
+
+    Filters to: active taxa, under Animalia/Plantae/Fungi, at major ranks.
+    Resolves parent_id to the nearest ancestor also in the filtered set.
+
+    Returns dict with 'loaded' and 'skipped' counts.
+    """
+    # Pass 1: read all taxa into memory, filter, and determine kingdoms
+    all_taxa = {}   # inat_id -> {name, rank, rank_level, ancestry_ids, kingdom}
+    kept_ids = set()
+
+    with gzip.open(gz_path, 'rt') as f:
+        reader = csv.reader(f, delimiter='\t')
+        for row in reader:
+            if len(row) < 6:
+                continue
+            inat_id = int(row[0])
+            ancestry_str = row[1]
+            rank_level = float(row[2])
+            rank = row[3]
+            name = row[4]
+            active = row[5].lower() == 'true'
+
+            if not active:
+                continue
+
+            ancestry_ids = []
+            if ancestry_str:
+                ancestry_ids = [int(x) for x in ancestry_str.split('/')]
+
+            all_taxa[inat_id] = {
+                'name': name,
+                'rank': rank,
+                'rank_level': rank_level,
+                'ancestry_ids': ancestry_ids,
+            }
+
+    # Determine kingdom for each taxon and filter
+    filtered = {}
+    for inat_id, t in all_taxa.items():
+        # Skip non-major ranks
+        rl = int(t['rank_level']) if t['rank_level'] == int(t['rank_level']) else None
+        if rl not in MAJOR_RANK_LEVELS:
+            continue
+
+        # Determine kingdom: check if taxon IS a target kingdom, or has one as ancestor
+        kingdom = None
+        if inat_id in TARGET_KINGDOM_INAT_IDS:
+            kingdom = t['name']
+        else:
+            for aid in t['ancestry_ids']:
+                if aid in TARGET_KINGDOM_INAT_IDS:
+                    kingdom = all_taxa[aid]['name'] if aid in all_taxa else None
+                    break
+
+        if kingdom is None:
+            continue
+
+        filtered[inat_id] = {
+            'name': t['name'],
+            'rank': RANK_LEVEL_TO_NAME[rl],
+            'ancestry_ids': t['ancestry_ids'],
+            'kingdom': kingdom,
+        }
+        kept_ids.add(inat_id)
+
+    # Pass 2: resolve parent_id to nearest kept ancestor
+    for _inat_id, t in filtered.items():
+        parent_inat_id = None
+        for aid in reversed(t['ancestry_ids']):
+            if aid in kept_ids:
+                parent_inat_id = aid
+                break
+        t['parent_inat_id'] = parent_inat_id
+
+    # Insert into database
+    # First pass: insert all taxa without parent_id (to get local IDs)
+    inat_to_local = {}
+    for inat_id, t in filtered.items():
+        db.conn.execute(
+            "INSERT OR IGNORE INTO taxa (inat_id, name, rank, kingdom) "
+            "VALUES (?, ?, ?, ?)",
+            (inat_id, t['name'], t['rank'], t['kingdom']),
+        )
+        row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
+        ).fetchone()
+        if row:
+            inat_to_local[inat_id] = row['id']
+
+    # Second pass: set parent_id using local IDs
+    for inat_id, t in filtered.items():
+        if t['parent_inat_id'] and t['parent_inat_id'] in inat_to_local:
+            local_id = inat_to_local[inat_id]
+            parent_local_id = inat_to_local[t['parent_inat_id']]
+            db.conn.execute(
+                "UPDATE taxa SET parent_id = ? WHERE id = ?",
+                (parent_local_id, local_id),
+            )
+
+    db.conn.commit()
+
+    loaded = len(filtered)
+    skipped = len(all_taxa) - loaded
+    log.info("Taxonomy loaded: %d taxa imported, %d skipped", loaded, skipped)
+    return {"loaded": loaded, "skipped": skipped}
+
+
+def load_taxonomy(db, data_dir=None):
+    """Download and load the full iNat taxonomy.
+
+    Args:
+        db: Database instance
+        data_dir: directory to store downloaded files (default: ~/.vireo/taxonomy/)
+    """
+    if data_dir is None:
+        data_dir = os.path.expanduser("~/.vireo/taxonomy")
+    os.makedirs(data_dir, exist_ok=True)
+
+    gz_path = os.path.join(data_dir, "taxa.csv.gz")
+    if not os.path.exists(gz_path):
+        download_taxa(gz_path)
+
+    return load_taxa_from_file(db, gz_path)
+
+
+# --- DWCA-based taxonomy loader (legacy) ---
 
 
 def download_taxonomy(output_path, progress_callback=None):

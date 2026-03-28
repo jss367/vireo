@@ -1,10 +1,13 @@
 # vireo/tests/test_taxonomy.py
+import gzip
 import json
 import os
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from db import Database
 
 
 def _create_mock_taxonomy(tmpdir):
@@ -246,3 +249,123 @@ def test_relationship_same_cross_lookup():
         tax = Taxonomy(tax_path)
 
         assert tax.relationship("Song Sparrow", "Melospiza melodia") == 'same'
+
+
+# ---------------------------------------------------------------------------
+# Tests for load_taxa_from_file (iNat AWS open-data taxa.csv.gz loader)
+# ---------------------------------------------------------------------------
+
+def _make_taxa_tsv(tmp_path):
+    """Create a small test taxa.csv.gz matching iNat AWS format.
+
+    Format: tab-separated, 6 columns:
+    taxon_id, ancestry, rank_level, rank, name, active
+    """
+    lines = [
+        "48460\t\t100\tstateofmatter\tLife\ttrue",
+        # Animalia
+        "1\t48460\t70\tkingdom\tAnimalia\ttrue",
+        "2\t48460/1\t60\tphylum\tChordata\ttrue",
+        "3\t48460/1/2\t50\tclass\tAves\ttrue",
+        "71261\t48460/1/2/3\t40\torder\tAccipitriformes\ttrue",
+        "5067\t48460/1/2/3/71261\t30\tfamily\tAccipitridae\ttrue",
+        "5269\t48460/1/2/3/71261/5067\t20\tgenus\tIchthyophaga\ttrue",
+        "5270\t48460/1/2/3/71261/5067/5269\t10\tspecies\tIchthyophaga ichthyaetus\ttrue",
+        # Intermediate rank that should be skipped
+        "355675\t48460/1/2\t57\tsubphylum\tVertebrata\ttrue",
+        # Plantae
+        "47126\t48460\t70\tkingdom\tPlantae\ttrue",
+        "211194\t48460/47126\t60\tphylum\tTracheophyta\ttrue",
+        # Fungi
+        "47170\t48460\t70\tkingdom\tFungi\ttrue",
+        "47169\t48460/47170\t60\tphylum\tBasidiomycota\ttrue",
+        # Inactive taxon — should be skipped
+        "99999\t48460/1/2/3\t40\torder\tObsoleteOrder\tfalse",
+        # Bacteria — should be skipped (not Animalia/Plantae/Fungi)
+        "67333\t48460\t70\tkingdom\tBacteria\ttrue",
+        "67334\t48460/67333\t60\tphylum\tProteobacteria\ttrue",
+        # Falconiformes for informal groups test
+        "71268\t48460/1/2/3\t40\torder\tFalconiformes\ttrue",
+        "5273\t48460/1/2/3/71268\t30\tfamily\tFalconidae\ttrue",
+        "4714\t48460/1/2/3/71268/5273\t20\tgenus\tFalco\ttrue",
+        "4647\t48460/1/2/3/71268/5273/4714\t10\tspecies\tFalco peregrinus\ttrue",
+    ]
+    path = str(tmp_path / "taxa.csv.gz")
+    with gzip.open(path, 'wt') as f:
+        f.write('\n'.join(lines) + '\n')
+    return path
+
+
+def test_load_taxa_from_file(tmp_path):
+    """load_taxa_from_file imports filtered taxa into the database."""
+    from taxonomy import load_taxa_from_file
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+
+    stats = load_taxa_from_file(db, tsv_path)
+
+    assert stats["loaded"] > 0
+    assert stats["skipped"] > 0
+
+    # Animalia kingdom loaded
+    row = db.conn.execute(
+        "SELECT * FROM taxa WHERE inat_id = 1"
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "Animalia"
+    assert row["rank"] == "kingdom"
+    assert row["kingdom"] == "Animalia"
+
+    # Species loaded with correct parent chain
+    species = db.conn.execute(
+        "SELECT * FROM taxa WHERE inat_id = 5270"
+    ).fetchone()
+    assert species is not None
+    assert species["name"] == "Ichthyophaga ichthyaetus"
+    assert species["rank"] == "species"
+    assert species["kingdom"] == "Animalia"
+    # Parent should be genus (5269), not a skipped intermediate rank
+    genus = db.conn.execute(
+        "SELECT * FROM taxa WHERE inat_id = 5269"
+    ).fetchone()
+    assert species["parent_id"] == genus["id"]
+
+    # Plantae and Fungi loaded
+    assert db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 47126"
+    ).fetchone() is not None
+    assert db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 47170"
+    ).fetchone() is not None
+
+    # Bacteria NOT loaded
+    assert db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 67333"
+    ).fetchone() is None
+
+    # Inactive taxon NOT loaded
+    assert db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 99999"
+    ).fetchone() is None
+
+    # Intermediate rank (subphylum) NOT loaded
+    assert db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 355675"
+    ).fetchone() is None
+
+
+def test_load_taxa_idempotent(tmp_path):
+    """Running load_taxa_from_file twice does not create duplicates."""
+    from taxonomy import load_taxa_from_file
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+
+    load_taxa_from_file(db, tsv_path)
+    count1 = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+
+    load_taxa_from_file(db, tsv_path)
+    count2 = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+
+    assert count1 == count2
