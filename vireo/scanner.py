@@ -3,48 +3,21 @@
 import logging
 import os
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 import imagehash
-from compare import read_xmp_keywords
-from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
 from PIL import Image
 
+from xmp import read_keywords, read_hierarchical_keywords
+from grouping import read_exif_timestamp
+from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
+
 log = logging.getLogger(__name__)
-
-NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-NS_LR = "http://ns.adobe.com/lightroom/1.0/"
-
-
-def _read_hierarchical_keywords(xmp_path):
-    """Read lr:hierarchicalSubject from an XMP sidecar.
-
-    Returns a list of pipe-delimited hierarchy strings, e.g. ['Birds|Raptors|Black kite'].
-    """
-    path = Path(xmp_path)
-    if not path.exists():
-        return []
-
-    try:
-        tree = ET.parse(path)
-    except ET.ParseError:
-        return []
-
-    root = tree.getroot()
-    results = []
-    for li in root.findall(
-        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
-    ):
-        if li.text:
-            results.append(li.text)
-    return results
 
 
 def _import_keywords_for_photo(db, photo_id, xmp_path_str):
     """Read flat and hierarchical keywords from XMP and populate the database."""
-    flat_keywords = read_xmp_keywords(xmp_path_str)
-    hier_keywords = _read_hierarchical_keywords(xmp_path_str)
+    flat_keywords = read_keywords(xmp_path_str)
+    hier_keywords = read_hierarchical_keywords(xmp_path_str)
 
     # Build hierarchy from lr:hierarchicalSubject
     # e.g., 'Birds|Raptors|Black kite' creates Birds -> Raptors -> Black kite
