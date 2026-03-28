@@ -1383,7 +1383,7 @@ class Database:
                    JOIN ancestors a ON a.id = k.id
                    WHERE k.parent_id IS NOT NULL
                )
-               SELECT k.id, k.name, k.parent_id
+               SELECT k.id, k.name, k.parent_id, k.type
                FROM keywords k
                JOIN ancestors a ON a.id = k.id
                ORDER BY k.name""",
@@ -1409,7 +1409,7 @@ class Database:
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(
-            """SELECT k.id, k.name, k.parent_id
+            """SELECT k.id, k.name, k.parent_id, k.type
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                WHERE pk.photo_id = ?
