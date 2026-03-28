@@ -935,20 +935,25 @@ function setFilter(f) {
   renderResults();
 }
 
+var _confTimer = null;
+
 function setMinConfidence(val) {
   minConfidence = parseInt(val, 10);
   document.getElementById('confSliderVal').textContent = minConfidence + '%';
-  // Read existing overrides, merge, then save
-  fetch('/api/workspaces/active/config')
-    .then(function(r) { return r.json(); })
-    .then(function(existing) {
-      existing.review_min_confidence = minConfidence;
-      return fetch('/api/workspaces/active/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(existing)
-      });
-    });
+  clearTimeout(_confTimer);
+  _confTimer = setTimeout(function() {
+    fetch('/api/workspaces/active/config')
+      .then(function(r) { return r.json(); })
+      .then(function(existing) {
+        existing.review_min_confidence = minConfidence;
+        return fetch('/api/workspaces/active/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(existing)
+        });
+      })
+      .catch(function() {});
+  }, 300);
 }
 
 // -- Threshold tuning --
