@@ -50,6 +50,51 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
             db.tag_photo(photo_id, kid)
 
 
+def _pair_raw_jpeg_companions(db):
+    """Find raw+JPEG pairs in the same folder and merge them.
+
+    When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
+    keep the raw as the primary photo and set companion_path to the JPEG filename.
+    Delete the duplicate JPEG-only photo record.
+    """
+    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
+    jpeg_exts = {".jpg", ".jpeg"}
+
+    rows = db.conn.execute(
+        "SELECT id, folder_id, filename, extension FROM photos ORDER BY folder_id, filename"
+    ).fetchall()
+
+    # Group by folder_id + base name (without extension)
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for row in rows:
+        base = os.path.splitext(row["filename"])[0]
+        groups[(row["folder_id"], base)].append(dict(row))
+
+    for (_folder_id, _base), members in groups.items():
+        if len(members) < 2:
+            continue
+
+        raws = [m for m in members if m["extension"] in raw_exts]
+        jpegs = [m for m in members if m["extension"] in jpeg_exts]
+
+        if not raws or not jpegs:
+            continue
+
+        # Use first raw as primary, first JPEG as companion
+        primary = raws[0]
+        companion = jpegs[0]
+
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            (companion["filename"], primary["id"]),
+        )
+        # Remove the duplicate JPEG record
+        db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+
+    db.conn.commit()
+
+
 def scan(root, db, progress_callback=None, incremental=False):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
@@ -285,6 +330,9 @@ def scan(root, db, progress_callback=None, incremental=False):
 
         if progress_callback:
             progress_callback(i + 1, total)
+
+    # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path
+    _pair_raw_jpeg_companions(db)
 
     db.update_folder_counts()
     log.info("Scan complete: %d photos indexed", total)

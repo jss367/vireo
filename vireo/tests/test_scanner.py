@@ -284,6 +284,33 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     assert 'Cardinal' in kw_names
 
 
+def test_scan_pairs_raw_and_jpeg(tmp_path):
+    """When a folder has IMG.cr3 and IMG.jpg, they become one photo with companion_path."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    # Create a JPEG
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    # Create a fake raw file with the same base name
+    with open(str(img_dir / "IMG_001.cr3"), "wb") as f:
+        f.write(b"\x00" * 200)
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    photos = db.conn.execute("SELECT filename, companion_path FROM photos").fetchall()
+    # Should be one photo record, not two
+    assert len(photos) == 1
+
+    photo = photos[0]
+    # Raw is primary, JPEG is companion
+    assert photo["filename"] == "IMG_001.cr3"
+    assert photo["companion_path"] == "IMG_001.jpg"
+
+
 def test_scan_stores_file_hash(tmp_path):
     """Scanning a folder computes and stores SHA-256 file_hash for each photo."""
     from db import Database
