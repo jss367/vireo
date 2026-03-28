@@ -65,6 +65,7 @@ DEFAULTS = {
         "soft_cut_score": 0.52,
         "merge_score": 0.62,
         "merge_max_gap": 60.0,
+        "extract_full_metadata": True,
     },
     "keyboard_shortcuts": {
         "review": {

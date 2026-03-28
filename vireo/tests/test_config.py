@@ -59,6 +59,13 @@ def test_culling_defaults_exist():
     assert DEFAULTS["cull_phash_threshold"] == 19
 
 
+def test_pipeline_extract_full_metadata_default():
+    """Pipeline config has extract_full_metadata default set to True."""
+    from config import DEFAULTS
+
+    assert DEFAULTS["pipeline"]["extract_full_metadata"] is True
+
+
 def test_pipeline_defaults_exist():
     """Config DEFAULTS includes nested pipeline settings."""
     from config import DEFAULTS
