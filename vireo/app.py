@@ -461,6 +461,17 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("not found", 404)
 
         result = dict(photo)
+
+        # Parse exif_data JSON into metadata field
+        raw_exif = result.pop("exif_data", None)
+        if raw_exif:
+            try:
+                result["metadata"] = json.loads(raw_exif)
+            except (ValueError, TypeError):
+                result["metadata"] = None
+        else:
+            result["metadata"] = None
+
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 

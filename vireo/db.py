@@ -680,7 +680,7 @@ class Database:
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     detection_box, detection_conf, subject_sharpness, subject_size, quality_score,
-                    latitude, longitude"""
+                    latitude, longitude, exif_data"""
 
     def get_photo(self, photo_id):
         """Return a single photo by id."""
