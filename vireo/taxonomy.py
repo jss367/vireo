@@ -453,6 +453,61 @@ def fetch_common_names(db, locale='en'):
     return {"updated": updated}
 
 
+# Default informal groups for wildlife photography.
+# Each maps a common name to a list of scientific names (order or family level).
+DEFAULT_INFORMAL_GROUPS = {
+    "Raptors": ["Accipitriformes", "Falconiformes", "Strigiformes"],
+    "Shorebirds": ["Charadriiformes"],
+    "Waterfowl": ["Anseriformes"],
+    "Songbirds": ["Passeriformes"],
+    "Hummingbirds": ["Trochilidae"],
+    "Wading birds": ["Ardeidae", "Ciconiidae", "Threskiornithidae"],
+    "Woodpeckers": ["Picidae"],
+    "Gamebirds": ["Galliformes"],
+}
+
+
+def seed_informal_groups(db):
+    """Create default informal groups and link them to taxa nodes.
+
+    Only links groups to taxa that exist in the database. Skips groups
+    that already exist (idempotent).
+
+    Returns dict with 'groups_created' count.
+    """
+    created = 0
+    for group_name, taxon_names in DEFAULT_INFORMAL_GROUPS.items():
+        # Insert group (ignore if exists)
+        db.conn.execute(
+            "INSERT OR IGNORE INTO informal_groups (name) VALUES (?)",
+            (group_name,),
+        )
+        group_row = db.conn.execute(
+            "SELECT id FROM informal_groups WHERE name = ?", (group_name,)
+        ).fetchone()
+        group_id = group_row["id"]
+
+        linked_any = False
+        for taxon_name in taxon_names:
+            taxon_row = db.conn.execute(
+                "SELECT id FROM taxa WHERE name = ?", (taxon_name,)
+            ).fetchone()
+            if taxon_row:
+                db.conn.execute(
+                    "INSERT OR IGNORE INTO informal_group_taxa "
+                    "(group_id, taxon_id) VALUES (?, ?)",
+                    (group_id, taxon_row["id"]),
+                )
+                linked_any = True
+
+        if linked_any:
+            created += 1
+
+    db.conn.commit()
+    log.info("Informal groups: %d created/verified", created)
+    return {"groups_created": created}
+
+
 # --- DWCA-based taxonomy loader (legacy) ---
 
 

@@ -430,3 +430,49 @@ def test_fetch_common_names(tmp_path):
     assert "Gray-headed Fish-Eagle" in names
 
     assert stats["updated"] > 0
+
+
+def test_seed_informal_groups(tmp_path):
+    """seed_informal_groups creates default wildlife photography groups."""
+    from taxonomy import load_taxa_from_file, seed_informal_groups
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+    load_taxa_from_file(db, tsv_path)
+
+    stats = seed_informal_groups(db)
+    assert stats["groups_created"] > 0
+
+    # "Raptors" group should exist and link to Accipitriformes and Falconiformes
+    group = db.conn.execute(
+        "SELECT id FROM informal_groups WHERE name = 'Raptors'"
+    ).fetchone()
+    assert group is not None
+
+    linked = db.conn.execute(
+        "SELECT t.name FROM informal_group_taxa igt "
+        "JOIN taxa t ON t.id = igt.taxon_id "
+        "WHERE igt.group_id = ?",
+        (group["id"],),
+    ).fetchall()
+    linked_names = {r["name"] for r in linked}
+    # Our test data has Accipitriformes and Falconiformes
+    assert "Accipitriformes" in linked_names
+    assert "Falconiformes" in linked_names
+
+
+def test_seed_informal_groups_idempotent(tmp_path):
+    """Running seed_informal_groups twice does not create duplicates."""
+    from taxonomy import load_taxa_from_file, seed_informal_groups
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+    load_taxa_from_file(db, tsv_path)
+
+    seed_informal_groups(db)
+    count1 = db.conn.execute("SELECT COUNT(*) FROM informal_groups").fetchone()[0]
+
+    seed_informal_groups(db)
+    count2 = db.conn.execute("SELECT COUNT(*) FROM informal_groups").fetchone()[0]
+
+    assert count1 == count2
