@@ -33,6 +33,15 @@ def test_edit_history_tables_exist(tmp_path):
     assert 'edit_history_items' in tables
 
 
+def test_photos_table_has_exif_data_column(tmp_path):
+    """photos table has exif_data JSON column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Column exists (either in CREATE or via ALTER)
+    col = db.conn.execute("SELECT exif_data FROM photos LIMIT 0").fetchall()
+    assert col is not None  # No exception means column exists
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database

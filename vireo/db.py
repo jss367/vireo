@@ -291,6 +291,12 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
 
+        # Full EXIF metadata JSON blob
+        try:
+            self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN exif_data TEXT")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
