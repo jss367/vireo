@@ -73,6 +73,16 @@ def test_pipeline_defaults_exist():
     assert p["merge_score"] == 0.62
 
 
+def test_ingest_defaults_present():
+    """Ingest config section has all required keys with correct defaults."""
+    from config import DEFAULTS
+
+    ingest = DEFAULTS["ingest"]
+    assert ingest["folder_template"] == "%Y/%m/%d"
+    assert ingest["skip_duplicates"] is True
+    assert ingest["file_types"] == "both"
+
+
 def test_deep_merge_preserves_pipeline(tmp_path):
     """Deep merge correctly handles nested pipeline config."""
     import json
