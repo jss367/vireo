@@ -4805,7 +4805,28 @@ def main():
     )
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--load-taxonomy",
+        action="store_true",
+        help="Download and import the iNaturalist taxonomy, then exit",
+    )
     args = parser.parse_args()
+
+    if args.load_taxonomy:
+        from db import Database
+        from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
+        db = Database(args.db)
+        print("Loading taxonomy tree from iNaturalist...")
+        stats = load_taxonomy(db)
+        print(f"  Taxonomy: {stats['loaded']} taxa loaded, {stats['skipped']} skipped")
+        print("Fetching common names from iNat API (this may take a few minutes)...")
+        cn_stats = fetch_common_names(db)
+        print(f"  Common names: {cn_stats['updated']} taxa updated")
+        print("Seeding informal groups...")
+        ig_stats = seed_informal_groups(db)
+        print(f"  Informal groups: {ig_stats['groups_created']} groups created")
+        print("Done.")
+        sys.exit(0)
 
     # Resolve port: --port 0 means pick a random free port
     port = args.port
