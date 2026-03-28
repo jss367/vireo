@@ -96,6 +96,14 @@ if [[ -z "$DMG" ]]; then
     echo "ERROR: No .dmg found"
     exit 1
 fi
+
+# --- Rebuild DMG after ad-hoc signing ---
+# cargo tauri build creates .app and .dmg in one step, so the original
+# DMG contains the unsigned app. Recreate it with the signed .app.
+if ! $FULL_SIGNING; then
+    echo "==> Rebuilding DMG with signed app..."
+    hdiutil create -volname "Vireo" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG"
+fi
 echo "==> Built: $DMG"
 echo ""
 
