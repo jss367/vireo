@@ -1,0 +1,247 @@
+<!-- Sync banner: pending changes indicator -->
+<div id="syncBanner" style="display:none;background:var(--bg-tertiary,#14374E);padding:10px 20px;border-bottom:1px solid var(--border-primary,#14374E);font-size:13px;align-items:center;gap:12px;">
+  <span id="syncBannerText" style="color:var(--warning,#f0c040);"></span>
+  <button onclick="openSyncPreview()" style="background:var(--bg-secondary,#0E2A3D);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer;">Review Changes</button>
+  <button onclick="runSync()" style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:4px;padding:5px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
+  <span id="syncStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
+</div>
+
+<!-- Sync Preview Modal -->
+<div id="syncPreviewOverlay" style="display:none;position:fixed;inset:0;z-index:9996;background:rgba(0,0,0,0.85);overflow-y:auto;">
+  <div style="max-width:850px;margin:40px auto;background:var(--bg-secondary,#0E2A3D);border-radius:8px;padding:24px;position:relative;">
+    <button onclick="closeSyncPreview()" style="position:absolute;top:12px;right:16px;background:none;border:none;color:var(--text-muted,#888);font-size:24px;cursor:pointer;">&times;</button>
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;">
+      <h2 style="font-size:16px;color:var(--accent,#24E5CA);margin:0;">Review Pending Changes</h2>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim,#888);margin-left:auto;">
+        <input type="range" id="syncThumbSize" min="60" max="600" value="120" step="20"
+               style="width:80px;accent-color:var(--accent,#24E5CA);"
+               oninput="updateSyncThumbSize(this.value)">
+        <span id="syncThumbSizeVal" style="min-width:32px;">120px</span>
+      </label>
+    </div>
+    <div id="syncPreviewContent">Loading...</div>
+    <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">
+      <button onclick="discardAllChanges()" style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Discard All</button>
+      <button onclick="closeSyncPreview(); runSync();" style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Sync to XMP</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- Sync Panel ---------- */
+
+var _syncPreviewData = null;
+var _syncThumbSize = 120;
+var _syncActiveFilters = null;
+
+async function checkPendingSync() {
+  try {
+    var data = await safeFetch('/api/sync/status', {}, { toast: false });
+    var banner = document.getElementById('syncBanner');
+    if (data.pending_count > 0) {
+      document.getElementById('syncBannerText').textContent =
+        data.pending_count + ' change' + (data.pending_count !== 1 ? 's' : '') +
+        ' pending \u2014 keywords have been added to the database but not written to XMP sidecar files yet.';
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+async function runSync() {
+  var status = document.getElementById('syncStatus');
+  status.textContent = 'Syncing...';
+  try {
+    var data = await safeFetch('/api/jobs/sync', {method: 'POST'}, { toast: false });
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.total > 0) {
+          status.textContent = 'Writing XMP: ' + p.current + '/' + p.total;
+        }
+      },
+      onComplete: function(result) {
+        if (result.status === 'completed') {
+          status.textContent = 'Synced!';
+          status.style.color = 'var(--accent,#24E5CA)';
+          setTimeout(checkPendingSync, 1000);
+        } else {
+          status.textContent = 'Failed';
+          status.style.color = 'var(--danger,#e74c3c)';
+        }
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        status.style.color = 'var(--danger,#e74c3c)';
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+function updateSyncThumbSize(val) {
+  _syncThumbSize = parseInt(val);
+  document.getElementById('syncThumbSizeVal').textContent = val + 'px';
+  document.querySelectorAll('.sync-preview-thumb').forEach(function(img) {
+    img.style.width = _syncThumbSize + 'px';
+    img.style.height = Math.round(_syncThumbSize * 2 / 3) + 'px';
+  });
+}
+
+async function openSyncPreview() {
+  _syncActiveFilters = null;
+  var overlay = document.getElementById('syncPreviewOverlay');
+  var content = document.getElementById('syncPreviewContent');
+  overlay.style.display = 'block';
+  content.innerHTML = '<p style="color:var(--text-dim,#888);padding:20px;">Loading changes...</p>';
+
+  try {
+    _syncPreviewData = await safeFetch('/api/sync/preview', {}, { toast: false });
+    renderSyncPreview();
+  } catch(e) {
+    content.innerHTML = '<p style="color:var(--danger,#e74c3c);padding:20px;">Failed to load: ' + e.message + '</p>';
+  }
+}
+
+function renderSyncPreview() {
+  var data = _syncPreviewData;
+  var content = document.getElementById('syncPreviewContent');
+  if (!data || data.photos.length === 0) {
+    content.innerHTML = '<p style="color:var(--text-dim,#888);padding:20px;">No pending changes.</p>';
+    return;
+  }
+
+  var allTypes = {};
+  data.photos.forEach(function(p) {
+    p.changes.forEach(function(c) { allTypes[c.type] = true; });
+  });
+  var typeList = Object.keys(allTypes).sort();
+
+  if (_syncActiveFilters === null) {
+    _syncActiveFilters = new Set(typeList);
+  }
+
+  var html = '<div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">';
+  html += '<span style="font-size:12px;color:var(--text-dim,#888);">Show:</span>';
+  typeList.forEach(function(t) {
+    var label = t.replace(/_/g, ' ');
+    var color = t === 'keyword_add' ? 'var(--accent,#24E5CA)' : t === 'keyword_remove' ? 'var(--danger,#e74c3c)' : 'var(--warning,#f0c040)';
+    var checked = _syncActiveFilters.has(t) ? ' checked' : '';
+    html += '<label style="display:flex;align-items:center;gap:4px;font-size:12px;color:' + color + ';cursor:pointer;">' +
+      '<input type="checkbox"' + checked + ' onchange="toggleSyncFilter(\'' + t + '\')" style="accent-color:' + color + ';"> ' +
+      label + '</label>';
+  });
+  html += '</div>';
+
+  var activeFilters = _syncActiveFilters;
+
+  var visibleCount = 0;
+  var visiblePhotos = 0;
+  data.photos.forEach(function(p) {
+    var visible = p.changes.filter(function(c) { return activeFilters.has(c.type); });
+    if (visible.length > 0) visiblePhotos++;
+    visibleCount += visible.length;
+  });
+
+  html += '<div style="display:flex;gap:8px;margin-bottom:12px;">' +
+    '<span style="font-size:12px;color:var(--text-dim,#888);flex:1;">' + visibleCount + ' change(s) across ' + visiblePhotos + ' photo(s)</span>' +
+    '<button onclick="discardAllChanges()" style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Discard All</button>' +
+    '<button onclick="closeSyncPreview(); runSync();" style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:500;">Sync All to XMP</button>' +
+  '</div>';
+
+  data.photos.forEach(function(p) {
+    var visibleChanges = p.changes.filter(function(c) { return activeFilters.has(c.type); });
+    if (visibleChanges.length === 0) return;
+
+    var changeIds = visibleChanges.map(function(c) { return c.id; });
+
+    html += '<div style="display:flex;gap:12px;padding:12px 0;border-bottom:1px solid var(--border-subtle,#0E2A3D);">';
+
+    html += '<div style="flex-shrink:0;">';
+    html += '<img class="sync-preview-thumb" src="/thumbnails/' + p.photo_id + '.jpg" style="width:' + _syncThumbSize + 'px;height:' + Math.round(_syncThumbSize * 2 / 3) + 'px;object-fit:cover;border-radius:4px;cursor:pointer;display:block;" onclick="openLightbox(' + p.photo_id + ',\'' + escapeAttr(p.filename).replace(/'/g, "\\'") + '\')">';
+    html += '</div>';
+
+    html += '<div style="flex:1;min-width:0;">';
+
+    visibleChanges.forEach(function(c) {
+      var icon = c.type === 'keyword_add' ? '+' : c.type === 'keyword_remove' ? '\u2212' : '~';
+      var color = c.type === 'keyword_add' ? 'var(--accent,#24E5CA)' : c.type === 'keyword_remove' ? 'var(--danger,#e74c3c)' : 'var(--warning,#f0c040)';
+      var typeLabel = c.type.replace(/_/g, ' ');
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;">';
+      html += '<span style="color:' + color + ';font-weight:700;font-size:16px;width:16px;text-align:center;">' + icon + '</span>';
+      html += '<span style="font-size:15px;color:var(--text-primary,#E0F0F0);font-weight:600;">' + escapeHtml(c.value) + '</span>';
+      html += '<span style="font-size:11px;color:var(--text-dim,#888);">' + typeLabel + '</span>';
+      html += '<button onclick="discardChange(' + c.id + ', this.closest(\'div\'))" style="margin-left:auto;background:none;border:none;color:var(--text-ghost,#555);font-size:16px;cursor:pointer;padding:0 4px;" title="Discard">&times;</button>';
+      html += '</div>';
+    });
+
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-top:4px;">';
+    html += '<span style="font-size:11px;color:var(--text-ghost,#555);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(p.filename) + '</span>';
+    html += '<button onclick="discardPhotoChanges([' + changeIds.join(',') + '], this)" style="margin-left:auto;background:none;color:var(--danger,#e74c3c);border:none;font-size:11px;cursor:pointer;padding:0;" title="Discard all changes for this photo">discard</button>';
+    html += '</div>';
+
+    html += '</div></div>';
+  });
+
+  content.innerHTML = html;
+}
+
+function closeSyncPreview() {
+  document.getElementById('syncPreviewOverlay').style.display = 'none';
+  checkPendingSync();
+}
+
+async function discardChange(changeId, rowEl) {
+  try {
+    await safeFetch('/api/sync/discard', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({change_ids: [changeId]}),
+    });
+    if (rowEl) {
+      rowEl.style.opacity = '0.3';
+      rowEl.style.textDecoration = 'line-through';
+    }
+  } catch(e) {}
+}
+
+async function discardPhotoChanges(changeIds, btn) {
+  try {
+    await safeFetch('/api/sync/discard', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({change_ids: changeIds}),
+    });
+    var row = btn.closest('[style*="border-bottom"]');
+    if (row) row.style.display = 'none';
+  } catch(e) {}
+}
+
+async function discardAllChanges() {
+  if (!confirm('Discard ALL pending changes? Nothing will be written to XMP.')) return;
+  try {
+    var data = await safeFetch('/api/sync/preview', {}, { toast: false });
+    var allIds = [];
+    data.photos.forEach(function(p) {
+      p.changes.forEach(function(c) { allIds.push(c.id); });
+    });
+    await safeFetch('/api/sync/discard', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({change_ids: allIds}),
+    });
+    closeSyncPreview();
+  } catch(e) {}
+}
+
+function toggleSyncFilter(type) {
+  if (_syncActiveFilters.has(type)) {
+    _syncActiveFilters.delete(type);
+  } else {
+    _syncActiveFilters.add(type);
+  }
+  renderSyncPreview();
+}
+</script>

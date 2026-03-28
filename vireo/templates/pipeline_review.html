@@ -764,6 +764,8 @@ input[type="range"]::-moz-range-thumb {
       <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
     </div>
 
+    {% include '_sync_panel.html' %}
+
     <!-- Encounters rendered by JS -->
     <div id="encountersContainer"></div>
 
@@ -1279,6 +1281,7 @@ function initPipelineReviewPage() {
     if (fb) fb.style.display = '';
 
     renderResults();
+    checkPendingSync();
   });
 }
 
@@ -1439,6 +1442,7 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
     enc.confirmed_species = speciesName;
   }
   renderResults();
+  checkPendingSync();
 }
 
 async function clearBurstOverride(event, encIdx, burstIdx) {
