@@ -76,3 +76,25 @@ def test_scan_status_includes_extended_stats(app_and_db):
     assert 'keyword_count' in data
     assert 'db_size' in data
     assert 'thumb_cache_size' in data
+
+
+def test_ingest_job_starts(app_and_db, tmp_path):
+    """POST /api/jobs/ingest starts a background job and returns job_id."""
+    app, db = app_and_db
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas_dest"
+    src.mkdir()
+    dst.mkdir()
+
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(src / "bird.jpg"))
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/ingest", json={
+            "source": str(src),
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "job_id" in data
+        assert data["job_id"].startswith("ingest-")
