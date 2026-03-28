@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import imagehash
@@ -65,7 +66,6 @@ def _pair_raw_jpeg_companions(db):
     ).fetchall()
 
     # Group by folder_id + base name (without extension)
-    from collections import defaultdict
     groups = defaultdict(list)
     for row in rows:
         base = os.path.splitext(row["filename"])[0]
@@ -126,6 +126,16 @@ def _pair_raw_jpeg_companions(db):
         db.conn.execute(
             "UPDATE photos SET companion_path = ? WHERE id = ?",
             (companion["filename"], primary["id"]),
+        )
+        # Transfer predictions from companion to primary
+        db.conn.execute(
+            "UPDATE predictions SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
+        )
+        # Transfer pending_changes from companion to primary
+        db.conn.execute(
+            "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
         )
         # Remove keyword associations then the duplicate JPEG record
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))

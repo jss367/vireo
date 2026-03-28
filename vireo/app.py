@@ -3149,6 +3149,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
         if not source or not destination:
             return json_error("source and destination are required")
+        if not os.path.isdir(source):
+            return json_error(f"source directory not found: {source}")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id

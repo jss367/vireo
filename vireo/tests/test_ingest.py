@@ -135,7 +135,7 @@ def test_ingest_unsorted_fallback(tmp_path):
 
 
 def test_ingest_skip_duplicates(tmp_path):
-    """Files with matching hash in DB are skipped."""
+    """Second ingest of same files detects duplicates via filesystem collision."""
     src = tmp_path / "sd_card"
     dst = tmp_path / "nas"
     src.mkdir()
