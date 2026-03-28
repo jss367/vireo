@@ -627,6 +627,167 @@ input[type="range"]::-moz-range-thumb {
   font-weight: 600;
   cursor: pointer;
 }
+
+/* ---------- Group Review Modal ---------- */
+.grm-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 500;
+  flex-direction: column;
+}
+.grm-overlay.open { display: flex; }
+
+.grm-header {
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary, #0E2A3D);
+  flex-shrink: 0;
+}
+.grm-header h3 { font-size: 15px; color: var(--text-primary, #E0F0F0); }
+.grm-close {
+  margin-left: auto;
+  background: none; border: none; color: var(--text-muted, #888);
+  font-size: 20px; cursor: pointer;
+}
+
+.grm-zone {
+  padding: 10px 20px;
+  min-height: 80px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.grm-zone-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  margin-bottom: 6px; font-weight: 600;
+}
+.grm-picks .grm-zone-label { color: var(--accent, #24E5CA); }
+.grm-candidates { flex: 1; overflow-x: auto; overflow-y: hidden; }
+.grm-candidates .grm-zone-label { color: var(--text-dim, #888); }
+.grm-rejects .grm-zone-label { color: var(--danger, #e74c3c); }
+
+.grm-strip {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  min-height: 60px;
+  flex-wrap: nowrap;
+}
+
+.grm-card {
+  flex-shrink: 0;
+  width: 180px;
+  background: var(--bg-tertiary, #14374E);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: border-color 0.15s;
+}
+.grm-card:hover { border-color: var(--text-ghost, #555); }
+.grm-card.selected { border-color: var(--accent, #24E5CA); }
+.grm-card.ai-best { border-color: var(--warning, #f0c040); }
+.grm-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.grm-card-info {
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.grm-card-species { color: var(--text-primary, #E0F0F0); font-weight: 600; }
+.grm-card-scores { color: var(--text-dim, #888); }
+.grm-card-scores .score-val { color: var(--text-secondary, #B0CCCC); }
+.grm-card-ai { color: var(--warning, #f0c040); font-size: 10px; font-weight: 600; }
+
+.grm-footer {
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-secondary, #0E2A3D);
+  flex-shrink: 0;
+}
+.grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+
+/* Loupe mode — split layout with preview on right */
+.grm-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.grm-strips {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-width: 0;
+}
+.grm-loupe {
+  width: 45%;
+  min-width: 300px;
+  background: var(--bg-primary, #0A1F2E);
+  border-left: 1px solid var(--border-primary, #14374E);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.grm-loupe-img {
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+  cursor: crosshair;
+  min-height: 200px;
+  max-height: 50vh;
+}
+.grm-loupe-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.grm-loupe-info {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  border-top: 1px solid var(--border-primary, #14374E);
+  text-align: center;
+}
+.grm-loupe-crosshair-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(78, 204, 163, 0.4);
+  pointer-events: none;
+}
+.grm-loupe-crosshair-v {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(78, 204, 163, 0.4);
+  pointer-events: none;
+}
+
+/* Zoomed strip thumbnails */
+.grm-card.zoomed img {
+  transition: none;
+}
+
+/* Pipeline metadata below loupe */
+.grm-loupe-detail {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-primary, #14374E);
+}
 </style>
 </head>
 <body>
@@ -805,6 +966,47 @@ input[type="range"]::-moz-range-thumb {
 <div class="undo-toast hidden" id="undoToast">
   <span id="undoMsg"></span>
   <button class="undo-toast-btn" onclick="undoLastAction()">Undo</button>
+</div>
+
+<!-- Group Review Modal -->
+<div class="grm-overlay" id="grmOverlay">
+  <div class="grm-header">
+    <h3>Review Burst Group</h3>
+    <span id="grmCount" style="font-size:12px;color:var(--text-dim,#888);"></span>
+    <button class="grm-close" onclick="closeGroupReview()">&times;</button>
+  </div>
+  <div class="grm-body">
+    <div class="grm-strips">
+      <div class="grm-zone grm-picks">
+        <div class="grm-zone-label">PICKS ↑</div>
+        <div class="grm-strip" id="grmPicks"></div>
+      </div>
+      <div class="grm-zone grm-candidates">
+        <div class="grm-zone-label">CANDIDATES ↑↓</div>
+        <div class="grm-strip" id="grmCandidates"></div>
+      </div>
+      <div class="grm-zone grm-rejects">
+        <div class="grm-zone-label">REJECTS ↓</div>
+        <div class="grm-strip" id="grmRejects"></div>
+      </div>
+    </div>
+    <div class="grm-loupe" id="grmLoupe">
+      <div class="grm-loupe-img" id="grmLoupeImg" onmousemove="grmLoupeMove(event)" onmouseleave="grmLoupeReset()" onclick="grmLoupeToggleLock(event)" onwheel="grmLoupeZoom(event)">
+        <img id="grmLoupePhoto" src="" alt="">
+        <div class="grm-loupe-crosshair-h" id="grmCrosshairH"></div>
+        <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
+      </div>
+      <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
+      <div class="grm-loupe-detail" id="grmLoupeDetail"></div>
+    </div>
+  </div>
+  <div class="grm-footer">
+    <label style="font-size:12px;color:var(--text-muted,#888);">Species:</label>
+    <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
+    <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
+    <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent,#24E5CA);color:#000;">Apply & Close</button>
+  </div>
 </div>
 
 <script>
@@ -1166,6 +1368,13 @@ function findEncounterForPhoto(photoId) {
 function openInspect(photoId) {
   var photo = findPhotoInResults(photoId);
   if (!photo) return;
+
+  // Route multi-photo bursts to the GRM
+  var burstInfo = findBurstForPhoto(photoId);
+  if (burstInfo && burstInfo.photoIds.length >= 2) {
+    openGroupReview(burstInfo.encIdx, burstInfo.burstIdx, photoId);
+    return;
+  }
 
   var enc = findEncounterForPhoto(photoId);
   var panel = document.getElementById('inspectPanel');
@@ -1604,6 +1813,467 @@ async function detachPhoto(encIdx, burstIdx, photoId) {
     renderResults();
     updateSummaryBar(pipelineResults.summary);
   });
+}
+
+/* ==================== Group Review Modal ==================== */
+
+var grmState = {
+  encIdx: null,       // encounter index in pipelineResults
+  burstIdx: null,     // burst index within encounter
+  items: [],          // photo objects from pipelineResults.photos
+  picks: new Set(),
+  rejects: new Set(),
+  removed: new Set(),
+  selected: null      // photo id
+};
+
+function findBurstForPhoto(photoId) {
+  if (!pipelineResults) return null;
+  for (var ei = 0; ei < pipelineResults.encounters.length; ei++) {
+    var enc = pipelineResults.encounters[ei];
+    if (!enc.bursts) continue;
+    for (var bi = 0; bi < enc.bursts.length; bi++) {
+      var burst = enc.bursts[bi];
+      var ids = burst.photo_ids || burst;
+      if (ids.indexOf(photoId) >= 0) {
+        return { encIdx: ei, burstIdx: bi, photoIds: ids };
+      }
+    }
+  }
+  return null;
+}
+
+function openGroupReview(encIdx, burstIdx, selectPhotoId) {
+  var enc = pipelineResults.encounters[encIdx];
+  var burst = enc.bursts[burstIdx];
+  var photoIds = burst.photo_ids || burst;
+
+  // Build items array from pipelineResults.photos
+  var photoMap = {};
+  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+  var items = photoIds.map(function(pid) { return photoMap[pid]; }).filter(Boolean);
+
+  grmState = {
+    encIdx: encIdx,
+    burstIdx: burstIdx,
+    items: items,
+    picks: new Set(),
+    rejects: new Set(),
+    removed: new Set(),
+    selected: null
+  };
+  _grmLoupeLocked = false;
+
+  // Auto-pick the AI best (highest quality_composite)
+  var best = null;
+  items.forEach(function(p) {
+    if (!best || (p.quality_composite || 0) > (best.quality_composite || 0)) best = p;
+  });
+  if (best) grmState.picks.add(best.id);
+
+  // Auto-reject the lowest quality
+  if (items.length > 2) {
+    var sorted = items.slice().sort(function(a, b) { return (a.quality_composite || 0) - (b.quality_composite || 0); });
+    var worstThird = Math.max(1, Math.floor(sorted.length / 3));
+    for (var i = 0; i < worstThird; i++) {
+      if (!grmState.picks.has(sorted[i].id)) {
+        grmState.rejects.add(sorted[i].id);
+      }
+    }
+  }
+
+  document.getElementById('grmOverlay').classList.add('open');
+
+  // Auto-select the requested photo (or the best)
+  var initSelect = selectPhotoId || (best ? best.id : null);
+  if (initSelect) {
+    grmSelect(initSelect);
+  } else {
+    renderGroupModal();
+  }
+}
+
+function closeGroupReview() {
+  document.getElementById('grmOverlay').classList.remove('open');
+}
+
+function renderGroupModal() {
+  var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+
+  // Find AI best
+  var bestId = null;
+  var bestScore = -1;
+  items.forEach(function(p) {
+    if ((p.quality_composite || 0) > bestScore) { bestScore = p.quality_composite || 0; bestId = p.id; }
+  });
+
+  function renderCard(p) {
+    var isBest = p.id === bestId;
+    var isSelected = p.id === grmState.selected;
+    var cls = 'grm-card' + (isSelected ? ' selected' : '') + (isBest ? ' ai-best' : '');
+    var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
+    var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
+
+    return '<div class="' + cls + '" data-photo-id="' + p.id + '" onclick="grmSelect(' + p.id + ')">' +
+      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy">' +
+      '<div class="grm-card-info">' +
+        '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
+        '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
+        (isBest ? '<div class="grm-card-ai">AI BEST</div>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  var pickItems = items.filter(function(p) { return grmState.picks.has(p.id); });
+  var candidateItems = items.filter(function(p) { return !grmState.picks.has(p.id) && !grmState.rejects.has(p.id); });
+  var rejectItems = items.filter(function(p) { return grmState.rejects.has(p.id); });
+
+  document.getElementById('grmPicks').innerHTML = pickItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Press ↑ to add picks</span>';
+  document.getElementById('grmCandidates').innerHTML = candidateItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">All sorted</span>';
+  document.getElementById('grmRejects').innerHTML = rejectItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Press ↓ to reject</span>';
+
+  // Species input
+  if (!document.getElementById('grmSpecies').value && items.length > 0) {
+    var enc = pipelineResults.encounters[grmState.encIdx];
+    document.getElementById('grmSpecies').value = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+  }
+
+  document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+}
+
+function grmSelect(photoId) {
+  grmState.selected = (grmState.selected === photoId) ? null : photoId;
+  renderGroupModal();
+
+  // Update loupe preview
+  var loupeImg = document.getElementById('grmLoupePhoto');
+  var loupeInfo = document.getElementById('grmLoupeInfo');
+  var detailEl = document.getElementById('grmLoupeDetail');
+
+  if (grmState.selected) {
+    loupeImg.src = '/photos/' + grmState.selected + '/full';
+    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
+    if (photo) {
+      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
+      loupeInfo.textContent = (photo.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
+
+      // Render pipeline metadata in detail panel
+      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
+    }
+  } else {
+    loupeImg.src = '';
+    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    detailEl.innerHTML = '';
+    grmLoupeReset();
+  }
+}
+
+function buildPipelineMetadataHtml(photo) {
+  var enc = pipelineResults.encounters[grmState.encIdx];
+  var label = (photo.label || '').toLowerCase();
+  var q = photo.quality_composite || 0;
+
+  var html = '';
+
+  // Triage badge
+  html += '<span class="triage-badge ' + label + '">' + (photo.label || 'UNSCORED') + '</span>';
+  if (photo.rarity_protected) {
+    html += ' <span class="triage-badge review">Rarity Protected</span>';
+  }
+
+  // Reject reasons
+  if (photo.reject_reasons && photo.reject_reasons.length > 0) {
+    html += '<div class="reject-reasons">';
+    photo.reject_reasons.forEach(function(r) {
+      html += '<div class="reject-reason">&#9888; ' + r + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Species predictions
+  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
+    html += '<div class="inspect-species-predictions">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
+    enc.species_predictions.forEach(function(sp) {
+      var modelParts = (sp.models || []).map(function(m) {
+        return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
+      });
+      html += '<div class="inspect-species-row">';
+      html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
+      html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Score waterfall
+  var scores = [
+    {name: 'Focus', key: 'focus_score', weight: 0.45, cls: 'focus'},
+    {name: 'Exposure', key: 'exposure_score', weight: 0.20, cls: 'exposure'},
+    {name: 'Composition', key: 'composition_score', weight: 0.15, cls: 'composition'},
+    {name: 'Area', key: 'area_score', weight: 0.10, cls: 'area'},
+    {name: 'Noise', key: 'noise_score', weight: 0.10, cls: 'noise'},
+  ];
+  html += '<div class="score-waterfall">';
+  html += '<div style="font-size:13px;font-weight:600;margin-bottom:8px;">Quality Score: ' + q.toFixed(3) + '</div>';
+  scores.forEach(function(s) {
+    var val = photo[s.key] || 0;
+    var weighted = val * s.weight;
+    var pct = Math.round(val * 100);
+    html += '<div class="score-waterfall-row">';
+    html += '<span class="score-wf-label">' + s.name + ' (' + (s.weight*100) + '%)</span>';
+    html += '<div class="score-wf-bar-track"><div class="score-wf-bar-fill ' + s.cls + '" style="width:' + pct + '%"></div></div>';
+    html += '<span class="score-wf-val">' + val.toFixed(3) + ' (' + weighted.toFixed(3) + ')</span>';
+    html += '</div>';
+  });
+  html += '</div>';
+
+  // Raw feature table
+  html += '<table class="feature-table">';
+  var features = [
+    ['Subject Tenengrad', photo.subject_tenengrad],
+    ['Background Tenengrad', photo.bg_tenengrad],
+    ['Crop Completeness', photo.crop_complete],
+    ['Background Separation', photo.bg_separation],
+    ['Highlight Clip', photo.subject_clip_high],
+    ['Shadow Clip', photo.subject_clip_low],
+    ['Median Luminance', photo.subject_y_median],
+    ['Subject Size', photo.subject_size],
+    ['Crop pHash', photo.phash_crop],
+    ['Detection Confidence', photo.detection_conf],
+  ];
+  features.forEach(function(f) {
+    var val = f[1];
+    if (val === null || val === undefined) val = '—';
+    else if (typeof val === 'number') val = val.toFixed(4);
+    html += '<tr><td>' + f[0] + '</td><td>' + val + '</td></tr>';
+  });
+  html += '</table>';
+
+  return html;
+}
+
+/* --- Loupe zoom/pan --- */
+
+var _grmZoomLevel = 4;
+var _grmLoupeLocked = false;
+
+function grmLoupeToggleLock(e) {
+  _grmLoupeLocked = !_grmLoupeLocked;
+  var ch = document.getElementById('grmCrosshairH');
+  var cv = document.getElementById('grmCrosshairV');
+  if (_grmLoupeLocked) {
+    ch.style.background = 'rgba(255, 180, 50, 0.7)';
+    cv.style.background = 'rgba(255, 180, 50, 0.7)';
+  } else {
+    ch.style.background = '';
+    cv.style.background = '';
+    grmLoupeMove(e);
+  }
+}
+
+function grmLoupeMove(e) {
+  if (_grmLoupeLocked) return;
+
+  var rect = e.currentTarget.getBoundingClientRect();
+  var x = ((e.clientX - rect.left) / rect.width) * 100;
+  var y = ((e.clientY - rect.top) / rect.height) * 100;
+
+  document.getElementById('grmCrosshairH').style.top = y + '%';
+  document.getElementById('grmCrosshairV').style.left = x + '%';
+
+  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
+    img.style.transformOrigin = x + '% ' + y + '%';
+    img.style.transform = 'scale(' + _grmZoomLevel + ')';
+    img.parentElement.classList.add('zoomed');
+  });
+}
+
+function grmLoupeZoom(e) {
+  e.preventDefault();
+  if (e.deltaY < 0) {
+    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+  } else {
+    _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
+  }
+  var wasLocked = _grmLoupeLocked;
+  _grmLoupeLocked = false;
+  grmLoupeMove(e);
+  _grmLoupeLocked = wasLocked;
+}
+
+function grmLoupeReset() {
+  if (_grmLoupeLocked) return;
+  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
+    img.style.transform = '';
+    img.style.transformOrigin = '';
+    img.parentElement.classList.remove('zoomed');
+  });
+}
+
+/* --- Zone movement --- */
+
+function _grmGetZone(photoId) {
+  if (grmState.picks.has(photoId)) return 'picks';
+  if (grmState.rejects.has(photoId)) return 'rejects';
+  return 'candidates';
+}
+
+function grmMoveUp() {
+  if (!grmState.selected) return;
+  var zone = _grmGetZone(grmState.selected);
+  if (zone === 'rejects') {
+    grmState.rejects.delete(grmState.selected);
+  } else if (zone === 'candidates') {
+    grmState.picks.add(grmState.selected);
+  }
+  renderGroupModal();
+}
+
+function grmMoveDown() {
+  if (!grmState.selected) return;
+  var zone = _grmGetZone(grmState.selected);
+  if (zone === 'picks') {
+    grmState.picks.delete(grmState.selected);
+  } else if (zone === 'candidates') {
+    grmState.rejects.add(grmState.selected);
+  }
+  renderGroupModal();
+}
+
+function grmMovePick() {
+  if (!grmState.selected) return;
+  grmState.rejects.delete(grmState.selected);
+  grmState.picks.add(grmState.selected);
+  renderGroupModal();
+}
+
+function grmMoveReject() {
+  if (!grmState.selected) return;
+  grmState.picks.delete(grmState.selected);
+  grmState.rejects.add(grmState.selected);
+  renderGroupModal();
+}
+
+function grmMoveCandidate() {
+  if (!grmState.selected) return;
+  grmState.picks.delete(grmState.selected);
+  grmState.rejects.delete(grmState.selected);
+  renderGroupModal();
+}
+
+function grmRemoveFromGroup() {
+  if (!grmState.selected) return;
+  grmState.removed.add(grmState.selected);
+  grmState.picks.delete(grmState.selected);
+  grmState.rejects.delete(grmState.selected);
+  grmState.selected = null;
+  renderGroupModal();
+  document.getElementById('grmLoupeDetail').innerHTML = '';
+}
+
+/* --- Keyboard handling --- */
+
+document.addEventListener('keydown', function(e) {
+  if (!document.getElementById('grmOverlay').classList.contains('open')) return;
+  if (e.target.tagName === 'INPUT') return;
+
+  if (e.key === 'Escape') { closeGroupReview(); e.preventDefault(); return; }
+  if (e.key === 'ArrowUp') { grmMoveUp(); e.preventDefault(); return; }
+  if (e.key === 'ArrowDown') { grmMoveDown(); e.preventDefault(); return; }
+  if (e.key === 'ArrowLeft') {
+    var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+    var idx = items.findIndex(function(p) { return p.id === grmState.selected; });
+    if (idx > 0) grmSelect(items[idx - 1].id);
+    e.preventDefault(); return;
+  }
+  if (e.key === 'ArrowRight') {
+    var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
+    var idx = items.findIndex(function(p) { return p.id === grmState.selected; });
+    if (idx < items.length - 1) grmSelect(items[idx + 1].id);
+    e.preventDefault(); return;
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
+  if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+});
+
+/* --- Apply & Close --- */
+
+function grmApply() {
+  var species = document.getElementById('grmSpecies').value.trim();
+
+  // Update local pipelineResults with pick/reject/candidate decisions
+  var photoMap = {};
+  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+  grmState.picks.forEach(function(pid) {
+    var p = photoMap[pid];
+    if (p) p.label = 'KEEP';
+  });
+
+  grmState.rejects.forEach(function(pid) {
+    var p = photoMap[pid];
+    if (p) p.label = 'REJECT';
+  });
+
+  // Candidates (not picked, not rejected, not removed) → REVIEW
+  grmState.items.forEach(function(item) {
+    if (!grmState.picks.has(item.id) && !grmState.rejects.has(item.id) && !grmState.removed.has(item.id)) {
+      var p = photoMap[item.id];
+      if (p) p.label = 'REVIEW';
+    }
+  });
+
+  // Detach removed photos from the burst into new single-photo bursts
+  if (grmState.removed.size > 0) {
+    var enc = pipelineResults.encounters[grmState.encIdx];
+    var burst = enc.bursts[grmState.burstIdx];
+    var burstIds = burst.photo_ids || burst;
+    grmState.removed.forEach(function(pid) {
+      var idx = burstIds.indexOf(pid);
+      if (idx >= 0) burstIds.splice(idx, 1);
+      // Add as a new single-photo burst in the same encounter
+      enc.bursts.push({ photo_ids: [pid], species_predictions: burst.species_predictions || [], species_override: null });
+    });
+    // Clean up empty burst
+    if (burstIds.length === 0) {
+      enc.bursts.splice(grmState.burstIdx, 1);
+    }
+    enc.burst_count = enc.bursts.length;
+  }
+
+  // Update species if changed
+  if (species) {
+    var enc = pipelineResults.encounters[grmState.encIdx];
+    if (enc) {
+      enc.confirmed_species = species;
+      enc.species_confirmed = true;
+    }
+  }
+
+  // Save to cache
+  safeFetch('/api/pipeline/save-cache', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(pipelineResults),
+  });
+
+  closeGroupReview();
+  // Clear the species input for next use
+  document.getElementById('grmSpecies').value = '';
+  renderResults();
+  // Recalculate summary counts from photo labels
+  var summary = pipelineResults.summary;
+  summary.keep_count = 0;
+  summary.review_count = 0;
+  summary.reject_count = 0;
+  pipelineResults.photos.forEach(function(p) {
+    if (p.label === 'KEEP') summary.keep_count++;
+    else if (p.label === 'REVIEW') summary.review_count++;
+    else if (p.label === 'REJECT') summary.reject_count++;
+  });
+  updateSummaryBar(summary);
 }
 
 initPipelineReviewPage();
