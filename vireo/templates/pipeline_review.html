@@ -104,6 +104,15 @@ body { padding-bottom: 36px; }
   cursor: pointer;
 }
 .encounter-header:hover { background: var(--border-secondary, #1A4560); }
+.encounter-chevron {
+  font-size: 10px;
+  color: var(--text-dim, #5A8890);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+  user-select: none;
+  flex-shrink: 0;
+}
+.encounter-chevron.collapsed { transform: rotate(-90deg); }
 /* .encounter-species replaced by .species-widget */
 .encounter-meta {
   font-size: 11px;
@@ -338,6 +347,18 @@ input[type="range"]::-moz-range-thumb {
   cursor: pointer;
 }
 .mask-toggle:hover { background: rgba(0,0,0,0.7); }
+
+/* Species predictions in inspect panel */
+.inspect-species-predictions { margin-bottom: 16px; }
+.inspect-species-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.inspect-species-name { color: var(--text-primary, #E0F0F0); font-weight: 500; }
+.inspect-species-conf { color: var(--text-dim, #5A8890); }
 
 /* Score waterfall */
 .score-waterfall { margin-bottom: 16px; }
@@ -808,6 +829,7 @@ function renderResults() {
 
     html += '<div class="encounter-card">';
     html += '<div class="encounter-header">';
+    html += '<span class="encounter-chevron" id="encChev' + ei + '" onclick="toggleEncounter(' + ei + ')">&#9660;</span>';
     html += renderSpeciesWidget(enc, ei, 'encounter', null);
     html += '<span class="encounter-meta" onclick="toggleEncounter(' + ei + ')" style="cursor:pointer;flex:1;">';
     html += '<span>' + enc.photo_count + ' photos</span>';
@@ -877,7 +899,10 @@ function renderPhotoCard(p, encIdx, burstIdx) {
 function toggleEncounter(idx) {
   var body = document.getElementById('encBody' + idx);
   if (!body) return;
-  body.style.display = body.style.display === 'none' ? '' : 'none';
+  var collapsed = body.style.display !== 'none';
+  body.style.display = collapsed ? 'none' : '';
+  var chev = document.getElementById('encChev' + idx);
+  if (chev) chev.classList.toggle('collapsed', collapsed);
 }
 
 function setFilter(f) {
@@ -1133,6 +1158,22 @@ function openInspect(photoId) {
     html += '<div class="reject-reasons">';
     photo.reject_reasons.forEach(function(r) {
       html += '<div class="reject-reason">&#9888; ' + r + '</div>';
+    });
+    html += '</div>';
+  }
+
+  // Species predictions
+  if (enc && enc.species_predictions && enc.species_predictions.length > 0) {
+    html += '<div class="inspect-species-predictions">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">Species Predictions</div>';
+    enc.species_predictions.forEach(function(sp) {
+      var modelParts = (sp.models || []).map(function(m) {
+        return escapeHtml(m.model) + ' ' + (m.confidence * 100).toFixed(0) + '%';
+      });
+      html += '<div class="inspect-species-row">';
+      html += '<span class="inspect-species-name">' + escapeHtml(sp.species) + '</span>';
+      html += '<span class="inspect-species-conf">' + modelParts.join(', ') + '</span>';
+      html += '</div>';
     });
     html += '</div>';
   }
