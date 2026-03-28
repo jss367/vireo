@@ -366,6 +366,14 @@ def create_app(db_path, thumb_cache_dir=None):
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
+        ws = db.get_workspace(db._active_workspace_id)
+        ws_overrides = {}
+        if ws and ws["config_overrides"]:
+            try:
+                ws_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
+
         return jsonify({
             "total_photos": total_photos,
             "has_detections": pipeline_counts["detections"],
@@ -377,6 +385,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
             },
             "results": results,
+            "workspace_overrides": ws_overrides,
         })
 
     @app.route("/api/folders")

@@ -730,6 +730,19 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
         labels_mod.LABELS_DIR = orig_labels_dir
 
 
+def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
+    """page-init response includes workspace config overrides."""
+    app, db = app_and_db
+    # Set a workspace override first
+    db.update_workspace(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "workspace_overrides" in data
+        assert data["workspace_overrides"]["review_min_confidence"] == 25
+
+
 def test_review_min_confidence_persists_in_workspace(app_and_db):
     """review_min_confidence can be saved and read from workspace config."""
     app, db = app_and_db
