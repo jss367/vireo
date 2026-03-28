@@ -85,11 +85,50 @@ def _pair_raw_jpeg_companions(db):
         primary = raws[0]
         companion = jpegs[0]
 
+        # Transfer metadata from companion to primary if primary lacks it
+        primary_full = db.conn.execute(
+            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            (primary["id"],),
+        ).fetchone()
+        companion_full = db.conn.execute(
+            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            (companion["id"],),
+        ).fetchone()
+
+        updates = []
+        params = []
+        if not primary_full["timestamp"] and companion_full["timestamp"]:
+            updates.append("timestamp = ?")
+            params.append(companion_full["timestamp"])
+        if primary_full["rating"] == 0 and companion_full["rating"] != 0:
+            updates.append("rating = ?")
+            params.append(companion_full["rating"])
+        if primary_full["flag"] == "none" and companion_full["flag"] != "none":
+            updates.append("flag = ?")
+            params.append(companion_full["flag"])
+        if updates:
+            params.append(primary["id"])
+            db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id = ?", params
+            )
+
+        # Transfer keywords from companion to primary
+        companion_keywords = db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for kw in companion_keywords:
+            db.conn.execute(
+                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+                (primary["id"], kw["keyword_id"]),
+            )
+
         db.conn.execute(
             "UPDATE photos SET companion_path = ? WHERE id = ?",
             (companion["filename"], primary["id"]),
         )
-        # Remove the duplicate JPEG record
+        # Remove keyword associations then the duplicate JPEG record
+        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
 
     db.conn.commit()

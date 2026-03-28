@@ -311,6 +311,63 @@ def test_scan_pairs_raw_and_jpeg(tmp_path):
     assert photo["companion_path"] == "IMG_001.jpg"
 
 
+def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
+    """Importing raws after JPEGs matches them to existing photo records."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    from PIL import Image
+
+    # First scan: JPEG only
+    Image.new("RGB", (200, 100), color="green").save(str(img_dir / "IMG_001.jpg"))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    photos_before = db.conn.execute("SELECT id FROM photos").fetchall()
+    assert len(photos_before) == 1
+
+    # Add metadata to the JPEG record (simulating user edits before raw arrives)
+    jpeg_id = photos_before[0]["id"]
+    db.conn.execute(
+        "UPDATE photos SET rating = 4, flag = 'flagged', timestamp = '2024-06-15T10:30:00' WHERE id = ?",
+        (jpeg_id,),
+    )
+    # Add a keyword to the JPEG
+    kw_id = db.add_keyword("Robin")
+    db.tag_photo(jpeg_id, kw_id)
+    db.conn.commit()
+
+    # Now add the raw file and rescan
+    with open(str(img_dir / "IMG_001.cr3"), "wb") as f:
+        f.write(b"\x00" * 200)
+    scan(str(img_dir), db)
+
+    photos_after = db.conn.execute(
+        "SELECT id, filename, companion_path, rating, flag, timestamp FROM photos"
+    ).fetchall()
+    # Still one photo — raw becomes primary, JPEG becomes companion
+    assert len(photos_after) == 1
+    assert photos_after[0]["filename"] == "IMG_001.cr3"
+    assert photos_after[0]["companion_path"] == "IMG_001.jpg"
+
+    # Metadata should have been transferred from the JPEG record
+    assert photos_after[0]["rating"] == 4
+    assert photos_after[0]["flag"] == "flagged"
+    assert photos_after[0]["timestamp"] == "2024-06-15T10:30:00"
+
+    # Keywords should have been transferred
+    raw_id = photos_after[0]["id"]
+    keywords = db.get_photo_keywords(raw_id)
+    kw_names = {k["name"] for k in keywords}
+    assert "Robin" in kw_names
+
+
 def test_scan_stores_file_hash(tmp_path):
     """Scanning a folder computes and stores SHA-256 file_hash for each photo."""
     from db import Database
