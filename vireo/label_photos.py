@@ -6,15 +6,15 @@ Usage:
 
 import argparse
 import logging
-import sys
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
 
 from classifier import Classifier
-from image_loader import load_image, SUPPORTED_EXTENSIONS
+from image_loader import SUPPORTED_EXTENSIONS, load_image
 from xmp_writer import write_xmp_sidecar
 
 logging.basicConfig(

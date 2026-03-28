@@ -401,7 +401,7 @@ def test_health_endpoint(app_and_db):
 
 def test_shutdown_endpoint(app_and_db):
     """POST /api/shutdown returns 200 and signals shutdown."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
 
     app, _ = app_and_db
     client = app.test_client()
@@ -466,7 +466,7 @@ def test_templates_jinja_free_except_includes():
         if not fname.endswith('.html'):
             continue
         fpath = os.path.join(templates_dir, fname)
-        with open(fpath, 'r', encoding='utf-8') as f:
+        with open(fpath, encoding='utf-8') as f:
             lines = f.readlines()
         for lineno, line in enumerate(lines, start=1):
             # Check for {{ ... }} expressions — never allowed
@@ -728,3 +728,57 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
             assert label_path in active_files
     finally:
         labels_mod.LABELS_DIR = orig_labels_dir
+
+
+def test_pipeline_page_init_includes_workspace_overrides(app_and_db):
+    """page-init response includes workspace config overrides."""
+    app, db = app_and_db
+    # Set a workspace override first
+    db.update_workspace(db._active_workspace_id, config_overrides={"review_min_confidence": 25})
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "workspace_overrides" in data
+        assert data["workspace_overrides"]["review_min_confidence"] == 25
+
+
+def test_review_min_confidence_persists_in_workspace(app_and_db):
+    """review_min_confidence can be saved and read from workspace config."""
+    app, db = app_and_db
+    with app.test_client() as c:
+        # Save threshold
+        resp = c.post("/api/workspaces/active/config",
+                       json={"review_min_confidence": 40},
+                       content_type="application/json")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["overrides"]["review_min_confidence"] == 40
+
+        # Read it back
+        resp = c.get("/api/workspaces/active/config")
+        assert resp.status_code == 200
+        assert resp.get_json()["review_min_confidence"] == 40
+
+
+def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
+    """POST /api/workspaces/active/config merges into existing overrides,
+    preserving keys not in the whitelist (e.g. active_labels)."""
+    app, db = app_and_db
+    # Pre-set overrides with a non-whitelisted key
+    db.update_workspace(db._active_workspace_id,
+                        config_overrides={"active_labels": ["/path/to/birds.txt"],
+                                          "classification_threshold": 0.5})
+    with app.test_client() as c:
+        # POST only review_min_confidence
+        resp = c.post("/api/workspaces/active/config",
+                       json={"review_min_confidence": 30},
+                       content_type="application/json")
+        assert resp.status_code == 200
+        overrides = resp.get_json()["overrides"]
+        # New key saved
+        assert overrides["review_min_confidence"] == 30
+        # Whitelisted key preserved
+        assert overrides["classification_threshold"] == 0.5
+        # Non-whitelisted key preserved
+        assert overrides["active_labels"] == ["/path/to/birds.txt"]

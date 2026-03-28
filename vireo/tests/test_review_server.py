@@ -124,8 +124,8 @@ def test_get_photos():
 
 def test_accept_writes_xmp():
     """POST /api/accept/<filename> writes prediction to XMP."""
-    from review_server import create_app
     from compare import read_xmp_keywords
+    from review_server import create_app
     with tempfile.TemporaryDirectory() as tmpdir:
         results_path = _create_test_review_data(tmpdir)
         app = create_app(tmpdir)
@@ -142,8 +142,8 @@ def test_accept_writes_xmp():
 
 def test_accept_group_writes_all_xmps():
     """POST /api/accept-group/<group_id> writes prediction to all member XMP files."""
-    from review_server import create_app
     from compare import read_xmp_keywords
+    from review_server import create_app
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_group_data(tmpdir)
         app = create_app(tmpdir)

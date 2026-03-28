@@ -25,6 +25,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
 ]
 
 [tool.setuptools.packages.find]
@@ -32,3 +34,47 @@ include = ["vireo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "vireo/tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E741",   # ambiguous variable name
+    "B010",   # do not call setattr with a constant
+    "SIM108", # ternary operator
+    "UP031",  # printf-style formatting
+]
+
+[tool.ruff.lint.per-file-ignores]
+"vireo/tests/*" = ["E402", "B011", "F841", "SIM115", "SIM117"]
+"tests/*" = ["E402", "B017", "F841"]
+# -- production code: pre-existing violations, fix in dedicated cleanup PR --
+"vireo/app.py" = ["B007", "F841", "SIM105", "SIM118"]
+"vireo/classifier.py" = ["B905"]
+"vireo/classify_job.py" = ["F821", "SIM105"]
+"vireo/culling.py" = ["B007", "F841", "SIM105"]
+"vireo/detector.py" = ["B904"]
+"vireo/dino_embed.py" = ["B904"]
+"vireo/importer.py" = ["B007"]
+"vireo/jobs.py" = ["SIM105"]
+"vireo/masking.py" = ["B904"]
+"vireo/models.py" = ["B904", "F401"]
+"vireo/quality.py" = ["B905"]
+"vireo/selection.py" = ["F841"]
+"vireo/sharpness.py" = ["SIM105", "SIM118"]
+"vireo/taxonomy.py" = ["B905"]
+# -- test files: violations not covered by vireo/tests/* glob --
+"vireo/tests/test_culling.py" = ["E702", "E731"]
+"vireo/tests/test_detector.py" = ["F401"]
+"vireo/tests/test_dinov2.py" = ["B007"]

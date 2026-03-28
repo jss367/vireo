@@ -93,8 +93,8 @@ class Classifier:
             if not labels:
                 raise ValueError("labels list must not be empty")
 
-            from bioclip import CustomLabelsClassifier
             import torch
+            from bioclip import CustomLabelsClassifier
 
             cache_path = _embedding_cache_path(labels, model_str)
 
@@ -142,7 +142,7 @@ class Classifier:
             self._mode = "custom"
         else:
             log.info("Loading TreeOfLife classifier...")
-            from bioclip import TreeOfLifeClassifier, Rank
+            from bioclip import Rank, TreeOfLifeClassifier
 
             tol_kwargs = {"model_str": model_str}
             if not model_str.startswith("hf-hub:"):
@@ -173,8 +173,6 @@ class Classifier:
                 embedding: numpy float32 array (the normalized image embedding vector)
         """
         import numpy as np
-        import torch
-        import torch.nn.functional as F
 
         clf = self._classifier
 

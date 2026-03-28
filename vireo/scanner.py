@@ -6,11 +6,10 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import imagehash
-from PIL import Image
-
 from compare import read_xmp_keywords
-from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
 from grouping import read_exif_timestamp
+from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
+from PIL import Image
 
 log = logging.getLogger(__name__)
 

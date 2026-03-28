@@ -13,7 +13,7 @@ import webbrowser
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
 
-from flask import Flask, jsonify, request, send_from_directory, render_template
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from xmp_writer import write_xmp_sidecar
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from labels import get_active_labels, set_active_labels, load_merged_labels, get_saved_labels, LABELS_DIR
+from labels import get_active_labels, load_merged_labels, set_active_labels
 
 
 def test_get_active_labels_empty(tmp_path, monkeypatch):

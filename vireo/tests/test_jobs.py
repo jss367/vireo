@@ -128,8 +128,8 @@ def test_log_broadcaster_captures_logs():
 
 def test_log_broadcaster_subscriber():
     """LogBroadcaster pushes records to subscriber queues."""
+
     from jobs import LogBroadcaster
-    import queue
 
     broadcaster = LogBroadcaster(buffer_size=50)
     broadcaster.install()

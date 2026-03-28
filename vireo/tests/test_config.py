@@ -76,6 +76,7 @@ def test_pipeline_defaults_exist():
 def test_deep_merge_preserves_pipeline(tmp_path):
     """Deep merge correctly handles nested pipeline config."""
     import json
+
     import config as cfg
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")

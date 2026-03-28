@@ -2,7 +2,6 @@
 
 import logging
 import os
-from collections import defaultdict
 from pathlib import Path
 
 from catalog_reader import read_catalog
@@ -140,12 +139,7 @@ def execute_import(
                 merged[file_path]["hierarchical_keywords"].update(
                     kw_data["hierarchical_keywords"]
                 )
-            elif strategy == "prefer_first" and not merged[file_path]["flat_keywords"]:
-                merged[file_path]["flat_keywords"] = kw_data["flat_keywords"]
-                merged[file_path]["hierarchical_keywords"] = kw_data[
-                    "hierarchical_keywords"
-                ]
-            elif strategy == "prefer_last":
+            elif strategy == "prefer_first" and not merged[file_path]["flat_keywords"] or strategy == "prefer_last":
                 merged[file_path]["flat_keywords"] = kw_data["flat_keywords"]
                 merged[file_path]["hierarchical_keywords"] = kw_data[
                     "hierarchical_keywords"

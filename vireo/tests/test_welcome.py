@@ -169,8 +169,8 @@ def test_setup_complete_flag_default(tmp_path, monkeypatch):
 
 def test_index_respects_setup_complete_flag(app_and_db, monkeypatch):
     """GET / goes to /browse when setup_complete is True, even without model."""
-    import models
     import config as cfg
+    import models
 
     monkeypatch.setattr(models, "get_active_model", lambda: None)
     cfg.set("setup_complete", True)

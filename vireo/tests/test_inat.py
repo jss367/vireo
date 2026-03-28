@@ -1,10 +1,11 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
-import pytest
 from db import Database
 
 
@@ -51,7 +52,7 @@ def test_inat_submission_cascades_on_photo_delete(db):
     assert row is None
 
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_validate_token_success():
@@ -94,13 +95,12 @@ def test_create_observation_success():
 
 
 def test_create_observation_auth_error():
-    from inat import create_observation, InatAuthError
+    from inat import InatAuthError, create_observation
     mock_resp = MagicMock()
     mock_resp.status_code = 401
     mock_resp.text = "Unauthorized"
-    with patch("inat.requests.post", return_value=mock_resp):
-        with pytest.raises(InatAuthError):
-            create_observation(token="bad", taxon_name="Test")
+    with patch("inat.requests.post", return_value=mock_resp), pytest.raises(InatAuthError):
+        create_observation(token="bad", taxon_name="Test")
 
 
 def test_upload_photo_success():
@@ -108,10 +108,9 @@ def test_upload_photo_success():
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"id": 55555}
-    with patch("inat.requests.post", return_value=mock_resp):
-        with patch("builtins.open", MagicMock()):
-            result = upload_photo("fake-token", 99999, "/path/to/photo.jpg")
-            assert result["id"] == 55555
+    with patch("inat.requests.post", return_value=mock_resp), patch("builtins.open", MagicMock()):
+        result = upload_photo("fake-token", 99999, "/path/to/photo.jpg")
+        assert result["id"] == 55555
 
 
 def test_submit_observation_success():
@@ -135,8 +134,8 @@ from PIL import Image
 @pytest.fixture
 def app_and_db(tmp_path):
     """Create a test app with sample data for iNat tests."""
-    from app import create_app
     import config as cfg
+    from app import create_app
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
 

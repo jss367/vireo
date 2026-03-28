@@ -18,7 +18,25 @@ jobs:
           allow-prereleases: true
 
       - name: Install dependencies
-        run: pip install flask Pillow pytest imagehash
+        run: pip install flask Pillow pytest imagehash pytest-cov requests
 
-      - name: Run lightweight tests
-        run: python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v
+      - name: Run tests with coverage
+        run: python -m pytest tests/ vireo/tests/ -v --tb=short --cov=vireo --cov-report=term-missing --cov-fail-under=40
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check vireo/ tests/

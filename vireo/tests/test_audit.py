@@ -11,9 +11,9 @@ from PIL import Image
 
 def test_check_drift_detects_xmp_change(tmp_path):
     """check_drift detects when XMP was modified after scan."""
+    from audit import check_drift
     from db import Database
     from scanner import scan
-    from audit import check_drift
     from xmp_writer import write_xmp_sidecar
 
     root = str(tmp_path / "photos")
@@ -43,9 +43,9 @@ def test_check_drift_detects_xmp_change(tmp_path):
 
 def test_check_orphans_detects_deleted_file(tmp_path):
     """check_orphans finds DB entries with no file on disk."""
+    from audit import check_orphans
     from db import Database
     from scanner import scan
-    from audit import check_orphans
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
@@ -65,9 +65,9 @@ def test_check_orphans_detects_deleted_file(tmp_path):
 
 def test_check_untracked_finds_new_files(tmp_path):
     """check_untracked finds files on disk not in the DB."""
+    from audit import check_untracked
     from db import Database
     from scanner import scan
-    from audit import check_untracked
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
@@ -86,8 +86,8 @@ def test_check_untracked_finds_new_files(tmp_path):
 
 def test_remove_orphans(tmp_path):
     """remove_orphans deletes DB entries for missing files."""
-    from db import Database
     from audit import remove_orphans
+    from db import Database
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/gone', name='gone')

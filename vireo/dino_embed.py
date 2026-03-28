@@ -10,7 +10,6 @@ Models are loaded from the facebookresearch/dinov2 torch hub.
 import logging
 
 import numpy as np
-from PIL import Image
 
 log = logging.getLogger(__name__)
 

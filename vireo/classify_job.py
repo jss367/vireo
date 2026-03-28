@@ -10,7 +10,6 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from labels import get_active_labels, get_saved_labels, load_merged_labels
 
@@ -51,10 +50,10 @@ class ClassifyParams:
     """Parameters for a classification job, parsed from the request body."""
 
     collection_id: str
-    labels_file: Optional[str]
-    labels_files: Optional[list]
-    model_id: Optional[str]
-    model_name: Optional[str]
+    labels_file: str | None
+    labels_files: list | None
+    model_id: str | None
+    model_name: str | None
     grouping_window: int
     similarity_threshold: float
     reclassify: bool
@@ -451,7 +450,7 @@ def _classify_photos(
             os.unlink(tmp_path)
 
         if embedding is not None:
-            db.store_photo_embedding(photo["id"], embedding.tobytes(), model=effective_name)
+            db.store_photo_embedding(photo["id"], embedding.tobytes(), model=model_name)
 
         if not all_preds:
             continue

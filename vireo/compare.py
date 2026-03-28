@@ -1,8 +1,8 @@
 """Read XMP keywords and compare against model predictions."""
 
 import logging
-from xml.etree import ElementTree as ET
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 log = logging.getLogger(__name__)
 

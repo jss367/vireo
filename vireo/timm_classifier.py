@@ -1,7 +1,6 @@
 """timm-based classifier for species classification (iNaturalist 2021)."""
 
 import logging
-import os
 
 log = logging.getLogger(__name__)
 

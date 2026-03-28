@@ -247,9 +247,10 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
     progress is being made. Stops after 3 consecutive failures with
     no progress.
     """
-    from huggingface_hub import hf_hub_download
     import shutil
     import time as _time
+
+    from huggingface_hub import hf_hub_download
 
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
@@ -353,8 +354,6 @@ def _download_with_byte_progress(repo_id, filename, file_size,
         progress_callback: callable(bytes_downloaded, file_size, rate_bytes_per_sec)
         stall_timeout: Seconds with no progress before raising _DownloadStalled.
     """
-    from huggingface_hub import hf_hub_download
-    from tqdm.auto import tqdm as base_tqdm
     import threading
     import time as _time
 
@@ -363,6 +362,8 @@ def _download_with_byte_progress(repo_id, filename, file_size,
     # progress.  Plain HTTP writes to .incomplete files and resumes.
     # Patch the name where _download_to_tmp_and_move actually calls it.
     import huggingface_hub.file_download as _hf_fd
+    from huggingface_hub import hf_hub_download
+    from tqdm.auto import tqdm as base_tqdm
     _hf_fd.is_xet_available = lambda: False
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 

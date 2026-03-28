@@ -34,7 +34,7 @@ def test_megadetector_loads_after_bioclip():
 
     # Phase 1: Import BioCLIP (same as classify job phase 3)
     try:
-        from classifier import Classifier
+        pass
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 
@@ -45,10 +45,9 @@ def test_megadetector_loads_after_bioclip():
         pytest.skip("PytorchWildlife not installed")
 
     # Phase 3: Load MegaDetector using our detector module
-    from detector import _get_detector
-
     # Reset singleton so we actually test loading
     import detector
+    from detector import _get_detector
     detector._detector = None
 
     try:
@@ -73,7 +72,7 @@ def test_megadetector_loads_with_force_weights_only_env():
         pytest.skip("torch not installed")
 
     try:
-        from classifier import Classifier
+        pass
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 

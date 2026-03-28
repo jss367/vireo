@@ -16,9 +16,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
 
 from classifier import Classifier
-from compare import read_xmp_keywords, categorize
-from grouping import group_by_timestamp, consensus_prediction, read_exif_timestamp
-from image_loader import load_image, SUPPORTED_EXTENSIONS
+from compare import categorize, read_xmp_keywords
+from grouping import consensus_prediction, group_by_timestamp, read_exif_timestamp
+from image_loader import SUPPORTED_EXTENSIONS, load_image
 from taxonomy import Taxonomy
 
 logging.basicConfig(

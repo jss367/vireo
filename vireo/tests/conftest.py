@@ -13,8 +13,8 @@ def app_and_db(tmp_path, monkeypatch):
     """Create a test app with sample data."""
     from db import Database
     monkeypatch.setenv("HOME", str(tmp_path))
-    from app import create_app
     import config as cfg
+    from app import create_app
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
 

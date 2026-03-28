@@ -279,8 +279,9 @@ def test_add_keyword_idempotent(tmp_path):
 
 def test_collection_crud(tmp_path):
     """add_collection, get_collections work."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -295,8 +296,9 @@ def test_collection_crud(tmp_path):
 
 def test_collection_photos_rating_rule(tmp_path):
     """get_collection_photos filters by rating rule."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -316,8 +318,9 @@ def test_collection_photos_rating_rule(tmp_path):
 
 def test_collection_photos_keyword_rule(tmp_path):
     """get_collection_photos filters by keyword contains rule."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -339,8 +342,9 @@ def test_collection_photos_keyword_rule(tmp_path):
 
 def test_collection_untagged_rule(tmp_path):
     """get_collection_photos filters by keyword_count equals 0."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -360,9 +364,10 @@ def test_collection_untagged_rule(tmp_path):
 
 def test_collection_recent_days_rule(tmp_path):
     """get_collection_photos filters by timestamp recent_days."""
-    from db import Database
-    from datetime import datetime, timedelta
     import json
+    from datetime import datetime, timedelta
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -386,8 +391,9 @@ def test_collection_recent_days_rule(tmp_path):
 
 def test_collection_has_species_rule(tmp_path):
     """get_collection_photos filters by has_species rule."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -466,8 +472,9 @@ def test_default_collections_idempotent(tmp_path):
 
 def test_default_collections_adds_missing(tmp_path):
     """create_default_collections adds new defaults alongside existing collections."""
-    from db import Database
     import json
+
+    from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)

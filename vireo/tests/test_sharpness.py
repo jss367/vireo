@@ -8,9 +8,7 @@ dependency is patched to return PIL images directly.
 import os
 import sys
 
-import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

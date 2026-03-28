@@ -1,6 +1,5 @@
 # vireo/tests/test_scoring.py
 """Tests for subject-aware quality scoring (Stage 4)."""
-import math
 import os
 import sys
 

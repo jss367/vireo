@@ -7,7 +7,6 @@ import logging
 import os
 
 import numpy as np
-from PIL import Image
 
 log = logging.getLogger(__name__)
 

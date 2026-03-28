@@ -1,11 +1,9 @@
 import dataclasses
 import json
-import os
 
 import pytest
-from PIL import Image
-
 from classify_job import ClassifyParams, run_classify_job
+from PIL import Image
 
 
 def test_classify_params_is_dataclass():
@@ -162,7 +160,8 @@ def test_load_labels_raises_when_no_labels_unsupported_model():
 
 def test_detect_subjects_returns_detection_map(tmp_path):
     """Phase 5: returns detection map for photos with detectable subjects."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     from classify_job import _detect_subjects
 
     runner = FakeRunner()
@@ -205,7 +204,8 @@ def test_detect_subjects_returns_detection_map(tmp_path):
 def test_detect_subjects_skips_existing_detections(tmp_path):
     """Phase 5: skips photos that already have detection_box (unless reclassify)."""
     import json as _json
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     from classify_job import _detect_subjects
 
     runner = FakeRunner()
@@ -237,6 +237,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
 def test_detect_subjects_graceful_on_import_error():
     """Phase 5: returns empty map if PytorchWildlife not installed."""
     from unittest.mock import MagicMock
+
     from classify_job import _detect_subjects
 
     runner = FakeRunner()
@@ -260,7 +261,8 @@ def test_detect_subjects_graceful_on_import_error():
 
 def test_classify_photos_new_photo(tmp_path):
     """Phase 6: classifies a new photo and returns raw results."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     import numpy as np
     from classify_job import _classify_photos
 
@@ -314,6 +316,7 @@ def test_classify_photos_new_photo(tmp_path):
 def test_classify_photos_skips_existing(tmp_path):
     """Phase 6: skips photos with existing predictions."""
     from unittest.mock import MagicMock
+
     from classify_job import _classify_photos
 
     runner = FakeRunner()
@@ -359,6 +362,7 @@ def test_classify_photos_skips_existing(tmp_path):
 def test_store_grouped_predictions_single_photo():
     """Phase 7: single-photo group stores prediction directly."""
     from unittest.mock import MagicMock
+
     from classify_job import _store_grouped_predictions
 
     mock_db = MagicMock()
@@ -396,8 +400,9 @@ def test_store_grouped_predictions_single_photo():
 
 def test_store_grouped_predictions_burst_group():
     """Phase 7: multi-photo group computes consensus and stores for all photos."""
-    from unittest.mock import MagicMock, patch
     from datetime import datetime
+    from unittest.mock import MagicMock
+
     from classify_job import _store_grouped_predictions
 
     mock_db = MagicMock()
@@ -445,7 +450,8 @@ def test_store_grouped_predictions_burst_group():
 
 def test_run_classify_job_full_pipeline(tmp_path):
     """run_classify_job orchestrates all phases end-to-end."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     import numpy as np
     from classify_job import ClassifyParams, run_classify_job
 
@@ -516,7 +522,6 @@ def test_run_classify_job_full_pipeline(tmp_path):
 
 def test_api_route_calls_run_classify_job(app_and_db):
     """The /api/jobs/classify route delegates to run_classify_job."""
-    from classify_job import ClassifyParams
 
     app, db = app_and_db
     client = app.test_client()

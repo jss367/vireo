@@ -4,7 +4,6 @@ import json
 import os
 import sqlite3
 import uuid
-import uuid
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
@@ -1934,12 +1933,7 @@ class Database:
         ).fetchall()
         updated = 0
         for kw in keywords:
-            if taxonomy.is_taxon(kw["name"]):
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1 WHERE id = ?", (kw["id"],)
-                )
-                updated += 1
-            elif hasattr(taxonomy, "api_lookup") and taxonomy.api_lookup(kw["name"]):
+            if taxonomy.is_taxon(kw["name"]) or hasattr(taxonomy, "api_lookup") and taxonomy.api_lookup(kw["name"]):
                 self.conn.execute(
                     "UPDATE keywords SET is_species = 1 WHERE id = ?", (kw["id"],)
                 )

@@ -7,10 +7,9 @@ Higher score = sharper image.
 import logging
 import os
 
-from PIL import Image, ImageFilter
 import numpy as np
-
 from image_loader import load_image
+from PIL import ImageFilter
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +98,7 @@ def score_collection_photos(db, collection_id, progress_callback=None):
         dict with scored_count, group_count, results (list of scored photos)
     """
     from datetime import datetime
+
     from grouping import group_by_timestamp, refine_groups_by_similarity
 
     if collection_id:

@@ -359,12 +359,20 @@ def create_app(db_path, thumb_cache_dir=None):
         pipeline_counts = db.get_pipeline_feature_counts()
         total_photos = db.count_photos()
 
-        from pipeline import load_results
         import config as cfg
+        from pipeline import load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        ws = db.get_workspace(db._active_workspace_id)
+        ws_overrides = {}
+        if ws and ws["config_overrides"]:
+            try:
+                ws_overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
 
         return jsonify({
             "total_photos": total_photos,
@@ -377,6 +385,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "proxy_longest_edge": pipeline_cfg.get("proxy_longest_edge", 1536),
             },
             "results": results,
+            "workspace_overrides": ws_overrides,
         })
 
     @app.route("/api/folders")
@@ -1041,11 +1050,23 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
-        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold"}
-        overrides = {k: v for k, v in body.items() if k in allowed and v is not None}
-        # Remove keys set to null (revert to global)
-        db.update_workspace(db._active_workspace_id, config_overrides=overrides if overrides else None)
-        return jsonify({"ok": True, "overrides": overrides})
+        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "review_min_confidence"}
+        # Merge into existing overrides to preserve non-whitelisted keys
+        ws = db.get_workspace(db._active_workspace_id)
+        existing = {}
+        if ws and ws["config_overrides"]:
+            try:
+                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
+        for k, v in body.items():
+            if k in allowed:
+                if v is None:
+                    existing.pop(k, None)
+                else:
+                    existing[k] = v
+        db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
+        return jsonify({"ok": True, "overrides": existing})
 
     # -- Prediction API routes --
 
@@ -2020,7 +2041,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/labels")
     def api_labels_list():
-        from labels import get_active_labels as get_global_active_labels, get_saved_labels
+        from labels import get_active_labels as get_global_active_labels
+        from labels import get_saved_labels
 
         db = _get_db()
         saved = get_saved_labels()
@@ -2426,6 +2448,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
             # Check if weights are downloaded
             import glob
+
             import torch
 
             hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
@@ -2529,7 +2552,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 removed.append(f)
 
         # Clear the cached singleton so it reloads next time
-        from detector import _get_detector
         import detector
         detector._detector = None
 
@@ -2665,8 +2687,9 @@ def create_app(db_path, thumb_cache_dir=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            import torch
             import urllib.request
+
+            import torch
 
             MAX_RETRIES = 3
 
@@ -2779,7 +2802,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 if not hub_name:
                     raise ValueError(f"Unknown DINOv2 variant: {model_id}")
                 runner.push_event(job["id"], "progress", {
-                    "phase": f"Downloading DINOv2 repo from torch hub...",
+                    "phase": "Downloading DINOv2 repo from torch hub...",
                     "current": 0, "total": 1,
                 })
                 # torch.hub.load downloads repo + weights automatically
@@ -4619,8 +4642,8 @@ def create_app(db_path, thumb_cache_dir=None):
     def serve_crop_preview(photo_id):
         """Serve the cropped region that would be sent to BioCLIP."""
         import config as cfg
-        from PIL import Image
         from image_loader import load_image
+        from PIL import Image
 
         db = _get_db()
         photo = db.conn.execute(

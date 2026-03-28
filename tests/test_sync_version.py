@@ -25,6 +25,10 @@ def version_files(tmp_path):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nname = "vireo"\nversion = "0.0.0"\n')
 
+    download_astro = tmp_path / "website" / "src" / "pages" / "download.astro"
+    download_astro.parent.mkdir(parents=True)
+    download_astro.write_text("---\nconst version = '0.0.0'\n---\n<html></html>\n")
+
     return tmp_path
 
 

@@ -242,7 +242,6 @@ def compute_crop_phash(image, mask, hash_size=8):
         str — hex-encoded pHash, or None if crop fails
     """
     import imagehash
-
     from masking import blur_background, crop_subject
 
     # Produce masked crop: blur background, then crop to subject bbox

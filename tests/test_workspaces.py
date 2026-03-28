@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from db import Database
 
 
@@ -303,7 +302,8 @@ def test_job_history_workspace_id(db_with_workspace):
     job_id = runner.start("test-job", noop, workspace_id=ws_id)
 
     # Wait for job to complete
-    import time, sqlite3
+    import sqlite3
+    import time
     for _ in range(100):
         job = runner.get(job_id)
         if job and job["status"] in ("completed", "failed"):
@@ -330,8 +330,10 @@ def test_job_history_workspace_id(db_with_workspace):
 
 
 def test_job_history_filtered_by_workspace(db_with_workspace):
+    import sqlite3
+    import time
+
     from jobs import JobRunner
-    import time, sqlite3
 
     db, ws_id, _, _ = db_with_workspace
     ws2_id = db.create_workspace("Other WS")
@@ -454,7 +456,8 @@ def test_migration_from_legacy_db(tmp_path):
 @pytest.fixture
 def client(tmp_path):
     """Flask test client with a fresh DB."""
-    import sys, os
+    import os
+    import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
     from app import create_app
     app = create_app(str(tmp_path / "test.db"))

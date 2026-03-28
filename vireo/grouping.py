@@ -181,6 +181,7 @@ def read_exif_timestamp(image_path):
         datetime or None if not available
     """
     from datetime import datetime
+
     from PIL import Image
     from PIL.ExifTags import Base as ExifBase
 

@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-import urllib.parse
 import zipfile
 from datetime import date
 

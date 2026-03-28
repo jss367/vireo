@@ -30,9 +30,9 @@ def _setup_photo_with_xmp(tmp_path, db, keywords=None):
 
 def test_sync_to_xmp_writes_keyword_add(tmp_path):
     """sync_to_xmp writes keyword_add changes to XMP sidecars."""
+    from compare import read_xmp_keywords
     from db import Database
     from sync import sync_to_xmp
-    from compare import read_xmp_keywords
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -56,9 +56,10 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
 
 def test_sync_to_xmp_writes_rating(tmp_path):
     """sync_to_xmp writes rating changes to XMP sidecars."""
+    from xml.etree import ElementTree as ET
+
     from db import Database
     from sync import sync_to_xmp
-    from xml.etree import ElementTree as ET
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -152,9 +153,10 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
 
 def test_sync_to_xmp_reports_unsupported_flag_changes(tmp_path):
     """Legacy flag pending changes remain queued and are reported as unsupported."""
+    from xml.etree import ElementTree as ET
+
     from db import Database
     from sync import sync_to_xmp
-    from xml.etree import ElementTree as ET
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()

@@ -10,8 +10,6 @@ All weights and thresholds are configurable with defaults from the design doc.
 import logging
 import math
 
-import numpy as np
-
 log = logging.getLogger(__name__)
 
 # Default weights and thresholds

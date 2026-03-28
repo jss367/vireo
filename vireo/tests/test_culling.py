@@ -27,7 +27,6 @@ from culling import (
     analyze_for_culling,
 )
 
-
 # ---------------------------------------------------------------------------
 # _cluster_photos  (single-linkage embedding clustering)
 # ---------------------------------------------------------------------------
@@ -477,7 +476,6 @@ def test_analyze_for_culling_empty(tmp_path):
 
 def _setup_culling_db(tmp_path, with_embeddings=True):
     """Helper: create a DB with photos, predictions, and optional embeddings."""
-    from culling import analyze_for_culling
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
