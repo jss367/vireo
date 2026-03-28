@@ -496,12 +496,12 @@ def _store_grouped_predictions(
         dict with predictions_stored, burst_groups, already_labeled counts.
     """
     from compare import categorize
-    from xmp import read_keywords
     from grouping import (
         consensus_prediction,
         group_by_timestamp,
         refine_groups_by_similarity,
     )
+    from xmp import read_keywords
 
     groups = group_by_timestamp(raw_results, window_seconds=grouping_window)
     groups = refine_groups_by_similarity(

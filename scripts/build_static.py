@@ -9,7 +9,6 @@ Reads templates from vireo/templates/, resolves includes, writes to outdir.
 import argparse
 import os
 import re
-import sys
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "..", "vireo", "templates")
 INCLUDE_RE = re.compile(r"\{%\s*include\s+['\"]([^'\"]+)['\"]\s*%\}")

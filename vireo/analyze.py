@@ -8,7 +8,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -17,8 +16,8 @@ from classifier import Classifier
 from compare import categorize
 from grouping import consensus_prediction, group_by_timestamp, read_exif_timestamp
 from image_loader import SUPPORTED_EXTENSIONS, load_image
-from xmp import read_keywords
 from taxonomy import Taxonomy
+from xmp import read_keywords
 
 logging.basicConfig(
     level=logging.INFO,

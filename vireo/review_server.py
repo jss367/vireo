@@ -8,7 +8,6 @@ import argparse
 import json
 import logging
 import os
-import sys
 import webbrowser
 
 from flask import Flask, jsonify, render_template, request, send_from_directory

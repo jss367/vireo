@@ -5,11 +5,10 @@ import os
 from pathlib import Path
 
 import imagehash
-from PIL import Image
-
-from xmp import read_keywords, read_hierarchical_keywords
 from grouping import read_exif_timestamp
 from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
+from PIL import Image
+from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
 
