@@ -1,5 +1,10 @@
 #!/bin/bash
-# Build a signed and notarized release, optionally publish to GitHub.
+# Build a release and optionally publish to GitHub.
+#
+# The app is always code-signed so macOS won't reject it as "damaged".
+# If Apple Developer credentials are set, uses full signing + notarization
+# (no Gatekeeper warning at all). Otherwise, uses ad-hoc signing (users
+# see "from an unidentified developer" and can right-click → Open).
 #
 # Usage:
 #   ./scripts/release.sh patch          # 0.2.1 -> 0.2.2
@@ -8,7 +13,7 @@
 #   ./scripts/release.sh 0.5.0          # explicit version
 #   ./scripts/release.sh patch --publish # also upload to GitHub Release
 #
-# Required environment variables (for macOS code signing & notarization):
+# Optional environment variables (for full notarization):
 #   APPLE_SIGNING_IDENTITY  - e.g. "Developer ID Application: Name (TEAM_ID)"
 #   APPLE_ID                - Your Apple ID email
 #   APPLE_PASSWORD          - App-specific password for notarization
@@ -17,23 +22,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# --- Validate signing env vars ---
-missing=()
+# --- Check if full signing credentials are available ---
+FULL_SIGNING=true
 for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
     if [ -z "${!var:-}" ]; then
-        missing+=("$var")
+        FULL_SIGNING=false
+        break
     fi
 done
-
-if [ ${#missing[@]} -gt 0 ]; then
-    echo "ERROR: Missing required environment variables for code signing:"
-    for var in "${missing[@]}"; do
-        echo "  - $var"
-    done
-    echo ""
-    echo "All releases must be signed and notarized. Set these variables and retry."
-    exit 1
-fi
 
 # --- Parse args ---
 BUMP="${1:?Usage: release.sh <patch|minor|major|X.Y.Z> [--publish]}"
@@ -62,9 +58,36 @@ echo "==> Syncing version..."
 python scripts/sync_version.py "$NEW_VERSION"
 echo ""
 
-# --- Build, sign, and notarize ---
-echo "==> Building signed and notarized app..."
-./scripts/build_signed.sh
+# --- Build ---
+if $FULL_SIGNING; then
+    echo "==> Building with full signing and notarization..."
+    ./scripts/build_signed.sh
+else
+    echo "==> Building (ad-hoc signing — no Apple Developer credentials)..."
+    python scripts/build_sidecar.py
+
+    BUILD_LOG=$(mktemp)
+    if ! cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
+        if grep -q "TAURI_SIGNING_PRIVATE_KEY" "$BUILD_LOG"; then
+            echo ""
+            echo "WARNING: Updater artifact signing skipped (TAURI_SIGNING_PRIVATE_KEY not set)."
+        else
+            echo "ERROR: cargo tauri build failed (see output above)"
+            rm -f "$BUILD_LOG"
+            exit 1
+        fi
+    fi
+    rm -f "$BUILD_LOG"
+
+    APP_PATH="src-tauri/target/release/bundle/macos/Vireo.app"
+    if [ ! -d "$APP_PATH" ]; then
+        echo "ERROR: $APP_PATH not found"
+        exit 1
+    fi
+    echo "==> Ad-hoc signing app bundle..."
+    codesign --sign - --force --deep "$APP_PATH"
+    codesign --verify --deep --verbose=2 "$APP_PATH"
+fi
 echo ""
 
 # --- Find the DMG ---
