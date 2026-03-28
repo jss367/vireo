@@ -586,3 +586,200 @@ def test_undo_nothing_when_only_non_undoable(app_and_db):
 
     resp = client.get('/api/undo/status')
     assert resp.get_json()['available'] is False
+
+
+# -- Undo coverage for individual action types --
+
+
+def test_undo_flag_restores_original(app_and_db):
+    """Undoing a flag change restores the photo's original flag value."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+    original_flag = photos[0]['flag'] or 'none'
+
+    client.post(f'/api/photos/{pid}/flag', json={'flag': 'flagged'})
+    assert db.get_photo(pid)['flag'] == 'flagged'
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+
+
+def test_undo_keyword_add_removes_keyword(app_and_db):
+    """Undoing a keyword addition removes the keyword and clears pending change."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    client.post(f'/api/photos/{pid}/keywords', json={'name': 'Heron'})
+    kw_names = {k['name'] for k in db.get_photo_keywords(pid)}
+    assert 'Heron' in kw_names
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+
+    kw_names = {k['name'] for k in db.get_photo_keywords(pid)}
+    assert 'Heron' not in kw_names
+
+    changes = db.get_pending_changes()
+    assert not any(c['change_type'] == 'keyword_add' and c['value'] == 'Heron' for c in changes)
+
+
+# -- Undo coverage for batch operations --
+
+
+def test_undo_batch_rating_restores_all_photos(app_and_db):
+    """Undoing a batch rating restores each photo's original rating."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+    originals = {p['id']: p['rating'] for p in photos[:3]}
+
+    client.post('/api/batch/rating', json={'photo_ids': pids, 'rating': 1})
+    for pid in pids:
+        assert db.get_photo(pid)['rating'] == 1
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+
+    for pid in pids:
+        assert db.get_photo(pid)['rating'] == originals[pid]
+
+
+def test_undo_batch_flag_restores_all_photos(app_and_db):
+    """Undoing a batch flag restores each photo's original flag."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+    originals = {p['id']: (p['flag'] or 'none') for p in photos[:3]}
+
+    client.post('/api/batch/flag', json={'photo_ids': pids, 'flag': 'rejected'})
+    for pid in pids:
+        assert db.get_photo(pid)['flag'] == 'rejected'
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+
+    for pid in pids:
+        assert (db.get_photo(pid)['flag'] or 'none') == originals[pid]
+
+
+def test_undo_batch_keyword_add_removes_from_all_photos(app_and_db):
+    """Undoing a batch keyword add removes the keyword from every photo."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:3]]
+
+    client.post('/api/batch/keyword', json={'photo_ids': pids, 'name': 'Owl'})
+    for pid in pids:
+        assert 'Owl' in {k['name'] for k in db.get_photo_keywords(pid)}
+
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+
+    for pid in pids:
+        assert 'Owl' not in {k['name'] for k in db.get_photo_keywords(pid)}
+
+    changes = db.get_pending_changes()
+    assert not any(c['change_type'] == 'keyword_add' and c['value'] == 'Owl' for c in changes)
+
+
+# -- Sequential undo --
+
+
+def test_multiple_sequential_undos(app_and_db):
+    """Multiple undos in sequence each reverse the correct action."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+    original_rating = photos[0]['rating']
+    original_flag = photos[0]['flag'] or 'none'
+
+    # Action 1: change rating
+    client.post(f'/api/photos/{pid}/rating', json={'rating': 2})
+    # Action 2: change flag
+    client.post(f'/api/photos/{pid}/flag', json={'flag': 'rejected'})
+    # Action 3: add keyword
+    client.post(f'/api/photos/{pid}/keywords', json={'name': 'Finch'})
+
+    assert len(db.get_edit_history()) == 3
+
+    # Undo 3: keyword add reversed
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert 'Finch' not in {k['name'] for k in db.get_photo_keywords(pid)}
+
+    # Undo 2: flag reversed
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert (db.get_photo(pid)['flag'] or 'none') == original_flag
+
+    # Undo 1: rating reversed
+    resp = client.post('/api/undo')
+    assert resp.status_code == 200
+    assert db.get_photo(pid)['rating'] == original_rating
+
+    # Nothing left
+    resp = client.post('/api/undo')
+    assert resp.status_code == 400
+
+
+# -- Pruning --
+
+
+def test_history_pruning_respects_max(app_and_db):
+    """Old history entries are pruned when exceeding max_edit_history."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    import config as cfg
+    cfg.set('max_edit_history', 3)
+
+    # Create 5 edits — only the newest 3 should survive
+    for r in range(5):
+        client.post(f'/api/photos/{pid}/rating', json={'rating': r})
+
+    history = db.get_edit_history(limit=100)
+    assert len(history) == 3
+    # Most recent should be the last rating set
+    assert history[0]['new_value'] == '4'
+
+
+# -- Workspace isolation --
+
+
+def test_history_isolated_between_workspaces(app_and_db):
+    """History in one workspace is invisible to another; undo doesn't cross workspaces."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    # Record an edit in the default workspace
+    client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
+    assert len(db.get_edit_history()) == 1
+
+    # Create and switch to a new workspace
+    ws2 = db.create_workspace('Second')
+    db.set_active_workspace(ws2)
+
+    # New workspace has no history
+    assert len(db.get_edit_history()) == 0
+
+    # Undo in new workspace finds nothing
+    result = db.undo_last_edit()
+    assert result is None
+
+    # Original workspace still has its history
+    ws1 = db.conn.execute("SELECT id FROM workspaces WHERE name = 'Default'").fetchone()['id']
+    db.set_active_workspace(ws1)
+    assert len(db.get_edit_history()) == 1
