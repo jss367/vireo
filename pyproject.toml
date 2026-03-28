@@ -25,6 +25,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
 ]
 
 [tool.setuptools.packages.find]
@@ -32,3 +34,28 @@ include = ["vireo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "vireo/tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E741",   # ambiguous variable name
+    "B010",   # do not call setattr with a constant
+    "SIM108", # ternary operator
+    "UP031",  # printf-style formatting
+]
+
+[tool.ruff.lint.per-file-ignores]
+"vireo/tests/*" = ["E402"]
+"tests/*" = ["E402"]
