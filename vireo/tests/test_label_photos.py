@@ -4,6 +4,10 @@ import sys
 import tempfile
 from xml.etree import ElementTree as ET
 
+import pytest
+
+pytest.importorskip("torch")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 

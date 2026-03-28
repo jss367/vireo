@@ -3,6 +3,10 @@ import os
 import sys
 import tempfile
 
+import pytest
+
+pytest.importorskip("torch")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
