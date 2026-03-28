@@ -321,13 +321,18 @@ jobs:
 
           approved_prs=""
           for pr in $prs; do
-            # Check for +1 reactions from trusted actors
-            reactions=$(gh api "repos/${{ github.repository }}/issues/${pr}/reactions" \
-              --jq '[.[] | select(.content == "+1") | .user.login]')
+            # Get the timestamp of the PR's latest push (most recent commit)
+            last_push=$(gh pr view "$pr" --repo "${{ github.repository }}" \
+              --json commits --jq '.commits[-1].committedDate')
+
+            # Check for +1 reactions from trusted actors that are newer than the last push
+            reaction_match=$(gh api "repos/${{ github.repository }}/issues/${pr}/reactions" \
+              --jq --arg cutoff "$last_push" \
+              '[.[] | select(.content == "+1" and .created_at > $cutoff) | .user.login]')
 
             for actor in $TRUSTED_ACTORS; do
-              if echo "$reactions" | jq -e "index(\"$actor\")" > /dev/null 2>&1; then
-                echo "PR #${pr} has +1 from trusted actor: ${actor}"
+              if echo "$reaction_match" | jq -e "index(\"$actor\")" > /dev/null 2>&1; then
+                echo "PR #${pr} has +1 from ${actor} after latest push (${last_push})"
                 approved_prs="${approved_prs} ${pr}"
                 break
               fi
