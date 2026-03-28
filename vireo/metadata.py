@@ -30,6 +30,7 @@ def _run_exiftool(file_paths, extra_args=None):
     cmd = ["exiftool", "-G", "-json", "-n"]
     if extra_args:
         cmd.extend(extra_args)
+    cmd.append("--")
     cmd.extend(file_paths)
 
     try:
@@ -42,6 +43,7 @@ def _run_exiftool(file_paths, extra_args=None):
         if result.returncode not in (0, 1):
             # returncode 1 = warnings (e.g. minor errors), still has output
             log.warning("exiftool returned %d: %s", result.returncode, result.stderr[:200])
+            return []
         if result.stdout.strip():
             return json.loads(result.stdout)
     except FileNotFoundError:
