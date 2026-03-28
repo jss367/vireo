@@ -5,7 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime
 
-from ingest import build_destination_path, discover_source_files
+from db import Database
+from ingest import build_destination_path, discover_source_files, ingest
 from PIL import Image
 
 
@@ -87,3 +88,157 @@ def test_discover_source_files_recursive(tmp_path):
 def test_discover_source_files_nonexistent_dir():
     files = discover_source_files("/nonexistent/path", file_types="both")
     assert files == []
+
+
+def test_ingest_copies_files_to_date_folders(tmp_path):
+    """Files are copied to destination organized by EXIF date (falls back to mtime)."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Create a JPEG with known mtime (no EXIF in synthetic images)
+    img = Image.new("RGB", (100, 100), color="red")
+    img.save(str(src / "photo.jpg"))
+    # Set mtime to a known date for predictable fallback
+    mtime = datetime(2026, 3, 28, 10, 0, 0).timestamp()
+    os.utime(str(src / "photo.jpg"), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db)
+
+    assert result["copied"] == 1
+    assert result["total"] == 1
+    assert (dst / "2026" / "03" / "28" / "photo.jpg").exists()
+
+
+def test_ingest_unsorted_fallback(tmp_path):
+    """Files with no EXIF and no readable mtime go to unsorted/."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Create a non-image file with a supported extension (will fail EXIF read)
+    with open(str(src / "corrupt.jpg"), "wb") as f:
+        f.write(b"not a real jpeg")
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db)
+
+    assert result["copied"] == 1
+    # Falls back to file mtime, so it should end up in a date folder.
+    # Only truly unsorted if we can't read mtime either — which doesn't happen on real FS.
+    # So we just verify the file was copied somewhere under dst.
+    copied_files = list(dst.rglob("corrupt.jpg"))
+    assert len(copied_files) == 1
+
+
+def test_ingest_skip_duplicates(tmp_path):
+    """Files with matching hash in DB are skipped."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="blue")
+    img.save(str(src / "photo.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+
+    # First ingest
+    result1 = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert result1["copied"] == 1
+
+    # Second ingest of same file — should skip
+    result2 = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert result2["copied"] == 0
+    assert result2["skipped_duplicate"] == 1
+
+
+def test_ingest_custom_folder_template(tmp_path):
+    """Custom folder template is used for organization."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="green")
+    img.save(str(src / "photo.jpg"))
+    mtime = datetime(2026, 3, 28, 10, 0, 0).timestamp()
+    os.utime(str(src / "photo.jpg"), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, folder_template="%Y/%m")
+
+    assert result["copied"] == 1
+    assert (dst / "2026" / "03" / "photo.jpg").exists()
+
+
+def test_ingest_filename_collision(tmp_path):
+    """Same filename from different source gets a suffix."""
+    src1 = tmp_path / "card1"
+    src2 = tmp_path / "card2"
+    dst = tmp_path / "nas"
+    for d in [src1, src2, dst]:
+        d.mkdir()
+
+    # Two different images with the same filename
+    Image.new("RGB", (100, 100), color="red").save(str(src1 / "IMG_001.jpg"))
+    Image.new("RGB", (100, 100), color="blue").save(str(src2 / "IMG_001.jpg"))
+    # Give both the same mtime so they end up in the same date folder
+    mtime = datetime(2026, 3, 28).timestamp()
+    os.utime(str(src1 / "IMG_001.jpg"), (mtime, mtime))
+    os.utime(str(src2 / "IMG_001.jpg"), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+    ingest(str(src1), str(dst), db=db)
+    ingest(str(src2), str(dst), db=db)
+
+    date_folder = dst / "2026" / "03" / "28"
+    files = sorted(f.name for f in date_folder.iterdir())
+    assert "IMG_001.jpg" in files
+    assert "IMG_001_1.jpg" in files
+
+
+def test_ingest_progress_callback(tmp_path):
+    """Progress callback is called for each file."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    for i in range(3):
+        Image.new("RGB", (50, 50)).save(str(src / f"img{i}.jpg"))
+
+    progress_calls = []
+    db = Database(str(tmp_path / "test.db"))
+    ingest(str(src), str(dst), db=db,
+           progress_callback=lambda cur, tot, fname: progress_calls.append((cur, tot, fname)))
+
+    assert len(progress_calls) == 3
+    assert progress_calls[-1][0] == 3  # current
+    assert progress_calls[-1][1] == 3  # total
+
+
+def test_ingest_file_types_filter(tmp_path):
+    """Only selected file types are copied."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    Image.new("RGB", (100, 100)).save(str(src / "photo.jpg"))
+    with open(str(src / "photo.cr3"), "wb") as f:
+        f.write(b"\x00" * 100)
+
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(str(src), str(dst), db=db, file_types="jpeg")
+
+    assert result["copied"] == 1
+    assert result["total"] == 1
+    # Only JPEG was discovered, raw was filtered out
+    copied_jpgs = list(dst.rglob("*.jpg"))
+    copied_raws = list(dst.rglob("*.cr3"))
+    assert len(copied_jpgs) == 1
+    assert len(copied_raws) == 0

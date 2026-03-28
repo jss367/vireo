@@ -1,9 +1,14 @@
 """Smart ingest: copy and organize photos from external source to destination."""
 
+import contextlib
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
 
+from grouping import read_exif_timestamp
 from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
 
@@ -51,3 +56,104 @@ def discover_source_files(source_dir, file_types="both"):
         and f.suffix.lower() in allowed
         and not f.name.startswith(".")
     )
+
+
+def ingest(
+    source_dir,
+    destination_dir,
+    db,
+    file_types="both",
+    folder_template="%Y/%m/%d",
+    skip_duplicates=True,
+    progress_callback=None,
+):
+    """Copy and organize photos from source to destination.
+
+    Args:
+        source_dir: path to source (e.g., /Volumes/SD_CARD)
+        destination_dir: path to destination (e.g., /Volumes/NAS/Photos)
+        db: Database instance (used for duplicate hash lookup)
+        file_types: "raw", "jpeg", or "both"
+        folder_template: strftime format for destination subfolder
+        skip_duplicates: if True, skip files whose hash matches existing file
+        progress_callback: optional callable(current, total, filename)
+
+    Returns:
+        dict with counts: copied, skipped_duplicate, failed, total
+    """
+    files = discover_source_files(source_dir, file_types)
+    total = len(files)
+
+    # Load known hashes from database for duplicate detection
+    known_hashes = set()
+    if skip_duplicates:
+        rows = db.conn.execute(
+            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
+        ).fetchall()
+        known_hashes = {r["file_hash"] for r in rows}
+
+    copied = 0
+    skipped_duplicate = 0
+    failed = 0
+
+    for i, source_file in enumerate(files):
+        try:
+            # Compute hash for duplicate detection
+            file_hash = compute_file_hash(str(source_file))
+
+            if skip_duplicates and file_hash in known_hashes:
+                skipped_duplicate += 1
+                if progress_callback:
+                    progress_callback(i + 1, total, source_file.name)
+                continue
+
+            # Determine destination folder from EXIF date
+            exif_dt = None
+            with contextlib.suppress(Exception):
+                exif_dt = read_exif_timestamp(str(source_file))
+            if exif_dt is None:
+                # Fall back to file modification time
+                with contextlib.suppress(Exception):
+                    exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+
+            rel_folder = build_destination_path(exif_dt, folder_template)
+            dest_folder = Path(destination_dir) / rel_folder
+            dest_folder.mkdir(parents=True, exist_ok=True)
+
+            dest_file = dest_folder / source_file.name
+
+            # Handle filename collision (different file, same name)
+            if dest_file.exists():
+                dest_hash = compute_file_hash(str(dest_file))
+                if file_hash == dest_hash:
+                    # Exact same file already there
+                    skipped_duplicate += 1
+                    known_hashes.add(file_hash)
+                    if progress_callback:
+                        progress_callback(i + 1, total, source_file.name)
+                    continue
+                # Different file, same name — add numeric suffix
+                stem = dest_file.stem
+                suffix = dest_file.suffix
+                counter = 1
+                while dest_file.exists():
+                    dest_file = dest_folder / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+            shutil.copy2(str(source_file), str(dest_file))
+            known_hashes.add(file_hash)
+            copied += 1
+
+        except Exception as e:
+            log.warning("Failed to ingest %s: %s", source_file, e)
+            failed += 1
+
+        if progress_callback:
+            progress_callback(i + 1, total, source_file.name)
+
+    return {
+        "copied": copied,
+        "skipped_duplicate": skipped_duplicate,
+        "failed": failed,
+        "total": total,
+    }
