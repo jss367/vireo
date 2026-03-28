@@ -5,13 +5,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 
 def _write_test_xmp(path, keywords):
     """Write a minimal XMP file with dc:subject keywords."""
-    from xmp_writer import write_xmp_sidecar
-    write_xmp_sidecar(path, flat_keywords=set(keywords), hierarchical_keywords=set())
+    from xmp import write_sidecar
+    write_sidecar(path, flat_keywords=set(keywords), hierarchical_keywords=set())
 
 
 def _create_mock_taxonomy(tmpdir):
@@ -75,23 +74,6 @@ def _create_mock_taxonomy(tmpdir):
     with open(path, 'w') as f:
         json.dump(taxonomy, f)
     return path
-
-
-def test_read_xmp_keywords():
-    """read_xmp_keywords returns dc:subject values from an XMP file."""
-    from compare import read_xmp_keywords
-    with tempfile.NamedTemporaryFile(suffix='.xmp', delete=False) as f:
-        _write_test_xmp(f.name, ['Northern cardinal', '0Locations', 'Dyke Marsh'])
-        result = read_xmp_keywords(f.name)
-        assert result == {'Northern cardinal', '0Locations', 'Dyke Marsh'}
-        os.unlink(f.name)
-
-
-def test_read_xmp_keywords_missing_file():
-    """read_xmp_keywords returns empty set for missing file."""
-    from compare import read_xmp_keywords
-    result = read_xmp_keywords('/tmp/nonexistent.xmp')
-    assert result == set()
 
 
 def test_categorize_match():

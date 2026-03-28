@@ -4,7 +4,6 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 from PIL import Image
 
@@ -14,12 +13,12 @@ def test_check_drift_detects_xmp_change(tmp_path):
     from audit import check_drift
     from db import Database
     from scanner import scan
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
     Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Sparrow'},
         hierarchical_keywords=set(),
@@ -30,7 +29,7 @@ def test_check_drift_detects_xmp_change(tmp_path):
 
     # Modify XMP after scan
     time.sleep(0.05)
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Cardinal'},
         hierarchical_keywords=set(),
