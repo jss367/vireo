@@ -4,7 +4,7 @@ import logging
 import os
 from collections import defaultdict
 
-from xmp import read_keywords, write_sidecar, remove_keywords, write_rating
+from xmp import read_keywords, remove_keywords, write_rating, write_sidecar
 
 log = logging.getLogger(__name__)
 

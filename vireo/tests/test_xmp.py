@@ -7,11 +7,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from xmp import (
-    read_keywords,
     read_hierarchical_keywords,
-    write_sidecar,
-    write_rating,
+    read_keywords,
     remove_keywords,
+    write_rating,
+    write_sidecar,
 )
 
 # ── Fixtures ────────────────────────────────────────────────────────────

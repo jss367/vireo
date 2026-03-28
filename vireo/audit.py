@@ -4,8 +4,8 @@ import logging
 import os
 from pathlib import Path
 
-from xmp import read_keywords
 from image_loader import SUPPORTED_EXTENSIONS
+from xmp import read_keywords
 
 log = logging.getLogger(__name__)
 

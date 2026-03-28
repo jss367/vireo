@@ -5,15 +5,13 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
-import sys
-import webbrowser
-
-import json
 import queue
 import time
+import webbrowser
 
 from db import Database
 from flask import (
