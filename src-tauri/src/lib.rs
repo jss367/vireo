@@ -84,7 +84,7 @@ pub fn run() {
             // "Report an Issue" — open GitHub issues in the default browser
             if id == menu::ids::REPORT_ISSUE {
                 use tauri_plugin_shell::ShellExt;
-                let _ = app.shell().open("https://github.com/jss367/vireo/issues", None::<&str>);
+                let _ = app.shell().open("https://github.com/jss367/vireo/issues", None::<tauri_plugin_shell::open::Program>);
                 return;
             }
 
