@@ -24,6 +24,8 @@ import urllib.request
 import zipfile
 from datetime import date
 
+import requests
+
 log = logging.getLogger(__name__)
 
 DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
@@ -39,6 +41,9 @@ RANK_LEVEL_TO_NAME = {
     70: "kingdom", 60: "phylum", 50: "class", 40: "order",
     30: "family", 20: "genus", 10: "species",
 }
+
+INAT_API_BASE = "https://api.inaturalist.org/v1"
+INAT_BATCH_SIZE = 30  # iNat API allows up to 30 IDs per request
 
 # Ranks we care about, in order from broad to specific
 RANK_ORDER = [
@@ -386,6 +391,66 @@ def load_taxonomy(db, data_dir=None):
         download_taxa(gz_path)
 
     return load_taxa_from_file(db, gz_path)
+
+
+def fetch_common_names(db, locale='en'):
+    """Fetch common names from the iNat API for all taxa in the database.
+
+    Batches requests to the iNat API, updates taxa.common_name with the
+    preferred common name, and inserts all English names into taxa_common_names.
+
+    Returns dict with 'updated' count.
+    """
+    rows = db.conn.execute(
+        "SELECT id, inat_id FROM taxa WHERE inat_id IS NOT NULL"
+    ).fetchall()
+
+    inat_ids = [(r['id'], r['inat_id']) for r in rows]
+    updated = 0
+
+    for i in range(0, len(inat_ids), INAT_BATCH_SIZE):
+        batch = inat_ids[i:i + INAT_BATCH_SIZE]
+        id_str = ','.join(str(iid) for _, iid in batch)
+        local_by_inat = {iid: lid for lid, iid in batch}
+
+        try:
+            resp = requests.get(
+                f"{INAT_API_BASE}/taxa",
+                params={'id': id_str, 'per_page': INAT_BATCH_SIZE},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.warning("iNat API returned %d for batch %d", resp.status_code, i)
+                continue
+
+            for taxon in resp.json().get('results', []):
+                inat_id = taxon['id']
+                local_id = local_by_inat.get(inat_id)
+                if not local_id:
+                    continue
+
+                preferred = taxon.get('preferred_common_name')
+                if preferred:
+                    db.conn.execute(
+                        "UPDATE taxa SET common_name = ? WHERE id = ?",
+                        (preferred, local_id),
+                    )
+                    updated += 1
+
+                for name_entry in taxon.get('names', []):
+                    if name_entry.get('locale') == locale:
+                        db.conn.execute(
+                            "INSERT OR IGNORE INTO taxa_common_names "
+                            "(taxon_id, name, locale) VALUES (?, ?, ?)",
+                            (local_id, name_entry['name'], locale),
+                        )
+        except requests.RequestException as e:
+            log.warning("iNat API request failed: %s", e)
+            continue
+
+    db.conn.commit()
+    log.info("Common names: %d taxa updated", updated)
+    return {"updated": updated}
 
 
 # --- DWCA-based taxonomy loader (legacy) ---

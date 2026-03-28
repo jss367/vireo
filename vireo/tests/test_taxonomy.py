@@ -369,3 +369,64 @@ def test_load_taxa_idempotent(tmp_path):
     count2 = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
 
     assert count1 == count2
+
+
+from unittest.mock import MagicMock, patch
+
+
+def test_fetch_common_names(tmp_path):
+    """fetch_common_names stores names from iNat API into taxa_common_names."""
+    from taxonomy import fetch_common_names, load_taxa_from_file
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+    load_taxa_from_file(db, tsv_path)
+
+    # Mock the iNat API response
+    def mock_get(url, params=None, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        # Return common names for the taxa IDs requested
+        results = []
+        for inat_id_str in params.get('id', '').split(','):
+            inat_id = int(inat_id_str)
+            if inat_id == 5270:
+                results.append({
+                    'id': 5270,
+                    'preferred_common_name': 'Grey-headed Fish Eagle',
+                    'names': [
+                        {'name': 'Grey-headed Fish Eagle', 'locale': 'en'},
+                        {'name': 'Gray-headed Fish-Eagle', 'locale': 'en'},
+                    ],
+                })
+            elif inat_id == 4647:
+                results.append({
+                    'id': 4647,
+                    'preferred_common_name': 'Peregrine Falcon',
+                    'names': [
+                        {'name': 'Peregrine Falcon', 'locale': 'en'},
+                    ],
+                })
+        resp.json.return_value = {'results': results}
+        return resp
+
+    with patch('taxonomy.requests.get', side_effect=mock_get):
+        stats = fetch_common_names(db)
+
+    # Check preferred common name set on taxa row
+    row = db.conn.execute(
+        "SELECT common_name FROM taxa WHERE inat_id = 5270"
+    ).fetchone()
+    assert row["common_name"] == "Grey-headed Fish Eagle"
+
+    # Check alternate names in taxa_common_names
+    names = [
+        r["name"] for r in db.conn.execute(
+            "SELECT name FROM taxa_common_names WHERE taxon_id = "
+            "(SELECT id FROM taxa WHERE inat_id = 5270)"
+        ).fetchall()
+    ]
+    assert "Grey-headed Fish Eagle" in names
+    assert "Gray-headed Fish-Eagle" in names
+
+    assert stats["updated"] > 0
