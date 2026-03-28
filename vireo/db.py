@@ -1312,10 +1312,34 @@ class Database:
                 if convention:
                     name = self._apply_case_convention(name, convention)
 
-        kw_type = 'taxonomy' if is_species else 'general'
+        # Auto-detect taxonomy type from taxa table
+        kw_type = 'general'
+        taxon_id = None
+        if is_species:
+            kw_type = 'taxonomy'
+        else:
+            # Check if name matches a known taxon (common name or scientific name)
+            taxon = self.conn.execute(
+                """SELECT t.id FROM taxa t
+                   WHERE t.common_name = ? COLLATE NOCASE
+                      OR t.name = ? COLLATE NOCASE
+                   LIMIT 1""",
+                (name, name),
+            ).fetchone()
+            if not taxon:
+                taxon = self.conn.execute(
+                    """SELECT t.taxon_id AS id FROM taxa_common_names t
+                       WHERE t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (name,),
+                ).fetchone()
+            if taxon:
+                kw_type = 'taxonomy'
+                taxon_id = taxon["id"]
+
         cur = self.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) VALUES (?, ?, ?, ?)",
-            (name, parent_id, 1 if is_species else 0, kw_type),
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
+            (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
         )
         self.conn.commit()
         return cur.lastrowid

@@ -626,6 +626,11 @@ def create_app(db_path, thumb_cache_dir=None):
         if not name:
             return json_error("name required")
         kid = db.add_keyword(name)
+        # Override type if explicitly provided
+        kw_type = body.get("type")
+        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
+            db.conn.commit()
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -699,6 +704,10 @@ def create_app(db_path, thumb_cache_dir=None):
         if not photo_ids or not name:
             return json_error("photo_ids and name required")
         kid = db.add_keyword(name)
+        kw_type = body.get("type")
+        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
+            db.conn.commit()
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)
