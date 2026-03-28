@@ -972,20 +972,33 @@ class Database:
         return self.conn.execute(query, params).fetchall()
 
     def get_accepted_species(self):
-        """Return distinct accepted species names in the active workspace."""
+        """Return distinct marker species from geolocated photos in the active workspace.
+
+        Uses the same derivation as get_geolocated_photos: the highest-confidence
+        accepted prediction per photo.  Only considers photos that have GPS
+        coordinates, so every returned species can actually produce a map marker.
+        """
+        ws = self._ws_id()
         return [
             row[0]
             for row in self.conn.execute(
                 """
-                SELECT DISTINCT pr.species
-                FROM predictions pr
-                JOIN photos p ON p.id = pr.photo_id
-                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                WHERE pr.workspace_id = ? AND pr.status = 'accepted'
-                  AND wf.workspace_id = ?
-                ORDER BY pr.species ASC
+                SELECT DISTINCT top_species FROM (
+                    SELECT (SELECT pr.species FROM predictions pr
+                            WHERE pr.photo_id = p.id
+                              AND pr.workspace_id = ?
+                              AND pr.status = 'accepted'
+                            ORDER BY pr.confidence DESC LIMIT 1) AS top_species
+                    FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ?
+                      AND p.latitude IS NOT NULL
+                      AND p.longitude IS NOT NULL
+                )
+                WHERE top_species IS NOT NULL
+                ORDER BY top_species ASC
                 """,
-                (self._ws_id(), self._ws_id()),
+                (ws, ws),
             ).fetchall()
         ]
 
