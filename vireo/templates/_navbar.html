@@ -1083,8 +1083,8 @@ function toggleLightboxZoom(e) {
     // Zoom to 1:1 — load full-resolution original
     // Measure click position relative to the image BEFORE changing layout
     var imgRect = img.getBoundingClientRect();
-    var clickX = (e.clientX - imgRect.left) / imgRect.width;
-    var clickY = (e.clientY - imgRect.top) / imgRect.height;
+    var clickX = imgRect.width ? (e.clientX - imgRect.left) / imgRect.width : 0.5;
+    var clickY = imgRect.height ? (e.clientY - imgRect.top) / imgRect.height : 0.5;
 
     wrap.classList.add('zoomed');
     badge.style.display = '';
