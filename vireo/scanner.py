@@ -80,7 +80,7 @@ def _extract_timestamp(exif_group):
         return str(dto)
 
 
-def scan(root, db, progress_callback=None, incremental=False):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -88,6 +88,7 @@ def scan(root, db, progress_callback=None, incremental=False):
         db: Database instance
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
+        extract_full_metadata: if True, store full ExifTool JSON in exif_data column
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -252,7 +253,7 @@ def scan(root, db, progress_callback=None, incremental=False):
         if burst_id is not None:
             updates.append("burst_id=?")
             update_params.append(burst_id)
-        if file_meta:
+        if file_meta and extract_full_metadata:
             updates.append("exif_data=?")
             update_params.append(json.dumps(file_meta))
         if updates:

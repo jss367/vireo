@@ -676,16 +676,19 @@ class Database:
         ).fetchone()
         return row["id"]
 
-    # Columns to return in photo queries (excludes large binary fields like embedding)
+    # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     detection_box, detection_conf, subject_sharpness, subject_size, quality_score,
-                    latitude, longitude, exif_data"""
+                    latitude, longitude"""
+
+    # Columns for single-photo detail queries (includes exif_data JSON)
+    PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
 
     def get_photo(self, photo_id):
-        """Return a single photo by id."""
+        """Return a single photo by id, including full metadata."""
         return self.conn.execute(
-            f"SELECT {self.PHOTO_COLS} FROM photos WHERE id = ?", (photo_id,)
+            f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
 
     def count_photos(self):

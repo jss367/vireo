@@ -2984,8 +2984,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
             do_scan(
-                root, thread_db, progress_callback=progress_cb, incremental=incremental
+                root, thread_db, progress_callback=progress_cb, incremental=incremental,
+                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
             )
             photo_count = job["progress"].get("total", 0)
 
