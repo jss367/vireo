@@ -46,7 +46,22 @@ python scripts/build_sidecar.py
 echo ""
 echo "=== Step 2/4: Build the Tauri app (with code signing) ==="
 cd "$REPO_ROOT"
-cargo tauri build
+BUILD_LOG=$(mktemp)
+if ! cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
+    # Tolerate updater-signing failure (TAURI_SIGNING_PRIVATE_KEY not configured)
+    # but fail on anything else
+    if grep -q "TAURI_SIGNING_PRIVATE_KEY" "$BUILD_LOG"; then
+        echo ""
+        echo "WARNING: Updater artifact signing skipped (TAURI_SIGNING_PRIVATE_KEY not set)."
+        echo "         The .app and .dmg were still built — continuing."
+    else
+        echo ""
+        echo "ERROR: cargo tauri build failed (see output above)"
+        rm -f "$BUILD_LOG"
+        exit 1
+    fi
+fi
+rm -f "$BUILD_LOG"
 
 echo ""
 echo "=== Step 3/4: Verify code signature on .app bundle ==="
