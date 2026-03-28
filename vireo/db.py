@@ -257,6 +257,12 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
+        # Ingest: file hash for duplicate detection + companion for raw/JPEG pairing
+        try:
+            self.conn.execute("SELECT file_hash FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN file_hash TEXT")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN companion_path TEXT")
 
         # Edit history tables migration
         try:

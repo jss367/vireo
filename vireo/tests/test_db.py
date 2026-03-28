@@ -1240,3 +1240,16 @@ def test_undo_last_edit_empty(tmp_path):
     """undo_last_edit returns None when no history exists."""
     db, pids = _make_db_with_photos(tmp_path)
     assert db.undo_last_edit() is None
+
+
+def test_photos_has_file_hash_and_companion_path(tmp_path):
+    """Photos table has file_hash and companion_path columns after migration."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT file_hash, companion_path FROM photos LIMIT 0"
+    ).description
+    col_names = [r[0] for r in row]
+    assert "file_hash" in col_names
+    assert "companion_path" in col_names
