@@ -1020,6 +1020,97 @@ def test_count_photos_without_gps(tmp_path):
     assert db.count_photos_without_gps() == 2
 
 
+def test_taxa_table_exists(tmp_path):
+    """The taxa table is created with expected columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "SELECT id, inat_id, name, common_name, rank, parent_id, kingdom "
+        "FROM taxa LIMIT 0"
+    )
+
+
+def test_taxa_common_names_table_exists(tmp_path):
+    """The taxa_common_names table is created."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "SELECT taxon_id, name, locale FROM taxa_common_names LIMIT 0"
+    )
+
+
+def test_informal_groups_tables_exist(tmp_path):
+    """The informal_groups and informal_group_taxa tables are created."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute("SELECT id, name FROM informal_groups LIMIT 0")
+    db.conn.execute(
+        "SELECT group_id, taxon_id FROM informal_group_taxa LIMIT 0"
+    )
+
+
+def test_keywords_type_column_exists(tmp_path):
+    """Keywords table has type column defaulting to 'general'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("test")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "general"
+
+
+def test_keywords_location_columns_exist(tmp_path):
+    """Keywords table has latitude and longitude columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Central Park")
+    db.conn.execute(
+        "UPDATE keywords SET latitude = 40.7829, longitude = -73.9654 WHERE id = ?",
+        (kid,),
+    )
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT latitude, longitude FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert abs(row["latitude"] - 40.7829) < 0.001
+    assert abs(row["longitude"] - (-73.9654)) < 0.001
+
+
+def test_keywords_taxon_id_column_exists(tmp_path):
+    """Keywords table has taxon_id column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Insert a taxon first
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (1, 'Animalia', 'Animals', 'kingdom', 'Animalia')"
+    )
+    tid = db.conn.execute("SELECT id FROM taxa WHERE inat_id = 1").fetchone()["id"]
+    kid = db.add_keyword("Animals")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (tid, kid),
+    )
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == tid
+
+
+def test_is_species_migrated_to_taxonomy_type(tmp_path):
+    """Existing is_species=1 keywords get type='taxonomy' after migration."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Cardinal", is_species=True)
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
 def test_embedding_model_column_exists(tmp_path):
     """The photos table has an embedding_model column."""
     from db import Database
