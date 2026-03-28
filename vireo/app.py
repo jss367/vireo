@@ -1785,6 +1785,22 @@ def create_app(db_path, thumb_cache_dir=None):
             ver = "0.1.0"
         return jsonify({"version": ver})
 
+    @app.route("/api/volumes", methods=["GET"])
+    def api_volumes():
+        """List mounted volumes (macOS/Linux) to help find SD cards."""
+        import platform
+        volumes = []
+        if platform.system() == "Darwin":
+            vol_dir = "/Volumes"
+        else:
+            vol_dir = "/media"
+        if os.path.isdir(vol_dir):
+            for name in sorted(os.listdir(vol_dir)):
+                path = os.path.join(vol_dir, name)
+                if os.path.isdir(path):
+                    volumes.append({"name": name, "path": path})
+        return jsonify(volumes)
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])

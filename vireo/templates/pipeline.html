@@ -181,10 +181,68 @@ body { padding-bottom: 36px; }
     <span class="photo-count" id="collectionPhotoCount"></span>
   </div>
 
-  <!-- Card 1: Classify -->
-  <div class="stage-card expanded" id="card-classify">
+  <!-- Card 1: Import -->
+  <div class="stage-card expanded" id="card-import">
+    <div class="stage-header" onclick="toggleCard('import')">
+      <span class="stage-num" id="numImport">1</span>
+      <span class="stage-name">Import</span>
+      <span class="stage-summary" id="summaryImport">
+        <span id="txtImported"></span>
+      </span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <div class="setting-row">
+        <div class="setting-item">
+          <div class="setting-label">Source</div>
+          <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
+            <option value="">Select a volume...</option>
+          </select>
+        </div>
+        <div class="setting-item">
+          <div class="setting-label">Custom Source Path</div>
+          <input type="text" class="setting-select" id="cfgSourceCustom"
+                 placeholder="/path/to/source" style="font-family:inherit;">
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-item">
+          <div class="setting-label">Destination</div>
+          <input type="text" class="setting-select" id="cfgDestination"
+                 placeholder="/path/to/photo/library" style="font-family:inherit;">
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-item">
+          <div class="setting-label">File Types</div>
+          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-right:12px;">
+            <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);"> JPEG
+          </label>
+          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+            <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);"> RAW
+          </label>
+        </div>
+        <div class="setting-item">
+          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+            <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+          </label>
+        </div>
+      </div>
+      <div class="run-row">
+        <button class="btn btn-primary" id="btnImport" onclick="runImport()">Import</button>
+        <span class="status-msg" id="statusImport"></span>
+      </div>
+      <div class="progress-wrap" id="progressImport" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillImport"></div></div>
+        <div class="progress-text" id="textImport"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 2: Classify -->
+  <div class="stage-card" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">1</span>
+      <span class="stage-num" id="numClassify">2</span>
       <span class="stage-name">Classify</span>
       <span class="stage-summary" id="summaryClassify">
         <span id="txtDetections"></span>
@@ -217,10 +275,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Extract Features -->
+  <!-- Card 3: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">2</span>
+      <span class="stage-num" id="numExtract">3</span>
       <span class="stage-name">Extract Features</span>
       <span class="stage-summary" id="summaryExtract">
         <span id="txtMasks"></span>
@@ -267,10 +325,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 3: Group & Score -->
+  <!-- Card 4: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">3</span>
+      <span class="stage-num" id="numGroup">4</span>
       <span class="stage-name">Group &amp; Score</span>
       <span class="stage-summary" id="summaryGroup">
         <span id="txtResults"></span>
@@ -304,14 +362,14 @@ function initPipelinePage() {
     .then(function(data) {
       var cfg = data.pipeline_config;
 
-      // Stage 1: Classify
+      // Stage 2: Classify
       if (data.has_detections) {
         document.getElementById('numClassify').classList.add('complete');
         document.getElementById('txtDetections').textContent =
           data.has_detections + ' detections';
       }
 
-      // Stage 2: Extract
+      // Stage 3: Extract
       if (data.has_masks) {
         document.getElementById('numExtract').classList.add('complete');
         var txt = data.has_masks + ' masks';
@@ -319,7 +377,7 @@ function initPipelinePage() {
         document.getElementById('txtMasks').textContent = txt;
       }
 
-      // Stage 3: Group
+      // Stage 4: Group
       if (data.results) {
         document.getElementById('numGroup').classList.add('complete');
         var s = data.results.summary;
@@ -352,10 +410,11 @@ function initPipelinePage() {
       console.error('Failed to load pipeline page data:', e);
     });
 
-  // Load collections, models, labels in parallel
+  // Load collections, models, labels, volumes in parallel
   loadCollections();
   loadModels();
   loadLabels();
+  loadVolumes();
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);
@@ -387,7 +446,124 @@ function onCollectionChange() {
   updateCardStates();
 }
 
-// -- Card 1: Classify --
+// -- Card 1: Import --
+async function loadVolumes() {
+  try {
+    var volumes = await safeFetch('/api/volumes', {}, { toast: false });
+    var sel = document.getElementById('cfgSource');
+    volumes.forEach(function(v) {
+      sel.innerHTML += '<option value="' + escapeHtml(v.path) + '">' + escapeHtml(v.name) + ' (' + escapeHtml(v.path) + ')</option>';
+    });
+  } catch(e) {}
+}
+
+function onSourceChange() {
+  var sel = document.getElementById('cfgSource');
+  var custom = document.getElementById('cfgSourceCustom');
+  if (sel.value) {
+    custom.value = '';
+  }
+}
+
+function getIngestFileTypes() {
+  var jpeg = document.getElementById('chkJpeg').checked;
+  var raw = document.getElementById('chkRaw').checked;
+  if (jpeg && raw) return 'both';
+  if (jpeg) return 'jpeg';
+  if (raw) return 'raw';
+  return 'both';
+}
+
+async function runImport() {
+  var source = document.getElementById('cfgSourceCustom').value.trim() ||
+               document.getElementById('cfgSource').value;
+  var destination = document.getElementById('cfgDestination').value.trim();
+  if (!source || !destination) {
+    alert('Please specify both a source and destination path.');
+    return;
+  }
+
+  var btn = document.getElementById('btnImport');
+  var status = document.getElementById('statusImport');
+  var progressWrap = document.getElementById('progressImport');
+  var fill = document.getElementById('fillImport');
+  var text = document.getElementById('textImport');
+  var num = document.getElementById('numImport');
+
+  btn.disabled = true;
+  status.textContent = 'Starting import...';
+  status.className = 'status-msg';
+  num.className = 'stage-num running';
+  progressWrap.style.display = '';
+  fill.style.width = '0%';
+
+  try {
+    var data = await safeFetch('/api/jobs/ingest', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        source: source,
+        destination: destination,
+        file_types: getIngestFileTypes(),
+        skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+      }),
+    }, { toast: false });
+    if (!data.job_id) {
+      btn.disabled = false;
+      status.textContent = data.error || 'Failed to start';
+      num.className = 'stage-num';
+      progressWrap.style.display = 'none';
+      return;
+    }
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+        fill.style.width = pct + '%';
+        var parts = [];
+        if (p.phase) parts.push(p.phase);
+        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+        if (p.current_file) parts.push(p.current_file);
+        text.textContent = parts.join(' — ');
+        status.textContent = parts.join(' — ');
+      },
+      onComplete: function(result) {
+        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+        if (result.status === 'completed') {
+          fill.style.width = '100%';
+          text.textContent = 'Complete';
+          status.textContent = 'Done!';
+          status.className = 'status-msg ok';
+          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
+          num.className = 'stage-num complete';
+          if (result.result) {
+            var r = result.result;
+            var summary = [];
+            if (r.copied != null) summary.push(r.copied + ' imported');
+            if (r.skipped_duplicate != null && r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
+            document.getElementById('txtImported').textContent = summary.join(', ');
+          }
+        } else {
+          status.textContent = 'Failed';
+          num.className = 'stage-num';
+        }
+        btn.disabled = false;
+      },
+      onError: function() {
+        status.textContent = 'Connection lost';
+        btn.disabled = false;
+        num.className = 'stage-num';
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+    num.className = 'stage-num';
+    progressWrap.style.display = 'none';
+  }
+}
+
+// -- Card 2: Classify --
 async function loadModels() {
   try {
     var data = await safeFetch('/api/models', {}, { toast: false });
@@ -619,7 +795,7 @@ async function runClassify(reclassify) {
   }
 }
 
-// -- Card 2: Extract Features --
+// -- Card 3: Extract Features --
 
 var _savedModelConfig = {
   sam2_variant: 'sam2-small',
@@ -735,7 +911,7 @@ async function runExtract() {
   }
 }
 
-// -- Card 3: Group & Score --
+// -- Card 4: Group & Score --
 
 async function runGroup() {
   var collId = document.getElementById('collectionPicker').value;
