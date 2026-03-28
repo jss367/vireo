@@ -282,3 +282,22 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     kw_names = {k['name'] for k in kws}
     assert 'Sparrow' in kw_names
     assert 'Cardinal' in kw_names
+
+
+def test_scan_stores_file_hash(tmp_path):
+    """Scanning a folder computes and stores SHA-256 file_hash for each photo."""
+    from db import Database
+    from scanner import scan
+
+    # Create a test image
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    img = Image.new("RGB", (200, 100), color="green")
+    img.save(str(img_dir / "test.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(img_dir), db)
+
+    photo = db.conn.execute("SELECT file_hash FROM photos LIMIT 1").fetchone()
+    assert photo["file_hash"] is not None
+    assert len(photo["file_hash"]) == 64  # SHA-256 hex digest length

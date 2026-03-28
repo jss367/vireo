@@ -1,5 +1,6 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,18 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+
+
+def compute_file_hash(file_path, chunk_size=65536):
+    """Compute SHA-256 hash of a file. Returns hex digest string."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _import_keywords_for_photo(db, photo_id, xmp_path_str):
@@ -221,6 +234,13 @@ def scan(root, db, progress_callback=None, incremental=False):
         except Exception:
             pass
 
+        # Compute file hash for duplicate detection
+        file_hash = None
+        try:
+            file_hash = compute_file_hash(str(image_path))
+        except Exception:
+            log.debug("Could not compute file hash for %s", image_path)
+
         photo_id = db.add_photo(
             folder_id=folder_id,
             filename=image_path.name,
@@ -248,6 +268,9 @@ def scan(root, db, progress_callback=None, incremental=False):
         if burst_id is not None:
             updates.append("burst_id=?")
             update_params.append(burst_id)
+        if file_hash is not None:
+            updates.append("file_hash=?")
+            update_params.append(file_hash)
         if updates:
             update_params.append(photo_id)
             db.conn.execute(
