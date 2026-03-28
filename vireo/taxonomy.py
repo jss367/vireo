@@ -1,21 +1,49 @@
 """iNaturalist taxonomy: download, parse, and lookup.
 
+Includes two loading approaches:
+1. DWCA-based: Downloads the DarwinCore Archive zip and builds a JSON lookup file.
+2. AWS open-data based: Downloads taxa.csv.gz and loads taxa into the SQLite
+   database for structured querying. This is the newer approach used by
+   load_taxa_from_file() and load_taxonomy().
+
+Data source (AWS): https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz
+Format: Tab-separated, 6 columns: taxon_id, ancestry, rank_level, rank, name, active
+
 Usage:
     python vireo/taxonomy.py --download [--output taxonomy.json]
 """
 
 import argparse
 import csv
+import gzip
 import io
 import json
 import logging
 import os
+import urllib.request
 import zipfile
 from datetime import date
+
+import requests
 
 log = logging.getLogger(__name__)
 
 DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
+
+# --- AWS open-data taxa.csv.gz loader constants ---
+TAXA_URL = "https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz"
+
+TARGET_KINGDOMS = {"Animalia", "Plantae", "Fungi"}
+TARGET_KINGDOM_INAT_IDS = {1, 47126, 47170}  # Animalia, Plantae, Fungi
+
+MAJOR_RANK_LEVELS = {70, 60, 50, 40, 30, 20, 10}  # kingdom through species
+RANK_LEVEL_TO_NAME = {
+    70: "kingdom", 60: "phylum", 50: "class", 40: "order",
+    30: "family", 20: "genus", 10: "species",
+}
+
+INAT_API_BASE = "https://api.inaturalist.org/v1"
+INAT_BATCH_SIZE = 30  # iNat API allows up to 30 IDs per request
 
 # Ranks we care about, in order from broad to specific
 RANK_ORDER = [
@@ -225,6 +253,264 @@ class Taxonomy:
                 return "sibling"
 
         return "unrelated"
+
+
+# --- AWS open-data taxa.csv.gz loader functions ---
+
+
+def download_taxa(dest_path):
+    """Download the iNat taxa.csv.gz file from AWS open data."""
+    log.info("Downloading iNat taxonomy from %s ...", TAXA_URL)
+    urllib.request.urlretrieve(TAXA_URL, dest_path)
+    log.info("Downloaded to %s", dest_path)
+    return dest_path
+
+
+def load_taxa_from_file(db, gz_path):
+    """Parse taxa.csv.gz and insert filtered taxa into the database.
+
+    Filters to: active taxa, under Animalia/Plantae/Fungi, at major ranks.
+    Resolves parent_id to the nearest ancestor also in the filtered set.
+
+    Returns dict with 'loaded' and 'skipped' counts.
+    """
+    # Pass 1: read all taxa into memory, filter, and determine kingdoms
+    all_taxa = {}   # inat_id -> {name, rank, rank_level, ancestry_ids, kingdom}
+    kept_ids = set()
+
+    with gzip.open(gz_path, 'rt') as f:
+        reader = csv.reader(f, delimiter='\t')
+        for row in reader:
+            if len(row) < 6:
+                continue
+            inat_id = int(row[0])
+            ancestry_str = row[1]
+            rank_level = float(row[2])
+            rank = row[3]
+            name = row[4]
+            active = row[5].lower() == 'true'
+
+            if not active:
+                continue
+
+            ancestry_ids = []
+            if ancestry_str:
+                ancestry_ids = [int(x) for x in ancestry_str.split('/')]
+
+            all_taxa[inat_id] = {
+                'name': name,
+                'rank': rank,
+                'rank_level': rank_level,
+                'ancestry_ids': ancestry_ids,
+            }
+
+    # Determine kingdom for each taxon and filter
+    filtered = {}
+    for inat_id, t in all_taxa.items():
+        # Skip non-major ranks
+        rl = int(t['rank_level']) if t['rank_level'] == int(t['rank_level']) else None
+        if rl not in MAJOR_RANK_LEVELS:
+            continue
+
+        # Determine kingdom: check if taxon IS a target kingdom, or has one as ancestor
+        kingdom = None
+        if inat_id in TARGET_KINGDOM_INAT_IDS:
+            kingdom = t['name']
+        else:
+            for aid in t['ancestry_ids']:
+                if aid in TARGET_KINGDOM_INAT_IDS:
+                    kingdom = all_taxa[aid]['name'] if aid in all_taxa else None
+                    break
+
+        if kingdom is None:
+            continue
+
+        filtered[inat_id] = {
+            'name': t['name'],
+            'rank': RANK_LEVEL_TO_NAME[rl],
+            'ancestry_ids': t['ancestry_ids'],
+            'kingdom': kingdom,
+        }
+        kept_ids.add(inat_id)
+
+    # Pass 2: resolve parent_id to nearest kept ancestor
+    for _inat_id, t in filtered.items():
+        parent_inat_id = None
+        for aid in reversed(t['ancestry_ids']):
+            if aid in kept_ids:
+                parent_inat_id = aid
+                break
+        t['parent_inat_id'] = parent_inat_id
+
+    # Insert into database
+    # First pass: insert all taxa without parent_id (to get local IDs)
+    inat_to_local = {}
+    for inat_id, t in filtered.items():
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, rank, kingdom) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(inat_id) DO UPDATE SET "
+            "name = excluded.name, rank = excluded.rank, kingdom = excluded.kingdom",
+            (inat_id, t['name'], t['rank'], t['kingdom']),
+        )
+        row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
+        ).fetchone()
+        if row:
+            inat_to_local[inat_id] = row['id']
+
+    # Second pass: set parent_id using local IDs
+    for inat_id, t in filtered.items():
+        if t['parent_inat_id'] and t['parent_inat_id'] in inat_to_local:
+            local_id = inat_to_local[inat_id]
+            parent_local_id = inat_to_local[t['parent_inat_id']]
+            db.conn.execute(
+                "UPDATE taxa SET parent_id = ? WHERE id = ?",
+                (parent_local_id, local_id),
+            )
+
+    db.conn.commit()
+
+    loaded = len(filtered)
+    skipped = len(all_taxa) - loaded
+    log.info("Taxonomy loaded: %d taxa imported, %d skipped", loaded, skipped)
+    return {"loaded": loaded, "skipped": skipped}
+
+
+def load_taxonomy(db, data_dir=None):
+    """Download and load the full iNat taxonomy.
+
+    Args:
+        db: Database instance
+        data_dir: directory to store downloaded files (default: ~/.vireo/taxonomy/)
+    """
+    if data_dir is None:
+        data_dir = os.path.expanduser("~/.vireo/taxonomy")
+    os.makedirs(data_dir, exist_ok=True)
+
+    gz_path = os.path.join(data_dir, "taxa.csv.gz")
+    if not os.path.exists(gz_path):
+        download_taxa(gz_path)
+
+    return load_taxa_from_file(db, gz_path)
+
+
+def fetch_common_names(db, locale='en'):
+    """Fetch common names from the iNat API for all taxa in the database.
+
+    Batches requests to the iNat API, updates taxa.common_name with the
+    preferred common name, and inserts all English names into taxa_common_names.
+
+    Returns dict with 'updated' count.
+    """
+    rows = db.conn.execute(
+        "SELECT id, inat_id FROM taxa WHERE inat_id IS NOT NULL"
+    ).fetchall()
+
+    inat_ids = [(r['id'], r['inat_id']) for r in rows]
+    updated = 0
+
+    for i in range(0, len(inat_ids), INAT_BATCH_SIZE):
+        batch = inat_ids[i:i + INAT_BATCH_SIZE]
+        id_str = ','.join(str(iid) for _, iid in batch)
+        local_by_inat = {iid: lid for lid, iid in batch}
+
+        try:
+            resp = requests.get(
+                f"{INAT_API_BASE}/taxa",
+                params={'id': id_str, 'per_page': INAT_BATCH_SIZE},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.warning("iNat API returned %d for batch %d", resp.status_code, i)
+                continue
+
+            for taxon in resp.json().get('results', []):
+                inat_id = taxon['id']
+                local_id = local_by_inat.get(inat_id)
+                if not local_id:
+                    continue
+
+                preferred = taxon.get('preferred_common_name')
+                if preferred:
+                    db.conn.execute(
+                        "UPDATE taxa SET common_name = ? WHERE id = ?",
+                        (preferred, local_id),
+                    )
+                    updated += 1
+
+                for name_entry in taxon.get('names', []):
+                    if name_entry.get('locale') == locale:
+                        db.conn.execute(
+                            "INSERT OR IGNORE INTO taxa_common_names "
+                            "(taxon_id, name, locale) VALUES (?, ?, ?)",
+                            (local_id, name_entry['name'], locale),
+                        )
+        except requests.RequestException as e:
+            log.warning("iNat API request failed: %s", e)
+            continue
+
+    db.conn.commit()
+    log.info("Common names: %d taxa updated", updated)
+    return {"updated": updated}
+
+
+# Default informal groups for wildlife photography.
+# Each maps a common name to a list of scientific names (order or family level).
+DEFAULT_INFORMAL_GROUPS = {
+    "Raptors": ["Accipitriformes", "Falconiformes", "Strigiformes"],
+    "Shorebirds": ["Charadriiformes"],
+    "Waterfowl": ["Anseriformes"],
+    "Songbirds": ["Passeriformes"],
+    "Hummingbirds": ["Trochilidae"],
+    "Wading birds": ["Ardeidae", "Ciconiidae", "Threskiornithidae"],
+    "Woodpeckers": ["Picidae"],
+    "Gamebirds": ["Galliformes"],
+}
+
+
+def seed_informal_groups(db):
+    """Create default informal groups and link them to taxa nodes.
+
+    Only links groups to taxa that exist in the database. Skips groups
+    that already exist (idempotent).
+
+    Returns dict with 'groups_created' count.
+    """
+    created = 0
+    for group_name, taxon_names in DEFAULT_INFORMAL_GROUPS.items():
+        # Insert group (ignore if exists)
+        db.conn.execute(
+            "INSERT OR IGNORE INTO informal_groups (name) VALUES (?)",
+            (group_name,),
+        )
+        group_row = db.conn.execute(
+            "SELECT id FROM informal_groups WHERE name = ?", (group_name,)
+        ).fetchone()
+        group_id = group_row["id"]
+
+        linked_any = False
+        for taxon_name in taxon_names:
+            taxon_row = db.conn.execute(
+                "SELECT id FROM taxa WHERE name = ?", (taxon_name,)
+            ).fetchone()
+            if taxon_row:
+                db.conn.execute(
+                    "INSERT OR IGNORE INTO informal_group_taxa "
+                    "(group_id, taxon_id) VALUES (?, ?)",
+                    (group_id, taxon_row["id"]),
+                )
+                linked_any = True
+
+        if linked_any:
+            created += 1
+
+    db.conn.commit()
+    log.info("Informal groups: %d created/verified", created)
+    return {"groups_created": created}
+
+
+# --- DWCA-based taxonomy loader (legacy) ---
 
 
 def download_taxonomy(output_path, progress_callback=None):
