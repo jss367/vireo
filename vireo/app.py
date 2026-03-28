@@ -4826,7 +4826,7 @@ def main():
         ig_stats = seed_informal_groups(db)
         print(f"  Informal groups: {ig_stats['groups_created']} groups created")
         print("Done.")
-        sys.exit(0)
+        raise SystemExit(0)
 
     # Resolve port: --port 0 means pick a random free port
     port = args.port
