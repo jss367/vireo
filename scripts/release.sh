@@ -87,6 +87,17 @@ else
     echo "==> Ad-hoc signing app bundle..."
     codesign --sign - --force --deep "$APP_PATH"
     codesign --verify --deep --verbose=2 "$APP_PATH"
+
+    # Rebuild the DMG so it contains the signed .app
+    # (cargo tauri build creates .app and .dmg in one step, so the
+    # original DMG contains the unsigned app)
+    OLD_DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+    if [[ -z "$OLD_DMG" ]]; then
+        echo "ERROR: No .dmg found to rebuild"
+        exit 1
+    fi
+    echo "==> Rebuilding DMG with signed app..."
+    hdiutil create -volname "Vireo" -srcfolder "$APP_PATH" -ov -format UDZO "$OLD_DMG"
 fi
 echo ""
 
