@@ -365,6 +365,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lightbox-img-wrap.zoomed {
   overflow: auto;
   cursor: grab;
+  align-items: flex-start;
+  justify-content: flex-start;
 }
 .lightbox-img-wrap.zoomed:active {
   cursor: grabbing;
@@ -1079,13 +1081,13 @@ function toggleLightboxZoom(e) {
     }
   } else {
     // Zoom to 1:1 — load full-resolution original
+    // Measure click position relative to the image BEFORE changing layout
+    var imgRect = img.getBoundingClientRect();
+    var clickX = imgRect.width ? (e.clientX - imgRect.left) / imgRect.width : 0.5;
+    var clickY = imgRect.height ? (e.clientY - imgRect.top) / imgRect.height : 0.5;
+
     wrap.classList.add('zoomed');
     badge.style.display = '';
-
-    // Remember click position as fraction of the visible image
-    var rect = wrap.getBoundingClientRect();
-    var clickX = (e.clientX - rect.left) / rect.width;
-    var clickY = (e.clientY - rect.top) / rect.height;
 
     if (_lightboxCurrentId) {
       img.src = '/photos/' + _lightboxCurrentId + '/original';
