@@ -465,11 +465,12 @@ function onSourceChange() {
   }
 }
 
+var _importRunning = false;
 function updateImportButton() {
   var jpeg = document.getElementById('chkJpeg').checked;
   var raw = document.getElementById('chkRaw').checked;
   var btn = document.getElementById('btnImport');
-  btn.disabled = !jpeg && !raw;
+  btn.disabled = _importRunning || (!jpeg && !raw);
 }
 function getIngestFileTypes() {
   var jpeg = document.getElementById('chkJpeg').checked;
@@ -496,6 +497,7 @@ async function runImport() {
   var text = document.getElementById('textImport');
   var num = document.getElementById('numImport');
 
+  _importRunning = true;
   btn.disabled = true;
   status.textContent = 'Starting import...';
   status.className = 'status-msg';
@@ -515,6 +517,7 @@ async function runImport() {
       }),
     }, { toast: false });
     if (!data.job_id) {
+      _importRunning = false;
       btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
       num.className = 'stage-num';
@@ -553,16 +556,19 @@ async function runImport() {
           status.textContent = 'Failed';
           num.className = 'stage-num';
         }
+        _importRunning = false;
         btn.disabled = false;
       },
       onError: function() {
         status.textContent = 'Connection lost';
+        _importRunning = false;
         btn.disabled = false;
         num.className = 'stage-num';
       }
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
+    _importRunning = false;
     btn.disabled = false;
     num.className = 'stage-num';
     progressWrap.style.display = 'none';
