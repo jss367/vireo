@@ -65,6 +65,7 @@ Workspace management: `workspaces`, `workspace_folders`
 2. Do all implementation work in the worktree.
 3. Run tests before finishing: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
 4. **Create a PR** using `gh pr create`. Include what was changed and test results in the PR description.
+5. **Before pushing to an existing branch**, check if its PR is still open (`gh pr view <branch> --json state`). If the PR is already merged or closed, create a new branch from `main`, apply your changes there, and open a new PR. Pushing to a merged PR's branch does nothing — the changes won't reach `main`.
 
 ## Debugging tips
 
