@@ -611,6 +611,167 @@ input[type="range"]::-moz-range-thumb {
   font-weight: 600;
   cursor: pointer;
 }
+
+/* ---------- Group Review Modal ---------- */
+.grm-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.8);
+  z-index: 500;
+  flex-direction: column;
+}
+.grm-overlay.open { display: flex; }
+
+.grm-header {
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary, #0E2A3D);
+  flex-shrink: 0;
+}
+.grm-header h3 { font-size: 15px; color: var(--text-primary, #E0F0F0); }
+.grm-close {
+  margin-left: auto;
+  background: none; border: none; color: var(--text-muted, #888);
+  font-size: 20px; cursor: pointer;
+}
+
+.grm-zone {
+  padding: 10px 20px;
+  min-height: 80px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+}
+.grm-zone-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  margin-bottom: 6px; font-weight: 600;
+}
+.grm-picks .grm-zone-label { color: var(--accent, #24E5CA); }
+.grm-candidates { flex: 1; overflow-x: auto; overflow-y: hidden; }
+.grm-candidates .grm-zone-label { color: var(--text-dim, #888); }
+.grm-rejects .grm-zone-label { color: var(--danger, #e74c3c); }
+
+.grm-strip {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  min-height: 60px;
+  flex-wrap: nowrap;
+}
+
+.grm-card {
+  flex-shrink: 0;
+  width: 180px;
+  background: var(--bg-tertiary, #14374E);
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: border-color 0.15s;
+}
+.grm-card:hover { border-color: var(--text-ghost, #555); }
+.grm-card.selected { border-color: var(--accent, #24E5CA); }
+.grm-card.ai-best { border-color: var(--warning, #f0c040); }
+.grm-card img {
+  width: 100%;
+  aspect-ratio: 3/2;
+  object-fit: cover;
+  display: block;
+}
+.grm-card-info {
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.grm-card-species { color: var(--text-primary, #E0F0F0); font-weight: 600; }
+.grm-card-scores { color: var(--text-dim, #888); }
+.grm-card-scores .score-val { color: var(--text-secondary, #B0CCCC); }
+.grm-card-ai { color: var(--warning, #f0c040); font-size: 10px; font-weight: 600; }
+
+.grm-footer {
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-secondary, #0E2A3D);
+  flex-shrink: 0;
+}
+.grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost, #555); flex: 1; }
+
+/* Loupe mode — split layout with preview on right */
+.grm-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+.grm-strips {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-width: 0;
+}
+.grm-loupe {
+  width: 45%;
+  min-width: 300px;
+  background: var(--bg-primary, #0A1F2E);
+  border-left: 1px solid var(--border-primary, #14374E);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.grm-loupe-img {
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+  cursor: crosshair;
+  min-height: 200px;
+  max-height: 50vh;
+}
+.grm-loupe-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.grm-loupe-info {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  border-top: 1px solid var(--border-primary, #14374E);
+  text-align: center;
+}
+.grm-loupe-crosshair-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(78, 204, 163, 0.4);
+  pointer-events: none;
+}
+.grm-loupe-crosshair-v {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(78, 204, 163, 0.4);
+  pointer-events: none;
+}
+
+/* Zoomed strip thumbnails */
+.grm-card.zoomed img {
+  transition: none;
+}
+
+/* Pipeline metadata below loupe */
+.grm-loupe-detail {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-primary, #14374E);
+}
 </style>
 </head>
 <body>
