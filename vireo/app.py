@@ -514,11 +514,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
         total_photos = db.count_photos()
         total_without_gps = db.count_photos_without_gps()
+        total_with_gps = total_photos - total_without_gps
 
         return jsonify({
             "photos": [dict(p) for p in photos],
-            "total_geo": len(photos),
+            "total_filtered": len(photos),
             "total_photos": total_photos,
+            "total_with_gps": total_with_gps,
             "total_without_gps": total_without_gps,
         })
 

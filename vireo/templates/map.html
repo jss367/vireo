@@ -598,18 +598,20 @@ async function loadPhotos() {
     map.fitBounds(markers.getBounds(), { padding: [30, 30] });
     renderSidebar(data.photos);
 
-    /* GPS coverage stats */
-    var totalGeo = data.total_geo;
+    /* GPS coverage stats — global (unfiltered) for consistency */
+    var totalFiltered = data.total_filtered;
+    var totalWithGps = data.total_with_gps;
     var totalPhotos = data.total_photos;
     var missingGps = data.total_without_gps;
-    var pct = totalPhotos > 0 ? Math.round((totalGeo / totalPhotos) * 100) : 0;
+    var pct = totalPhotos > 0 ? Math.round((totalWithGps / totalPhotos) * 100) : 0;
 
     var statusEl = document.getElementById('mapStatus');
-    statusEl.innerHTML = 'Showing ' + totalGeo + ' geolocated photos &mdash; '
-      + pct + '% GPS coverage'
-      + (missingGps > 0
-          ? ' &mdash; <a href="/browse?missing_gps=1">' + missingGps + ' missing GPS</a>'
-          : '');
+    var parts = ['Showing ' + totalFiltered + ' of ' + totalWithGps + ' geolocated photos'];
+    parts.push(pct + '% GPS coverage');
+    if (missingGps > 0) {
+      parts.push('<a href="/browse?missing_gps=1">' + missingGps + ' missing GPS</a>');
+    }
+    statusEl.innerHTML = parts.join(' &mdash; ');
   } catch (e) {
     document.getElementById('mapStatus').textContent = 'Failed to load photos.';
   }

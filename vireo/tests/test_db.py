@@ -926,7 +926,7 @@ def test_get_geolocated_photos_species_filter(tmp_path):
 
 
 def test_get_accepted_species(tmp_path):
-    """get_accepted_species returns distinct species from accepted predictions."""
+    """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -934,6 +934,9 @@ def test_get_accepted_species(tmp_path):
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
+    # Both photos need GPS to appear in species list
+    db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
+    db.conn.commit()
     db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
     db.add_prediction(p2, 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
@@ -947,6 +950,23 @@ def test_get_accepted_species(tmp_path):
     assert len(species) == 2
 
 
+def test_get_accepted_species_excludes_non_geolocated(tmp_path):
+    """get_accepted_species excludes species from photos without GPS."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    # p1 has no GPS coordinates
+    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    preds = db.get_predictions(photo_ids=[p1])
+    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
+    db.conn.commit()
+
+    species = db.get_accepted_species()
+    assert species == []
+
+
 def test_get_accepted_species_excludes_non_accepted(tmp_path):
     """get_accepted_species only includes accepted predictions, not pending."""
     from db import Database
@@ -954,10 +974,33 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
+    db.conn.commit()
     db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
 
     species = db.get_accepted_species()
     assert species == []
+
+
+def test_get_accepted_species_uses_top_confidence(tmp_path):
+    """get_accepted_species returns only the highest-confidence species per photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
+    db.conn.commit()
+    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(p1, 'Cooper\'s Hawk', 0.60, 'bioclip')
+    preds = db.get_predictions(photo_ids=[p1])
+    for pr in preds:
+        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
+    db.conn.commit()
+
+    species = db.get_accepted_species()
+    # Only the top-confidence species should appear
+    assert species == ['Red-tailed Hawk']
 
 
 def test_count_photos_without_gps(tmp_path):
