@@ -47,16 +47,16 @@ def _extract_dimensions(exif_group, file_group):
     2. EXIF:ImageWidth / EXIF:ImageHeight
     3. File:ImageWidth / File:ImageHeight
     """
-    width = (
-        exif_group.get("ExifImageWidth")
-        or exif_group.get("ImageWidth")
-        or file_group.get("ImageWidth")
-    )
-    height = (
-        exif_group.get("ExifImageHeight")
-        or exif_group.get("ImageHeight")
-        or file_group.get("ImageHeight")
-    )
+    width = exif_group.get("ExifImageWidth")
+    if width is None:
+        width = exif_group.get("ImageWidth")
+    if width is None:
+        width = file_group.get("ImageWidth")
+    height = exif_group.get("ExifImageHeight")
+    if height is None:
+        height = exif_group.get("ImageHeight")
+    if height is None:
+        height = file_group.get("ImageHeight")
     if width is not None:
         width = int(width)
     if height is not None:
@@ -210,8 +210,12 @@ def scan(root, db, progress_callback=None, incremental=False):
             burst_id = str(burst_id)
 
         # GPS coordinates — ExifTool with -n gives decimal degrees directly
-        latitude = composite.get("GPSLatitude") or exif_group.get("GPSLatitude")
-        longitude = composite.get("GPSLongitude") or exif_group.get("GPSLongitude")
+        latitude = composite.get("GPSLatitude")
+        if latitude is None:
+            latitude = exif_group.get("GPSLatitude")
+        longitude = composite.get("GPSLongitude")
+        if longitude is None:
+            longitude = exif_group.get("GPSLongitude")
 
         # Compute perceptual hash (computed, not from EXIF)
         phash = None
