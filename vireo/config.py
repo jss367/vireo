@@ -67,6 +67,12 @@ DEFAULTS = {
         "merge_max_gap": 60.0,
         "extract_full_metadata": True,
     },
+    # --- Ingest (import from external source) ---
+    "ingest": {
+        "folder_template": "%Y/%m/%d",
+        "skip_duplicates": True,
+        "file_types": "both",
+    },
     "keyboard_shortcuts": {
         "review": {
             "accept": "a",

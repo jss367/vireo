@@ -1,8 +1,10 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
+import hashlib
 import json
 import logging
 import os
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +15,18 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+
+
+def compute_file_hash(file_path, chunk_size=65536):
+    """Compute SHA-256 hash of a file. Returns hex digest string."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _import_keywords_for_photo(db, photo_id, xmp_path_str):
@@ -78,6 +92,135 @@ def _extract_timestamp(exif_group):
         return dt.isoformat()
     except (ValueError, TypeError):
         return str(dto)
+
+
+def _pair_raw_jpeg_companions(db):
+    """Find raw+JPEG pairs in the same folder and merge them.
+
+    When both IMG_001.cr3 and IMG_001.jpg exist in the same folder,
+    keep the raw as the primary photo and set companion_path to the JPEG filename.
+    Delete the duplicate JPEG-only photo record.
+    """
+    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
+    jpeg_exts = {".jpg", ".jpeg"}
+
+    rows = db.conn.execute(
+        "SELECT id, folder_id, filename, extension FROM photos ORDER BY folder_id, filename"
+    ).fetchall()
+
+    # Group by folder_id + base name (without extension)
+    groups = defaultdict(list)
+    for row in rows:
+        base = os.path.splitext(row["filename"])[0]
+        groups[(row["folder_id"], base)].append(dict(row))
+
+    for (_folder_id, _base), members in groups.items():
+        if len(members) < 2:
+            continue
+
+        raws = [m for m in members if m["extension"] in raw_exts]
+        jpegs = [m for m in members if m["extension"] in jpeg_exts]
+
+        if not raws or not jpegs:
+            continue
+
+        # Use first raw as primary, first JPEG as companion
+        primary = raws[0]
+        companion = jpegs[0]
+
+        # Transfer metadata from companion to primary if primary lacks it
+        primary_full = db.conn.execute(
+            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            (primary["id"],),
+        ).fetchone()
+        companion_full = db.conn.execute(
+            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            (companion["id"],),
+        ).fetchone()
+
+        updates = []
+        params = []
+        if not primary_full["timestamp"] and companion_full["timestamp"]:
+            updates.append("timestamp = ?")
+            params.append(companion_full["timestamp"])
+        if primary_full["rating"] == 0 and companion_full["rating"] != 0:
+            updates.append("rating = ?")
+            params.append(companion_full["rating"])
+        if primary_full["flag"] == "none" and companion_full["flag"] != "none":
+            updates.append("flag = ?")
+            params.append(companion_full["flag"])
+        if updates:
+            params.append(primary["id"])
+            db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id = ?", params
+            )
+
+        # Transfer keywords from companion to primary
+        companion_keywords = db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for kw in companion_keywords:
+            db.conn.execute(
+                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+                (primary["id"], kw["keyword_id"]),
+            )
+
+        db.conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            (companion["filename"], primary["id"]),
+        )
+
+        # Transfer predictions: keep higher confidence when both have the same
+        # (model, workspace_id) to avoid UNIQUE constraint violation.
+        companion_preds = db.conn.execute(
+            "SELECT id, species, confidence, model, workspace_id FROM predictions WHERE photo_id = ?",
+            (companion["id"],),
+        ).fetchall()
+        for cp in companion_preds:
+            existing = db.conn.execute(
+                "SELECT id, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
+                (primary["id"], cp["model"], cp["workspace_id"]),
+            ).fetchone()
+            if existing:
+                # Keep the higher-confidence prediction
+                if cp["confidence"] > existing["confidence"]:
+                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (existing["id"],))
+                    db.conn.execute(
+                        "UPDATE predictions SET photo_id = ? WHERE id = ?",
+                        (primary["id"], cp["id"]),
+                    )
+                else:
+                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (cp["id"],))
+            else:
+                db.conn.execute(
+                    "UPDATE predictions SET photo_id = ? WHERE id = ?",
+                    (primary["id"], cp["id"]),
+                )
+
+        # Transfer pending_changes from companion to primary
+        db.conn.execute(
+            "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
+        )
+        # Transfer iNaturalist submissions: deduplicate on (photo_id, observation_id)
+        # before reassigning to avoid UNIQUE constraint violation.
+        db.conn.execute(
+            """DELETE FROM inat_submissions
+               WHERE photo_id = ? AND observation_id IN (
+                   SELECT observation_id FROM inat_submissions WHERE photo_id = ?
+               )""",
+            (companion["id"], primary["id"]),
+        )
+        db.conn.execute(
+            "UPDATE inat_submissions SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
+        )
+        # Remove keyword associations then the duplicate JPEG record
+        db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
+        db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
+
+    db.conn.commit()
 
 
 def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True):
@@ -226,6 +369,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         except Exception:
             log.debug("Could not compute pHash for %s", image_path)
 
+        # Compute file hash for duplicate detection
+        file_hash = None
+        try:
+            file_hash = compute_file_hash(str(image_path))
+        except Exception:
+            log.debug("Could not compute file hash for %s", image_path)
+
+
         photo_id = db.add_photo(
             folder_id=folder_id,
             filename=image_path.name,
@@ -253,6 +404,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if burst_id is not None:
             updates.append("burst_id=?")
             update_params.append(burst_id)
+        if file_hash is not None:
+            updates.append("file_hash=?")
+            update_params.append(file_hash)
         if file_meta and extract_full_metadata:
             updates.append("exif_data=?")
             update_params.append(json.dumps(file_meta))
@@ -270,6 +424,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
         if progress_callback:
             progress_callback(i + 1, total)
+
+    # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path
+    _pair_raw_jpeg_companions(db)
 
     db.update_folder_counts()
     log.info("Scan complete: %d photos indexed", total)

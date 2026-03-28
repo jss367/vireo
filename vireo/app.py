@@ -1796,6 +1796,22 @@ def create_app(db_path, thumb_cache_dir=None):
             ver = "0.1.0"
         return jsonify({"version": ver})
 
+    @app.route("/api/volumes", methods=["GET"])
+    def api_volumes():
+        """List mounted volumes (macOS/Linux) to help find SD cards."""
+        import platform
+        volumes = []
+        if platform.system() == "Darwin":
+            vol_dir = "/Volumes"
+        else:
+            vol_dir = "/media"
+        if os.path.isdir(vol_dir):
+            for name in sorted(os.listdir(vol_dir)):
+                path = os.path.join(vol_dir, name)
+                if os.path.isdir(path):
+                    volumes.append({"name": name, "path": path})
+        return jsonify(volumes)
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
@@ -3134,6 +3150,75 @@ def create_app(db_path, thumb_cache_dir=None):
 
         job_id = runner.start("previews", work, config={"collection_id": collection_id},
                                workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/ingest", methods=["POST"])
+    def api_job_ingest():
+        body = request.get_json(silent=True) or {}
+        source = body.get("source", "")
+        destination = body.get("destination", "")
+        file_types = body.get("file_types", "both")
+        folder_template = body.get("folder_template", "%Y/%m/%d")
+        skip_duplicates = body.get("skip_duplicates", True)
+
+        if not source or not destination:
+            return json_error("source and destination are required")
+        if not os.path.isdir(source):
+            return json_error(f"source directory not found: {source}")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from ingest import ingest as do_ingest
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            current / max(time.time() - job["_start_time"], 0.01), 1
+                        ),
+                        "phase": "Importing photos",
+                    },
+                )
+
+            result = do_ingest(
+                source_dir=source,
+                destination_dir=destination,
+                db=thread_db,
+                file_types=file_types,
+                folder_template=folder_template,
+                skip_duplicates=skip_duplicates,
+                progress_callback=progress_cb,
+            )
+            return result
+
+        job_id = runner.start(
+            "ingest",
+            work,
+            config={
+                "source": source,
+                "destination": destination,
+                "file_types": file_types,
+                "folder_template": folder_template,
+            },
+            workspace_id=active_ws,
+        )
         return jsonify({"job_id": job_id})
 
     @app.route("/api/jobs/import", methods=["POST"])
