@@ -7,15 +7,12 @@ Usage:
 import argparse
 import logging
 import os
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
-
 from classifier import Classifier
 from image_loader import SUPPORTED_EXTENSIONS, load_image
-from xmp_writer import write_xmp_sidecar
+from xmp import write_sidecar
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,7 +108,7 @@ def run(
 
         if write:
             try:
-                write_xmp_sidecar(
+                write_sidecar(
                     str(xmp_path),
                     flat_keywords=flat_keywords,
                     hierarchical_keywords=set(),

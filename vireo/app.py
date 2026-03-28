@@ -5,17 +5,13 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
-import sys
-import webbrowser
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
-
-import json
 import queue
 import time
+import webbrowser
 
 from db import Database
 from flask import (
@@ -480,9 +476,9 @@ def create_app(db_path, thumb_cache_dir=None):
             xmp_keywords = []
             xmp_exists = os.path.exists(xmp_path)
             if xmp_exists:
-                from compare import read_xmp_keywords
+                from xmp import read_keywords
 
-                xmp_keywords = sorted(read_xmp_keywords(xmp_path))
+                xmp_keywords = sorted(read_keywords(xmp_path))
             result["xmp_exists"] = xmp_exists
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path

@@ -4,8 +4,8 @@ import logging
 import os
 from pathlib import Path
 
-from catalog_reader import read_catalog
-from xmp_writer import write_xmp_sidecar
+from catalog import read_catalog
+from xmp import write_sidecar
 
 log = logging.getLogger(__name__)
 
@@ -177,7 +177,7 @@ def execute_import(
             # Write XMP if requested
             if write_xmp and Path(file_path).exists():
                 xmp_path = str(Path(file_path).with_suffix(".xmp"))
-                write_xmp_sidecar(
+                write_sidecar(
                     xmp_path,
                     flat_keywords=kw_data["flat_keywords"],
                     hierarchical_keywords=kw_data["hierarchical_keywords"],

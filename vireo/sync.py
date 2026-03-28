@@ -3,20 +3,10 @@
 import logging
 import os
 from collections import defaultdict
-from xml.etree import ElementTree as ET
 
-from compare import read_xmp_keywords
-from xmp_writer import write_xmp_sidecar
+from xmp import read_keywords, remove_keywords, write_rating, write_sidecar
 
 log = logging.getLogger(__name__)
-
-NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-NS_DC = "http://purl.org/dc/elements/1.1/"
-NS_LR = "http://ns.adobe.com/lightroom/1.0/"
-NS_XMP = "http://ns.adobe.com/xap/1.0/"
-
-# Register xmp namespace so writes preserve it
-ET.register_namespace("xmp", NS_XMP)
 
 
 def _get_xmp_path_for_photo(db, photo_id):
@@ -28,75 +18,6 @@ def _get_xmp_path_for_photo(db, photo_id):
     folder_path = folders.get(photo["folder_id"], "")
     base = os.path.splitext(photo["filename"])[0]
     return os.path.join(folder_path, base + ".xmp")
-
-
-def _write_rating_to_xmp(xmp_path, rating):
-    """Write xmp:Rating attribute to an XMP sidecar."""
-    from pathlib import Path
-
-    path = Path(xmp_path)
-
-    if path.exists():
-        try:
-            tree = ET.parse(path)
-            root = tree.getroot()
-        except ET.ParseError:
-            return
-    else:
-        return  # Don't create XMP just for rating
-
-    # Find rdf:Description and set xmp:Rating attribute
-    desc = root.find(f".//{{{NS_RDF}}}Description")
-    if desc is not None:
-        desc.set(f"{{{NS_XMP}}}Rating", str(rating))
-        ET.indent(tree, space="  ")
-        tree.write(xmp_path, xml_declaration=True, encoding="unicode")
-
-
-def _remove_keywords_from_xmp(xmp_path, keywords_to_remove):
-    """Remove keywords from dc:subject and lr:hierarchicalSubject in an XMP file.
-
-    Args:
-        xmp_path: path to the .xmp sidecar
-        keywords_to_remove: set of keyword strings to remove
-    """
-    from pathlib import Path
-
-    path = Path(xmp_path)
-    if not path.exists():
-        return
-
-    try:
-        tree = ET.parse(path)
-    except ET.ParseError:
-        log.warning("Corrupt XMP file, cannot remove keywords: %s", xmp_path)
-        return
-
-    root = tree.getroot()
-    remove_lower = {kw.lower() for kw in keywords_to_remove}
-    removed = []
-
-    # Remove from dc:subject bag
-    for bag in root.findall(f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text and li.text.lower() in remove_lower:
-                removed.append(li.text)
-                bag.remove(li)
-
-    # Remove from lr:hierarchicalSubject bag (matches if any segment matches)
-    for bag in root.findall(f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag"):
-        for li in bag.findall(f"{{{NS_RDF}}}li"):
-            if li.text:
-                # Hierarchical keywords use pipe-delimited paths like "Animals|Birds|Hawk"
-                segments = {s.lower() for s in li.text.split("|")}
-                if segments & remove_lower:
-                    removed.append(li.text)
-                    bag.remove(li)
-
-    if removed:
-        ET.indent(tree, space="  ")
-        tree.write(xmp_path, xml_declaration=True, encoding="unicode")
-        log.info("Removed keywords from %s: %s", xmp_path, removed)
 
 
 def sync_to_xmp(db, progress_callback=None):
@@ -163,17 +84,17 @@ def sync_to_xmp(db, progress_callback=None):
 
             # Write keywords
             if keywords_to_add:
-                write_xmp_sidecar(
+                write_sidecar(
                     xmp_path, flat_keywords=keywords_to_add, hierarchical_keywords=set()
                 )
 
             # Handle keyword removals: remove matching li elements from bags
             if keywords_to_remove:
-                _remove_keywords_from_xmp(xmp_path, keywords_to_remove)
+                remove_keywords(xmp_path, keywords_to_remove)
 
             # Write rating
             if new_rating is not None:
-                _write_rating_to_xmp(xmp_path, new_rating)
+                write_rating(xmp_path, new_rating)
 
             if supported_ids:
                 synced += 1
@@ -227,7 +148,7 @@ def sync_from_xmp(db, photo_ids):
             continue
 
         # Read current XMP keywords
-        xmp_keywords = read_xmp_keywords(xmp_path)
+        xmp_keywords = read_keywords(xmp_path)
         xmp_keywords_lower = {kw.lower(): kw for kw in xmp_keywords}
 
         # Get current DB keywords

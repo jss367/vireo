@@ -1,15 +1,19 @@
 """Export Lightroom keywords to XMP sidecar files.
 
 Usage:
-    python lr-migration/export_keywords.py --catalogs *.lrcat [--write]
+    python scripts/export_keywords.py --catalogs *.lrcat [--write]
 """
 
 import argparse
 import logging
+import os
+import sys
 from pathlib import Path
 
-from catalog_reader import read_catalog
-from xmp_writer import write_xmp_sidecar
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+
+from catalog import read_catalog
+from xmp import write_sidecar
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,7 +84,7 @@ def run(catalogs, write=False):
 
         if write:
             try:
-                write_xmp_sidecar(
+                write_sidecar(
                     str(xmp_path),
                     entry["flat_keywords"],
                     entry["hierarchical_keywords"],

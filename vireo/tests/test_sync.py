@@ -3,14 +3,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 from PIL import Image
 
 
 def _setup_photo_with_xmp(tmp_path, db, keywords=None):
     """Create a photo file, XMP sidecar, and DB entry. Returns (photo_id, xmp_path)."""
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     root = str(tmp_path / "photos")
     os.makedirs(root, exist_ok=True)
@@ -20,7 +19,7 @@ def _setup_photo_with_xmp(tmp_path, db, keywords=None):
     Image.new('RGB', (100, 100)).save(img_path)
 
     xmp_path = os.path.join(root, 'bird.xmp')
-    write_xmp_sidecar(xmp_path, flat_keywords=keywords or set(), hierarchical_keywords=set())
+    write_sidecar(xmp_path, flat_keywords=keywords or set(), hierarchical_keywords=set())
 
     pid = db.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
                        file_size=100, file_mtime=os.path.getmtime(img_path),
@@ -30,9 +29,9 @@ def _setup_photo_with_xmp(tmp_path, db, keywords=None):
 
 def test_sync_to_xmp_writes_keyword_add(tmp_path):
     """sync_to_xmp writes keyword_add changes to XMP sidecars."""
-    from compare import read_xmp_keywords
     from db import Database
     from sync import sync_to_xmp
+    from xmp import read_keywords
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -47,7 +46,7 @@ def test_sync_to_xmp_writes_keyword_add(tmp_path):
     assert result['failed'] == 0
 
     # Verify XMP was written
-    keywords = read_xmp_keywords(xmp_path)
+    keywords = read_keywords(xmp_path)
     assert 'Northern cardinal' in keywords
 
     # Pending changes should be cleared
@@ -105,7 +104,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
     """sync_from_xmp reconciles DB keywords to the current XMP keywords."""
     from db import Database
     from sync import sync_from_xmp
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -118,7 +117,7 @@ def test_sync_from_xmp_updates_db(tmp_path):
 
     # Replace the XMP sidecar with a different keyword set.
     os.remove(xmp_path)
-    write_xmp_sidecar(xmp_path, flat_keywords={'Cardinal'}, hierarchical_keywords=set())
+    write_sidecar(xmp_path, flat_keywords={'Cardinal'}, hierarchical_keywords=set())
 
     sync_from_xmp(db, [pid])
 
@@ -132,7 +131,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
     """Case-only differences between DB and XMP keyword names should not drop the tag."""
     from db import Database
     from sync import sync_from_xmp
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -143,7 +142,7 @@ def test_sync_from_xmp_preserves_keyword_when_only_case_differs(tmp_path):
     db.tag_photo(pid, kid)
 
     os.remove(xmp_path)
-    write_xmp_sidecar(xmp_path, flat_keywords={'sparrow'}, hierarchical_keywords=set())
+    write_sidecar(xmp_path, flat_keywords={'sparrow'}, hierarchical_keywords=set())
 
     sync_from_xmp(db, [pid])
 

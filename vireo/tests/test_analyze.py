@@ -9,10 +9,9 @@ import pytest
 pytest.importorskip("torch")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 from PIL import Image
-from xmp_writer import write_xmp_sidecar
+from xmp import write_sidecar
 
 
 def _create_mock_taxonomy(tmpdir):
@@ -51,7 +50,7 @@ def _create_test_folder(tmpdir):
     # Photo with existing species keyword
     img = Image.new('RGB', (224, 224), color='red')
     img.save(os.path.join(img_dir, "bird1.jpg"))
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(img_dir, "bird1.xmp"),
         flat_keywords={'Northern cardinal', 'Dyke Marsh'},
         hierarchical_keywords=set(),

@@ -8,13 +8,10 @@ import argparse
 import json
 import logging
 import os
-import sys
 import webbrowser
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lr-migration"))
-
 from flask import Flask, jsonify, render_template, request, send_from_directory
-from xmp_writer import write_xmp_sidecar
+from xmp import write_sidecar
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -89,7 +86,7 @@ def create_app(data_dir):
                 else:
                     return jsonify({"error": "no predictions available"}), 400
 
-                write_xmp_sidecar(
+                write_sidecar(
                     photo["xmp_path"],
                     flat_keywords={prediction},
                     hierarchical_keywords=set(),
@@ -142,7 +139,7 @@ def create_app(data_dir):
                 written = 0
                 for xp in xmp_paths:
                     try:
-                        write_xmp_sidecar(
+                        write_sidecar(
                             xp,
                             flat_keywords={prediction},
                             hierarchical_keywords=set(),
@@ -199,7 +196,7 @@ def create_app(data_dir):
                     continue
 
                 try:
-                    write_xmp_sidecar(
+                    write_sidecar(
                         photo["xmp_path"],
                         flat_keywords={pred["prediction"]},
                         hierarchical_keywords=set(),
@@ -226,7 +223,7 @@ def create_app(data_dir):
 
                 for xp in photo.get("member_xmp_paths", []):
                     try:
-                        write_xmp_sidecar(
+                        write_sidecar(
                             xp,
                             flat_keywords={pred["prediction"]},
                             hierarchical_keywords=set(),

@@ -4,8 +4,8 @@ import logging
 import os
 from pathlib import Path
 
-from compare import read_xmp_keywords
 from image_loader import SUPPORTED_EXTENSIONS
+from xmp import read_keywords
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def check_drift(db):
                 )
             continue
 
-        xmp_keywords = read_xmp_keywords(xmp_path)
+        xmp_keywords = read_keywords(xmp_path)
 
         if xmp_keywords != db_keywords:
             added_in_xmp = xmp_keywords - db_keywords

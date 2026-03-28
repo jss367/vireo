@@ -72,14 +72,11 @@ def main():
     sep = ";" if platform.system() == "Windows" else ":"
     vireo_dir = os.path.join(repo_root, "vireo")
 
-    lr_migration_dir = os.path.join(repo_root, "lr-migration")
-
     pyinstaller_args = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", "vireo-server",
         "--paths", vireo_dir,
-        "--paths", lr_migration_dir,
         # Bundle Flask templates and static assets — destinations are
         # relative to _MEIPASS, and Flask resolves them relative to
         # os.path.dirname(__file__) which is _MEIPASS for the entry script.
@@ -115,8 +112,8 @@ def main():
         "--hidden-import", "bursts",
         "--hidden-import", "detector",
         "--hidden-import", "timm_classifier",
-        "--hidden-import", "xmp_writer",
-        "--hidden-import", "catalog_reader",
+        "--hidden-import", "xmp",
+        "--hidden-import", "catalog",
     ]
 
     if args.ci:

@@ -1,7 +1,7 @@
+import os
 import sqlite3
 import sys
 import tempfile
-import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -106,7 +106,7 @@ def create_test_catalog(path):
 
 def test_read_catalog_keywords():
     """read_catalog returns a dict mapping file paths to keyword data."""
-    from catalog_reader import read_catalog
+    from catalog import read_catalog
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cat_path = os.path.join(tmpdir, "test.lrcat")
@@ -134,7 +134,7 @@ def test_read_catalog_keywords():
 
 def test_keyword_hierarchy_includes_parents():
     """When includeParents=1, hierarchical keywords include parent names."""
-    from catalog_reader import read_catalog
+    from catalog import read_catalog
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cat_path = os.path.join(tmpdir, "test.lrcat")
@@ -149,7 +149,7 @@ def test_keyword_hierarchy_includes_parents():
 
 def test_skips_non_exportable_keywords():
     """Keywords with includeOnExport=0 are skipped."""
-    from catalog_reader import read_catalog
+    from catalog import read_catalog
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cat_path = os.path.join(tmpdir, "test.lrcat")

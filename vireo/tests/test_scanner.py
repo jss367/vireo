@@ -4,7 +4,6 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 from PIL import Image
 
@@ -163,14 +162,14 @@ def test_scan_imports_xmp_keywords(tmp_path):
     """scan() reads XMP sidecars and imports keywords into the database."""
     from db import Database
     from scanner import scan
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
     Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
 
     # Create XMP sidecar with keywords
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Northern cardinal', 'Birds'},
         hierarchical_keywords={'Birds|Northern cardinal'},
@@ -191,13 +190,13 @@ def test_scan_imports_hierarchical_keywords(tmp_path):
     """scan() creates keyword hierarchy from lr:hierarchicalSubject."""
     from db import Database
     from scanner import scan
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
     Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
 
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Black kite'},
         hierarchical_keywords={'Birds|Raptors|Black kite'},
@@ -249,12 +248,12 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     """Incremental scan re-reads XMP when xmp_mtime changes."""
     from db import Database
     from scanner import scan
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     root = str(tmp_path / "photos")
     os.makedirs(root)
     Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Sparrow'},
         hierarchical_keywords=set(),
@@ -270,7 +269,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
 
     # Modify XMP - add a keyword
     time.sleep(0.05)
-    write_xmp_sidecar(
+    write_sidecar(
         os.path.join(root, 'bird.xmp'),
         flat_keywords={'Cardinal'},
         hierarchical_keywords=set(),

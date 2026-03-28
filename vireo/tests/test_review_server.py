@@ -5,7 +5,6 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'lr-migration'))
 
 from PIL import Image
 
@@ -19,9 +18,9 @@ def _create_test_review_data(tmpdir):
     img_path = os.path.join(tmpdir, "bird1.jpg")
     img.save(img_path)
 
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
     xmp_path = os.path.join(tmpdir, "bird1.xmp")
-    write_xmp_sidecar(xmp_path, flat_keywords={'Dyke Marsh'}, hierarchical_keywords=set())
+    write_sidecar(xmp_path, flat_keywords={'Dyke Marsh'}, hierarchical_keywords=set())
 
     thumb = Image.new('RGB', (100, 100), color='red')
     thumb.save(os.path.join(thumb_dir, "bird1.jpg"))
@@ -66,7 +65,7 @@ def _create_group_data(tmpdir):
     thumb_dir = os.path.join(tmpdir, "thumbnails")
     os.makedirs(thumb_dir)
 
-    from xmp_writer import write_xmp_sidecar
+    from xmp import write_sidecar
 
     paths = []
     for name in ['bird_a.jpg', 'bird_b.jpg', 'bird_c.jpg']:
@@ -74,7 +73,7 @@ def _create_group_data(tmpdir):
         xmp_path = os.path.join(tmpdir, name.replace('.jpg', '.xmp'))
         Image.new('RGB', (100, 100)).save(img_path)
         Image.new('RGB', (50, 50)).save(os.path.join(thumb_dir, name))
-        write_xmp_sidecar(xmp_path, flat_keywords=set(), hierarchical_keywords=set())
+        write_sidecar(xmp_path, flat_keywords=set(), hierarchical_keywords=set())
         paths.append((img_path, xmp_path))
 
     results = {
@@ -124,8 +123,8 @@ def test_get_photos():
 
 def test_accept_writes_xmp():
     """POST /api/accept/<filename> writes prediction to XMP."""
-    from compare import read_xmp_keywords
     from review_server import create_app
+    from xmp import read_keywords
     with tempfile.TemporaryDirectory() as tmpdir:
         results_path = _create_test_review_data(tmpdir)
         app = create_app(tmpdir)
@@ -135,15 +134,15 @@ def test_accept_writes_xmp():
         assert resp.status_code == 200
 
         xmp_path = os.path.join(tmpdir, "bird1.xmp")
-        keywords = read_xmp_keywords(xmp_path)
+        keywords = read_keywords(xmp_path)
         assert 'Northern cardinal' in keywords
         assert 'Dyke Marsh' in keywords
 
 
 def test_accept_group_writes_all_xmps():
     """POST /api/accept-group/<group_id> writes prediction to all member XMP files."""
-    from compare import read_xmp_keywords
     from review_server import create_app
+    from xmp import read_keywords
     with tempfile.TemporaryDirectory() as tmpdir:
         _create_group_data(tmpdir)
         app = create_app(tmpdir)
@@ -155,7 +154,7 @@ def test_accept_group_writes_all_xmps():
         assert data['accepted_count'] == 3
 
         for name in ['bird_a.xmp', 'bird_b.xmp', 'bird_c.xmp']:
-            kw = read_xmp_keywords(os.path.join(tmpdir, name))
+            kw = read_keywords(os.path.join(tmpdir, name))
             assert 'Song sparrow' in kw
 
 
@@ -243,9 +242,9 @@ def test_batch_accept_filters_by_category():
         with open(results_path) as f:
             data = json.load(f)
 
-        from xmp_writer import write_xmp_sidecar
+        from xmp import write_sidecar
         xmp2 = os.path.join(tmpdir, "bird2.xmp")
-        write_xmp_sidecar(xmp2, flat_keywords=set(), hierarchical_keywords=set())
+        write_sidecar(xmp2, flat_keywords=set(), hierarchical_keywords=set())
         data['photos'].append({
             'filename': 'bird2.jpg',
             'image_path': os.path.join(tmpdir, 'bird2.jpg'),
