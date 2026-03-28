@@ -1,4 +1,5 @@
 # vireo/tests/test_scanner.py
+import json
 import os
 import sys
 import time
@@ -282,3 +283,24 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     kw_names = {k['name'] for k in kws}
     assert 'Sparrow' in kw_names
     assert 'Cardinal' in kw_names
+
+
+def test_scan_populates_exif_data(tmp_path):
+    """scan() populates the exif_data JSON column when extract_full_metadata is on."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img = Image.new('RGB', (640, 480), color='blue')
+    img.save(os.path.join(root, 'test.jpg'))
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    row = db.conn.execute("SELECT exif_data FROM photos LIMIT 1").fetchone()
+    assert row["exif_data"] is not None
+    meta = json.loads(row["exif_data"])
+    assert isinstance(meta, dict)
+    # Should have at least a File group
+    assert "File" in meta

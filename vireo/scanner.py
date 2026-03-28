@@ -1,12 +1,14 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
+import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import imagehash
-from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import SUPPORTED_EXTENSIONS
+from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
@@ -37,6 +39,47 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
             db.tag_photo(photo_id, kid)
 
 
+def _extract_dimensions(exif_group, file_group):
+    """Extract width and height from ExifTool metadata groups.
+
+    Priority:
+    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight (actual image dimensions for JPEGs)
+    2. EXIF:ImageWidth / EXIF:ImageHeight
+    3. File:ImageWidth / File:ImageHeight
+    """
+    width = (
+        exif_group.get("ExifImageWidth")
+        or exif_group.get("ImageWidth")
+        or file_group.get("ImageWidth")
+    )
+    height = (
+        exif_group.get("ExifImageHeight")
+        or exif_group.get("ImageHeight")
+        or file_group.get("ImageHeight")
+    )
+    if width is not None:
+        width = int(width)
+    if height is not None:
+        height = int(height)
+    return width, height
+
+
+def _extract_timestamp(exif_group):
+    """Extract and normalize timestamp from ExifTool EXIF group.
+
+    Checks EXIF:DateTimeOriginal first, then EXIF:CreateDate.
+    Returns ISO format string or None.
+    """
+    dto = exif_group.get("DateTimeOriginal") or exif_group.get("CreateDate")
+    if not dto:
+        return None
+    try:
+        dt = datetime.strptime(str(dto), "%Y:%m:%d %H:%M:%S")
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        return str(dto)
+
+
 def scan(root, db, progress_callback=None, incremental=False):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
@@ -62,6 +105,10 @@ def scan(root, db, progress_callback=None, incremental=False):
 
     total = len(image_files)
     log.info("Found %d images in %s", total, root)
+
+    # Batch extract metadata via ExifTool for all files
+    all_paths = [str(f) for f in image_files]
+    metadata_map = extract_metadata(all_paths)
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
@@ -140,86 +187,39 @@ def scan(root, db, progress_callback=None, incremental=False):
                         progress_callback(i + 1, total)
                     continue
 
-        # Read dimensions
-        width, height = None, None
-        try:
-            ext = image_path.suffix.lower()
-            if ext in SUPPORTED_EXTENSIONS and ext not in IMAGE_EXTENSIONS:
-                # RAW file — PIL only reads the thumbnail, use rawpy
-                import rawpy
+        # Get pre-extracted metadata for this file
+        file_meta = metadata_map.get(str(image_path), {})
+        file_group = file_meta.get("File", {})
+        exif_group = file_meta.get("EXIF", {})
+        composite = file_meta.get("Composite", {})
 
-                with rawpy.imread(str(image_path)) as raw:
-                    sizes = raw.sizes
-                    width, height = sizes.width, sizes.height
-            else:
-                with Image.open(str(image_path)) as img:
-                    width, height = img.size
-        except Exception:
-            log.debug("Could not read dimensions from %s", image_path)
+        # Dimensions from ExifTool (works for all file types including RAW)
+        width, height = _extract_dimensions(exif_group, file_group)
 
-        # Compute perceptual hash
+        # Timestamp from ExifTool
+        timestamp = _extract_timestamp(exif_group)
+
+        # Focal length
+        focal_length = exif_group.get("FocalLength")
+        if focal_length is not None:
+            focal_length = float(focal_length)
+
+        # Burst ID (ImageUniqueID)
+        burst_id = exif_group.get("ImageUniqueID")
+        if burst_id:
+            burst_id = str(burst_id)
+
+        # GPS coordinates — ExifTool with -n gives decimal degrees directly
+        latitude = composite.get("GPSLatitude") or exif_group.get("GPSLatitude")
+        longitude = composite.get("GPSLongitude") or exif_group.get("GPSLongitude")
+
+        # Compute perceptual hash (computed, not from EXIF)
         phash = None
         try:
             with Image.open(str(image_path)) as img:
                 phash = str(imagehash.phash(img))
         except Exception:
             log.debug("Could not compute pHash for %s", image_path)
-
-        # Read EXIF timestamp
-        timestamp = None
-        try:
-            dt = read_exif_timestamp(str(image_path))
-            if dt:
-                timestamp = dt.isoformat()
-        except Exception:
-            log.debug("Could not read EXIF timestamp from %s", image_path)
-
-        # Read EXIF focal length and burst/sequence ID
-        focal_length = None
-        burst_id = None
-        try:
-            with Image.open(str(image_path)) as img:
-                exif = img.getexif()
-                # FocalLength is EXIF tag 0x920A
-                fl = exif.get(0x920A)
-                if fl is not None:
-                    focal_length = float(fl)
-                # Check EXIF IFD for FocalLength if not in main IFD
-                if focal_length is None:
-                    exif_ifd = exif.get_ifd(0x8769)
-                    if exif_ifd:
-                        fl = exif_ifd.get(0x920A)
-                        if fl is not None:
-                            focal_length = float(fl)
-                # BurstMode / SequenceNumber from MakerNote varies by camera
-                # Try ImageUniqueID (0xA420) as a fallback burst grouping key
-                exif_ifd = exif.get_ifd(0x8769)
-                if exif_ifd:
-                    uid = exif_ifd.get(0xA420)  # ImageUniqueID
-                    if uid:
-                        burst_id = str(uid)
-        except Exception:
-            pass
-
-        # Read GPS coordinates
-        latitude, longitude = None, None
-        try:
-            with Image.open(str(image_path)) as img:
-                gps_info = img.getexif().get_ifd(0x8825)
-                if gps_info:
-                    lat = gps_info.get(2)  # GPSLatitude
-                    lat_ref = gps_info.get(1)  # N or S
-                    lng = gps_info.get(4)  # GPSLongitude
-                    lng_ref = gps_info.get(3)  # E or W
-                    if lat and lng:
-                        latitude = lat[0] + lat[1] / 60 + lat[2] / 3600
-                        longitude = lng[0] + lng[1] / 60 + lng[2] / 3600
-                        if lat_ref == "S":
-                            latitude = -latitude
-                        if lng_ref == "W":
-                            longitude = -longitude
-        except Exception:
-            pass
 
         photo_id = db.add_photo(
             folder_id=folder_id,
@@ -233,7 +233,7 @@ def scan(root, db, progress_callback=None, incremental=False):
             height=height,
         )
 
-        # Store GPS, pHash, focal length, and burst ID if found
+        # Store GPS, pHash, focal length, burst ID, and exif_data
         updates = []
         update_params = []
         if latitude is not None:
@@ -248,6 +248,9 @@ def scan(root, db, progress_callback=None, incremental=False):
         if burst_id is not None:
             updates.append("burst_id=?")
             update_params.append(burst_id)
+        if file_meta:
+            updates.append("exif_data=?")
+            update_params.append(json.dumps(file_meta))
         if updates:
             update_params.append(photo_id)
             db.conn.execute(
