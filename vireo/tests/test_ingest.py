@@ -269,3 +269,48 @@ def test_ingest_file_types_filter(tmp_path):
     copied_raws = list(dst.rglob("*.cr3"))
     assert len(copied_jpgs) == 1
     assert len(copied_raws) == 0
+
+
+def test_ingest_then_scan_end_to_end(tmp_path):
+    """Full workflow: ingest from SD card to NAS, then scan the destination."""
+    from scanner import scan
+
+    src = tmp_path / "sd_card" / "DCIM" / "100CANON"
+    dst = tmp_path / "nas" / "photos"
+    src.mkdir(parents=True)
+    dst.mkdir(parents=True)
+
+    # Create 3 test photos on "SD card"
+    for i in range(3):
+        img = Image.new("RGB", (200, 100), color=(i * 80, 100, 100))
+        img.save(str(src / f"IMG_{i:04d}.jpg"))
+        # Set mtime to different dates
+        mtime = datetime(2026, 3, 25 + i, 10, 0, 0).timestamp()
+        os.utime(str(src / f"IMG_{i:04d}.jpg"), (mtime, mtime))
+
+    db = Database(str(tmp_path / "test.db"))
+
+    # Step 1: Ingest
+    result = ingest(str(src), str(dst), db=db)
+    assert result["copied"] == 3
+    assert result["failed"] == 0
+
+    # Verify folder structure
+    assert (dst / "2026" / "03" / "25").exists()
+    assert (dst / "2026" / "03" / "26").exists()
+    assert (dst / "2026" / "03" / "27").exists()
+
+    # Step 2: Scan the destination
+    scan(str(dst), db)
+
+    photos = db.conn.execute("SELECT * FROM photos ORDER BY timestamp").fetchall()
+    assert len(photos) == 3
+
+    # Verify each photo has a file_hash
+    for photo in photos:
+        assert photo["file_hash"] is not None
+
+    # Step 3: Re-ingest same card — all should be skipped as duplicates
+    result2 = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert result2["copied"] == 0
+    assert result2["skipped_duplicate"] == 3
