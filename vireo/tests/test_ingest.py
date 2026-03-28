@@ -221,6 +221,33 @@ def test_ingest_progress_callback(tmp_path):
     assert progress_calls[-1][1] == 3  # total
 
 
+def test_ingest_skip_duplicates_via_db_hash(tmp_path):
+    """Files whose hash is already in the DB (from a prior scan) are skipped."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    library = tmp_path / "library"
+    for d in [src, dst, library]:
+        d.mkdir()
+
+    # Create the same image in both library and source
+    img = Image.new("RGB", (100, 100), color="blue")
+    img.save(str(library / "existing.jpg"))
+    img.save(str(src / "new_copy.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    # Scan library to populate file_hash in DB
+    from scanner import scan
+
+    scan(str(library), db)
+
+    # Ingest from source -- file hash matches DB, should skip
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    # File should NOT exist at destination
+    assert not list(dst.rglob("new_copy.jpg"))
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
