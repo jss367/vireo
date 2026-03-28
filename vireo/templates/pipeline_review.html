@@ -1324,6 +1324,13 @@ function openInspect(photoId) {
   var photo = findPhotoInResults(photoId);
   if (!photo) return;
 
+  // Route multi-photo bursts to the GRM
+  var burstInfo = findBurstForPhoto(photoId);
+  if (burstInfo && burstInfo.photoIds.length >= 2) {
+    openGroupReview(burstInfo.encIdx, burstInfo.burstIdx, photoId);
+    return;
+  }
+
   var enc = findEncounterForPhoto(photoId);
   var panel = document.getElementById('inspectPanel');
   var overlay = document.getElementById('inspectOverlay');
@@ -2129,6 +2136,48 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
 });
+
+/* --- Apply & Close --- */
+
+function grmApply() {
+  var species = document.getElementById('grmSpecies').value.trim();
+
+  // Update local pipelineResults with pick/reject decisions
+  var photoMap = {};
+  pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+
+  grmState.picks.forEach(function(pid) {
+    var p = photoMap[pid];
+    if (p) p.label = 'KEEP';
+  });
+
+  grmState.rejects.forEach(function(pid) {
+    var p = photoMap[pid];
+    if (p) p.label = 'REJECT';
+  });
+
+  // Update species if changed
+  if (species) {
+    var enc = pipelineResults.encounters[grmState.encIdx];
+    if (enc) {
+      enc.confirmed_species = species;
+      enc.species_confirmed = true;
+    }
+  }
+
+  // Save to cache
+  safeFetch('/api/pipeline/save-cache', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(pipelineResults),
+  });
+
+  closeGroupReview();
+  // Clear the species input for next use
+  document.getElementById('grmSpecies').value = '';
+  renderResults();
+  updateSummaryBar(pipelineResults.summary);
+}
 
 initPipelineReviewPage();
 </script>
