@@ -4593,7 +4593,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):
-        """Serve the original image file at full resolution for 1:1 zoom."""
+        """Serve the full-resolution image for 1:1 zoom, converting RAW formats to JPEG."""
+        import config as cfg
         from flask import send_file
 
         db = _get_db()
@@ -4606,7 +4607,30 @@ def create_app(db_path, thumb_cache_dir=None):
         image_path = os.path.join(photo["path"], photo["filename"])
         if not os.path.exists(image_path):
             return "Not found", 404
-        return send_file(image_path)
+
+        # Serve browser-native formats directly
+        ext = os.path.splitext(photo["filename"])[1].lower()
+        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+            return send_file(image_path)
+
+        # Convert non-browser formats (RAW, etc.) to JPEG, cached
+        originals_dir = os.path.join(
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "originals"
+        )
+        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+        if os.path.exists(cache_path):
+            return send_file(cache_path, mimetype="image/jpeg")
+
+        from image_loader import load_image
+
+        img = load_image(image_path, max_size=None)
+        if img is None:
+            return "Could not load image", 500
+
+        os.makedirs(originals_dir, exist_ok=True)
+        preview_quality = cfg.load().get("preview_quality", 90)
+        img.save(cache_path, format="JPEG", quality=preview_quality)
+        return send_file(cache_path, mimetype="image/jpeg")
 
     # -- Logs page --
 
