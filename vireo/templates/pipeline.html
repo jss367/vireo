@@ -216,10 +216,10 @@ body { padding-bottom: 36px; }
         <div class="setting-item">
           <div class="setting-label">File Types</div>
           <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-right:12px;">
-            <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);"> JPEG
+            <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);" onchange="updateImportButton()"> JPEG
           </label>
           <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-            <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);"> RAW
+            <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="updateImportButton()"> RAW
           </label>
         </div>
         <div class="setting-item">
@@ -465,6 +465,12 @@ function onSourceChange() {
   }
 }
 
+function updateImportButton() {
+  var jpeg = document.getElementById('chkJpeg').checked;
+  var raw = document.getElementById('chkRaw').checked;
+  var btn = document.getElementById('btnImport');
+  btn.disabled = !jpeg && !raw;
+}
 function getIngestFileTypes() {
   var jpeg = document.getElementById('chkJpeg').checked;
   var raw = document.getElementById('chkRaw').checked;
