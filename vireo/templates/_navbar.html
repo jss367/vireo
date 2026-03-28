@@ -978,7 +978,7 @@ async function createWorkspace() {
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed')) toggleLightboxZoom(event);">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed') && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <img id="lightboxImg" src="" alt="">
   </div>
@@ -1069,29 +1069,36 @@ function toggleLightboxZoom(e) {
   var isZoomed = wrap.classList.contains('zoomed');
 
   if (isZoomed) {
-    // Zoom out
+    // Zoom out — switch back to preview image
     wrap.classList.remove('zoomed');
     badge.style.display = 'none';
     wrap.scrollTop = 0;
     wrap.scrollLeft = 0;
+    if (_lightboxCurrentId) {
+      img.src = '/photos/' + _lightboxCurrentId + '/full';
+    }
   } else {
-    // Zoom to 1:1 centered on click position
+    // Zoom to 1:1 — load full-resolution original
     wrap.classList.add('zoomed');
     badge.style.display = '';
 
-    // Wait for layout to update, then scroll to click position
-    setTimeout(function() {
-      var rect = wrap.getBoundingClientRect();
-      // Click position as fraction of the visible image
-      var clickX = (e.clientX - rect.left) / rect.width;
-      var clickY = (e.clientY - rect.top) / rect.height;
+    // Remember click position as fraction of the visible image
+    var rect = wrap.getBoundingClientRect();
+    var clickX = (e.clientX - rect.left) / rect.width;
+    var clickY = (e.clientY - rect.top) / rect.height;
 
-      // Scroll to center the clicked point
+    if (_lightboxCurrentId) {
+      img.src = '/photos/' + _lightboxCurrentId + '/original';
+    }
+
+    // Scroll to click position once the full-res image loads
+    img.onload = function() {
+      img.onload = null;
       var scrollX = (img.naturalWidth * clickX) - (wrap.clientWidth / 2);
       var scrollY = (img.naturalHeight * clickY) - (wrap.clientHeight / 2);
       wrap.scrollLeft = Math.max(0, scrollX);
       wrap.scrollTop = Math.max(0, scrollY);
-    }, 50);
+    };
   }
 }
 
@@ -1130,6 +1137,7 @@ function toggleLightboxZoom(e) {
     // Single click without dragging = zoom out
     if (!didDrag && wrap && wrap.classList.contains('zoomed')) {
       toggleLightboxZoom(e);
+      window._lightboxZoomHandled = true;  // Prevent onclick from re-zooming
     }
   });
 })();

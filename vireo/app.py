@@ -4591,6 +4591,23 @@ def create_app(db_path, thumb_cache_dir=None):
         img.save(cache_path, format="JPEG", quality=preview_quality)
         return send_file(cache_path, mimetype="image/jpeg")
 
+    @app.route("/photos/<int:photo_id>/original")
+    def serve_original_photo(photo_id):
+        """Serve the original image file at full resolution for 1:1 zoom."""
+        from flask import send_file
+
+        db = _get_db()
+        photo = db.conn.execute(
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+            (photo_id,),
+        ).fetchone()
+        if not photo:
+            return "Not found", 404
+        image_path = os.path.join(photo["path"], photo["filename"])
+        if not os.path.exists(image_path):
+            return "Not found", 404
+        return send_file(image_path)
+
     # -- Logs page --
 
     @app.route("/logs")
