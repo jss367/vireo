@@ -166,6 +166,39 @@ class Database:
                 new_value TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS taxa (
+                id          INTEGER PRIMARY KEY,
+                inat_id     INTEGER UNIQUE,
+                name        TEXT NOT NULL,
+                common_name TEXT,
+                rank        TEXT NOT NULL,
+                parent_id   INTEGER REFERENCES taxa(id),
+                kingdom     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
+            CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
+            CREATE INDEX IF NOT EXISTS idx_taxa_common ON taxa(common_name);
+
+            CREATE TABLE IF NOT EXISTS taxa_common_names (
+                taxon_id    INTEGER REFERENCES taxa(id) ON DELETE CASCADE,
+                name        TEXT NOT NULL,
+                locale      TEXT DEFAULT 'en',
+                PRIMARY KEY (taxon_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS informal_groups (
+                id          INTEGER PRIMARY KEY,
+                name        TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS informal_group_taxa (
+                group_id    INTEGER REFERENCES informal_groups(id) ON DELETE CASCADE,
+                taxon_id    INTEGER REFERENCES taxa(id) ON DELETE CASCADE,
+                PRIMARY KEY (group_id, taxon_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -374,6 +407,29 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE pending_changes ADD COLUMN change_token TEXT")
             self.conn.commit()
+
+        # Keyword type/location/taxon columns (taxonomy support)
+        try:
+            self.conn.execute("SELECT type FROM keywords LIMIT 0")
+        except Exception:
+            self.conn.execute(
+                "ALTER TABLE keywords ADD COLUMN type TEXT NOT NULL DEFAULT 'general'"
+            )
+            # Migrate existing is_species=1 keywords to type='taxonomy'
+            self.conn.execute(
+                "UPDATE keywords SET type = 'taxonomy' WHERE is_species = 1"
+            )
+        try:
+            self.conn.execute("SELECT latitude FROM keywords LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE keywords ADD COLUMN latitude REAL")
+            self.conn.execute("ALTER TABLE keywords ADD COLUMN longitude REAL")
+        try:
+            self.conn.execute("SELECT taxon_id FROM keywords LIMIT 0")
+        except Exception:
+            self.conn.execute(
+                "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
+            )
 
         # Ensure workspace indexes exist (for fresh DBs that skip migration)
         self.conn.execute(
