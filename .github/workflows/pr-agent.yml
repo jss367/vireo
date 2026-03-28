@@ -7,6 +7,9 @@ on:
     types: [submitted]
   push:
     branches: [main]
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
@@ -16,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   issues: write
@@ -189,6 +193,119 @@ jobs:
             - Target the new PR at the current PR's HEAD branch, not main.
             - Run tests before committing. Fix any failures.
             - Include "Parent PR: #N" on its own line in the PR body.
+
+  # ═══════════════════════════════════════════════════════════
+  #  FIX CI — auto-fix when Tests workflow fails on a PR
+  # ═══════════════════════════════════════════════════════════
+  fix-ci:
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'failure'
+      && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR number and check for loops
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Find the PR associated with this workflow run
+          pr_number=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}/pulls" \
+            --jq '.[0].number // empty')
+
+          if [[ -z "$pr_number" ]]; then
+            echo "No PR found for this workflow run."
+            echo "should_fix=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Security gate: skip fork PRs to avoid running privileged actions on untrusted code
+          pr_repo=$(gh pr view "$pr_number" --repo "${{ github.repository }}" \
+            --json headRepositoryOwner,headRepository \
+            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
+
+          if [[ "$pr_repo" != "${{ github.repository }}" ]]; then
+            echo "PR #${pr_number} is from fork ${pr_repo} — skipping."
+            echo "should_fix=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Prevent infinite loops: skip if the failing commit was already a CI fix
+          last_msg=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}" \
+            --jq '.commit.message' | head -1)
+
+          if [[ "$last_msg" == "fix: resolve CI failures"* ]]; then
+            echo "Last commit was already a CI fix attempt — not retrying."
+            echo "should_fix=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Will attempt to fix CI for PR #${pr_number}"
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "should_fix=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.should_fix == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        if: steps.pr.outputs.should_fix == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          allow-prereleases: true
+
+      - name: Install dependencies
+        if: steps.pr.outputs.should_fix == 'true'
+        run: pip install flask Pillow pytest imagehash pytest-cov requests ruff
+
+      - name: Fix CI failures
+        if: steps.pr.outputs.should_fix == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are a CI fix agent for the Vireo repository.
+
+            PR #${{ steps.pr.outputs.pr_number }} has failing CI checks. Fix the failures.
+
+            ## Steps
+
+            1. Read the failed workflow run logs:
+               gh run view ${{ github.event.workflow_run.id }} --repo ${{ github.repository }} --log-failed
+
+            2. Read the PR to understand the changes:
+               gh pr view ${{ steps.pr.outputs.pr_number }} --json title,body,headRefName
+               gh pr diff ${{ steps.pr.outputs.pr_number }}
+
+            3. Check out the PR branch:
+               HEAD=$(gh pr view ${{ steps.pr.outputs.pr_number }} --json headRefName -q .headRefName)
+               git checkout $HEAD
+
+            4. Analyze the failures and fix the code. Common CI issues:
+               - Test failures: fix the code or update tests
+               - Lint errors (ruff): fix style/formatting issues
+               - Import errors: fix missing or incorrect imports
+               - Coverage below threshold: add tests for uncovered code
+
+            5. Run the full test suite to verify:
+               python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v
+
+            6. Run lint to verify:
+               ruff check vireo/ tests/
+
+            7. Commit and push to the PR branch:
+               git add -A
+               git commit -m "fix: resolve CI failures on PR #${{ steps.pr.outputs.pr_number }}"
+               git push origin $HEAD
+
+            ## Rules
+            - Push directly to the PR branch. Do NOT create a new branch or new PR.
+            - Fix ALL failures, not just the first one.
+            - Run both tests and lint before pushing.
+            - If you cannot fix the failures, comment on the PR explaining what went wrong:
+              gh pr comment ${{ steps.pr.outputs.pr_number }} --body "🤖 CI fix attempted but could not resolve all failures. Manual intervention needed."
 
   # ═══════════════════════════════════════════════════════════
   #  MERGE CHAIN — approval or 👍 on a claude-agent PR
