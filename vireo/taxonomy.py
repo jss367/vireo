@@ -347,8 +347,10 @@ def load_taxa_from_file(db, gz_path):
     inat_to_local = {}
     for inat_id, t in filtered.items():
         db.conn.execute(
-            "INSERT OR IGNORE INTO taxa (inat_id, name, rank, kingdom) "
-            "VALUES (?, ?, ?, ?)",
+            "INSERT INTO taxa (inat_id, name, rank, kingdom) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(inat_id) DO UPDATE SET "
+            "name = excluded.name, rank = excluded.rank, kingdom = excluded.kingdom",
             (inat_id, t['name'], t['rank'], t['kingdom']),
         )
         row = db.conn.execute(

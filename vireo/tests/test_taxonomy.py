@@ -371,6 +371,28 @@ def test_load_taxa_idempotent(tmp_path):
     assert count1 == count2
 
 
+def test_load_taxa_updates_on_reload(tmp_path):
+    """Reloading taxa updates changed names/ranks instead of ignoring them."""
+    from taxonomy import load_taxa_from_file
+
+    db = Database(str(tmp_path / "test.db"))
+    tsv_path = _make_taxa_tsv(tmp_path)
+
+    load_taxa_from_file(db, tsv_path)
+
+    # Manually corrupt a taxon name to simulate stale data
+    db.conn.execute("UPDATE taxa SET name = 'OldName' WHERE inat_id = 3")
+    db.conn.commit()
+    assert db.conn.execute(
+        "SELECT name FROM taxa WHERE inat_id = 3"
+    ).fetchone()["name"] == "OldName"
+
+    # Reload should fix it
+    load_taxa_from_file(db, tsv_path)
+    row = db.conn.execute("SELECT name FROM taxa WHERE inat_id = 3").fetchone()
+    assert row["name"] == "Aves"
+
+
 from unittest.mock import MagicMock, patch
 
 
