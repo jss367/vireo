@@ -3151,6 +3151,8 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("source and destination are required")
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id

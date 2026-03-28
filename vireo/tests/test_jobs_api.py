@@ -98,3 +98,42 @@ def test_ingest_job_starts(app_and_db, tmp_path):
         data = resp.get_json()
         assert "job_id" in data
         assert data["job_id"].startswith("ingest-")
+
+
+def test_ingest_missing_params(app_and_db, tmp_path):
+    """POST /api/jobs/ingest returns error when source or destination missing."""
+    app, db = app_and_db
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/ingest", json={})
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/ingest", json={"source": str(tmp_path)})
+        assert resp.status_code == 400
+
+        resp = c.post("/api/jobs/ingest", json={"destination": str(tmp_path)})
+        assert resp.status_code == 400
+
+
+def test_ingest_nonexistent_source(app_and_db, tmp_path):
+    """POST /api/jobs/ingest returns error for non-existent source directory."""
+    app, db = app_and_db
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/ingest", json={
+            "source": str(tmp_path / "does_not_exist"),
+            "destination": str(tmp_path),
+        })
+        assert resp.status_code == 400
+        assert "not found" in resp.get_json()["error"]
+
+
+def test_ingest_relative_destination(app_and_db, tmp_path):
+    """POST /api/jobs/ingest validates destination is absolute."""
+    app, db = app_and_db
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/ingest", json={
+            "source": str(src),
+            "destination": "relative/path",
+        })
+        assert resp.status_code == 400
