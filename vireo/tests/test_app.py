@@ -728,3 +728,21 @@ def test_labels_list_returns_workspace_active(app_and_db, tmp_path):
             assert label_path in active_files
     finally:
         labels_mod.LABELS_DIR = orig_labels_dir
+
+
+def test_review_min_confidence_persists_in_workspace(app_and_db):
+    """review_min_confidence can be saved and read from workspace config."""
+    app, db = app_and_db
+    with app.test_client() as c:
+        # Save threshold
+        resp = c.post("/api/workspaces/active/config",
+                       json={"review_min_confidence": 40},
+                       content_type="application/json")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["overrides"]["review_min_confidence"] == 40
+
+        # Read it back
+        resp = c.get("/api/workspaces/active/config")
+        assert resp.status_code == 200
+        assert resp.get_json()["review_min_confidence"] == 40

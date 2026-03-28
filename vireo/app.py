@@ -1015,7 +1015,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
-        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold"}
+        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "review_min_confidence"}
         overrides = {k: v for k, v in body.items() if k in allowed and v is not None}
         # Remove keys set to null (revert to global)
         db.update_workspace(db._active_workspace_id, config_overrides=overrides if overrides else None)
