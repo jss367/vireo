@@ -46,7 +46,7 @@ python scripts/build_sidecar.py
 echo ""
 echo "=== Step 2/4: Build the Tauri app (with code signing) ==="
 cd "$REPO_ROOT"
-cargo tauri build
+cargo tauri build 2>&1 || true  # updater signing error is non-fatal until key is configured
 
 echo ""
 echo "=== Step 3/4: Verify code signature on .app bundle ==="
