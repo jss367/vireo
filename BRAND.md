@@ -2,11 +2,9 @@
 
 ## Logo
 
-`logo.png` — A vireo songbird integrated with a camera aperture, teal gradient on dark navy.
+`logo.png` — A vireo songbird integrated with a camera aperture, yellow/grey with warm naturalist palette.
 
 ## Color Palette
-
-Extracted from the logo. Foundation for the "Vireo Dark" and "Classic Dark" UI themes.
 
 | Name              | Hex       | RGB             | Usage                              |
 |-------------------|-----------|-----------------|------------------------------------|
@@ -20,4 +18,4 @@ Extracted from the logo. Foundation for the "Vireo Dark" and "Classic Dark" UI t
 
 ## Alternate Logo
 
-`logo_yellow.png` — Yellow/grey variant with warm naturalist palette.
+`logo_teal.png` — Teal gradient on dark navy variant.

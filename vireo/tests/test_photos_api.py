@@ -280,3 +280,44 @@ def test_photo_detail_metadata_null_when_empty(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("metadata") is None
+
+
+def test_add_keyword_with_type_override(app_and_db):
+    """POST /api/photos/<id>/keywords with type param sets keyword type in DB."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    resp = client.post(f'/api/photos/{pid}/keywords',
+                       json={"name": "Tim", "type": "people"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    kid = data["keyword_id"]
+
+    # Verify the keyword type is "people" in the database
+    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row is not None
+    assert row["type"] == "people"
+
+
+def test_batch_keyword_with_type_override(app_and_db):
+    """POST /api/batch/keyword with type param sets keyword type in DB."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    photo_ids = [p['id'] for p in photos]
+
+    resp = client.post('/api/batch/keyword',
+                       json={"photo_ids": photo_ids, "name": "Central Park", "type": "location"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["updated"] == len(photo_ids)
+
+    # Verify the keyword type is "location" in the database
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE name = 'Central Park'").fetchone()
+    assert row is not None
+    assert row["type"] == "location"
