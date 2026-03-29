@@ -19,9 +19,9 @@ All AI classification and detection runs locally on your device. No photos are s
 
 ## Data that leaves your device
 
-Vireo only contacts external services when you explicitly initiate an action:
+Vireo contacts external services in the following ways:
 
-- **iNaturalist** — When you submit an observation, your photo, GPS coordinates, species name, observation date, and geoprivacy setting are sent to iNaturalist. This requires an API token you provide. Submitted data is governed by [iNaturalist's privacy policy](https://www.inaturalist.org/pages/privacy).
+- **iNaturalist** — Vireo contacts iNaturalist in two ways. First, on startup it may query the iNaturalist taxonomy API to resolve unknown keyword names — only the keyword text is sent, no photos or personal data. Second, when you submit an observation, your photo, GPS coordinates, species name, observation date, and geoprivacy setting are sent to iNaturalist. Observation submissions require an API token you provide. Submitted data is governed by [iNaturalist's privacy policy](https://www.inaturalist.org/pages/privacy).
 
 - **HuggingFace Hub** — When you download AI models, Vireo fetches model weights from HuggingFace. No photos or personal data are sent. If you provide a HuggingFace token for private model access, it is sent as an authentication header.
 
@@ -29,7 +29,7 @@ Vireo only contacts external services when you explicitly initiate an action:
 
 - **Zenodo** — Vireo downloads the MegaDetector model weights from Zenodo. No personal data is sent.
 
-Vireo has no analytics, telemetry, or automated crash reporting. If you do not use any of the features above, Vireo makes zero network requests.
+Vireo has no analytics, telemetry, or automated crash reporting.
 
 ## Credentials
 
