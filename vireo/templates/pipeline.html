@@ -12,31 +12,6 @@
 body { padding-bottom: 36px; }
 .content { max-width: 900px; }
 
-/* Collection picker bar */
-.collection-bar {
-  background: var(--bg-secondary, #0E2A3D);
-  border: 1px solid var(--border-primary, #14374E);
-  border-radius: 8px;
-  padding: 16px 20px;
-  margin-bottom: 24px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.collection-bar select {
-  background: var(--bg-input, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
-  border-radius: 4px;
-  padding: 8px 12px;
-  font-size: 13px;
-  min-width: 250px;
-}
-.collection-bar .photo-count {
-  font-size: 12px;
-  color: var(--text-dim, #5A8890);
-}
-
 /* Stage cards */
 .stage-card {
   background: var(--bg-secondary, #0E2A3D);
@@ -64,7 +39,6 @@ body { padding-bottom: 36px; }
 }
 .stage-num.complete { background: var(--accent, #24E5CA); color: #000; }
 .stage-num.running { background: var(--info, #12C3B5); color: #000; animation: pulse 1.2s infinite; }
-.stage-num.stale { background: var(--warning, #F0C040); color: #000; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 .stage-name { font-size: 15px; font-weight: 600; }
 .stage-summary {
@@ -104,11 +78,6 @@ body { padding-bottom: 36px; }
   border-radius: 4px; padding: 8px 12px; font-size: 13px; width: 100%;
 }
 
-/* Run button row */
-.run-row {
-  display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap;
-}
-
 /* Buttons */
 .btn {
   border: none; border-radius: 4px; padding: 10px 24px;
@@ -142,13 +111,52 @@ body { padding-bottom: 36px; }
 }
 .progress-text { font-size: 11px; color: var(--text-dim, #5A8890); margin-top: 4px; }
 
-/* Stale indicator */
-.stale-badge {
-  font-size: 10px; font-weight: 600;
-  color: var(--warning, #F0C040);
-  background: rgba(240, 192, 64, 0.15);
-  padding: 2px 8px; border-radius: 10px;
-  margin-left: 8px;
+/* Source choice: Import OR Collection */
+.source-choice {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.source-option {
+  flex: 1;
+  padding: 12px;
+  border-radius: 6px;
+  transition: opacity 0.2s;
+}
+.source-option-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+.source-option-body.dimmed {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.source-or {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dim, #5A8890);
+  letter-spacing: 1px;
+}
+
+/* Pipeline action bar */
+.pipeline-action-bar {
+  margin-top: 8px;
+  padding: 20px 0;
+  display: flex;
+  justify-content: center;
+}
+.btn-large {
+  padding: 12px 48px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 /* View results link */
@@ -172,70 +180,91 @@ body { padding-bottom: 36px; }
 <div class="content">
   <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
 
-  <!-- Collection picker -->
-  <div class="collection-bar">
-    <label style="font-size:13px;font-weight:600;">Collection</label>
-    <select id="collectionPicker" onchange="onCollectionChange()">
-      <option value="">Select a collection...</option>
-    </select>
-    <span class="photo-count" id="collectionPhotoCount"></span>
-  </div>
-
-  <!-- Card 1: Import -->
-  <div class="stage-card expanded" id="card-import">
-    <div class="stage-header" onclick="toggleCard('import')">
-      <span class="stage-num" id="numImport">1</span>
-      <span class="stage-name">Import</span>
-      <span class="stage-summary" id="summaryImport">
-        <span id="txtImported"></span>
+  <!-- Card 1: Source -->
+  <div class="stage-card expanded" id="card-source">
+    <div class="stage-header" onclick="toggleCard('source')">
+      <span class="stage-num" id="numSource">1</span>
+      <span class="stage-name">Source</span>
+      <span class="stage-summary" id="summarySource">
+        <span id="txtSource"></span>
       </span>
       <span class="stage-chevron">&#9656;</span>
     </div>
     <div class="stage-body">
-      <div class="setting-row">
-        <div class="setting-item">
-          <div class="setting-label">Source</div>
-          <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
-            <option value="">Select a volume...</option>
-          </select>
+      <div class="source-choice">
+        <div class="source-option" id="sourceOptionImport">
+          <div class="source-option-header" onclick="selectSourceMode('import')">
+            <input type="radio" name="sourceMode" value="import" id="radioImport" checked>
+            <label for="radioImport" style="cursor:pointer;font-weight:600;font-size:13px;">Import Photos</label>
+          </div>
+          <div class="source-option-body" id="sourceImportBody">
+            <div class="setting-row">
+              <div class="setting-item">
+                <div class="setting-label">Source</div>
+                <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
+                  <option value="">Select a volume...</option>
+                </select>
+              </div>
+              <div class="setting-item">
+                <div class="setting-label">Custom Source Path</div>
+                <input type="text" class="setting-select" id="cfgSourceCustom"
+                       placeholder="/path/to/source" style="font-family:inherit;"
+                       oninput="updateStartButton()">
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-item">
+                <div class="setting-label">Destination</div>
+                <input type="text" class="setting-select" id="cfgDestination"
+                       placeholder="/path/to/photo/library" style="font-family:inherit;"
+                       oninput="updateStartButton()">
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-item">
+                <div class="setting-label">File Types</div>
+                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-right:12px;">
+                  <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);" onchange="updateStartButton()"> JPEG
+                </label>
+                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                  <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="updateStartButton()"> RAW
+                </label>
+              </div>
+              <div class="setting-item">
+                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                  <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+                </label>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="setting-item">
-          <div class="setting-label">Custom Source Path</div>
-          <input type="text" class="setting-select" id="cfgSourceCustom"
-                 placeholder="/path/to/source" style="font-family:inherit;">
+
+        <div class="source-or">OR</div>
+
+        <div class="source-option" id="sourceOptionCollection">
+          <div class="source-option-header" onclick="selectSourceMode('collection')">
+            <input type="radio" name="sourceMode" value="collection" id="radioCollection">
+            <label for="radioCollection" style="cursor:pointer;font-weight:600;font-size:13px;">Use Existing Collection</label>
+          </div>
+          <div class="source-option-body dimmed" id="sourceCollectionBody">
+            <div class="setting-row">
+              <div class="setting-item">
+                <div class="setting-label">Collection</div>
+                <select class="setting-select" id="collectionPicker" onchange="onCollectionChange()">
+                  <option value="">Select a collection...</option>
+                </select>
+                <span class="photo-count" id="collectionPhotoCount" style="font-size:12px;color:var(--text-dim);margin-left:8px;"></span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="setting-row">
-        <div class="setting-item">
-          <div class="setting-label">Destination</div>
-          <input type="text" class="setting-select" id="cfgDestination"
-                 placeholder="/path/to/photo/library" style="font-family:inherit;">
-        </div>
+
+      <div class="progress-wrap" id="progressSource" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillSource"></div></div>
+        <div class="progress-text" id="textSource"></div>
       </div>
-      <div class="setting-row">
-        <div class="setting-item">
-          <div class="setting-label">File Types</div>
-          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-right:12px;">
-            <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);" onchange="updateImportButton()"> JPEG
-          </label>
-          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-            <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="updateImportButton()"> RAW
-          </label>
-        </div>
-        <div class="setting-item">
-          <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-            <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
-          </label>
-        </div>
-      </div>
-      <div class="run-row">
-        <button class="btn btn-primary" id="btnImport" onclick="runImport()">Import</button>
-        <span class="status-msg" id="statusImport"></span>
-      </div>
-      <div class="progress-wrap" id="progressImport" style="display:none;">
-        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillImport"></div></div>
-        <div class="progress-text" id="textImport"></div>
-      </div>
+      <span class="status-msg" id="statusSource"></span>
     </div>
   </div>
 
@@ -261,13 +290,10 @@ body { padding-bottom: 36px; }
         </div>
       </div>
       <div class="readiness-panel" id="readinessPanel" style="display:none;"></div>
-      <div class="run-row">
-        <button class="btn btn-primary" id="btnClassify" onclick="runClassify(false)" disabled>Classify</button>
-        <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-          <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);"> Re-classify
-        </label>
-        <span class="status-msg" id="statusClassify"></span>
-      </div>
+      <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+        <input type="checkbox" id="chkReclassify" style="accent-color:var(--accent);"> Re-classify
+      </label>
+      <span class="status-msg" id="statusClassify"></span>
       <div class="progress-wrap" id="progressClassify" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillClassify"></div></div>
         <div class="progress-text" id="textClassify"></div>
@@ -314,10 +340,7 @@ body { padding-bottom: 36px; }
           </div>
         </div>
       </div>
-      <div class="run-row">
-        <button class="btn btn-primary" id="btnExtract" onclick="runExtract()" disabled>Extract Features</button>
-        <span class="status-msg" id="statusExtract"></span>
-      </div>
+      <span class="status-msg" id="statusExtract"></span>
       <div class="progress-wrap" id="progressExtract" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
         <div class="progress-text" id="textExtract"></div>
@@ -341,16 +364,20 @@ body { padding-bottom: 36px; }
         Tune scoring and grouping thresholds on the
         <a href="/pipeline/review" style="color:var(--accent);">Pipeline Review</a> page.
       </p>
-      <div class="run-row">
-        <button class="btn btn-primary" id="btnGroup" onclick="runGroup()" disabled>Group &amp; Score</button>
-        <span class="status-msg" id="statusGroup"></span>
-      </div>
+      <span class="status-msg" id="statusGroup"></span>
       <div class="progress-wrap" id="progressGroup" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillGroup"></div></div>
         <div class="progress-text" id="textGroup"></div>
       </div>
       <a id="viewResultsLink" href="/pipeline/review" class="view-results-btn" style="display:none;">View Results</a>
     </div>
+  </div>
+
+  <!-- Pipeline action bar -->
+  <div class="pipeline-action-bar">
+    <button class="btn btn-primary btn-large" id="btnStartPipeline" onclick="startPipeline()" disabled>
+      Start Pipeline
+    </button>
   </div>
 </div>
 
@@ -430,12 +457,33 @@ async function loadCollections() {
   } catch(e) {}
 }
 
+// -- Card 1: Source --
+var _sourceMode = 'import'; // 'import' or 'collection'
+
+function selectSourceMode(mode) {
+  _sourceMode = mode;
+  document.getElementById('radioImport').checked = (mode === 'import');
+  document.getElementById('radioCollection').checked = (mode === 'collection');
+
+  var importBody = document.getElementById('sourceImportBody');
+  var collBody = document.getElementById('sourceCollectionBody');
+
+  if (mode === 'import') {
+    importBody.classList.remove('dimmed');
+    collBody.classList.add('dimmed');
+  } else {
+    importBody.classList.add('dimmed');
+    collBody.classList.remove('dimmed');
+  }
+  updateStartButton();
+}
+
 function onCollectionChange() {
   var collId = document.getElementById('collectionPicker').value;
   var countEl = document.getElementById('collectionPhotoCount');
   if (!collId) {
     countEl.textContent = '';
-    updateCardStates();
+    updateStartButton();
     return;
   }
   safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
@@ -443,10 +491,9 @@ function onCollectionChange() {
       countEl.textContent = (data.total || 0) + ' photos';
     })
     .catch(function() { countEl.textContent = ''; });
-  updateCardStates();
+  updateStartButton();
 }
 
-// -- Card 1: Import --
 async function loadVolumes() {
   try {
     var volumes = await safeFetch('/api/volumes', {}, { toast: false });
@@ -460,18 +507,10 @@ async function loadVolumes() {
 function onSourceChange() {
   var sel = document.getElementById('cfgSource');
   var custom = document.getElementById('cfgSourceCustom');
-  if (sel.value) {
-    custom.value = '';
-  }
+  if (sel.value) custom.value = '';
+  updateStartButton();
 }
 
-var _importRunning = false;
-function updateImportButton() {
-  var jpeg = document.getElementById('chkJpeg').checked;
-  var raw = document.getElementById('chkRaw').checked;
-  var btn = document.getElementById('btnImport');
-  btn.disabled = _importRunning || (!jpeg && !raw);
-}
 function getIngestFileTypes() {
   var jpeg = document.getElementById('chkJpeg').checked;
   var raw = document.getElementById('chkRaw').checked;
@@ -481,32 +520,100 @@ function getIngestFileTypes() {
   return 'both';
 }
 
-async function runImport() {
+function updateStartButton() {
+  var btn = document.getElementById('btnStartPipeline');
+  if (_pipelineRunning) { btn.disabled = true; return; }
+
+  if (_sourceMode === 'import') {
+    var source = (document.getElementById('cfgSourceCustom').value.trim() ||
+                  document.getElementById('cfgSource').value);
+    var dest = document.getElementById('cfgDestination').value.trim();
+    var jpeg = document.getElementById('chkJpeg').checked;
+    var raw = document.getElementById('chkRaw').checked;
+    btn.disabled = !source || !dest || (!jpeg && !raw);
+  } else {
+    var collId = document.getElementById('collectionPicker').value;
+    btn.disabled = !collId;
+  }
+}
+
+// -- Pipeline orchestration --
+var _pipelineRunning = false;
+var _pipelineAbort = false;
+
+async function startPipeline() {
+  if (_pipelineRunning) return;
+  _pipelineRunning = true;
+  _pipelineAbort = false;
+
+  var btn = document.getElementById('btnStartPipeline');
+  btn.textContent = 'Stop Pipeline';
+  btn.onclick = stopPipeline;
+  btn.disabled = false;
+
+  try {
+    // Step 1: Source -- get or create collection
+    var collectionId;
+    if (_sourceMode === 'import') {
+      collectionId = await runImportStep();
+      if (!collectionId || _pipelineAbort) return;
+    } else {
+      collectionId = parseInt(document.getElementById('collectionPicker').value);
+      if (!collectionId) return;
+      // Mark source as complete
+      document.getElementById('numSource').className = 'stage-num complete';
+      document.getElementById('txtSource').textContent = 'Collection selected';
+    }
+
+    if (_pipelineAbort) return;
+
+    // Step 2: Classify
+    var classifyOk = await runClassifyStep(collectionId);
+    if (!classifyOk || _pipelineAbort) return;
+
+    // Step 3: Extract
+    var extractOk = await runExtractStep(collectionId);
+    if (!extractOk || _pipelineAbort) return;
+
+    // Step 4: Group & Score
+    await runGroupStep(collectionId);
+
+  } finally {
+    _pipelineRunning = false;
+    btn.textContent = 'Start Pipeline';
+    btn.onclick = startPipeline;
+    updateStartButton();
+  }
+}
+
+function stopPipeline() {
+  _pipelineAbort = true;
+  var btn = document.getElementById('btnStartPipeline');
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+}
+
+async function runImportStep() {
   var source = document.getElementById('cfgSourceCustom').value.trim() ||
                document.getElementById('cfgSource').value;
   var destination = document.getElementById('cfgDestination').value.trim();
-  if (!source || !destination) {
-    alert('Please specify both a source and destination path.');
-    return;
-  }
 
-  var btn = document.getElementById('btnImport');
-  var status = document.getElementById('statusImport');
-  var progressWrap = document.getElementById('progressImport');
-  var fill = document.getElementById('fillImport');
-  var text = document.getElementById('textImport');
-  var num = document.getElementById('numImport');
+  var num = document.getElementById('numSource');
+  var status = document.getElementById('statusSource');
+  var progressWrap = document.getElementById('progressSource');
+  var fill = document.getElementById('fillSource');
+  var text = document.getElementById('textSource');
 
-  _importRunning = true;
-  btn.disabled = true;
-  status.textContent = 'Starting import...';
-  status.className = 'status-msg';
   num.className = 'stage-num running';
+  status.textContent = 'Starting import...';
   progressWrap.style.display = '';
   fill.style.width = '0%';
 
+  // Expand the source card
+  document.getElementById('card-source').classList.add('expanded');
+
   try {
-    var data = await safeFetch('/api/jobs/ingest', {
+    var data = await safeFetch('/api/jobs/import-full', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -516,62 +623,59 @@ async function runImport() {
         skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
       }),
     }, { toast: false });
+
     if (!data.job_id) {
-      _importRunning = false;
-      btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
       num.className = 'stage-num';
       progressWrap.style.display = 'none';
-      return;
+      return null;
     }
 
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(p) {
-        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-        fill.style.width = pct + '%';
-        var parts = [];
-        if (p.phase) parts.push(p.phase);
-        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-        if (p.current_file) parts.push(p.current_file);
-        text.textContent = parts.join(' — ');
-        status.textContent = parts.join(' — ');
-      },
-      onComplete: function(result) {
-        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-        if (result.status === 'completed') {
-          fill.style.width = '100%';
-          text.textContent = 'Complete';
-          status.textContent = 'Done!';
-          status.className = 'status-msg ok';
-          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
-          num.className = 'stage-num complete';
-          if (result.result) {
+    return await new Promise(function(resolve) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+          fill.style.width = pct + '%';
+          var parts = [];
+          if (p.phase) parts.push(p.phase);
+          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+          if (p.current_file) parts.push(p.current_file);
+          text.textContent = parts.join(' \u2014 ');
+          status.textContent = parts.join(' \u2014 ');
+        },
+        onComplete: function(result) {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+          if (result.status === 'completed' && result.result) {
+            fill.style.width = '100%';
+            text.textContent = 'Complete';
+            num.className = 'stage-num complete';
             var r = result.result;
             var summary = [];
             if (r.copied != null) summary.push(r.copied + ' imported');
-            if (r.skipped_duplicate != null && r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
-            document.getElementById('txtImported').textContent = summary.join(', ');
+            if (r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
+            if (r.photos_indexed) summary.push(r.photos_indexed + ' indexed');
+            document.getElementById('txtSource').textContent = summary.join(', ');
+            status.textContent = 'Done!';
+            status.className = 'status-msg ok';
+            resolve(r.collection_id);
+          } else {
+            status.textContent = 'Import failed';
+            num.className = 'stage-num';
+            resolve(null);
           }
-        } else {
-          status.textContent = 'Failed';
+        },
+        onError: function() {
+          status.textContent = 'Connection lost';
           num.className = 'stage-num';
+          resolve(null);
         }
-        _importRunning = false;
-        btn.disabled = false;
-      },
-      onError: function() {
-        status.textContent = 'Connection lost';
-        _importRunning = false;
-        btn.disabled = false;
-        num.className = 'stage-num';
-      }
+      });
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    _importRunning = false;
-    btn.disabled = false;
     num.className = 'stage-num';
     progressWrap.style.display = 'none';
+    return null;
   }
 }
 
@@ -678,37 +782,29 @@ async function updateReadiness() {
   }
 }
 
-async function runClassify(reclassify) {
-  var collId = document.getElementById('collectionPicker').value;
-  if (!collId) return;
-
+async function runClassifyStep(collectionId) {
   var selectedModels = [];
   document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
     selectedModels.push({id: cb.value, name: cb.dataset.name});
   });
   if (selectedModels.length === 0) {
-    alert('Select at least one model.');
-    return;
+    document.getElementById('statusClassify').textContent = 'No models selected \u2014 skipping';
+    return false;
   }
 
-  var reclass = reclassify || document.getElementById('chkReclassify').checked;
-  if (reclass && !confirm('This will clear existing predictions for selected models and re-classify. Continue?')) {
-    return;
-  }
-
-  var btn = document.getElementById('btnClassify');
+  var num = document.getElementById('numClassify');
   var status = document.getElementById('statusClassify');
   var progressWrap = document.getElementById('progressClassify');
   var fill = document.getElementById('fillClassify');
   var text = document.getElementById('textClassify');
-  var num = document.getElementById('numClassify');
 
-  btn.disabled = true;
-  status.textContent = reclass ? 'Clearing old predictions...' : 'Starting...';
-  status.className = 'status-msg';
   num.className = 'stage-num running';
+  status.textContent = 'Starting classification...';
   progressWrap.style.display = '';
   fill.style.width = '0%';
+
+  // Expand card
+  document.getElementById('card-classify').classList.add('expanded');
 
   var labelsFiles = (function() {
     var files = [];
@@ -721,6 +817,7 @@ async function runClassify(reclassify) {
   var total = selectedModels.length;
 
   for (var i = 0; i < selectedModels.length; i++) {
+    if (_pipelineAbort) return false;
     var model = selectedModels[i];
     status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + 'Starting ' + model.name + '...';
 
@@ -729,20 +826,18 @@ async function runClassify(reclassify) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          collection_id: parseInt(collId),
+          collection_id: collectionId,
           model_id: model.id,
           labels_files: labelsFiles,
-          reclassify: !!reclass,
+          reclassify: false,
         }),
       }, { toast: false });
 
-      // Stream progress for this model's job
-      await new Promise(function(resolve) {
+      var ok = await new Promise(function(resolve) {
         var resolved = false;
-        function done() { if (!resolved) { resolved = true; completed++; resolve(); } }
+        function done(success) { if (!resolved) { resolved = true; if (success) completed++; resolve(success); } }
         safeEventSource('/api/jobs/' + data.job_id + '/stream', {
           onProgress: function(p) {
-            // Progress within this model: scale to fraction of total
             var modelPct = p.total > 0 ? p.current / p.total : 0;
             var overallPct = Math.round(((completed + modelPct) / total) * 100);
             fill.style.width = overallPct + '%';
@@ -751,24 +846,18 @@ async function runClassify(reclassify) {
             if (p.phase) parts.push(p.phase);
             if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
             if (p.current_file) parts.push(p.current_file);
-            text.textContent = parts.join(' — ');
-            status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ': ' : '') + parts.slice(total > 1 ? 1 : 0).join(' — ');
+            text.textContent = parts.join(' \u2014 ');
           },
           onComplete: function(result) {
             window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
             if (result.status === 'completed' && result.result) {
-              var r = result.result;
-              var parts = [model.name + ': ' + r.total + ' photos'];
-              if (r.predictions_stored) parts.push(r.predictions_stored + ' predictions');
-              if (result.duration) parts.push(formatDuration(result.duration));
-              status.textContent = (total > 1 ? 'Model ' + (i+1) + '/' + total + ' — ' : '') + parts.join(', ');
-              totalPredictions += (r.predictions_stored || r.total || 0);
+              totalPredictions += (result.result.predictions_stored || result.result.total || 0);
+              done(true);
+            } else {
+              done(false);
             }
-            done();
           },
-          onError: function() {
-            done();
-          }
+          onError: function() { done(false); }
         });
       });
     } catch(e) {
@@ -776,34 +865,19 @@ async function runClassify(reclassify) {
     }
   }
 
-  // All models done
   fill.style.width = '100%';
   text.textContent = 'Complete';
-  btn.disabled = false;
-
-  if (completed === 0) {
-    status.textContent = 'All models failed.';
-    status.className = 'status-msg';
-    num.className = 'stage-num';
-    progressWrap.style.display = 'none';
-  } else if (completed < total) {
-    status.textContent = 'Done! ' + completed + '/' + total + ' models classified (some failed).';
-    status.className = 'status-msg';
+  if (completed > 0) {
     num.className = 'stage-num complete';
-    document.getElementById('summaryClassify').textContent = totalPredictions + ' detections (' + completed + '/' + total + ' models)';
-    _pipelineState.hasDetections = true;
-    markStale('extract');
-    markStale('group');
-    updateCardStates();
-  } else {
-    status.textContent = 'Done! ' + completed + '/' + total + ' models classified.';
+    status.textContent = 'Done!';
     status.className = 'status-msg ok';
-    num.className = 'stage-num complete';
-    document.getElementById('summaryClassify').textContent = totalPredictions + ' detections (' + completed + ' model' + (completed !== 1 ? 's' : '') + ')';
+    document.getElementById('txtDetections').textContent = totalPredictions + ' detections';
     _pipelineState.hasDetections = true;
-    markStale('extract');
-    markStale('group');
-    updateCardStates();
+    return true;
+  } else {
+    num.className = 'stage-num';
+    status.textContent = 'Classification failed';
+    return false;
   }
 }
 
@@ -838,173 +912,156 @@ function onModelConfigChange() {
   }).catch(function() {});
 }
 
-async function runExtract() {
-  var collId = document.getElementById('collectionPicker').value;
-  if (!collId) return;
-
-  var btn = document.getElementById('btnExtract');
+async function runExtractStep(collectionId) {
+  var num = document.getElementById('numExtract');
   var status = document.getElementById('statusExtract');
   var progressWrap = document.getElementById('progressExtract');
   var fill = document.getElementById('fillExtract');
   var text = document.getElementById('textExtract');
 
-  btn.disabled = true;
+  num.className = 'stage-num running';
   status.textContent = 'Starting feature extraction...';
-  status.className = 'status-msg';
   progressWrap.style.display = '';
   fill.style.width = '0%';
-
-  var num = document.getElementById('numExtract');
-  num.className = 'stage-num running';
+  document.getElementById('card-extract').classList.add('expanded');
 
   try {
     var data = await safeFetch('/api/jobs/extract-masks', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({collection_id: parseInt(collId)}),
+      body: JSON.stringify({collection_id: collectionId}),
     }, { toast: false });
+
     if (!data.job_id) {
-      btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
       num.className = 'stage-num';
-      progressWrap.style.display = 'none';
-      return;
+      return false;
     }
 
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(p) {
-        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-        fill.style.width = pct + '%';
-        var parts = [];
-        if (p.phase) parts.push(p.phase);
-        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-        if (p.current_file) parts.push(p.current_file);
-        text.textContent = parts.join(' — ');
-        status.textContent = parts.join(' — ');
-      },
-      onComplete: function(result) {
-        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-        if (result.status === 'completed') {
-          fill.style.width = '100%';
-          text.textContent = 'Complete';
-          status.textContent = 'Done!';
-          status.className = 'status-msg ok';
-          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
-          num.className = 'stage-num complete';
-          if (result.result) {
-            var r = result.result;
-            var summary = [];
-            if (r.masks_created) summary.push(r.masks_created + ' masks');
-            if (r.scored_count) summary.push(r.scored_count + ' sharpness');
-            document.getElementById('summaryExtract').textContent = summary.join(', ');
+    return await new Promise(function(resolve) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+          fill.style.width = pct + '%';
+          var parts = [];
+          if (p.phase) parts.push(p.phase);
+          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+          if (p.current_file) parts.push(p.current_file);
+          text.textContent = parts.join(' \u2014 ');
+          status.textContent = parts.join(' \u2014 ');
+        },
+        onComplete: function(result) {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+          if (result.status === 'completed') {
+            fill.style.width = '100%';
+            text.textContent = 'Complete';
+            status.textContent = 'Done!';
+            status.className = 'status-msg ok';
+            num.className = 'stage-num complete';
+            if (result.result) {
+              var r = result.result;
+              var summary = [];
+              if (r.masks_created) summary.push(r.masks_created + ' masks');
+              if (r.scored_count) summary.push(r.scored_count + ' sharpness');
+              document.getElementById('txtMasks').textContent = summary.join(', ');
+            }
+            _pipelineState.hasMasks = true;
+            resolve(true);
+          } else {
+            status.textContent = 'Failed';
+            num.className = 'stage-num';
+            resolve(false);
           }
-          // Mark downstream as stale
-          markStale('group');
-          // Enable downstream buttons
-          _pipelineState.hasMasks = true;
-          updateCardStates();
-        } else {
-          status.textContent = 'Failed';
+        },
+        onError: function() {
+          status.textContent = 'Connection lost';
           num.className = 'stage-num';
+          resolve(false);
         }
-        btn.disabled = false;
-      },
-      onError: function() {
-        status.textContent = 'Connection lost';
-        btn.disabled = false;
-        num.className = 'stage-num';
-      }
+      });
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
     num.className = 'stage-num';
-    progressWrap.style.display = 'none';
+    return false;
   }
 }
 
 // -- Card 4: Group & Score --
 
-async function runGroup() {
-  var collId = document.getElementById('collectionPicker').value;
-  if (!collId) return;
-
-  var btn = document.getElementById('btnGroup');
+async function runGroupStep(collectionId) {
+  var num = document.getElementById('numGroup');
   var status = document.getElementById('statusGroup');
   var progressWrap = document.getElementById('progressGroup');
   var fill = document.getElementById('fillGroup');
   var text = document.getElementById('textGroup');
 
-  btn.disabled = true;
-  status.textContent = 'Running pipeline...';
-  status.className = 'status-msg';
+  num.className = 'stage-num running';
+  status.textContent = 'Running grouping & scoring...';
   progressWrap.style.display = '';
   fill.style.width = '0%';
-
-  var num = document.getElementById('numGroup');
-  num.className = 'stage-num running';
+  document.getElementById('card-group').classList.add('expanded');
 
   try {
     var data = await safeFetch('/api/jobs/regroup', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({collection_id: parseInt(collId)}),
+      body: JSON.stringify({collection_id: collectionId}),
     }, { toast: false });
+
     if (!data.job_id) {
-      btn.disabled = false;
       status.textContent = data.error || 'Failed to start';
       num.className = 'stage-num';
-      progressWrap.style.display = 'none';
-      return;
+      return false;
     }
 
-    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-      onProgress: function(p) {
-        var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-        fill.style.width = pct + '%';
-        var parts = [];
-        if (p.phase) parts.push(p.phase);
-        if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-        text.textContent = parts.join(' — ');
-        status.textContent = parts.join(' — ');
-      },
-      onComplete: function(result) {
-        window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-        if (result.status === 'completed') {
-          fill.style.width = '100%';
-          text.textContent = 'Complete';
-          status.textContent = 'Done!';
-          status.className = 'status-msg ok';
-          if (result.duration) status.textContent += ' (' + formatDuration(result.duration) + ')';
-          num.className = 'stage-num complete';
-          if (result.result) {
-            var r = result.result;
-            var summary = [];
-            if (r.encounter_count != null) summary.push(r.encounter_count + ' encounters');
-            if (r.keep_count != null) summary.push(r.keep_count + 'K / ' + (r.review_count||0) + 'R / ' + (r.reject_count||0) + 'X');
-            document.getElementById('summaryGroup').textContent = summary.join(' — ');
+    return await new Promise(function(resolve) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
+          fill.style.width = pct + '%';
+          var parts = [];
+          if (p.phase) parts.push(p.phase);
+          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
+          text.textContent = parts.join(' \u2014 ');
+          status.textContent = parts.join(' \u2014 ');
+        },
+        onComplete: function(result) {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+          if (result.status === 'completed') {
+            fill.style.width = '100%';
+            text.textContent = 'Complete';
+            status.textContent = 'Done!';
+            status.className = 'status-msg ok';
+            num.className = 'stage-num complete';
+            if (result.result) {
+              var r = result.result;
+              var summary = [];
+              if (r.encounter_count != null) summary.push(r.encounter_count + ' encounters');
+              if (r.keep_count != null) summary.push(r.keep_count + 'K / ' + (r.review_count||0) + 'R / ' + (r.reject_count||0) + 'X');
+              document.getElementById('txtResults').textContent = summary.join(' \u2014 ');
+            }
+            var resultsLink = document.getElementById('viewResultsLink');
+            if (resultsLink) resultsLink.style.display = '';
+            _pipelineState.hasResults = true;
+            resolve(true);
+          } else {
+            status.textContent = 'Failed';
+            num.className = 'stage-num';
+            resolve(false);
           }
-          // Show view results link
-          var resultsLink = document.getElementById('viewResultsLink');
-          if (resultsLink) resultsLink.style.display = '';
-          _pipelineState.hasResults = true;
-        } else {
-          status.textContent = 'Failed';
+        },
+        onError: function() {
+          status.textContent = 'Connection lost';
           num.className = 'stage-num';
+          resolve(false);
         }
-        btn.disabled = false;
-      },
-      onError: function() {
-        status.textContent = 'Connection lost';
-        btn.disabled = false;
-        num.className = 'stage-num';
-      }
+      });
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    btn.disabled = false;
     num.className = 'stage-num';
-    progressWrap.style.display = 'none';
+    return false;
   }
 }
 
@@ -1023,31 +1080,15 @@ var _pipelineState = {
 };
 
 function updateCardStates() {
-  var collId = document.getElementById('collectionPicker').value;
-  var hasCollection = !!collId;
-
-  document.getElementById('btnClassify').disabled = !hasCollection;
-  document.getElementById('btnExtract').disabled = !hasCollection || !_pipelineState.hasDetections;
-  document.getElementById('btnGroup').disabled = !hasCollection || !_pipelineState.hasMasks;
-
-  // Expand completed cards
+  // No individual buttons to enable/disable anymore.
+  // Just auto-expand cards based on state.
   if (_pipelineState.hasDetections && !_pipelineState.hasMasks) {
     document.getElementById('card-extract').classList.add('expanded');
   }
   if (_pipelineState.hasMasks && !_pipelineState.hasResults) {
     document.getElementById('card-group').classList.add('expanded');
   }
-}
-
-function markStale(name) {
-  var num = document.getElementById('num' + name.charAt(0).toUpperCase() + name.slice(1));
-  if (num && !num.classList.contains('running')) {
-    num.className = 'stage-num stale';
-  }
-  var summary = document.getElementById('summary' + name.charAt(0).toUpperCase() + name.slice(1));
-  if (summary && !summary.querySelector('.stale-badge')) {
-    summary.innerHTML += '<span class="stale-badge">stale</span>';
-  }
+  updateStartButton();
 }
 
 </script>
