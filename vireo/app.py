@@ -3257,11 +3257,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 progress_callback=ingest_cb,
             )
 
-            # Phase 2: Scan destination to index into DB
-            max_id_before = thread_db.conn.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM photos"
-            ).fetchone()[0]
+            # Track destination paths of files actually copied
+            copied_paths = ingest_result.get("copied_paths", [])
 
+            # Phase 2: Scan destination to index into DB
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3294,11 +3293,27 @@ def create_app(db_path, thumb_cache_dir=None):
                 progress_callback=thumb_cb,
             )
 
-            # Phase 4: Create collection from newly imported photos
-            new_photos = thread_db.conn.execute(
-                "SELECT id FROM photos WHERE id > ?", (max_id_before,)
-            ).fetchall()
-            photo_ids = [p["id"] for p in new_photos]
+            # Phase 4: Create collection from files actually copied
+            # Use a temp table to avoid SQLite variable-limit issues
+            # and match by exact path (unique per file, unlike hashes)
+            photo_ids = []
+            if copied_paths:
+                thread_db.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                )
+                thread_db.conn.execute("DELETE FROM _imported_paths")
+                thread_db.conn.executemany(
+                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                )
+                rows = thread_db.conn.execute(
+                    """SELECT p.id FROM photos p
+                       JOIN folders f ON p.folder_id = f.id
+                       JOIN _imported_paths ip ON f.path = ip.dirpath
+                                               AND p.filename = ip.fname"""
+                ).fetchall()
+                photo_ids = [r["id"] for r in rows]
+                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
 
             collection_id = None
             collection_name = None

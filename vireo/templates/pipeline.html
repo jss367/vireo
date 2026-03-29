@@ -865,7 +865,7 @@ async function runClassifyStep(collectionId) {
     }
   }
 
-  if (completed > 0) {
+  if (completed === total) {
     fill.style.width = '100%';
     text.textContent = 'Complete';
     num.className = 'stage-num complete';
@@ -876,7 +876,8 @@ async function runClassifyStep(collectionId) {
     return true;
   } else {
     num.className = 'stage-num';
-    status.textContent = 'Classification failed';
+    var failedCount = total - completed;
+    status.textContent = failedCount + ' of ' + total + ' model' + (total > 1 ? 's' : '') + ' failed';
     return false;
   }
 }
