@@ -318,6 +318,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def settings():
         return render_template("settings.html")
 
+    @app.route("/keywords")
+    def keywords_page():
+        return render_template("keywords.html")
+
     # -- API routes --
 
     @app.route("/api/browse/init")
@@ -668,6 +672,14 @@ def create_app(db_path, thumb_cache_dir=None):
             db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
+        return jsonify({"ok": True})
+
+    @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
+    def api_delete_keyword(keyword_id):
+        db = _get_db()
+        db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
+        db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
+        db.conn.commit()
         return jsonify({"ok": True})
 
     # -- Batch operations --
