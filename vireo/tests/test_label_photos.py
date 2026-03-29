@@ -8,6 +8,10 @@ import pytest
 
 pytest.importorskip("torch")
 
+BIOCLIP_MODEL = "/tmp/bioclip_model/open_clip_pytorch_model.bin"
+if not os.path.exists(BIOCLIP_MODEL):
+    pytest.skip("bioclip model weights not available", allow_module_level=True)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
