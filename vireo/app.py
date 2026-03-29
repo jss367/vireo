@@ -620,7 +620,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         rating = body.get("rating", 0)
-        if not isinstance(rating, int) or rating < 0 or rating > 5:
+        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
             return json_error("rating must be an integer 0-5")
         old = db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
@@ -745,7 +745,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         rating = body.get("rating", 0)
-        if not isinstance(rating, int) or rating < 0 or rating > 5:
+        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
             return json_error("rating must be an integer 0-5")
         if not photo_ids:
             return json_error("photo_ids required")
