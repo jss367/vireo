@@ -1321,10 +1321,34 @@ class Database:
                 if convention:
                     name = self._apply_case_convention(name, convention)
 
-        kw_type = 'taxonomy' if is_species else 'general'
+        # Auto-detect taxonomy type from taxa table
+        kw_type = 'general'
+        taxon_id = None
+        if is_species:
+            kw_type = 'taxonomy'
+        else:
+            # Check if name matches a known taxon (common name or scientific name)
+            taxon = self.conn.execute(
+                """SELECT t.id FROM taxa t
+                   WHERE t.common_name = ? COLLATE NOCASE
+                      OR t.name = ? COLLATE NOCASE
+                   LIMIT 1""",
+                (name, name),
+            ).fetchone()
+            if not taxon:
+                taxon = self.conn.execute(
+                    """SELECT t.taxon_id AS id FROM taxa_common_names t
+                       WHERE t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (name,),
+                ).fetchone()
+            if taxon:
+                kw_type = 'taxonomy'
+                taxon_id = taxon["id"]
+
         cur = self.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) VALUES (?, ?, ?, ?)",
-            (name, parent_id, 1 if is_species else 0, kw_type),
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
+            (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -1392,7 +1416,7 @@ class Database:
                    JOIN ancestors a ON a.id = k.id
                    WHERE k.parent_id IS NOT NULL
                )
-               SELECT k.id, k.name, k.parent_id
+               SELECT k.id, k.name, k.parent_id, k.type
                FROM keywords k
                JOIN ancestors a ON a.id = k.id
                ORDER BY k.name""",
@@ -1418,12 +1442,41 @@ class Database:
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
         return self.conn.execute(
-            """SELECT k.id, k.name, k.parent_id
+            """SELECT k.id, k.name, k.parent_id, k.type
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                WHERE pk.photo_id = ?
                ORDER BY k.name""",
             (photo_id,),
+        ).fetchall()
+
+    VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
+
+    def update_keyword(self, keyword_id, **kwargs):
+        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name."""
+        if 'type' in kwargs and kwargs['type'] not in self.VALID_KEYWORD_TYPES:
+            raise ValueError(f"Invalid keyword type: {kwargs['type']}")
+        allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [keyword_id]
+        self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
+        self.conn.commit()
+
+    def get_all_keywords(self):
+        """Return all keywords with photo counts, type, and taxon info."""
+        return self.conn.execute(
+            """SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
+                      k.latitude, k.longitude,
+                      t.name AS taxon_name, t.common_name AS taxon_common_name,
+                      COUNT(pk.photo_id) AS photo_count
+               FROM keywords k
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               LEFT JOIN photo_keywords pk ON pk.keyword_id = k.id
+               GROUP BY k.id
+               ORDER BY k.name"""
         ).fetchall()
 
     # -- Predictions --
@@ -1665,21 +1718,23 @@ class Database:
 
     # -- Pending Changes --
 
-    def queue_change(self, photo_id, change_type, value):
+    def queue_change(self, photo_id, change_type, value, workspace_id=None):
         """Add a change to the sync queue (skips if already queued).
 
         Returns the inserted pending change token, or None if an identical row already exists.
+        If workspace_id is not provided, uses the active workspace.
         """
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing = self.conn.execute(
             "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
-            (photo_id, change_type, value, self._ws_id()),
+            (photo_id, change_type, value, ws_id),
         ).fetchone()
         if existing:
             return None
         change_token = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
-            (photo_id, change_type, value, change_token, self._ws_id()),
+            (photo_id, change_type, value, change_token, ws_id),
         )
         self.conn.commit()
         return change_token
@@ -1691,10 +1746,11 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def remove_pending_changes(self, photo_id, change_type=None, value=None):
+    def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None):
         """Delete matching pending changes. Returns rows removed."""
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
         clauses = ["photo_id = ?", "workspace_id = ?"]
-        params = [photo_id, self._ws_id()]
+        params = [photo_id, ws_id]
         if change_type is not None:
             clauses.append("change_type = ?")
             params.append(change_type)

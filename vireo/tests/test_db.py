@@ -1120,6 +1120,53 @@ def test_is_species_migrated_to_taxonomy_type(tmp_path):
     assert row["is_species"] == 1
 
 
+def test_add_keyword_people_type(tmp_path):
+    """A keyword can be created with type='people' via direct SQL update."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("John Doe")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'people' WHERE id = ?", (kid,)
+    )
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "people"
+
+
+def test_keyword_tree_includes_type(tmp_path):
+    """get_keyword_tree returns the type field for each keyword."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword('Cardinal', is_species=True)
+    db.tag_photo(pid, kid)
+
+    tree = db.get_keyword_tree()
+    assert len(tree) >= 1
+    cardinal = [k for k in tree if k['name'] == 'Cardinal'][0]
+    assert cardinal['type'] == 'taxonomy'
+
+
+def test_photo_keywords_includes_type(tmp_path):
+    """get_photo_keywords returns the type field for each keyword."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    kid = db.add_keyword('Sunset')
+    db.tag_photo(pid, kid)
+
+    keywords = db.get_photo_keywords(pid)
+    assert len(keywords) == 1
+    assert keywords[0]['type'] == 'general'
+
+
 def test_embedding_model_column_exists(tmp_path):
     """The photos table has an embedding_model column."""
     from db import Database
@@ -1353,3 +1400,59 @@ def test_photos_has_file_hash_and_companion_path(tmp_path):
     col_names = [r[0] for r in row]
     assert "file_hash" in col_names
     assert "companion_path" in col_names
+
+
+def test_add_keyword_auto_detects_taxonomy(tmp_path):
+    """add_keyword auto-detects taxonomy type when name matches a taxon."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Insert a taxon into the taxa table
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES (1, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')"
+    )
+    db.conn.commit()
+    kid = db.add_keyword("Northern Cardinal")
+    row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == 1
+
+
+def test_add_keyword_auto_detects_taxonomy_via_scientific_name(tmp_path):
+    """add_keyword auto-detects taxonomy type when name matches a scientific name."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES (1, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')"
+    )
+    db.conn.commit()
+    kid = db.add_keyword("Cardinalis cardinalis")
+    row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == 1
+
+
+def test_add_keyword_auto_detects_taxonomy_via_alt_common_name(tmp_path):
+    """add_keyword auto-detects taxonomy type via taxa_common_names table."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES (1, 'Cardinalis cardinalis', 'Northern Cardinal', 'species')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name) VALUES (1, 'Redbird')"
+    )
+    db.conn.commit()
+    kid = db.add_keyword("Redbird")
+    row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == 1
+
+
+def test_add_keyword_no_auto_detect_for_general(tmp_path):
+    """add_keyword defaults to general when name doesn't match a taxon."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("favorite")
+    row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "general"
+    assert row["taxon_id"] is None

@@ -318,6 +318,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def settings():
         return render_template("settings.html")
 
+    @app.route("/keywords")
+    def keywords_page():
+        return render_template("keywords.html")
+
     # -- API routes --
 
     @app.route("/api/browse/init")
@@ -537,6 +541,12 @@ def create_app(db_path, thumb_cache_dir=None):
         species = db.get_accepted_species()
         return jsonify({"species": species})
 
+    @app.route("/api/keywords/all")
+    def api_all_keywords():
+        db = _get_db()
+        keywords = db.get_all_keywords()
+        return jsonify([dict(k) for k in keywords])
+
     @app.route("/api/keywords")
     def api_keywords():
         db = _get_db()
@@ -588,19 +598,19 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
-    def _queue_keyword_add(photo_id, keyword_name):
+    def _queue_keyword_add(photo_id, keyword_name, workspace_id=None):
         """Queue a keyword add unless it cancels a pending removal."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name)
+        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
         if removed == 0:
-            db.queue_change(photo_id, "keyword_add", keyword_name)
+            db.queue_change(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
 
-    def _queue_keyword_remove(photo_id, keyword_name):
+    def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None):
         """Queue a keyword removal unless it cancels a pending add."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name)
+        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
         if removed == 0:
-            db.queue_change(photo_id, "keyword_remove", keyword_name)
+            db.queue_change(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
 
     # -- Edit API routes --
 
@@ -637,6 +647,11 @@ def create_app(db_path, thumb_cache_dir=None):
         if not name:
             return json_error("name required")
         kid = db.add_keyword(name)
+        # Override type if explicitly provided
+        kw_type = body.get("type")
+        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
+            db.conn.commit()
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -658,6 +673,63 @@ def create_app(db_path, thumb_cache_dir=None):
         _queue_keyword_remove(photo_id, kw_name)
         db.record_edit('keyword_remove', f'Removed keyword "{kw_name}"', str(keyword_id),
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
+        return jsonify({"ok": True})
+
+    @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
+    def api_update_keyword(keyword_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        # Capture old name before update for sidecar queuing
+        new_name = body.get("name")
+        old_name = None
+        if new_name:
+            old_row = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+            ).fetchone()
+            if old_row and old_row["name"] != new_name:
+                old_name = old_row["name"]
+        # Apply the update first — if it raises, no sidecar changes are queued
+        try:
+            db.update_keyword(keyword_id, **body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        # Queue sidecar updates only after successful DB update, for all affected workspaces
+        if old_name:
+            affected = db.conn.execute(
+                """SELECT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id = ?""",
+                (keyword_id,),
+            ).fetchall()
+            for row in affected:
+                _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
+                _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+        return jsonify({"ok": True})
+
+    @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
+    def api_delete_keyword(keyword_id):
+        db = _get_db()
+        # Queue sidecar removals for all affected workspaces
+        kw_row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if kw_row:
+            affected = db.conn.execute(
+                """SELECT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id = ?""",
+                (keyword_id,),
+            ).fetchall()
+            for row in affected:
+                _queue_keyword_remove(row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
+        db.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
+        db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
+        db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
+        db.conn.commit()
         return jsonify({"ok": True})
 
     # -- Batch operations --
@@ -710,6 +782,10 @@ def create_app(db_path, thumb_cache_dir=None):
         if not photo_ids or not name:
             return json_error("photo_ids and name required")
         kid = db.add_keyword(name)
+        kw_type = body.get("type")
+        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+            db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
+            db.conn.commit()
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, name)

@@ -782,3 +782,202 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
         assert overrides["classification_threshold"] == 0.5
         # Non-whitelisted key preserved
         assert overrides["active_labels"] == ["/path/to/birds.txt"]
+
+
+def test_get_all_keywords(app_and_db):
+    """GET /api/keywords/all returns all keywords with photo counts."""
+    app, db = app_and_db
+    client = app.test_client()
+    # conftest already created 'Cardinal' (tagged to p1) and 'Sparrow' (tagged to p2)
+    # Add an untagged keyword to verify photo_count=0
+    db.add_keyword("favorite")
+
+    resp = client.get("/api/keywords/all")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) >= 3
+    cardinal = next(k for k in data if k["name"] == "Cardinal")
+    assert cardinal["photo_count"] >= 1
+    assert "type" in cardinal
+    favorite = next(k for k in data if k["name"] == "favorite")
+    assert favorite["photo_count"] == 0
+    assert favorite["type"] == "general"
+
+
+def test_update_keyword_type(app_and_db):
+    """PUT /api/keywords/<id> updates keyword type."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Tim")
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "people"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "people"
+
+
+def test_update_keyword_type_invalid(app_and_db):
+    """PUT /api/keywords/<id> rejects invalid types."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("test")
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "invalid_type"})
+    assert resp.status_code == 400
+
+
+def test_update_keyword_name(app_and_db):
+    """PUT /api/keywords/<id> can rename a keyword."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("old_name")
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "new_name"})
+    assert resp.status_code == 200
+    row = db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["name"] == "new_name"
+
+
+def test_rename_keyword_queues_sidecar_changes(app_and_db):
+    """Renaming a keyword queues remove+add pending changes for affected photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    # conftest photos: p1 is in folder '/photos/2024'
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    # Clear any prior pending changes
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "NewBird") in actions
+
+
+def test_delete_keyword_queues_sidecar_removals(app_and_db):
+    """Deleting a keyword queues removal pending changes for affected photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("ToDelete")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.delete(f"/api/keywords/{kid}")
+    assert resp.status_code == 200
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (p1,),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "ToDelete" for c in changes)
+    # Keyword should be gone
+    assert db.conn.execute("SELECT id FROM keywords WHERE id = ?", (kid,)).fetchone() is None
+
+
+def test_rename_with_invalid_type_queues_nothing(app_and_db):
+    """PUT with invalid type + name returns 400 and queues no sidecar changes."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("StableKeyword")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "Renamed", "type": "invalid"})
+    assert resp.status_code == 400
+
+    # No sidecar changes should have been queued
+    count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM pending_changes WHERE photo_id = ?", (p1,)
+    ).fetchone()["cnt"]
+    assert count == 0
+    # Keyword name should be unchanged
+    row = db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["name"] == "StableKeyword"
+
+
+def test_rename_keyword_queues_for_all_workspaces(app_and_db):
+    """Renaming a keyword queues sidecar changes for photos in all workspaces."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create a second workspace with its own folder and photo
+    ws2 = db.create_workspace("Second")
+    fid2 = db.add_folder("/photos/ws2", name="ws2")
+    db.add_workspace_folder(ws2, fid2)
+    p_ws2 = db.add_photo(folder_id=fid2, filename="ws2bird.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    # Tag photos in both workspaces with the same keyword
+    kid = db.add_keyword("SharedBird")
+    p_ws1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p_ws1, kid)
+    db.tag_photo(p_ws2, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Rename keyword (active workspace is ws1)
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "RenamedBird"})
+    assert resp.status_code == 200
+
+    # Check pending changes for ws1 photo
+    ws1_id = db._ws_id()
+    ws1_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? AND workspace_id = ?",
+        (p_ws1, ws1_id),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedBird" for c in ws1_changes)
+    assert any(c["change_type"] == "keyword_add" and c["value"] == "RenamedBird" for c in ws1_changes)
+
+    # Check pending changes for ws2 photo — should also be queued under ws2
+    ws2_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? AND workspace_id = ?",
+        (p_ws2, ws2),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedBird" for c in ws2_changes)
+    assert any(c["change_type"] == "keyword_add" and c["value"] == "RenamedBird" for c in ws2_changes)
+
+
+def test_delete_keyword_queues_for_all_workspaces(app_and_db):
+    """Deleting a keyword queues sidecar removals for photos in all workspaces."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    ws2 = db.create_workspace("Second")
+    fid2 = db.add_folder("/photos/ws2del", name="ws2del")
+    db.add_workspace_folder(ws2, fid2)
+    p_ws2 = db.add_photo(folder_id=fid2, filename="ws2del.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    kid = db.add_keyword("SharedDelete")
+    p_ws1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p_ws1, kid)
+    db.tag_photo(p_ws2, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.delete(f"/api/keywords/{kid}")
+    assert resp.status_code == 200
+
+    ws1_id = db._ws_id()
+    ws1_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? AND workspace_id = ?",
+        (p_ws1, ws1_id),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedDelete" for c in ws1_changes)
+
+    ws2_changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? AND workspace_id = ?",
+        (p_ws2, ws2),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedDelete" for c in ws2_changes)

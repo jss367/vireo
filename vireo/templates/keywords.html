@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Keywords</title>
+<style>
+  body { padding-bottom: 36px; }
+  .content { max-width: 1200px; }
+
+  /* Toolbar */
+  .kw-toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 12px; padding: 10px 12px;
+    background: var(--bg-tertiary); border-radius: 6px;
+    border: 1px solid var(--border-primary);
+  }
+  .kw-search {
+    padding: 6px 10px; border-radius: 4px; font-size: 13px;
+    border: 1px solid var(--border-secondary);
+    background: var(--bg-input); color: var(--text-primary);
+    width: 220px;
+  }
+  .kw-search::placeholder { color: var(--text-dim); }
+  .kw-search:focus { outline: none; border-color: var(--accent); }
+
+  .kw-filter-btn {
+    padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--border-secondary);
+    background: transparent; color: var(--text-secondary);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .kw-filter-btn:hover { background: var(--bg-secondary); }
+  .kw-filter-btn.active {
+    background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+  }
+
+  .kw-stats {
+    margin-left: auto; font-size: 12px; color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* Bulk action bar */
+  .kw-bulk-bar {
+    display: none; align-items: center; gap: 10px;
+    margin-bottom: 10px; padding: 8px 12px;
+    background: var(--accent-dim); border-radius: 6px;
+    border: 1px solid var(--accent);
+    font-size: 13px; color: var(--accent);
+  }
+  .kw-bulk-bar.visible { display: flex; }
+  .kw-bulk-bar select {
+    padding: 4px 8px; border-radius: 4px; font-size: 12px;
+    border: 1px solid var(--border-secondary);
+    background: var(--bg-input); color: var(--text-primary);
+  }
+  .kw-bulk-btn {
+    padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent);
+    color: var(--accent-text); font-weight: 600;
+  }
+  .kw-bulk-btn:hover { opacity: 0.9; }
+  .kw-bulk-btn.danger {
+    border-color: var(--danger); background: transparent;
+    color: var(--danger); font-weight: normal;
+  }
+  .kw-bulk-btn.danger:hover { background: rgba(231,76,60,0.15); }
+
+  /* Table */
+  .kw-table-wrap {
+    overflow-x: auto; border-radius: 6px;
+    border: 1px solid var(--border-primary);
+  }
+  .kw-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  .kw-table th {
+    padding: 8px 10px; text-align: left; font-weight: 600;
+    background: var(--bg-tertiary); color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-secondary);
+    cursor: pointer; user-select: none; white-space: nowrap;
+    position: sticky; top: 0; z-index: 1;
+  }
+  .kw-table th:hover { color: var(--accent); }
+  .kw-table th .sort-arrow { font-size: 10px; margin-left: 4px; opacity: 0.4; }
+  .kw-table th.sorted .sort-arrow { opacity: 1; color: var(--accent); }
+  .kw-table td {
+    padding: 6px 10px; border-bottom: 1px solid var(--border-primary);
+    color: var(--text-primary); vertical-align: middle;
+  }
+  .kw-table tr:hover td { background: rgba(36,229,202,0.04); }
+  .kw-table td.cb-cell, .kw-table th.cb-cell { width: 32px; text-align: center; }
+  .kw-table input[type="checkbox"] { cursor: pointer; accent-color: var(--accent); }
+
+  /* Name cell */
+  .kw-name-cell { cursor: default; }
+  .kw-name-cell .name-text:hover { color: var(--accent); cursor: text; }
+  .kw-name-input {
+    background: var(--bg-input); color: var(--text-primary);
+    border: 1px solid var(--accent); border-radius: 3px;
+    padding: 2px 6px; font-size: 13px; width: 100%;
+  }
+
+  /* Type badge */
+  .kw-type-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    cursor: pointer; transition: opacity 0.15s; white-space: nowrap;
+  }
+  .kw-type-badge:hover { opacity: 0.8; }
+
+  .kw-type-badge.type-general { background: rgba(176,204,204,0.1); color: #B0CCCC; }
+  .kw-type-badge.type-taxonomy { background: rgba(36,229,202,0.15); color: #24E5CA; }
+  .kw-type-badge.type-location { background: rgba(52,152,219,0.15); color: #3498db; }
+  .kw-type-badge.type-descriptive { background: rgba(155,89,182,0.15); color: #9b59b6; }
+  .kw-type-badge.type-people { background: rgba(241,196,15,0.15); color: #f1c40f; }
+  .kw-type-badge.type-event { background: rgba(230,126,34,0.15); color: #e67e22; }
+
+  /* Type dropdown (floating) */
+  .kw-type-dropdown {
+    position: absolute; z-index: 100;
+    background: var(--bg-secondary); border: 1px solid var(--border-secondary);
+    border-radius: 6px; padding: 4px 0; min-width: 140px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  }
+  .kw-type-dropdown-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .kw-type-dropdown-item:hover {
+    background: var(--bg-tertiary); color: var(--text-primary);
+  }
+
+  /* Empty state */
+  .kw-empty {
+    text-align: center; padding: 40px 20px;
+    color: var(--text-muted); font-size: 14px;
+  }
+
+  .kw-coords { font-size: 11px; color: var(--text-dim); font-family: monospace; }
+  .kw-taxon { font-size: 12px; color: var(--text-muted); font-style: italic; }
+  .kw-parent { font-size: 12px; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="content">
+
+  <div class="section">
+    <div class="section-title">Keywords Management</div>
+
+    <!-- Toolbar -->
+    <div class="kw-toolbar">
+      <input type="text" class="kw-search" id="kwSearch" placeholder="Search keywords...">
+      <button class="kw-filter-btn active" data-type="all">All</button>
+      <button class="kw-filter-btn" data-type="general">General</button>
+      <button class="kw-filter-btn" data-type="taxonomy">Taxonomy</button>
+      <button class="kw-filter-btn" data-type="location">Location</button>
+      <button class="kw-filter-btn" data-type="descriptive">Descriptive</button>
+      <button class="kw-filter-btn" data-type="people">People</button>
+      <button class="kw-filter-btn" data-type="event">Event</button>
+      <span class="kw-stats" id="kwStats">Loading...</span>
+    </div>
+
+    <!-- Bulk action bar -->
+    <div class="kw-bulk-bar" id="kwBulkBar">
+      <span id="kwBulkCount">0 selected</span>
+      <select id="kwBulkType">
+        <option value="">Set type...</option>
+        <option value="general">General</option>
+        <option value="taxonomy">Taxonomy</option>
+        <option value="location">Location</option>
+        <option value="descriptive">Descriptive</option>
+        <option value="people">People</option>
+        <option value="event">Event</option>
+      </select>
+      <button class="kw-bulk-btn" id="kwBulkApply">Apply</button>
+      <span style="flex:1"></span>
+      <button class="kw-bulk-btn danger" id="kwBulkDelete">Delete Selected</button>
+    </div>
+
+    <!-- Table -->
+    <div class="kw-table-wrap">
+      <table class="kw-table" id="kwTable">
+        <thead>
+          <tr>
+            <th class="cb-cell"><input type="checkbox" id="kwSelectAll" title="Select / deselect all"></th>
+            <th data-col="name">Name <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="type">Type <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="parent">Parent <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="taxon">Taxon <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="photo_count">Photos <span class="sort-arrow">&#9650;</span></th>
+            <th data-col="coords">Coords <span class="sort-arrow">&#9650;</span></th>
+          </tr>
+        </thead>
+        <tbody id="kwBody"></tbody>
+      </table>
+      <div class="kw-empty" id="kwEmpty" style="display:none;">No keywords found.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  const TYPE_ICONS = {general:'\u25CF', taxonomy:'\uD83C\uDF3F', location:'\uD83D\uDCCD', descriptive:'\u25C6', people:'\uD83D\uDC64', event:'\uD83D\uDCC5'};
+  const TYPES = ['general','taxonomy','location','descriptive','people','event'];
+
+  let allKeywords = [];
+  let sortCol = 'name';
+  let sortDir = 1; // 1 = asc, -1 = desc
+  let filterType = 'all';
+  let searchTerm = '';
+  let selectedIds = new Set();
+  let parentMap = {};
+  let activeDropdown = null;
+
+  // -- Load data --
+  async function loadKeywords() {
+    try {
+      const r = await fetch('/api/keywords/all');
+      allKeywords = await r.json();
+      parentMap = {};
+      allKeywords.forEach(k => { parentMap[k.id] = k.name; });
+      render();
+    } catch(e) {
+      document.getElementById('kwEmpty').style.display = 'block';
+      document.getElementById('kwEmpty').textContent = 'Failed to load keywords.';
+    }
+  }
+
+  function getFiltered() {
+    let list = allKeywords;
+    if (filterType !== 'all') {
+      list = list.filter(k => (k.type || 'general') === filterType);
+    }
+    if (searchTerm) {
+      const s = searchTerm.toLowerCase();
+      list = list.filter(k => k.name.toLowerCase().includes(s));
+    }
+    return list;
+  }
+
+  function sortList(list) {
+    return list.slice().sort((a, b) => {
+      let va, vb;
+      switch(sortCol) {
+        case 'name': va = (a.name||'').toLowerCase(); vb = (b.name||'').toLowerCase(); break;
+        case 'type': va = a.type||'general'; vb = b.type||'general'; break;
+        case 'parent':
+          va = (a.parent_id ? (parentMap[a.parent_id]||'').toLowerCase() : '');
+          vb = (b.parent_id ? (parentMap[b.parent_id]||'').toLowerCase() : '');
+          break;
+        case 'taxon':
+          va = (a.taxon_common_name || a.taxon_name || '').toLowerCase();
+          vb = (b.taxon_common_name || b.taxon_name || '').toLowerCase();
+          break;
+        case 'photo_count': va = a.photo_count||0; vb = b.photo_count||0; break;
+        case 'coords':
+          va = (a.latitude != null ? 1 : 0); vb = (b.latitude != null ? 1 : 0);
+          break;
+        default: va = ''; vb = '';
+      }
+      if (va < vb) return -1 * sortDir;
+      if (va > vb) return 1 * sortDir;
+      return 0;
+    });
+  }
+
+  function render() {
+    const filtered = sortList(getFiltered());
+    const tbody = document.getElementById('kwBody');
+    const empty = document.getElementById('kwEmpty');
+    const stats = document.getElementById('kwStats');
+
+    stats.textContent = filtered.length + ' of ' + allKeywords.length + ' keywords';
+
+    if (!filtered.length) {
+      tbody.innerHTML = '';
+      empty.style.display = 'block';
+      empty.textContent = searchTerm || filterType !== 'all' ? 'No matching keywords.' : 'No keywords found.';
+      return;
+    }
+    empty.style.display = 'none';
+
+    const rows = filtered.map(k => {
+      const t = k.type || 'general';
+      const icon = TYPE_ICONS[t] || TYPE_ICONS.general;
+      const checked = selectedIds.has(k.id) ? 'checked' : '';
+      const parentName = k.parent_id ? (parentMap[k.parent_id] || '#' + k.parent_id) : '';
+      const taxonStr = k.taxon_common_name ? (k.taxon_common_name + (k.taxon_name ? ' (' + k.taxon_name + ')' : ''))
+                       : (k.taxon_name || '');
+      const coordStr = (k.latitude != null && k.longitude != null)
+                       ? k.latitude.toFixed(4) + ', ' + k.longitude.toFixed(4) : '';
+
+      return '<tr data-id="' + k.id + '">' +
+        '<td class="cb-cell"><input type="checkbox" class="kw-cb" data-id="' + k.id + '" ' + checked + '></td>' +
+        '<td class="kw-name-cell"><span class="name-text" data-id="' + k.id + '">' + escapeHtml(k.name) + '</span></td>' +
+        '<td><span class="kw-type-badge type-' + t + '" data-id="' + k.id + '" data-type="' + t + '">' + icon + ' ' + t + '</span></td>' +
+        '<td><span class="kw-parent">' + escapeHtml(parentName) + '</span></td>' +
+        '<td><span class="kw-taxon">' + escapeHtml(taxonStr) + '</span></td>' +
+        '<td>' + (k.photo_count || 0) + '</td>' +
+        '<td><span class="kw-coords">' + coordStr + '</span></td>' +
+        '</tr>';
+    });
+    tbody.innerHTML = rows.join('');
+    updateBulkBar();
+    updateSelectAllCheckbox();
+  }
+
+  // -- Search & filter --
+  document.getElementById('kwSearch').addEventListener('input', function() {
+    searchTerm = this.value.trim();
+    render();
+  });
+
+  document.querySelectorAll('.kw-filter-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.kw-filter-btn').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      filterType = this.dataset.type;
+      render();
+    });
+  });
+
+  // -- Sorting --
+  document.querySelectorAll('.kw-table th[data-col]').forEach(th => {
+    th.addEventListener('click', function() {
+      const col = this.dataset.col;
+      if (sortCol === col) { sortDir *= -1; } else { sortCol = col; sortDir = 1; }
+      // Update header styles
+      document.querySelectorAll('.kw-table th').forEach(h => {
+        h.classList.remove('sorted');
+        const arrow = h.querySelector('.sort-arrow');
+        if (arrow) arrow.innerHTML = '&#9650;';
+      });
+      this.classList.add('sorted');
+      const arrow = this.querySelector('.sort-arrow');
+      if (arrow) arrow.innerHTML = sortDir === 1 ? '&#9650;' : '&#9660;';
+      render();
+    });
+  });
+
+  // -- Checkbox selection --
+  document.getElementById('kwBody').addEventListener('change', function(e) {
+    if (e.target.classList.contains('kw-cb')) {
+      const id = parseInt(e.target.dataset.id);
+      if (e.target.checked) { selectedIds.add(id); } else { selectedIds.delete(id); }
+      updateBulkBar();
+      updateSelectAllCheckbox();
+    }
+  });
+
+  document.getElementById('kwSelectAll').addEventListener('change', function() {
+    const checked = this.checked;
+    const filtered = getFiltered();
+    filtered.forEach(k => {
+      if (checked) { selectedIds.add(k.id); } else { selectedIds.delete(k.id); }
+    });
+    render();
+  });
+
+  function updateSelectAllCheckbox() {
+    const filtered = getFiltered();
+    const cb = document.getElementById('kwSelectAll');
+    if (!filtered.length) { cb.checked = false; cb.indeterminate = false; return; }
+    const allChecked = filtered.every(k => selectedIds.has(k.id));
+    const someChecked = filtered.some(k => selectedIds.has(k.id));
+    cb.checked = allChecked;
+    cb.indeterminate = someChecked && !allChecked;
+  }
+
+  function updateBulkBar() {
+    const bar = document.getElementById('kwBulkBar');
+    const count = selectedIds.size;
+    document.getElementById('kwBulkCount').textContent = count + ' selected';
+    if (count > 0) { bar.classList.add('visible'); } else { bar.classList.remove('visible'); }
+  }
+
+  // -- Inline type change via badge click --
+  document.getElementById('kwBody').addEventListener('click', function(e) {
+    const badge = e.target.closest('.kw-type-badge');
+    if (!badge) return;
+    e.stopPropagation();
+    closeDropdown();
+
+    const kwId = parseInt(badge.dataset.id);
+    const currentType = badge.dataset.type;
+    const rect = badge.getBoundingClientRect();
+
+    const dd = document.createElement('div');
+    dd.className = 'kw-type-dropdown';
+    dd.style.top = (rect.bottom + window.scrollY + 2) + 'px';
+    dd.style.left = (rect.left + window.scrollX) + 'px';
+
+    TYPES.forEach(t => {
+      const item = document.createElement('div');
+      item.className = 'kw-type-dropdown-item';
+      item.innerHTML = '<span class="kw-type-badge type-' + t + '" style="cursor:inherit;pointer-events:none;">' + TYPE_ICONS[t] + ' ' + t + '</span>';
+      if (t === currentType) { item.style.fontWeight = '700'; }
+      item.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        closeDropdown();
+        if (t !== currentType) { updateType(kwId, t); }
+      });
+      dd.appendChild(item);
+    });
+
+    document.body.appendChild(dd);
+    activeDropdown = dd;
+  });
+
+  function closeDropdown() {
+    if (activeDropdown) { activeDropdown.remove(); activeDropdown = null; }
+  }
+  document.addEventListener('click', closeDropdown);
+
+  async function updateType(kwId, newType) {
+    try {
+      await fetch('/api/keywords/' + kwId, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({type: newType})
+      });
+      const kw = allKeywords.find(k => k.id === kwId);
+      if (kw) kw.type = newType;
+      render();
+    } catch(e) { console.error('Failed to update type', e); }
+  }
+
+  // -- Inline rename (double-click) --
+  document.getElementById('kwBody').addEventListener('dblclick', function(e) {
+    const nameSpan = e.target.closest('.name-text');
+    if (!nameSpan) return;
+
+    const kwId = parseInt(nameSpan.dataset.id);
+    const kw = allKeywords.find(k => k.id === kwId);
+    if (!kw) return;
+
+    const td = nameSpan.parentElement;
+    const oldName = kw.name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = oldName;
+    input.className = 'kw-name-input';
+    td.innerHTML = '';
+    td.appendChild(input);
+    input.focus();
+    input.select();
+
+    let committed = false;
+    function commit() {
+      if (committed) return;
+      committed = true;
+      const newName = input.value.trim();
+      if (newName && newName !== oldName) {
+        renameKeyword(kwId, newName);
+      } else {
+        render();
+      }
+    }
+    function cancel() {
+      if (committed) return;
+      committed = true;
+      render();
+    }
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+    });
+  });
+
+  async function renameKeyword(kwId, newName) {
+    try {
+      await fetch('/api/keywords/' + kwId, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: newName})
+      });
+      const kw = allKeywords.find(k => k.id === kwId);
+      if (kw) { kw.name = newName; parentMap[kw.id] = newName; }
+    } catch(e) { console.error('Failed to rename', e); }
+    render();
+  }
+
+  // -- Bulk apply type --
+  document.getElementById('kwBulkApply').addEventListener('click', async function() {
+    const newType = document.getElementById('kwBulkType').value;
+    if (!newType) return;
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+
+    for (const id of ids) {
+      try {
+        await fetch('/api/keywords/' + id, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({type: newType})
+        });
+        const kw = allKeywords.find(k => k.id === id);
+        if (kw) kw.type = newType;
+      } catch(e) { console.error('Failed to update', id, e); }
+    }
+    selectedIds.clear();
+    document.getElementById('kwBulkType').value = '';
+    render();
+  });
+
+  // -- Bulk delete --
+  document.getElementById('kwBulkDelete').addEventListener('click', async function() {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    if (!confirm('Delete ' + ids.length + ' keyword(s)? This will also remove them from all photos.')) return;
+
+    for (const id of ids) {
+      try {
+        await fetch('/api/keywords/' + id, { method: 'DELETE' });
+        allKeywords = allKeywords.filter(k => k.id !== id);
+        delete parentMap[id];
+      } catch(e) { console.error('Failed to delete', id, e); }
+    }
+    selectedIds.clear();
+    render();
+  });
+
+  // -- Init --
+  loadKeywords();
+})();
+</script>
+</body>
+</html>
