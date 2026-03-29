@@ -334,7 +334,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
 
         photos = db.get_photos(page=page, per_page=per_page, sort=sort)
@@ -403,7 +403,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
@@ -995,7 +995,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
         total = db.count_collection_photos(collection_id)
         return jsonify(
@@ -4837,7 +4837,7 @@ def create_app(db_path, thumb_cache_dir=None):
             top_sims = [float(filtered_sims[idx]) for idx in top_indices]
             photos_map = db.get_photos_by_ids(top_pids)
             results = []
-            for pid, sim in zip(top_pids, top_sims):
+            for pid, sim in zip(top_pids, top_sims, strict=False):
                 if pid in photos_map:
                     results.append({
                         "photo": dict(photos_map[pid]),
@@ -4902,7 +4902,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photos_map = db.get_photos_by_ids(top_pids)
 
         results = []
-        for pid, sim in zip(top_pids, top_sims):
+        for pid, sim in zip(top_pids, top_sims, strict=False):
             if pid in photos_map:
                 results.append(
                     {
