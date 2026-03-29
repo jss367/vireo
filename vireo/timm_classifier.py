@@ -93,7 +93,8 @@ class TimmClassifier:
         import torch
         from PIL import Image
 
-        img = Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as f:
+            img = f.convert("RGB")
         input_tensor = self._transform(img).unsqueeze(0).to(self._device)
 
         with torch.no_grad():

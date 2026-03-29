@@ -152,7 +152,8 @@ def load_mask(masks_dir, photo_id):
     path = os.path.join(masks_dir, f"{photo_id}.png")
     if not os.path.exists(path):
         return None
-    mask_img = Image.open(path).convert("L")
+    with Image.open(path) as f:
+        mask_img = f.convert("L")
     return np.array(mask_img) > 127
 
 
