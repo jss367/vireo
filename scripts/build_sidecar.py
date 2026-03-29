@@ -87,6 +87,7 @@ def main():
         "--hidden-import", "jobs",
         "--hidden-import", "scanner",
         "--hidden-import", "classifier",
+        "--hidden-import", "classify_job",
         "--hidden-import", "thumbnails",
         "--hidden-import", "pipeline",
         "--hidden-import", "audit",
@@ -112,8 +113,13 @@ def main():
         "--hidden-import", "bursts",
         "--hidden-import", "detector",
         "--hidden-import", "timm_classifier",
+        "--hidden-import", "text_encoder",
         "--hidden-import", "xmp",
         "--hidden-import", "catalog",
+        # ONNX Runtime and related libraries
+        "--hidden-import", "onnx_runtime",
+        "--hidden-import", "onnxruntime",
+        "--hidden-import", "tokenizers",
     ]
 
     if args.ci:
@@ -124,6 +130,10 @@ def main():
             "--exclude-module", "notebook",
             "--exclude-module", "jupyter",
             "--exclude-module", "IPython",
+            # Safety: prevent accidental bundling of PyTorch via transitive deps
+            "--exclude-module", "torch",
+            "--exclude-module", "torchvision",
+            "--exclude-module", "lightning",
             "--strip",
         ]
 
