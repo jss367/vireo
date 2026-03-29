@@ -73,12 +73,11 @@ jobs:
         run: cargo install tauri-cli
 
       # --- Build the Tauri app (signing happens automatically) ---
+      # Only pass APPLE_SIGNING_IDENTITY so Tauri signs but does not notarize.
+      # The separate "Notarize DMG" step handles notarization via xcrun notarytool.
       - name: Build Tauri app
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
