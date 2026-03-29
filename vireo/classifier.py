@@ -152,20 +152,45 @@ class Classifier:
             self._mode = "tol"
             self._rank = Rank.SPECIES
 
-    def classify(self, image_path, threshold=0.4):
+    def _build_custom_results(self, probs, threshold):
+        """Build sorted prediction dicts from a probability array (custom labels mode)."""
+        clf = self._classifier
+        ranked = sorted(zip(clf.classes, probs), key=lambda x: x[1], reverse=True)
+        results = []
+        for species, score in ranked:
+            score = float(score)
+            if score < threshold:
+                continue
+            results.append(
+                {
+                    "species": species,
+                    "score": score,
+                    "auto_tag": f"auto:{species}",
+                    "confidence_tag": f"auto:confidence:{score:.2f}",
+                }
+            )
+        return results
+
+    def classify(self, image, threshold=0.4):
         """Classify an image and return predictions above threshold.
+
+        Args:
+            image: file path (str) or PIL Image
 
         Returns:
             list of dicts with species, score, auto_tag, confidence_tag
         """
-        preds, _ = self.classify_with_embedding(image_path, threshold)
+        preds, _ = self.classify_with_embedding(image, threshold)
         return preds
 
-    def classify_with_embedding(self, image_path, threshold=0.4):
+    def classify_with_embedding(self, image, threshold=0.4):
         """Classify an image and return both predictions and the image embedding.
 
         Single forward pass — computes the image embedding once, uses it for
         classification, and returns it for downstream use (e.g. similarity grouping).
+
+        Args:
+            image: file path (str) or PIL Image
 
         Returns:
             (predictions, embedding) where:
@@ -177,33 +202,17 @@ class Classifier:
         clf = self._classifier
 
         # Compute image embedding (single forward pass)
-        img_features = clf.create_image_features_for_image(image_path, normalize=True)
+        # create_image_features_for_image accepts both paths and PIL images
+        img_features = clf.create_image_features_for_image(image, normalize=True)
         embedding = img_features.cpu().numpy().astype(np.float32).flatten()
 
         if self._mode == "custom":
-            # Dot product with text embeddings to get probabilities (same as predict())
             probs = (100.0 * img_features @ clf.txt_embeddings).softmax(dim=-1)
             probs = probs.cpu().numpy().flatten()
-
-            # Build sorted predictions
-            ranked = sorted(zip(clf.classes, probs), key=lambda x: x[1], reverse=True)
-            results = []
-            for species, score in ranked:
-                score = float(score)
-                if score < threshold:
-                    continue
-                results.append(
-                    {
-                        "species": species,
-                        "score": score,
-                        "auto_tag": f"auto:{species}",
-                        "confidence_tag": f"auto:confidence:{score:.2f}",
-                    }
-                )
-            return results, embedding
+            return self._build_custom_results(probs, threshold), embedding
         else:
             # TreeOfLife mode — predictions include full taxonomy
-            raw_preds = clf.predict(image_path, self._rank)
+            raw_preds = clf.predict(image, self._rank)
             results = []
             for pred in raw_preds:
                 species = pred.get("common_name") or pred.get("species", "")
@@ -216,7 +225,6 @@ class Classifier:
                     "auto_tag": f"auto:{species}",
                     "confidence_tag": f"auto:confidence:{score:.2f}",
                 }
-                # TreeOfLife predictions include taxonomy fields
                 taxonomy = {}
                 for rank in ("kingdom", "phylum", "class", "order", "family", "genus"):
                     if rank in pred and pred[rank]:
@@ -227,3 +235,39 @@ class Classifier:
                     result["taxonomy"] = taxonomy
                 results.append(result)
             return results, embedding
+
+    def classify_batch_with_embedding(self, images, threshold=0.4):
+        """Classify multiple PIL images in a single forward pass.
+
+        Only supported in custom labels mode. TreeOfLife mode falls back to
+        single-image processing.
+
+        Args:
+            images: list of PIL Images
+            threshold: minimum confidence to include
+
+        Returns:
+            list of (predictions, embedding) tuples
+        """
+        if self._mode != "custom":
+            return [self.classify_with_embedding(img, threshold) for img in images]
+
+        import numpy as np
+
+        clf = self._classifier
+
+        # Batch encode — bioclip's create_image_features handles
+        # preprocessing, stacking, and model.encode_image in one call
+        rgb_images = [img.convert("RGB") for img in images]
+        all_features = clf.create_image_features(rgb_images, normalize=True)
+        embeddings = all_features.cpu().numpy().astype(np.float32)
+
+        # Batch dot product with text embeddings
+        all_probs = (100.0 * all_features @ clf.txt_embeddings).softmax(dim=-1)
+        all_probs = all_probs.cpu().numpy()
+
+        results = []
+        for i in range(len(images)):
+            preds = self._build_custom_results(all_probs[i], threshold)
+            results.append((preds, embeddings[i].flatten()))
+        return results

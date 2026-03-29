@@ -331,19 +331,132 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     return detection_map, detected
 
 
+_BATCH_SIZE = 16
+
+
+def _prepare_image(photo, folders, detection_map):
+    """Load, crop, and resize a photo for classification.
+
+    Returns (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
+    """
+    from PIL import Image
+
+    folder_path = folders.get(photo["folder_id"], "")
+    image_path = os.path.join(folder_path, photo["filename"])
+
+    img = load_image(image_path, max_size=None)
+    if img is None:
+        return None, folder_path, image_path
+
+    # Crop to detected subject with padding
+    primary = detection_map.get(photo["id"])
+    if primary:
+        iw, ih = img.size
+        box = primary["box"]
+        pad_w = box["w"] * 0.2
+        pad_h = box["h"] * 0.2
+        x1 = max(0, int((box["x"] - pad_w) * iw))
+        y1 = max(0, int((box["y"] - pad_h) * ih))
+        x2 = min(iw, int((box["x"] + box["w"] + pad_w) * iw))
+        y2 = min(ih, int((box["y"] + box["h"] + pad_h) * ih))
+        crop = img.crop((x1, y1, x2, y2))
+        if crop.size[0] >= 50 and crop.size[1] >= 50:
+            img = crop
+
+    img.thumbnail((1024, 1024), Image.LANCZOS)
+    return img, folder_path, image_path
+
+
+def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
+    """Classify a batch of prepared images and append results.
+
+    Returns the number of failures within this batch.
+    """
+    from datetime import datetime as dt
+
+    images = [entry["img"] for entry in batch]
+    failed = 0
+
+    try:
+        if model_type == "timm":
+            batch_preds = clf.classify_batch(images, threshold=0)
+            batch_results = [(preds, None) for preds in batch_preds]
+        else:
+            batch_results = clf.classify_batch_with_embedding(images, threshold=0)
+    except Exception:
+        log.warning("Batch classification failed, falling back to single-image", exc_info=True)
+        batch_results = []
+        for entry in batch:
+            try:
+                if model_type == "timm":
+                    preds = clf.classify(entry["img"], threshold=0)
+                    batch_results.append((preds, None))
+                else:
+                    preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
+                    batch_results.append((preds, emb))
+            except Exception:
+                log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
+                batch_results.append(None)
+                failed += 1
+
+    for entry, result in zip(batch, batch_results, strict=True):
+        if result is None:
+            continue
+        all_preds, embedding = result
+
+        if embedding is not None:
+            db.store_photo_embedding(
+                entry["photo"]["id"], embedding.tobytes(), model=model_name
+            )
+
+        if not all_preds:
+            continue
+
+        top = all_preds[0]
+        log.info(
+            '%s: "%s" at %.0f%%',
+            entry["photo"]["filename"],
+            top["species"],
+            top["score"] * 100,
+        )
+
+        timestamp = None
+        if entry["photo"]["timestamp"]:
+            try:
+                timestamp = dt.fromisoformat(entry["photo"]["timestamp"])
+            except Exception:
+                pass
+
+        raw_results.append(
+            {
+                "photo": entry["photo"],
+                "folder_path": entry["folder_path"],
+                "image_path": entry["image_path"],
+                "prediction": top["species"],
+                "confidence": top["score"],
+                "timestamp": timestamp,
+                "filename": entry["photo"]["filename"],
+                "embedding": embedding,
+                "taxonomy": top.get("taxonomy"),
+            }
+        )
+
+    return failed
+
+
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
     model_name, runner, job, db,
 ):
-    """Classify each photo, cropping to detected subject when available.
+    """Classify photos in batches, cropping to detected subject when available.
+
+    Images are passed directly to classifiers as PIL objects (no temp file I/O).
+    Multiple images are batched into a single forward pass for throughput.
 
     Returns:
         (raw_results, failed_count, skipped_existing_count)
     """
-    import tempfile
     from datetime import datetime as dt
-
-    from PIL import Image
 
     if load_image is None:
         raise ImportError("image_loader module is required for classification")
@@ -352,13 +465,11 @@ def _classify_photos(
     failed = 0
     skipped_existing = 0
     total = len(photos)
+    batch = []
 
     start_time = time.time()
 
     for i, photo in enumerate(photos):
-        folder_path = folders.get(photo["folder_id"], "")
-        image_path = os.path.join(folder_path, photo["filename"])
-
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
         runner.push_event(
@@ -373,7 +484,14 @@ def _classify_photos(
             },
         )
 
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+
         if photo["id"] in existing_preds:
+            # Flush pending batch to preserve photo ordering in raw_results
+            if batch:
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                batch = []
             skipped_existing += 1
             pred_row = db.get_prediction_for_photo(photo["id"], model_name)
             if pred_row:
@@ -406,83 +524,25 @@ def _classify_photos(
                 )
             continue
 
-        img = load_image(image_path, max_size=None)
+        img, folder_path, image_path = _prepare_image(photo, folders, detection_map)
         if img is None:
             failed += 1
             continue
 
-        # Crop to detected subject with padding
-        primary = detection_map.get(photo["id"])
-        if primary:
-            iw, ih = img.size
-            box = primary["box"]
-            pad_w = box["w"] * 0.2
-            pad_h = box["h"] * 0.2
-            x1 = max(0, int((box["x"] - pad_w) * iw))
-            y1 = max(0, int((box["y"] - pad_h) * ih))
-            x2 = min(iw, int((box["x"] + box["w"] + pad_w) * iw))
-            y2 = min(ih, int((box["y"] + box["h"] + pad_h) * ih))
-            crop = img.crop((x1, y1, x2, y2))
-            if crop.size[0] >= 50 and crop.size[1] >= 50:
-                img = crop
+        batch.append({
+            "photo": photo,
+            "folder_path": folder_path,
+            "image_path": image_path,
+            "img": img,
+        })
 
-        img.thumbnail((1024, 1024), Image.LANCZOS)
+        if len(batch) >= _BATCH_SIZE:
+            failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+            batch = []
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp_path = tmp.name
-            img.save(tmp_path, quality=85)
-
-        try:
-            if model_type == "timm":
-                all_preds = clf.classify(tmp_path, threshold=0)
-                embedding = None
-            else:
-                all_preds, embedding = clf.classify_with_embedding(
-                    tmp_path, threshold=0
-                )
-        except Exception:
-            log.warning(
-                "Classification failed for %s", photo["filename"], exc_info=True
-            )
-            failed += 1
-            continue
-        finally:
-            os.unlink(tmp_path)
-
-        if embedding is not None:
-            db.store_photo_embedding(photo["id"], embedding.tobytes(), model=model_name)
-
-        if not all_preds:
-            continue
-
-        top = all_preds[0]
-        log.info(
-            '%s: "%s" at %.0f%%',
-            photo["filename"],
-            top["species"],
-            top["score"] * 100,
-        )
-
-        timestamp = None
-        if photo["timestamp"]:
-            try:
-                timestamp = dt.fromisoformat(photo["timestamp"])
-            except Exception:
-                pass
-
-        raw_results.append(
-            {
-                "photo": photo,
-                "folder_path": folder_path,
-                "image_path": image_path,
-                "prediction": top["species"],
-                "confidence": top["score"],
-                "timestamp": timestamp,
-                "filename": photo["filename"],
-                "embedding": embedding,
-                "taxonomy": top.get("taxonomy"),
-            }
-        )
+    # Flush remaining images
+    if batch:
+        failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
 
     return raw_results, failed, skipped_existing
 
