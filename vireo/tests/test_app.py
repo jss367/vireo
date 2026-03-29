@@ -881,3 +881,26 @@ def test_delete_keyword_queues_sidecar_removals(app_and_db):
     assert any(c["change_type"] == "keyword_remove" and c["value"] == "ToDelete" for c in changes)
     # Keyword should be gone
     assert db.conn.execute("SELECT id FROM keywords WHERE id = ?", (kid,)).fetchone() is None
+
+
+def test_rename_with_invalid_type_queues_nothing(app_and_db):
+    """PUT with invalid type + name returns 400 and queues no sidecar changes."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("StableKeyword")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "Renamed", "type": "invalid"})
+    assert resp.status_code == 400
+
+    # No sidecar changes should have been queued
+    count = db.conn.execute(
+        "SELECT COUNT(*) as cnt FROM pending_changes WHERE photo_id = ?", (p1,)
+    ).fetchone()["cnt"]
+    assert count == 0
+    # Keyword name should be unchanged
+    row = db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["name"] == "StableKeyword"

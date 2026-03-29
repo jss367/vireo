@@ -668,37 +668,48 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_update_keyword(keyword_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
+        # Capture old name before update for sidecar queuing
         new_name = body.get("name")
+        old_name = None
         if new_name:
-            # Queue sidecar updates for all photos tagged with this keyword
             old_row = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
             ).fetchone()
             if old_row and old_row["name"] != new_name:
-                photo_ids = db.conn.execute(
-                    "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
-                    (keyword_id,),
-                ).fetchall()
-                for row in photo_ids:
-                    _queue_keyword_remove(row["photo_id"], old_row["name"])
-                    _queue_keyword_add(row["photo_id"], new_name)
+                old_name = old_row["name"]
+        # Apply the update first — if it raises, no sidecar changes are queued
         try:
             db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
+        # Queue sidecar updates only after successful DB update, scoped to active workspace
+        if old_name:
+            photo_ids = db.conn.execute(
+                """SELECT pk.photo_id FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id = ? AND wf.workspace_id = ?""",
+                (keyword_id, db._ws_id()),
+            ).fetchall()
+            for row in photo_ids:
+                _queue_keyword_remove(row["photo_id"], old_name)
+                _queue_keyword_add(row["photo_id"], new_name)
         return jsonify({"ok": True})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
         db = _get_db()
-        # Queue sidecar removals for all photos tagged with this keyword
+        # Queue sidecar removals scoped to the active workspace
         kw_row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if kw_row:
             photo_ids = db.conn.execute(
-                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
-                (keyword_id,),
+                """SELECT pk.photo_id FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE pk.keyword_id = ? AND wf.workspace_id = ?""",
+                (keyword_id, db._ws_id()),
             ).fetchall()
             for row in photo_ids:
                 _queue_keyword_remove(row["photo_id"], kw_row["name"])
