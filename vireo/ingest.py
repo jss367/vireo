@@ -13,7 +13,7 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
-def build_destination_path(exif_timestamp, template="%Y/%m/%d"):
+def build_destination_path(exif_timestamp, template="%Y/%m-%d"):
     """Build relative destination folder path from EXIF timestamp.
 
     Args:
@@ -63,7 +63,7 @@ def ingest(
     destination_dir,
     db,
     file_types="both",
-    folder_template="%Y/%m/%d",
+    folder_template="%Y/%m-%d",
     skip_duplicates=True,
     progress_callback=None,
 ):

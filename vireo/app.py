@@ -3235,7 +3235,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m/%d")
+        folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
 
         if not source or not destination:
@@ -3305,7 +3305,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m/%d")
+        folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
 
         if not source or not destination:
