@@ -289,8 +289,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # First pass: determine which files need full processing (for incremental mode).
     # Handle XMP-only changes inline; collect files needing metadata extraction.
-    files_to_process = []  # list of (index, image_path) tuples
-    for i, image_path in enumerate(image_files):
+    files_to_process = []
+    processed_count = 0
+    for image_path in image_files:
         stat = image_path.stat()
         file_mtime = stat.st_mtime
         xmp_path = image_path.with_suffix(".xmp")
@@ -304,8 +305,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
 
                 if file_unchanged and xmp_unchanged:
+                    processed_count += 1
                     if progress_callback:
-                        progress_callback(i + 1, total)
+                        progress_callback(processed_count, total)
                     continue
 
                 # XMP changed: re-import keywords
@@ -318,17 +320,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     db.conn.commit()
 
                 if file_unchanged:
+                    processed_count += 1
                     if progress_callback:
-                        progress_callback(i + 1, total)
+                        progress_callback(processed_count, total)
                     continue
 
-        files_to_process.append((i, image_path))
+        files_to_process.append(image_path)
 
     # Batch extract metadata via ExifTool only for files that need processing
-    paths_to_extract = [str(ip) for _, ip in files_to_process]
+    paths_to_extract = [str(ip) for ip in files_to_process]
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
 
-    for i, image_path in files_to_process:
+    for image_path in files_to_process:
         folder_id = _ensure_folder(image_path.parent)
 
         # File stats
@@ -348,6 +351,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
         # Dimensions from ExifTool (works for all file types including RAW)
         width, height = _extract_dimensions(exif_group, file_group)
+
+        # Fallback to Pillow if ExifTool didn't provide dimensions
+        if width is None or height is None:
+            try:
+                with Image.open(str(image_path)) as img:
+                    width, height = img.size
+            except Exception:
+                log.debug("Could not read dimensions from %s", image_path)
 
         # Timestamp from ExifTool
         timestamp = _extract_timestamp(exif_group)
@@ -431,8 +442,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
 
+        processed_count += 1
         if progress_callback:
-            progress_callback(i + 1, total)
+            progress_callback(processed_count, total)
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path
     _pair_raw_jpeg_companions(db)
