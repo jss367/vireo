@@ -922,8 +922,11 @@ function renderKeywordTree(keywords) {
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
       var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
       var activeClass = activeKeyword === k.name ? ' active' : '';
+      var treeTypeIcons = {general:'',taxonomy:'🌿',location:'📍',descriptive:'◆',people:'👤',event:'📅'};
+      var tIcon = treeTypeIcons[k.type] || '';
       html += '<div class="tree-item' + activeClass + '" onclick="filterByKeyword(\'' + escapeAttr(k.name) + '\')">' +
         indent + toggle +
+        (tIcon ? '<span style="font-size:10px;margin-right:3px;opacity:0.7">' + tIcon + '</span>' : '') +
         '<span>' + escapeHtml(k.name) + '</span>' +
       '</div>';
       if (hasChildren) {
