@@ -304,6 +304,46 @@ body {
   font-weight: bold;
 }
 .keyword-tag .remove-kw:hover { color: var(--danger, #e74c3c); }
+.keyword-type-indicator {
+  display: inline-block;
+  font-size: 10px;
+  opacity: 0.7;
+  cursor: pointer;
+  position: relative;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+.keyword-type-indicator:hover { opacity: 1; }
+.keyword-type-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  background: var(--bg-secondary, #0B2636);
+  border: 1px solid var(--border-secondary, #1A4560);
+  border-radius: 4px;
+  z-index: 1000;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  padding: 4px 0;
+}
+.keyword-type-dropdown.open { display: block; }
+.keyword-type-option {
+  display: block;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-secondary, #B0CCCC);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.keyword-type-option:hover {
+  background: var(--bg-tertiary, #14374E);
+  color: var(--text-primary, #E0F0F0);
+}
+.keyword-type-option.active {
+  color: var(--accent, #24E5CA);
+  font-weight: bold;
+}
 .add-kw-input {
   background: var(--bg-tertiary, #14374E);
   color: var(--text-primary, #E0F0F0);
@@ -1656,9 +1696,21 @@ function renderDetail(photo) {
   else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
 
   // Keywords
+  var kwTypeIcons = {general:'●', taxonomy:'🌿', location:'📍', descriptive:'◆', people:'👤', event:'📅'};
+  var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', location:'Location', descriptive:'Descriptive', people:'People', event:'Event'};
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
-    kwHtml += '<span class="keyword-tag">' + escapeHtml(k.name) +
+    var ktype = k.type || 'general';
+    var icon = kwTypeIcons[ktype] || '●';
+    var dropdownHtml = '<div class="keyword-type-dropdown" data-kw-id="' + k.id + '">';
+    Object.keys(kwTypeIcons).forEach(function(t) {
+      var activeClass = t === ktype ? ' active' : '';
+      dropdownHtml += '<span class="keyword-type-option' + activeClass + '" onclick="setKeywordType(' + k.id + ',\'' + t + '\',this)">' + kwTypeIcons[t] + ' ' + kwTypeLabels[t] + '</span>';
+    });
+    dropdownHtml += '</div>';
+    kwHtml += '<span class="keyword-tag">' +
+      '<span class="keyword-type-indicator" onclick="toggleTypeDropdown(this,' + k.id + ')" title="Type: ' + kwTypeLabels[ktype] + '">' + icon + dropdownHtml + '</span>' +
+      escapeHtml(k.name) +
       '<span class="remove-kw" onclick="removeKeyword(' + photo.id + ',' + k.id + ')">&times;</span></span>';
   });
   document.getElementById('detailKeywords').innerHTML = kwHtml;
@@ -1769,7 +1821,40 @@ async function removeKeyword(photoId, keywordId) {
   } catch(e) {}
 }
 
+/* ---------- Keyword Type Dropdown ---------- */
+function toggleTypeDropdown(indicator, kwId) {
+  // Close all other open dropdowns first
+  document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+    if (dd.dataset.kwId !== String(kwId)) dd.classList.remove('open');
+  });
+  var dropdown = indicator.querySelector('.keyword-type-dropdown');
+  if (dropdown) dropdown.classList.toggle('open');
+}
 
+async function setKeywordType(kwId, newType, el) {
+  try {
+    await safeFetch('/api/keywords/' + kwId, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: newType }),
+    });
+    // Close dropdown
+    var dropdown = el.closest('.keyword-type-dropdown');
+    if (dropdown) dropdown.classList.remove('open');
+    // Refresh detail panel and keyword sidebar
+    if (selectedPhotoId) loadDetail(selectedPhotoId);
+    loadKeywords();
+  } catch(e) {}
+}
+
+// Close keyword type dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.keyword-type-indicator')) {
+    document.querySelectorAll('.keyword-type-dropdown.open').forEach(function(dd) {
+      dd.classList.remove('open');
+    });
+  }
+});
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {
