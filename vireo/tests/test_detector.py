@@ -34,7 +34,7 @@ def test_megadetector_loads_after_bioclip():
 
     # Phase 1: Import BioCLIP (same as classify job phase 3)
     try:
-        pass
+        import classifier  # noqa: F401
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 
@@ -72,7 +72,7 @@ def test_megadetector_loads_with_force_weights_only_env():
         pytest.skip("torch not installed")
 
     try:
-        pass
+        import classifier  # noqa: F401
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 

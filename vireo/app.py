@@ -620,6 +620,8 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         rating = body.get("rating", 0)
+        if not isinstance(rating, int) or rating < 0 or rating > 5:
+            return json_error("rating must be an integer 0-5")
         old = db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
         db.update_photo_rating(photo_id, rating)
@@ -633,6 +635,8 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         flag = body.get("flag", "none")
+        if flag not in ("none", "flagged", "rejected"):
+            return json_error("flag must be 'none', 'flagged', or 'rejected'")
         old = db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
         db.update_photo_flag(photo_id, flag)
@@ -741,6 +745,8 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         rating = body.get("rating", 0)
+        if not isinstance(rating, int) or rating < 0 or rating > 5:
+            return json_error("rating must be an integer 0-5")
         if not photo_ids:
             return json_error("photo_ids required")
         old_values = {}
@@ -761,6 +767,8 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         flag = body.get("flag", "none")
+        if flag not in ("none", "flagged", "rejected"):
+            return json_error("flag must be 'none', 'flagged', or 'rejected'")
         if not photo_ids:
             return json_error("photo_ids required")
         old_values = {}
@@ -5133,16 +5141,16 @@ def main():
         from db import Database
         from taxonomy import fetch_common_names, load_taxonomy, seed_informal_groups
         db = Database(args.db)
-        print("Loading taxonomy tree from iNaturalist...")
+        log.info("Loading taxonomy tree from iNaturalist...")
         stats = load_taxonomy(db)
-        print(f"  Taxonomy: {stats['loaded']} taxa loaded, {stats['skipped']} skipped")
-        print("Fetching common names from iNat API (this may take a few minutes)...")
+        log.info("  Taxonomy: %d taxa loaded, %d skipped", stats['loaded'], stats['skipped'])
+        log.info("Fetching common names from iNat API (this may take a few minutes)...")
         cn_stats = fetch_common_names(db)
-        print(f"  Common names: {cn_stats['updated']} taxa updated")
-        print("Seeding informal groups...")
+        log.info("  Common names: %d taxa updated", cn_stats['updated'])
+        log.info("Seeding informal groups...")
         ig_stats = seed_informal_groups(db)
-        print(f"  Informal groups: {ig_stats['groups_created']} groups created")
-        print("Done.")
+        log.info("  Informal groups: %d groups created", ig_stats['groups_created'])
+        log.info("Done.")
         raise SystemExit(0)
 
     # Resolve port: --port 0 means pick a random free port
