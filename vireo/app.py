@@ -3257,11 +3257,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 progress_callback=ingest_cb,
             )
 
-            # Phase 2: Scan destination to index into DB
-            max_id_before = thread_db.conn.execute(
-                "SELECT COALESCE(MAX(id), 0) FROM photos"
-            ).fetchone()[0]
+            # Track hashes of files actually copied
+            copied_hashes = ingest_result.get("copied_hashes", [])
 
+            # Phase 2: Scan destination to index into DB
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3294,11 +3293,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 progress_callback=thumb_cb,
             )
 
-            # Phase 4: Create collection from newly imported photos
-            new_photos = thread_db.conn.execute(
-                "SELECT id FROM photos WHERE id > ?", (max_id_before,)
-            ).fetchall()
-            photo_ids = [p["id"] for p in new_photos]
+            # Phase 4: Create collection from files actually copied
+            photo_ids = []
+            if copied_hashes:
+                placeholders = ",".join("?" * len(copied_hashes))
+                rows = thread_db.conn.execute(
+                    f"SELECT id FROM photos WHERE file_hash IN ({placeholders})",
+                    copied_hashes,
+                ).fetchall()
+                photo_ids = [r["id"] for r in rows]
 
             collection_id = None
             collection_name = None

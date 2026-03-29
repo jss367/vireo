@@ -95,6 +95,7 @@ def ingest(
     copied = 0
     skipped_duplicate = 0
     failed = 0
+    copied_hashes = []
 
     for i, source_file in enumerate(files):
         try:
@@ -142,6 +143,7 @@ def ingest(
 
             shutil.copy2(str(source_file), str(dest_file))
             known_hashes.add(file_hash)
+            copied_hashes.append(file_hash)
             copied += 1
 
         except Exception as e:
@@ -156,4 +158,5 @@ def ingest(
         "skipped_duplicate": skipped_duplicate,
         "failed": failed,
         "total": total,
+        "copied_hashes": copied_hashes,
     }
