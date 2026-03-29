@@ -148,19 +148,37 @@ jobs:
             libayatana-appindicator3-dev
 
       # ── Tauri build ───────────────────────────────────────
-      - name: Build Tauri app
+      # Try with Apple signing on macOS. If it fails, fall back to unsigned.
+      - name: Build Tauri app (with signing)
+        id: tauri-signed
+        if: runner.os == 'macOS'
+        continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing (optional — builds succeed without these)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tauriScript: npx tauri
+          args: --target ${{ matrix.rust-target }}
+
+      - name: Warn if signing failed
+        if: steps.tauri-signed.outcome == 'failure'
+        run: echo "::warning::macOS code signing failed — building unsigned. Users will need to right-click > Open on first launch."
+
+      - name: Build Tauri app (unsigned fallback)
+        if: steps.tauri-signed.outcome == 'failure' || steps.tauri-signed.outcome == 'skipped'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
