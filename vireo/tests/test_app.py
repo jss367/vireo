@@ -782,3 +782,36 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
         assert overrides["classification_threshold"] == 0.5
         # Non-whitelisted key preserved
         assert overrides["active_labels"] == ["/path/to/birds.txt"]
+
+
+def test_update_keyword_type(app_and_db):
+    """PUT /api/keywords/<id> updates keyword type."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Tim")
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "people"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["type"] == "people"
+
+
+def test_update_keyword_type_invalid(app_and_db):
+    """PUT /api/keywords/<id> rejects invalid types."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("test")
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "invalid_type"})
+    assert resp.status_code == 400
+
+
+def test_update_keyword_name(app_and_db):
+    """PUT /api/keywords/<id> can rename a keyword."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("old_name")
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "new_name"})
+    assert resp.status_code == 200
+    row = db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
+    assert row["name"] == "new_name"

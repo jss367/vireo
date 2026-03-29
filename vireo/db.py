@@ -1441,6 +1441,21 @@ class Database:
             (photo_id,),
         ).fetchall()
 
+    VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
+
+    def update_keyword(self, keyword_id, **kwargs):
+        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name."""
+        if 'type' in kwargs and kwargs['type'] not in self.VALID_KEYWORD_TYPES:
+            raise ValueError(f"Invalid keyword type: {kwargs['type']}")
+        allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [keyword_id]
+        self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
+        self.conn.commit()
+
     # -- Predictions --
 
     def add_prediction(

@@ -654,6 +654,16 @@ def create_app(db_path, thumb_cache_dir=None):
                        [{'photo_id': photo_id, 'old_value': str(keyword_id), 'new_value': ''}])
         return jsonify({"ok": True})
 
+    @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
+    def api_update_keyword(keyword_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        try:
+            db.update_keyword(keyword_id, **body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify({"ok": True})
+
     # -- Batch operations --
 
     @app.route("/api/batch/rating", methods=["POST"])
