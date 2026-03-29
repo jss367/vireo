@@ -1,5 +1,5 @@
 /* Vireo Base — shared reset, typography, and component classes.
-   Theme variables (--bg-primary, --accent, etc.) are defined in _navbar.html
+   Theme variables (--bg-primary, --accent, etc.) are defined in vireo-theme.css
    and available on :root in all pages. */
 
 /* ---------- Reset ---------- */
