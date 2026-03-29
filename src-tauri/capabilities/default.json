@@ -24,6 +24,7 @@
     "process:allow-restart",
     "core:tray:default",
     "core:tray:allow-set-icon",
-    "core:tray:allow-set-tooltip"
+    "core:tray:allow-set-tooltip",
+    "opener:allow-open-url"
   ]
 }
