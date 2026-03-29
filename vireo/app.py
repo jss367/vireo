@@ -677,6 +677,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
         db = _get_db()
+        db.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
         db.conn.commit()

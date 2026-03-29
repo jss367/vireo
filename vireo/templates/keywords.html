@@ -301,10 +301,10 @@
 
       return '<tr data-id="' + k.id + '">' +
         '<td class="cb-cell"><input type="checkbox" class="kw-cb" data-id="' + k.id + '" ' + checked + '></td>' +
-        '<td class="kw-name-cell"><span class="name-text" data-id="' + k.id + '">' + escHtml(k.name) + '</span></td>' +
+        '<td class="kw-name-cell"><span class="name-text" data-id="' + k.id + '">' + escapeHtml(k.name) + '</span></td>' +
         '<td><span class="kw-type-badge type-' + t + '" data-id="' + k.id + '" data-type="' + t + '">' + icon + ' ' + t + '</span></td>' +
-        '<td><span class="kw-parent">' + escHtml(parentName) + '</span></td>' +
-        '<td><span class="kw-taxon">' + escHtml(taxonStr) + '</span></td>' +
+        '<td><span class="kw-parent">' + escapeHtml(parentName) + '</span></td>' +
+        '<td><span class="kw-taxon">' + escapeHtml(taxonStr) + '</span></td>' +
         '<td>' + (k.photo_count || 0) + '</td>' +
         '<td><span class="kw-coords">' + coordStr + '</span></td>' +
         '</tr>';
@@ -312,11 +312,6 @@
     tbody.innerHTML = rows.join('');
     updateBulkBar();
     updateSelectAllCheckbox();
-  }
-
-  function escHtml(s) {
-    if (!s) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   // -- Search & filter --
@@ -465,7 +460,7 @@
       committed = true;
       const newName = input.value.trim();
       if (newName && newName !== oldName) {
-        renamKeyword(kwId, newName);
+        renameKeyword(kwId, newName);
       } else {
         render();
       }
@@ -482,7 +477,7 @@
     });
   });
 
-  async function renamKeyword(kwId, newName) {
+  async function renameKeyword(kwId, newName) {
     try {
       await fetch('/api/keywords/' + kwId, {
         method: 'PUT',

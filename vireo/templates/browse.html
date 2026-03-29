@@ -913,6 +913,7 @@ function renderKeywordTree(keywords) {
     byParent[pid].push(k);
   });
 
+  var treeTypeIcons = {general:'',taxonomy:'🌿',location:'📍',descriptive:'◆',people:'👤',event:'📅'};
   function buildTree(parentId, depth) {
     var children = byParent[parentId] || [];
     var html = '';
@@ -922,7 +923,6 @@ function renderKeywordTree(keywords) {
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
       var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
       var activeClass = activeKeyword === k.name ? ' active' : '';
-      var treeTypeIcons = {general:'',taxonomy:'🌿',location:'📍',descriptive:'◆',people:'👤',event:'📅'};
       var tIcon = treeTypeIcons[k.type] || '';
       html += '<div class="tree-item' + activeClass + '" onclick="filterByKeyword(\'' + escapeAttr(k.name) + '\')">' +
         indent + toggle +
