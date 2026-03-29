@@ -171,7 +171,7 @@ class Classifier:
         self,
         labels=None,
         model_str="ViT-B-16",
-        pretrained_str="/tmp/bioclip_model/open_clip_pytorch_model.bin",
+        pretrained_str=None,  # kept for backward compatibility, not used
         embedding_progress_callback=None,
     ):
         # Resolve model directory
