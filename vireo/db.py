@@ -1709,21 +1709,23 @@ class Database:
 
     # -- Pending Changes --
 
-    def queue_change(self, photo_id, change_type, value):
+    def queue_change(self, photo_id, change_type, value, workspace_id=None):
         """Add a change to the sync queue (skips if already queued).
 
         Returns the inserted pending change token, or None if an identical row already exists.
+        If workspace_id is not provided, uses the active workspace.
         """
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing = self.conn.execute(
             "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
-            (photo_id, change_type, value, self._ws_id()),
+            (photo_id, change_type, value, ws_id),
         ).fetchone()
         if existing:
             return None
         change_token = str(uuid.uuid4())
         self.conn.execute(
             "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
-            (photo_id, change_type, value, change_token, self._ws_id()),
+            (photo_id, change_type, value, change_token, ws_id),
         )
         self.conn.commit()
         return change_token
@@ -1735,10 +1737,11 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def remove_pending_changes(self, photo_id, change_type=None, value=None):
+    def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None):
         """Delete matching pending changes. Returns rows removed."""
+        ws_id = workspace_id if workspace_id is not None else self._ws_id()
         clauses = ["photo_id = ?", "workspace_id = ?"]
-        params = [photo_id, self._ws_id()]
+        params = [photo_id, ws_id]
         if change_type is not None:
             clauses.append("change_type = ?")
             params.append(change_type)
