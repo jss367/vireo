@@ -102,19 +102,27 @@ if [ -z "$DMG_PATH" ]; then
 fi
 
 echo "Submitting $DMG_PATH for notarization..."
-xcrun notarytool submit "$DMG_PATH" \
+if xcrun notarytool submit "$DMG_PATH" \
     --apple-id "$APPLE_ID" \
     --password "$APPLE_PASSWORD" \
     --team-id "$APPLE_TEAM_ID" \
-    --wait
+    --wait; then
 
-echo ""
-echo "Stapling notarization ticket to DMG..."
-xcrun stapler staple "$DMG_PATH"
+    echo ""
+    echo "Stapling notarization ticket to DMG..."
+    xcrun stapler staple "$DMG_PATH"
 
-echo ""
-echo "=== Done ==="
-echo "Signed and notarized DMG: $DMG_PATH"
-echo ""
-echo "Verification:"
-spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+    echo ""
+    echo "=== Done ==="
+    echo "Signed and notarized DMG: $DMG_PATH"
+    echo ""
+    echo "Verification:"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
+else
+    echo ""
+    echo "WARNING: Notarization failed. The DMG is signed but NOT notarized."
+    echo "         Users will need to right-click > Open on first launch."
+    echo ""
+    echo "=== Done (without notarization) ==="
+    echo "Signed DMG: $DMG_PATH"
+fi
