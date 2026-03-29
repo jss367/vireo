@@ -1,14 +1,16 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
 import hashlib
+import json
 import logging
 import os
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 import imagehash
-from grouping import read_exif_timestamp
-from image_loader import IMAGE_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import SUPPORTED_EXTENSIONS
+from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
@@ -49,6 +51,48 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         if kw not in existing_kw_names:
             kid = db.add_keyword(kw)
             db.tag_photo(photo_id, kid)
+
+
+def _extract_dimensions(exif_group, file_group):
+    """Extract width and height from ExifTool metadata groups.
+
+    Priority:
+    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight (actual image dimensions for JPEGs)
+    2. EXIF:ImageWidth / EXIF:ImageHeight
+    3. File:ImageWidth / File:ImageHeight
+    """
+    width = exif_group.get("ExifImageWidth")
+    if width is None:
+        width = exif_group.get("ImageWidth")
+    if width is None:
+        width = file_group.get("ImageWidth")
+    height = exif_group.get("ExifImageHeight")
+    if height is None:
+        height = exif_group.get("ImageHeight")
+    if height is None:
+        height = file_group.get("ImageHeight")
+    if width is not None:
+        width = int(width)
+    if height is not None:
+        height = int(height)
+    return width, height
+
+
+def _extract_timestamp(exif_group):
+    """Extract and normalize timestamp from ExifTool EXIF group.
+
+    Checks EXIF:DateTimeOriginal first, then EXIF:CreateDate.
+    Returns ISO format string or None.
+    """
+    dto = exif_group.get("DateTimeOriginal") or exif_group.get("CreateDate")
+    if not dto:
+        return None
+    try:
+        dt = datetime.strptime(str(dto), "%Y:%m:%d %H:%M:%S")
+        return dt.isoformat()
+    except (ValueError, TypeError):
+        log.debug("Unparseable EXIF timestamp dropped: %r", dto)
+        return None
 
 
 def _pair_raw_jpeg_companions(db):
@@ -180,7 +224,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -188,6 +232,7 @@ def scan(root, db, progress_callback=None, incremental=False):
         db: Database instance
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
+        extract_full_metadata: if True, store full ExifTool JSON in exif_data column
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -242,21 +287,16 @@ def scan(root, db, progress_callback=None, incremental=False):
         folder_cache[folder_str] = folder_id
         return folder_id
 
-    for i, image_path in enumerate(image_files):
-        folder_id = _ensure_folder(image_path.parent)
-
-        # File stats
+    # First pass: determine which files need full processing (for incremental mode).
+    # Handle XMP-only changes inline; collect files needing metadata extraction.
+    files_to_process = []
+    processed_count = 0
+    for image_path in image_files:
         stat = image_path.stat()
-        file_size = stat.st_size
         file_mtime = stat.st_mtime
-
-        # XMP sidecar
         xmp_path = image_path.with_suffix(".xmp")
-        xmp_mtime = None
-        if xmp_path.exists():
-            xmp_mtime = xmp_path.stat().st_mtime
+        xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
 
-        # Incremental: check if file needs processing
         if incremental:
             full_path_str = str(image_path)
             existing = existing_by_path.get(full_path_str)
@@ -265,8 +305,9 @@ def scan(root, db, progress_callback=None, incremental=False):
                 xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
 
                 if file_unchanged and xmp_unchanged:
+                    processed_count += 1
                     if progress_callback:
-                        progress_callback(i + 1, total)
+                        progress_callback(processed_count, total)
                     continue
 
                 # XMP changed: re-import keywords
@@ -279,28 +320,68 @@ def scan(root, db, progress_callback=None, incremental=False):
                     db.conn.commit()
 
                 if file_unchanged:
+                    processed_count += 1
                     if progress_callback:
-                        progress_callback(i + 1, total)
+                        progress_callback(processed_count, total)
                     continue
 
-        # Read dimensions
-        width, height = None, None
-        try:
-            ext = image_path.suffix.lower()
-            if ext in SUPPORTED_EXTENSIONS and ext not in IMAGE_EXTENSIONS:
-                # RAW file — PIL only reads the thumbnail, use rawpy
-                import rawpy
+        files_to_process.append(image_path)
 
-                with rawpy.imread(str(image_path)) as raw:
-                    sizes = raw.sizes
-                    width, height = sizes.width, sizes.height
-            else:
+    # Batch extract metadata via ExifTool only for files that need processing
+    paths_to_extract = [str(ip) for ip in files_to_process]
+    metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+
+    for image_path in files_to_process:
+        folder_id = _ensure_folder(image_path.parent)
+
+        # File stats
+        stat = image_path.stat()
+        file_size = stat.st_size
+        file_mtime = stat.st_mtime
+
+        # XMP sidecar
+        xmp_path = image_path.with_suffix(".xmp")
+        xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+
+        # Get pre-extracted metadata for this file
+        file_meta = metadata_map.get(str(image_path), {})
+        file_group = file_meta.get("File", {})
+        exif_group = file_meta.get("EXIF", {})
+        composite = file_meta.get("Composite", {})
+
+        # Dimensions from ExifTool (works for all file types including RAW)
+        width, height = _extract_dimensions(exif_group, file_group)
+
+        # Fallback to Pillow if ExifTool didn't provide dimensions
+        if width is None or height is None:
+            try:
                 with Image.open(str(image_path)) as img:
                     width, height = img.size
-        except Exception:
-            log.debug("Could not read dimensions from %s", image_path)
+            except Exception:
+                log.debug("Could not read dimensions from %s", image_path)
 
-        # Compute perceptual hash
+        # Timestamp from ExifTool
+        timestamp = _extract_timestamp(exif_group)
+
+        # Focal length
+        focal_length = exif_group.get("FocalLength")
+        if focal_length is not None:
+            focal_length = float(focal_length)
+
+        # Burst ID (ImageUniqueID)
+        burst_id = exif_group.get("ImageUniqueID")
+        if burst_id:
+            burst_id = str(burst_id)
+
+        # GPS coordinates — ExifTool with -n gives decimal degrees directly
+        latitude = composite.get("GPSLatitude")
+        if latitude is None:
+            latitude = exif_group.get("GPSLatitude")
+        longitude = composite.get("GPSLongitude")
+        if longitude is None:
+            longitude = exif_group.get("GPSLongitude")
+
+        # Compute perceptual hash (computed, not from EXIF)
         phash = None
         try:
             with Image.open(str(image_path)) as img:
@@ -308,68 +389,13 @@ def scan(root, db, progress_callback=None, incremental=False):
         except Exception:
             log.debug("Could not compute pHash for %s", image_path)
 
-        # Read EXIF timestamp
-        timestamp = None
-        try:
-            dt = read_exif_timestamp(str(image_path))
-            if dt:
-                timestamp = dt.isoformat()
-        except Exception:
-            log.debug("Could not read EXIF timestamp from %s", image_path)
-
-        # Read EXIF focal length and burst/sequence ID
-        focal_length = None
-        burst_id = None
-        try:
-            with Image.open(str(image_path)) as img:
-                exif = img.getexif()
-                # FocalLength is EXIF tag 0x920A
-                fl = exif.get(0x920A)
-                if fl is not None:
-                    focal_length = float(fl)
-                # Check EXIF IFD for FocalLength if not in main IFD
-                if focal_length is None:
-                    exif_ifd = exif.get_ifd(0x8769)
-                    if exif_ifd:
-                        fl = exif_ifd.get(0x920A)
-                        if fl is not None:
-                            focal_length = float(fl)
-                # BurstMode / SequenceNumber from MakerNote varies by camera
-                # Try ImageUniqueID (0xA420) as a fallback burst grouping key
-                exif_ifd = exif.get_ifd(0x8769)
-                if exif_ifd:
-                    uid = exif_ifd.get(0xA420)  # ImageUniqueID
-                    if uid:
-                        burst_id = str(uid)
-        except Exception:
-            pass
-
-        # Read GPS coordinates
-        latitude, longitude = None, None
-        try:
-            with Image.open(str(image_path)) as img:
-                gps_info = img.getexif().get_ifd(0x8825)
-                if gps_info:
-                    lat = gps_info.get(2)  # GPSLatitude
-                    lat_ref = gps_info.get(1)  # N or S
-                    lng = gps_info.get(4)  # GPSLongitude
-                    lng_ref = gps_info.get(3)  # E or W
-                    if lat and lng:
-                        latitude = lat[0] + lat[1] / 60 + lat[2] / 3600
-                        longitude = lng[0] + lng[1] / 60 + lng[2] / 3600
-                        if lat_ref == "S":
-                            latitude = -latitude
-                        if lng_ref == "W":
-                            longitude = -longitude
-        except Exception:
-            pass
-
         # Compute file hash for duplicate detection
         file_hash = None
         try:
             file_hash = compute_file_hash(str(image_path))
         except Exception:
             log.debug("Could not compute file hash for %s", image_path)
+
 
         photo_id = db.add_photo(
             folder_id=folder_id,
@@ -383,7 +409,7 @@ def scan(root, db, progress_callback=None, incremental=False):
             height=height,
         )
 
-        # Store GPS, pHash, focal length, and burst ID if found
+        # Store GPS, pHash, focal length, burst ID, and exif_data
         updates = []
         update_params = []
         if latitude is not None:
@@ -401,6 +427,9 @@ def scan(root, db, progress_callback=None, incremental=False):
         if file_hash is not None:
             updates.append("file_hash=?")
             update_params.append(file_hash)
+        if file_meta and extract_full_metadata:
+            updates.append("exif_data=?")
+            update_params.append(json.dumps(file_meta))
         if updates:
             update_params.append(photo_id)
             db.conn.execute(
@@ -413,8 +442,9 @@ def scan(root, db, progress_callback=None, incremental=False):
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
 
+        processed_count += 1
         if progress_callback:
-            progress_callback(i + 1, total)
+            progress_callback(processed_count, total)
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path
     _pair_raw_jpeg_companions(db)

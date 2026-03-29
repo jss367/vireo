@@ -251,6 +251,37 @@ def test_api_species_empty(app_and_db):
     assert data['species'] == []
 
 
+def test_photo_detail_includes_metadata(app_and_db):
+    """GET /api/photos/<id> includes parsed metadata when exif_data is populated."""
+    app, db = app_and_db
+    import json
+
+    # Manually set exif_data on a photo
+    test_meta = {"EXIF": {"Make": "TestCam", "Model": "X100"}, "File": {"FileType": "JPEG"}}
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = 1",
+        (json.dumps(test_meta),),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/photos/1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "metadata" in data
+    assert data["metadata"]["EXIF"]["Make"] == "TestCam"
+
+
+def test_photo_detail_metadata_null_when_empty(app_and_db):
+    """GET /api/photos/<id> returns metadata as null when exif_data is not populated."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/photos/1')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data.get("metadata") is None
+
+
 def test_add_keyword_with_type_override(app_and_db):
     """POST /api/photos/<id>/keywords with type param sets keyword type in DB."""
     app, db = app_and_db

@@ -465,6 +465,17 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("not found", 404)
 
         result = dict(photo)
+
+        # Parse exif_data JSON into metadata field
+        raw_exif = result.pop("exif_data", None)
+        if raw_exif:
+            try:
+                result["metadata"] = json.loads(raw_exif)
+            except (ValueError, TypeError):
+                result["metadata"] = None
+        else:
+            result["metadata"] = None
+
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
@@ -3065,8 +3076,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
             do_scan(
-                root, thread_db, progress_callback=progress_cb, incremental=incremental
+                root, thread_db, progress_callback=progress_cb, incremental=incremental,
+                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
             )
             photo_count = job["progress"].get("total", 0)
 
