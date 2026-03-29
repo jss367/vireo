@@ -136,7 +136,7 @@ def nms(boxes, scores, iou_threshold=0.5):
         yy2 = np.minimum(y2[i], y2[order[1:]])
 
         inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
-        iou = inter / (areas[i] + areas[order[1:]] - inter)
+        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
 
         remaining = np.where(iou <= iou_threshold)[0]
         order = order[remaining + 1]
