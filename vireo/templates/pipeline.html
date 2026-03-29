@@ -829,7 +829,7 @@ async function runClassifyStep(collectionId) {
           collection_id: collectionId,
           model_id: model.id,
           labels_files: labelsFiles,
-          reclassify: false,
+          reclassify: !!document.getElementById('chkReclassify').checked,
         }),
       }, { toast: false });
 
@@ -865,9 +865,9 @@ async function runClassifyStep(collectionId) {
     }
   }
 
-  fill.style.width = '100%';
-  text.textContent = 'Complete';
   if (completed > 0) {
+    fill.style.width = '100%';
+    text.textContent = 'Complete';
     num.className = 'stage-num complete';
     status.textContent = 'Done!';
     status.className = 'status-msg ok';
