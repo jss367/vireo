@@ -653,11 +653,13 @@ def download_taxonomy(output_path, progress_callback=None):
         sci_key = taxon["scientific_name"].lower()
         taxa_by_scientific[sci_key] = entry
 
-    # Index preferred common names first so they always win
+    # Index preferred common names first so they always win.
+    # Keep the first mapping when two taxa share a preferred name.
     for taxon_id, cn in common_names.items():
         entry = entries_by_taxon.get(taxon_id)
-        if entry:
-            taxa_by_common[cn.lower()] = entry
+        cn_key = cn.lower()
+        if entry and cn_key not in taxa_by_common:
+            taxa_by_common[cn_key] = entry
 
     # Then index alternate names only for still-unmapped keys
     for taxon_id, names in alt_names.items():
