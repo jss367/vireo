@@ -1,19 +1,18 @@
 #!/bin/bash
-# Build a release and optionally publish to GitHub.
-#
-# The app is always code-signed so macOS won't reject it as "damaged".
-# If Apple Developer credentials are set, uses full signing + notarization
-# (no Gatekeeper warning at all). Otherwise, uses ad-hoc signing (users
-# see "from an unidentified developer" and can right-click → Open).
+# Release Vireo: bump version, tag, and let CI build all platforms.
 #
 # Usage:
-#   ./scripts/release.sh patch          # 0.2.1 -> 0.2.2
-#   ./scripts/release.sh minor          # 0.2.1 -> 0.3.0
-#   ./scripts/release.sh major          # 0.2.1 -> 1.0.0
-#   ./scripts/release.sh 0.5.0          # explicit version
-#   ./scripts/release.sh patch --publish # also upload to GitHub Release
+#   ./scripts/release.sh patch                # bump + local build (for testing)
+#   ./scripts/release.sh minor --publish      # bump + tag + push (CI builds all platforms)
+#   ./scripts/release.sh 0.5.0 --publish      # explicit version
 #
-# Optional environment variables (for full notarization):
+# With --publish, the script bumps the version, commits, tags, and pushes.
+# CI (build-release.yml) then builds macOS ARM64, macOS Intel, Windows, and
+# Linux, and creates a draft GitHub Release with all artifacts.
+#
+# Without --publish, a local build is done for testing on the current machine.
+#
+# Optional environment variables (for local signed builds):
 #   APPLE_SIGNING_IDENTITY  - e.g. "Developer ID Application: Name (TEAM_ID)"
 #   APPLE_ID                - Your Apple ID email
 #   APPLE_PASSWORD          - App-specific password for notarization
@@ -21,15 +20,6 @@
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-# --- Check if full signing credentials are available ---
-FULL_SIGNING=true
-for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-    if [ -z "${!var:-}" ]; then
-        FULL_SIGNING=false
-        break
-    fi
-done
 
 # --- Parse args ---
 BUMP="${1:?Usage: release.sh <patch|minor|major|X.Y.Z> [--publish]}"
@@ -58,54 +48,63 @@ echo "==> Syncing version..."
 python scripts/sync_version.py "$NEW_VERSION"
 echo ""
 
-# --- Build ---
-if $FULL_SIGNING; then
-    echo "==> Building with full signing and notarization..."
-    ./scripts/build_signed.sh
-else
-    echo "==> Building (ad-hoc signing — no Apple Developer credentials)..."
-    python scripts/build_sidecar.py
+# --- Local build (only when NOT publishing — CI handles publish builds) ---
+if ! $PUBLISH; then
+    # Check if full signing credentials are available
+    FULL_SIGNING=true
+    for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+        if [ -z "${!var:-}" ]; then
+            FULL_SIGNING=false
+            break
+        fi
+    done
 
-    BUILD_LOG=$(mktemp)
-    if ! cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
-        if grep -q "TAURI_SIGNING_PRIVATE_KEY" "$BUILD_LOG"; then
-            echo ""
-            echo "WARNING: Updater artifact signing skipped (TAURI_SIGNING_PRIVATE_KEY not set)."
-        else
-            echo "ERROR: cargo tauri build failed (see output above)"
-            rm -f "$BUILD_LOG"
+    if $FULL_SIGNING; then
+        echo "==> Building with full signing and notarization..."
+        ./scripts/build_signed.sh
+    else
+        echo "==> Building (ad-hoc signing — no Apple Developer credentials)..."
+        python scripts/build_sidecar.py
+
+        BUILD_LOG=$(mktemp)
+        if ! cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
+            if grep -q "TAURI_SIGNING_PRIVATE_KEY" "$BUILD_LOG"; then
+                echo ""
+                echo "WARNING: Updater artifact signing skipped (TAURI_SIGNING_PRIVATE_KEY not set)."
+            else
+                echo "ERROR: cargo tauri build failed (see output above)"
+                rm -f "$BUILD_LOG"
+                exit 1
+            fi
+        fi
+        rm -f "$BUILD_LOG"
+
+        APP_PATH="src-tauri/target/release/bundle/macos/Vireo.app"
+        if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: $APP_PATH not found"
             exit 1
         fi
+        echo "==> Ad-hoc signing app bundle..."
+        codesign --sign - --force --deep "$APP_PATH"
+        codesign --verify --deep --verbose=2 "$APP_PATH"
     fi
-    rm -f "$BUILD_LOG"
+    echo ""
 
-    APP_PATH="src-tauri/target/release/bundle/macos/Vireo.app"
-    if [ ! -d "$APP_PATH" ]; then
-        echo "ERROR: $APP_PATH not found"
+    # Find the DMG
+    DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+    if [[ -z "$DMG" ]]; then
+        echo "ERROR: No .dmg found"
         exit 1
     fi
-    echo "==> Ad-hoc signing app bundle..."
-    codesign --sign - --force --deep "$APP_PATH"
-    codesign --verify --deep --verbose=2 "$APP_PATH"
-fi
-echo ""
 
-# --- Find the DMG ---
-DMG=$(find src-tauri/target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-if [[ -z "$DMG" ]]; then
-    echo "ERROR: No .dmg found"
-    exit 1
+    # Rebuild DMG after ad-hoc signing
+    if ! $FULL_SIGNING; then
+        echo "==> Rebuilding DMG with signed app..."
+        hdiutil create -volname "Vireo" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG"
+    fi
+    echo "==> Built: $DMG"
+    echo ""
 fi
-
-# --- Rebuild DMG after ad-hoc signing ---
-# cargo tauri build creates .app and .dmg in one step, so the original
-# DMG contains the unsigned app. Recreate it with the signed .app.
-if ! $FULL_SIGNING; then
-    echo "==> Rebuilding DMG with signed app..."
-    hdiutil create -volname "Vireo" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG"
-fi
-echo "==> Built: $DMG"
-echo ""
 
 # --- Commit version bump ---
 echo "==> Committing version bump..."
@@ -118,17 +117,14 @@ if $PUBLISH; then
     echo "==> Tagging v$NEW_VERSION..."
     git tag "v$NEW_VERSION"
     git push && git push origin "v$NEW_VERSION"
-
-    echo "==> Creating GitHub Release..."
-    gh release create "v$NEW_VERSION" \
-        "$DMG" \
-        --title "Vireo $NEW_VERSION" \
-        --generate-notes
     echo ""
-    echo "Release published: https://github.com/jss367/vireo/releases/tag/v$NEW_VERSION"
+    echo "Tag pushed. CI will build all platforms and create a draft release."
+    echo "Monitor: https://github.com/jss367/vireo/actions"
+    echo "Release: https://github.com/jss367/vireo/releases/tag/v$NEW_VERSION"
 else
     echo "Build complete. To publish:"
     echo "  git push"
     echo "  git tag v$NEW_VERSION && git push origin v$NEW_VERSION"
-    echo "  gh release create v$NEW_VERSION $DMG --title 'Vireo $NEW_VERSION' --generate-notes"
+    echo ""
+    echo "CI will build all platforms and create a draft release."
 fi
