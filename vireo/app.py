@@ -420,19 +420,16 @@ def create_app(db_path, thumb_cache_dir=None):
             keyword=keyword,
         )
 
-        # Total count — use count_photos for unfiltered, otherwise count the filtered set
+        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
         if not any([folder_id, rating_min, date_from, date_to, keyword]):
             total = db.count_photos()
         else:
-            total = len(
-                db.get_photos(
-                    folder_id=folder_id,
-                    rating_min=rating_min,
-                    date_from=date_from,
-                    date_to=date_to,
-                    keyword=keyword,
-                    per_page=999999,
-                )
+            total = db.count_filtered_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
             )
 
         return jsonify(

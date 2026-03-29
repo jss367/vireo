@@ -991,6 +991,50 @@ class Database:
         """
         return self.conn.execute(query, params).fetchall()
 
+    def count_filtered_photos(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+    ):
+        """Return count of photos matching the given filters, scoped to active workspace."""
+        conditions = ["wf.workspace_id = ?"]
+        params = [self._ws_id()]
+
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            params.append(date_to)
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT COUNT(DISTINCT p.id) FROM photos p
+            {join_clause}
+            {where}
+        """
+        return self.conn.execute(query, params).fetchone()[0]
+
     def get_geolocated_photos(
         self,
         folder_id=None,
