@@ -23,6 +23,10 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA cache_size=-10000")  # 10 MB
+        self.conn.execute("PRAGMA temp_store=MEMORY")
+        self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self._active_workspace_id = None
         self._create_tables()
         self.ensure_default_workspace()
@@ -205,6 +209,10 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
+            CREATE INDEX IF NOT EXISTS idx_predictions_photo ON predictions(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
         """
         )
         # Migrations for existing databases
