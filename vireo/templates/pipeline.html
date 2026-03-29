@@ -983,6 +983,7 @@ async function runExtractStep(collectionId) {
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     num.className = 'stage-num';
+    progressWrap.style.display = 'none';
     return false;
   }
 }
@@ -1061,6 +1062,7 @@ async function runGroupStep(collectionId) {
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     num.className = 'stage-num';
+    progressWrap.style.display = 'none';
     return false;
   }
 }
