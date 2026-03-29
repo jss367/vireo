@@ -59,18 +59,24 @@ def update_toml_file(path, version):
 
 
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <version>")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(args) != 1:
+        print(f"Usage: {sys.argv[0]} <version> [--include-website]")
         sys.exit(1)
 
-    version = sys.argv[1].lstrip("v")
+    version = args[0].lstrip("v")
     print(f"Syncing version to {version}")
 
     update_json_file("src-tauri/tauri.conf.json", version)
     update_json_file("package.json", version)
     update_toml_file("src-tauri/Cargo.toml", version)
     update_toml_file("pyproject.toml", version)
-    update_astro_version("website/src/pages/download.astro", version)
+
+    # download.astro is updated by the build-release workflow AFTER
+    # artifacts are uploaded, so the website never points to a 404.
+    if "--include-website" in sys.argv:
+        update_astro_version("website/src/pages/download.astro", version)
+
     print("Done.")
 
 
