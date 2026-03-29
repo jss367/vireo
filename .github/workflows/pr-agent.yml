@@ -118,6 +118,7 @@ jobs:
     if: >-
       github.event_name == 'issue_comment'
       && github.event.issue.pull_request
+      && github.event.issue.state == 'open'
       && contains(github.event.issue.labels.*.name, 'claude-agent')
       && !contains(github.event.comment.body, '/claude-fix')
       && !contains(github.event.comment.body, '👍')
