@@ -996,8 +996,9 @@ class Database:
         params.extend([per_page, offset])
 
         pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
+        distinct = "DISTINCT " if keyword is not None else ""
         query = f"""
-            SELECT {pcols} FROM photos p
+            SELECT {distinct}{pcols} FROM photos p
             {join_clause}
             {where}
             ORDER BY {order}
