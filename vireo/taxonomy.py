@@ -530,8 +530,8 @@ def download_taxonomy(output_path, progress_callback=None):
             progress_callback(msg)
 
     _status("Downloading iNaturalist taxonomy archive...")
-    response = urllib.request.urlopen(DWCA_URL)
-    zip_data = response.read()
+    with urllib.request.urlopen(DWCA_URL) as response:
+        zip_data = response.read()
     _status(f"Downloaded {len(zip_data) // (1024 * 1024)} MB — parsing...")
 
     # Parse the DWCA zip
