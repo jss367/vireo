@@ -289,7 +289,7 @@ async function selectSpecies(name) {
     var data = await safeFetch('/api/species/' + encodeURIComponent(name) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
-    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed to analyze: ' + e.message + '</div>';
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed to analyze: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -356,7 +356,7 @@ async function recluster(species, threshold) {
     var data = await safeFetch('/api/species/' + encodeURIComponent(species) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
-    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed: ' + e.message + '</div>';
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed: ' + escapeHtml(e.message) + '</div>';
   }
 }
 

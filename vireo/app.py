@@ -18,6 +18,7 @@ from flask import (
     Flask,
     Response,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -3735,9 +3736,15 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/thumbnails/<filename>")
     def serve_thumbnail(filename):
+        def _send_cached(directory, fname):
+            resp = make_response(send_from_directory(directory, fname))
+            resp.cache_control.public = True
+            resp.cache_control.max_age = 24 * 60 * 60  # 1 day
+            return resp
+
         thumb_path = os.path.join(app.config["THUMB_CACHE_DIR"], filename)
         if os.path.exists(thumb_path):
-            return send_from_directory(app.config["THUMB_CACHE_DIR"], filename)
+            return _send_cached(app.config["THUMB_CACHE_DIR"], filename)
 
         # Try to generate on the fly
         try:
@@ -3752,7 +3759,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 source = os.path.join(photo["path"], photo["filename"])
                 result = generate_thumbnail(photo_id, source, app.config["THUMB_CACHE_DIR"])
                 if result:
-                    return send_from_directory(app.config["THUMB_CACHE_DIR"], filename)
+                    return _send_cached(app.config["THUMB_CACHE_DIR"], filename)
         except Exception:
             pass
 
