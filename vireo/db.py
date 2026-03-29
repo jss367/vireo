@@ -716,6 +716,20 @@ class Database:
             f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
 
+    def get_photos_by_ids(self, photo_ids):
+        """Return photos for a list of IDs in a single query.
+
+        Returns a dict mapping photo_id -> Row for efficient lookup.
+        """
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
+            photo_ids,
+        ).fetchall()
+        return {row["id"]: row for row in rows}
+
     def count_photos(self):
         """Return photo count for the active workspace."""
         return self.conn.execute(
@@ -982,14 +996,59 @@ class Database:
         params.extend([per_page, offset])
 
         pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
+        distinct = "DISTINCT " if keyword is not None else ""
         query = f"""
-            SELECT {pcols} FROM photos p
+            SELECT {distinct}{pcols} FROM photos p
             {join_clause}
             {where}
             ORDER BY {order}
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()
+
+    def count_filtered_photos(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+    ):
+        """Return count of photos matching the given filters, scoped to active workspace."""
+        conditions = ["wf.workspace_id = ?"]
+        params = [self._ws_id()]
+
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            params.append(date_to)
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        query = f"""
+            SELECT COUNT(DISTINCT p.id) FROM photos p
+            {join_clause}
+            {where}
+        """
+        return self.conn.execute(query, params).fetchone()[0]
 
     def get_geolocated_photos(
         self,
@@ -1112,9 +1171,31 @@ class Database:
         )
         self.conn.commit()
 
+    def batch_update_photo_rating(self, photo_ids, rating):
+        """Set rating for multiple photos in a single transaction."""
+        if not photo_ids:
+            return
+        placeholders = ",".join("?" for _ in photo_ids)
+        self.conn.execute(
+            f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
+            [rating] + list(photo_ids),
+        )
+        self.conn.commit()
+
     def update_photo_flag(self, photo_id, flag):
         """Set photo flag ('none', 'flagged', 'rejected')."""
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id))
+        self.conn.commit()
+
+    def batch_update_photo_flag(self, photo_ids, flag):
+        """Set flag for multiple photos in a single transaction."""
+        if not photo_ids:
+            return
+        placeholders = ",".join("?" for _ in photo_ids)
+        self.conn.execute(
+            f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
+            [flag] + list(photo_ids),
+        )
         self.conn.commit()
 
     def update_photo_sharpness(self, photo_id, sharpness):
@@ -1929,13 +2010,16 @@ class Database:
         )
         self.conn.commit()
 
-    def get_collection_photos(self, collection_id, page=1, per_page=50):
-        """Build SQL from collection rules and return matching photos."""
+    def _build_collection_query(self, collection_id):
+        """Build SQL clauses from collection rules.
+
+        Returns (folder_join, join_clause, where, params) or None if collection not found.
+        """
         row = self.conn.execute(
             "SELECT rules FROM collections WHERE id = ?", (collection_id,)
         ).fetchone()
         if not row:
-            return []
+            return None
 
         rules = json.loads(row["rules"])
         conditions = []
@@ -2094,6 +2178,15 @@ class Database:
         if conditions:
             where = "WHERE " + " AND ".join(conditions)
 
+        return folder_join, join_clause, where, params
+
+    def get_collection_photos(self, collection_id, page=1, per_page=50):
+        """Build SQL from collection rules and return matching photos."""
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            return []
+
+        folder_join, join_clause, where, params = parts
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
@@ -2107,6 +2200,21 @@ class Database:
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()
+
+    def count_collection_photos(self, collection_id):
+        """Return total count of photos matching collection rules."""
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            return 0
+
+        folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT COUNT(DISTINCT p.id) FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return self.conn.execute(query, params).fetchone()[0]
 
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""

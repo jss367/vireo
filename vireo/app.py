@@ -145,6 +145,8 @@ def create_app(db_path, thumb_cache_dir=None):
         log.exception("Unhandled error: %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
+    _MAX_PER_PAGE = 500
+
     def json_error(msg, status=400):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
         return jsonify({"error": msg}), status
@@ -332,7 +334,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = request.args.get("per_page", default_per_page, type=int)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
 
         photos = db.get_photos(page=page, per_page=per_page, sort=sort)
@@ -401,7 +403,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = request.args.get("per_page", default_per_page, type=int)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
@@ -420,19 +422,16 @@ def create_app(db_path, thumb_cache_dir=None):
             keyword=keyword,
         )
 
-        # Total count — use count_photos for unfiltered, otherwise count the filtered set
+        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
         if not any([folder_id, rating_min, date_from, date_to, keyword]):
             total = db.count_photos()
         else:
-            total = len(
-                db.get_photos(
-                    folder_id=folder_id,
-                    rating_min=rating_min,
-                    date_from=date_from,
-                    date_to=date_to,
-                    keyword=keyword,
-                    per_page=999999,
-                )
+            total = db.count_filtered_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
             )
 
         return jsonify(
@@ -749,13 +748,12 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("rating must be an integer 0-5")
         if not photo_ids:
             return json_error("photo_ids required")
-        old_values = {}
-        for pid in photo_ids:
-            old = db.get_photo(pid)
-            if old:
-                old_values[pid] = old["rating"]
-                db.update_photo_rating(pid, rating)
-                db.queue_change(pid, "rating", str(rating))
+        photos_map = db.get_photos_by_ids(photo_ids)
+        old_values = {pid: photos_map[pid]["rating"] for pid in photo_ids if pid in photos_map}
+        valid_ids = list(old_values.keys())
+        db.batch_update_photo_rating(valid_ids, rating)
+        for pid in valid_ids:
+            db.queue_change(pid, "rating", str(rating))
         items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
         db.record_edit('rating', f'Set rating to {rating} on {len(photo_ids)} photos',
                        str(rating), items, is_batch=True)
@@ -771,12 +769,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         if not photo_ids:
             return json_error("photo_ids required")
-        old_values = {}
-        for pid in photo_ids:
-            old = db.get_photo(pid)
-            if old:
-                old_values[pid] = old["flag"]
-                db.update_photo_flag(pid, flag)
+        photos_map = db.get_photos_by_ids(photo_ids)
+        old_values = {pid: photos_map[pid]["flag"] for pid in photo_ids if pid in photos_map}
+        valid_ids = list(old_values.keys())
+        db.batch_update_photo_flag(valid_ids, flag)
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -999,10 +995,9 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
-        per_page = request.args.get("per_page", default_per_page, type=int)
+        per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
-        # Get total count (fetch with large limit, count results)
-        total = len(db.get_collection_photos(collection_id, page=1, per_page=1_000_000))
+        total = db.count_collection_photos(collection_id)
         return jsonify(
             {
                 "photos": [dict(p) for p in photos],
@@ -4838,14 +4833,14 @@ def create_app(db_path, thumb_cache_dir=None):
         # Top-N by similarity
         if total_matches > 0:
             top_indices = np.argsort(filtered_sims)[::-1][:limit]
+            top_pids = [filtered_ids[idx] for idx in top_indices]
+            top_sims = [float(filtered_sims[idx]) for idx in top_indices]
+            photos_map = db.get_photos_by_ids(top_pids)
             results = []
-            for idx in top_indices:
-                pid = filtered_ids[idx]
-                sim = float(filtered_sims[idx])
-                photo = db.get_photo(pid)
-                if photo:
+            for pid, sim in zip(top_pids, top_sims, strict=False):
+                if pid in photos_map:
                     results.append({
-                        "photo": dict(photo),
+                        "photo": dict(photos_map[pid]),
                         "similarity": round(sim, 4),
                     })
         else:
@@ -4902,16 +4897,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Get top-N most similar
         top_indices = np.argsort(similarities)[::-1][:limit]
+        top_pids = [photo_ids[idx] for idx in top_indices]
+        top_sims = [float(similarities[idx]) for idx in top_indices]
+        photos_map = db.get_photos_by_ids(top_pids)
 
         results = []
-        for idx in top_indices:
-            pid = photo_ids[idx]
-            sim = float(similarities[idx])
-            photo = db.get_photo(pid)
-            if photo:
+        for pid, sim in zip(top_pids, top_sims, strict=False):
+            if pid in photos_map:
                 results.append(
                     {
-                        "photo": dict(photo),
+                        "photo": dict(photos_map[pid]),
                         "similarity": round(sim, 4),
                     }
                 )
