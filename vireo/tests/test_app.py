@@ -784,6 +784,26 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
         assert overrides["active_labels"] == ["/path/to/birds.txt"]
 
 
+def test_get_all_keywords(app_and_db):
+    """GET /api/keywords/all returns all keywords with photo counts."""
+    app, db = app_and_db
+    client = app.test_client()
+    # conftest already created 'Cardinal' (tagged to p1) and 'Sparrow' (tagged to p2)
+    # Add an untagged keyword to verify photo_count=0
+    db.add_keyword("favorite")
+
+    resp = client.get("/api/keywords/all")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) >= 3
+    cardinal = next(k for k in data if k["name"] == "Cardinal")
+    assert cardinal["photo_count"] >= 1
+    assert "type" in cardinal
+    favorite = next(k for k in data if k["name"] == "favorite")
+    assert favorite["photo_count"] == 0
+    assert favorite["type"] == "general"
+
+
 def test_update_keyword_type(app_and_db):
     """PUT /api/keywords/<id> updates keyword type."""
     app, db = app_and_db

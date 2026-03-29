@@ -1456,6 +1456,20 @@ class Database:
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         self.conn.commit()
 
+    def get_all_keywords(self):
+        """Return all keywords with photo counts, type, and taxon info."""
+        return self.conn.execute(
+            """SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
+                      k.latitude, k.longitude,
+                      t.name AS taxon_name, t.common_name AS taxon_common_name,
+                      COUNT(pk.photo_id) AS photo_count
+               FROM keywords k
+               LEFT JOIN taxa t ON t.id = k.taxon_id
+               LEFT JOIN photo_keywords pk ON pk.keyword_id = k.id
+               GROUP BY k.id
+               ORDER BY k.name"""
+        ).fetchall()
+
     # -- Predictions --
 
     def add_prediction(

@@ -526,6 +526,12 @@ def create_app(db_path, thumb_cache_dir=None):
         species = db.get_accepted_species()
         return jsonify({"species": species})
 
+    @app.route("/api/keywords/all")
+    def api_all_keywords():
+        db = _get_db()
+        keywords = db.get_all_keywords()
+        return jsonify([dict(k) for k in keywords])
+
     @app.route("/api/keywords")
     def api_keywords():
         db = _get_db()
