@@ -47,7 +47,10 @@ echo ""
 echo "=== Step 2/4: Build the Tauri app (with code signing) ==="
 cd "$REPO_ROOT"
 BUILD_LOG=$(mktemp)
-if ! cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
+# Unset notarization credentials so Tauri only signs (not notarizes).
+# Step 4 handles notarization via xcrun notarytool which is more reliable.
+if ! env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
+    cargo tauri build 2>&1 | tee "$BUILD_LOG"; then
     # Tolerate updater-signing failure (TAURI_SIGNING_PRIVATE_KEY not configured)
     # but fail on anything else
     if grep -q "TAURI_SIGNING_PRIVATE_KEY" "$BUILD_LOG"; then
