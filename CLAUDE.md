@@ -61,11 +61,13 @@ Workspace management: `workspaces`, `workspace_folders`
 
 **All feature work, bug fixes, and non-trivial changes MUST be done in a git worktree.** Do not make changes directly on `main`. At the start of any implementation task, create a worktree before writing code.
 
+**IMPORTANT: Once a PR is created for a branch, that branch is frozen. All subsequent changes — review fixes, bug fixes, CI failures — must go in a new branch off the PR's branch with a new fix PR targeting it. NEVER push additional commits to a branch that already has a PR. Exception: merge conflict resolution may be pushed directly to a branch with an open PR. The commit must contain only conflict resolution — no other fixes or changes.**
+
 1. Create a worktree and feature branch for the task.
 2. Do all implementation work in the worktree.
 3. Run tests before finishing: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
 4. **Create a PR** using `gh pr create`. Include what was changed and test results in the PR description.
-5. **Review fixes go in a new PR.** When fixing issues from code review, create a new branch off the original PR's branch and open a new fix PR targeting that branch — do not push additional commits to the original PR.
+5. **After a PR is created, NEVER push additional commits to its branch** (except merge conflict resolution). Any further changes — review fixes, bug fixes, CI failures — must go in a new branch off the PR's branch with a new fix PR targeting that branch.
 6. **Before pushing to an existing branch**, check if its PR is still open (`gh pr view <branch> --json state`). If the PR is already merged or closed, create a new branch from `main`, apply your changes there, and open a new PR. Pushing to a merged PR's branch does nothing — the changes won't reach `main`.
 
 ## Debugging tips
