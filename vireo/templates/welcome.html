@@ -139,9 +139,11 @@
 
 <script src="/static/vireo-utils.js"></script>
 <script>
-/* Inline safeFetch/safeEventSource fallback for standalone welcome page */
+/* Inline safeFetch/safeEventSource fallback for standalone welcome page.
+   Use var assignments (not function declarations) inside if-blocks to avoid
+   browser scoping issues (Safari doesn't hoist block-scoped declarations). */
 if (typeof safeFetch === 'undefined') {
-  async function safeFetch(url, opts, cfg) {
+  var safeFetch = async function(url, opts, cfg) {
     cfg = cfg || {};
     var resp = await fetch(url, opts);
     if (!resp.ok) {
@@ -152,10 +154,10 @@ if (typeof safeFetch === 'undefined') {
     var text = await resp.text();
     if (!text) return null;
     return JSON.parse(text);
-  }
+  };
 }
 if (typeof safeEventSource === 'undefined') {
-  function safeEventSource(url, callbacks) {
+  var safeEventSource = function(url, callbacks) {
     callbacks = callbacks || {};
     var source = new EventSource(url);
     source.addEventListener('progress', function(e) {
@@ -170,7 +172,7 @@ if (typeof safeEventSource === 'undefined') {
       if (callbacks.onError) callbacks.onError();
     };
     return source;
-  }
+  };
 }
 
 var selectedClassificationModel = 'bioclip-vit-b-16';
