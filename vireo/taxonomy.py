@@ -536,7 +536,8 @@ def download_taxonomy(output_path, progress_callback=None):
 
     # Parse the DWCA zip
     taxa_by_id = {}
-    common_names = {}  # taxon_id -> common_name
+    common_names = {}  # taxon_id -> preferred common_name
+    alt_names = {}  # taxon_id -> [all English vernacular names]
 
     with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
         file_list = zf.namelist()
@@ -596,13 +597,15 @@ def download_taxonomy(output_path, progress_callback=None):
                     if lang and lang.lower() != "en":
                         continue
                     taxon_id = row.get("id") or row.get("taxonID")
-                    if (
-                        taxon_id
-                        and taxon_id in taxa_by_id
-                        and taxon_id not in common_names
-                    ):
-                        common_names[taxon_id] = row.get("vernacularName", "")
-            _status(f"Found {len(common_names):,} English common names")
+                    vn = row.get("vernacularName", "")
+                    if taxon_id and taxon_id in taxa_by_id and vn:
+                        if taxon_id not in common_names:
+                            common_names[taxon_id] = vn
+                        # Collect all English names per taxon for alternate-name indexing
+                        if taxon_id not in alt_names:
+                            alt_names[taxon_id] = []
+                        alt_names[taxon_id].append(vn)
+            _status(f"Found {len(common_names):,} English common names ({sum(len(v) for v in alt_names.values()):,} total including alternates)")
         else:
             log.warning("No VernacularNames file found in archive")
 
@@ -627,6 +630,7 @@ def download_taxonomy(output_path, progress_callback=None):
     _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
     taxa_by_common = {}
     taxa_by_scientific = {}
+    entries_by_taxon = {}
 
     for taxon_id, taxon in taxa_by_id.items():
         rank = taxon["rank"]
@@ -643,16 +647,29 @@ def download_taxonomy(output_path, progress_callback=None):
             "lineage_names": lineage_names,
             "lineage_ranks": lineage_ranks,
         }
+        entries_by_taxon[taxon_id] = entry
 
         # Index by scientific name
         sci_key = taxon["scientific_name"].lower()
         taxa_by_scientific[sci_key] = entry
 
-        # Index by common name if available
-        cn = common_names.get(taxon_id, "")
-        if cn:
-            cn_key = cn.lower()
+    # Index preferred common names first so they always win.
+    # Keep the first mapping when two taxa share a preferred name.
+    for taxon_id, cn in common_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        cn_key = cn.lower()
+        if entry and cn_key not in taxa_by_common:
             taxa_by_common[cn_key] = entry
+
+    # Then index alternate names only for still-unmapped keys
+    for taxon_id, names in alt_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        if not entry:
+            continue
+        for cn in names:
+            cn_key = cn.lower()
+            if cn_key not in taxa_by_common:
+                taxa_by_common[cn_key] = entry
 
     result = {
         "last_updated": str(date.today()),
