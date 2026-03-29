@@ -3739,8 +3739,7 @@ def create_app(db_path, thumb_cache_dir=None):
         def _send_cached(directory, fname):
             resp = make_response(send_from_directory(directory, fname))
             resp.cache_control.public = True
-            resp.cache_control.max_age = 30 * 24 * 60 * 60  # 30 days
-            resp.cache_control.immutable = True
+            resp.cache_control.max_age = 24 * 60 * 60  # 1 day
             return resp
 
         thumb_path = os.path.join(app.config["THUMB_CACHE_DIR"], filename)

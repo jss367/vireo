@@ -453,10 +453,19 @@ class Database:
                 "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
             )
 
-        # Ensure workspace indexes exist (for fresh DBs that skip migration)
+        # Ensure indexes exist (for fresh DBs that skip migration, and for
+        # legacy DBs where DROP TABLE predictions destroys earlier indexes)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_predictions_workspace "
             "ON predictions(workspace_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_predictions_photo "
+            "ON predictions(photo_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_predictions_status "
+            "ON predictions(status)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_collections_workspace "
