@@ -99,10 +99,20 @@ fi
 
 # --- Rebuild DMG after ad-hoc signing ---
 # cargo tauri build creates .app and .dmg in one step, so the original
-# DMG contains the unsigned app. Recreate it with the signed .app.
+# DMG contains the unsigned app. Mount the Tauri DMG, swap in the signed
+# .app, and repackage — preserving the layout (background, icon positions,
+# Applications symlink).
 if ! $FULL_SIGNING; then
     echo "==> Rebuilding DMG with signed app..."
-    hdiutil create -volname "Vireo" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG"
+    DMG_MOUNT=$(mktemp -d)
+    DMG_STAGING=$(mktemp -d)
+    hdiutil attach "$DMG" -mountpoint "$DMG_MOUNT" -nobrowse -readonly -noverify
+    cp -a "$DMG_MOUNT"/. "$DMG_STAGING"/
+    hdiutil detach "$DMG_MOUNT"
+    rm -rf "$DMG_STAGING/Vireo.app"
+    cp -a "$APP_PATH" "$DMG_STAGING/"
+    hdiutil create -volname "Vireo" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+    rm -rf "$DMG_MOUNT" "$DMG_STAGING"
 fi
 echo "==> Built: $DMG"
 echo ""
