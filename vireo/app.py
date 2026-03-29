@@ -1732,7 +1732,7 @@ def create_app(db_path, thumb_cache_dir=None):
         entries = []
         total_size = 0
         for f in sorted(os.listdir(CACHE_DIR)):
-            if f.endswith(".pt"):
+            if f.endswith(".npy"):
                 fp = os.path.join(CACHE_DIR, f)
                 size = os.path.getsize(fp)
                 total_size += size
@@ -2524,7 +2524,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/system/info")
     def api_system_info():
-        """Return system information: GPU, Python, PyTorch."""
+        """Return system information: ONNX Runtime, Python, hardware."""
         import platform
 
         info = {
@@ -2532,116 +2532,78 @@ def create_app(db_path, thumb_cache_dir=None):
             "platform": platform.platform(),
             "device": "CPU",
             "device_detail": "No GPU acceleration",
-            "torch_version": None,
-            "torch_detail": "",
+            "onnxruntime_version": None,
+            "onnxruntime_providers": [],
         }
         try:
-            import torch
+            import onnxruntime as ort
 
-            info["torch_version"] = torch.__version__
-            if torch.cuda.is_available():
+            info["onnxruntime_version"] = ort.__version__
+            available = ort.get_available_providers()
+            info["onnxruntime_providers"] = available
+
+            if "CoreMLExecutionProvider" in available:
+                info["device"] = "CoreML"
+                info["device_detail"] = "Apple CoreML acceleration"
+            elif "CUDAExecutionProvider" in available:
                 info["device"] = "CUDA"
-                info["device_detail"] = torch.cuda.get_device_name(0)
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                info["device"] = "MPS"
-                info["device_detail"] = "Apple Metal Performance Shaders"
+                info["device_detail"] = "NVIDIA CUDA acceleration"
             else:
                 info["device"] = "CPU"
                 info["device_detail"] = "GPU not available — using CPU"
-            info["torch_detail"] = (
-                f"CUDA: {torch.cuda.is_available()}, MPS: {getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available()}"
-            )
         except ImportError:
-            info["torch_detail"] = "PyTorch not installed"
+            info["device_detail"] = "onnxruntime not installed"
 
-        # MegaDetector status
-        try:
-            from PytorchWildlife.models import detection as pw_detection  # noqa: F401
+        # MegaDetector status — just check for the ONNX file
+        from detector import MEGADETECTOR_ONNX_PATH
 
-            info["megadetector"] = "installed"
-            info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
+        info["megadetector"] = "available"
+        info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
 
-            # Check if weights are downloaded
-            import glob
-
-            import torch
-
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-            weight_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
-            if weight_files:
-                size_mb = round(os.path.getsize(weight_files[0]) / 1024 / 1024, 1)
-                info["megadetector_weights_path"] = weight_files[0]
-                info["megadetector_weights_size"] = f"{size_mb} MB"
-                # Validate the weights file is loadable
-                try:
-                    ckpt = torch.load(weight_files[0], map_location="cpu", weights_only=False)
-                    if isinstance(ckpt, dict):
-                        info["megadetector_weights"] = "downloaded"
-                    else:
-                        info["megadetector_weights"] = "corrupt"
-                        info["megadetector_weights_detail"] = "File loads but has unexpected format"
-                except Exception as e:
-                    info["megadetector_weights"] = "corrupt"
-                    info["megadetector_weights_detail"] = str(e)[:100]
-            else:
-                info["megadetector_weights"] = "not downloaded"
-                info["megadetector_weights_path"] = None
-                info["megadetector_weights_size"] = None
-        except ImportError:
-            info["megadetector"] = "not installed"
-            info["megadetector_detail"] = "pip install PytorchWildlife"
-            info["megadetector_weights"] = "unavailable"
-        except Exception as e:
-            info["megadetector"] = "error"
-            info["megadetector_detail"] = str(e)
-            info["megadetector_weights"] = "error"
+        if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+            size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+            info["megadetector_weights"] = "downloaded"
+            info["megadetector_weights_path"] = MEGADETECTOR_ONNX_PATH
+            info["megadetector_weights_size"] = f"{size_mb} MB"
+        else:
+            info["megadetector_weights"] = "not downloaded"
+            info["megadetector_weights_path"] = None
+            info["megadetector_weights_size"] = None
 
         return jsonify(info)
 
     @app.route("/api/megadetector/download", methods=["POST"])
     def api_megadetector_download():
-        """Download MegaDetector weights as a background job."""
+        """Download MegaDetector ONNX model as a background job."""
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            import torch
-            import wget
+            from detector import MEGADETECTOR_ONNX_DIR, MEGADETECTOR_ONNX_PATH
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
 
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-            os.makedirs(hub_dir, exist_ok=True)
-            dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
-            wget_dest = os.path.join(hub_dir, "MDV6-yolov9-c.pt")
+            os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
 
-            # Remove partial downloads (wget saves as MDV6-yolov9-c.pt, PW expects MDV6b-)
-            for f in [dest, wget_dest, dest + ".tmp", wget_dest + ".tmp"]:
-                if os.path.exists(f):
-                    os.remove(f)
-
-            url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
             runner.push_event(job["id"], "progress", {
-                "phase": "Downloading MegaDetector weights (~50 MB)...",
+                "phase": "Downloading MegaDetector ONNX model...",
                 "current": 0, "total": 1,
             })
 
-            wget.download(url, out=hub_dir)
+            import shutil
 
-            # wget saves as MDV6-yolov9-c.pt, PytorchWildlife expects MDV6b-yolov9-c.pt
-            if os.path.exists(wget_dest) and not os.path.exists(dest):
-                os.rename(wget_dest, dest)
+            cached_path = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx",
+                subfolder="megadetector-v6",
+            )
 
-            if not os.path.exists(dest):
-                raise RuntimeError("Download completed but weights file not found")
+            dest = MEGADETECTOR_ONNX_PATH
+            if cached_path != dest:
+                shutil.copy2(cached_path, dest)
 
-            # Validate the downloaded file
-            runner.push_event(job["id"], "progress", {
-                "phase": "Validating weights...",
-                "current": 1, "total": 1,
-            })
-            ckpt = torch.load(dest, map_location="cpu", weights_only=False)
-            if not isinstance(ckpt, dict):
-                os.remove(dest)
-                raise RuntimeError("Downloaded file is not a valid model checkpoint")
+            if not os.path.isfile(dest):
+                raise RuntimeError("Download completed but ONNX file not found")
 
             size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
             return {"status": "downloaded", "size": f"{size_mb} MB", "path": dest}
@@ -2651,23 +2613,18 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/megadetector/delete", methods=["POST"])
     def api_megadetector_delete():
-        """Delete MegaDetector weights from disk."""
-        import glob
+        """Delete MegaDetector ONNX model from disk."""
+        import shutil
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
+        import detector
+        from detector import MEGADETECTOR_ONNX_DIR
 
         removed = []
-        for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
-            for f in glob.glob(os.path.join(hub_dir, pattern)):
-                os.remove(f)
-                removed.append(f)
+        if os.path.isdir(MEGADETECTOR_ONNX_DIR):
+            shutil.rmtree(MEGADETECTOR_ONNX_DIR)
+            removed.append(MEGADETECTOR_ONNX_DIR)
 
         # Clear the cached singleton so it reloads next time
-        import detector
         detector._session = None
 
         return jsonify({"deleted": removed, "count": len(removed)})
@@ -2675,114 +2632,75 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/models/pipeline")
     def api_models_pipeline():
         """Return download status of all pipeline models (MegaDetector, SAM2, DINOv2)."""
-        import glob
-
+        models_dir = os.path.expanduser("~/.vireo/models")
         models = []
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
-
-        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
-
-        # MegaDetector
-        md_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
+        # MegaDetector — check for ONNX model in ~/.vireo/models/megadetector-v6/
+        md_dir = os.path.join(models_dir, "megadetector-v6")
+        md_onnx = os.path.join(md_dir, "model.onnx")
         md_status = "not downloaded"
         md_size = None
-        if md_files:
-            md_size = round(os.path.getsize(md_files[0]) / 1024 / 1024, 1)
-            try:
-                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-                ckpt = torch.load(md_files[0], map_location="cpu", weights_only=False)
-                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
-                md_status = "downloaded" if isinstance(ckpt, dict) else "corrupt"
-                del ckpt
-            except Exception:
-                md_status = "corrupt"
-                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+        if os.path.isfile(md_onnx):
+            md_size = round(os.path.getsize(md_onnx) / 1024 / 1024, 1)
+            md_status = "downloaded"
         models.append({
             "id": "megadetector-v6",
             "name": "MegaDetector V6",
             "role": "Detection",
-            "description": "YOLOv9-c animal detector",
+            "description": "YOLOv9-c animal detector (ONNX)",
             "size_estimate": "~50 MB",
             "status": md_status,
             "size": f"{md_size} MB" if md_size else None,
         })
 
-        # SAM2 variants
+        # SAM2 variants — check for ONNX models in ~/.vireo/models/sam2-{variant}/
         sam2_variants = [
-            ("sam2-tiny", "facebook/sam2.1-hiera-tiny", "SAM2 Tiny", "~40 MB"),
-            ("sam2-small", "facebook/sam2.1-hiera-small", "SAM2 Small", "~150 MB"),
-            ("sam2-base-plus", "facebook/sam2.1-hiera-base-plus", "SAM2 Base+", "~320 MB"),
-            ("sam2-large", "facebook/sam2.1-hiera-large", "SAM2 Large", "~900 MB"),
+            ("sam2-tiny", "SAM2 Tiny", "~40 MB"),
+            ("sam2-small", "SAM2 Small", "~150 MB"),
+            ("sam2-base-plus", "SAM2 Base+", "~320 MB"),
+            ("sam2-large", "SAM2 Large", "~900 MB"),
         ]
-        for variant_id, hf_repo, name, size_est in sam2_variants:
-            repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
+        for variant_id, name, size_est in sam2_variants:
+            variant_dir = os.path.join(models_dir, variant_id)
+            encoder_path = os.path.join(variant_dir, "image_encoder.onnx")
+            decoder_path = os.path.join(variant_dir, "mask_decoder.onnx")
             status = "not downloaded"
             size = None
-            if os.path.exists(repo_dir):
-                # Check for actual weight files (snapshots with .pt files)
-                pt_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.pt"), recursive=True)
-                if pt_files:
-                    total_size = sum(os.path.getsize(f) for f in pt_files)
-                    size = round(total_size / 1024 / 1024, 1)
-                    status = "downloaded" if size > 10 else "incomplete"
-                else:
-                    # Check for safetensors
-                    st_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.safetensors"), recursive=True)
-                    if st_files:
-                        total_size = sum(os.path.getsize(f) for f in st_files)
-                        size = round(total_size / 1024 / 1024, 1)
-                        status = "downloaded" if size > 10 else "incomplete"
+            if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
+                total_size = os.path.getsize(encoder_path) + os.path.getsize(decoder_path)
+                size = round(total_size / 1024 / 1024, 1)
+                status = "downloaded"
+            elif os.path.isfile(encoder_path) or os.path.isfile(decoder_path):
+                status = "incomplete"
             models.append({
                 "id": variant_id,
                 "name": name,
                 "role": "Segmentation",
-                "description": f"SAM2 mask generation ({variant_id})",
+                "description": f"SAM2 mask generation ({variant_id}, ONNX)",
                 "size_estimate": size_est,
                 "status": status,
                 "size": f"{size} MB" if size else None,
-                "hf_repo": hf_repo,
             })
 
-        # DINOv2 variants
+        # DINOv2 variants — check for ONNX models in ~/.vireo/models/dinov2-{variant}/
         dinov2_variants = [
-            ("vit-s14", "dinov2_vits14", "DINOv2 ViT-S/14", "384-dim", "~85 MB"),
-            ("vit-b14", "dinov2_vitb14", "DINOv2 ViT-B/14", "768-dim", "~350 MB"),
-            ("vit-l14", "dinov2_vitl14", "DINOv2 ViT-L/14", "1024-dim", "~1.2 GB"),
+            ("vit-s14", "DINOv2 ViT-S/14", "384-dim", "~85 MB"),
+            ("vit-b14", "DINOv2 ViT-B/14", "768-dim", "~350 MB"),
+            ("vit-l14", "DINOv2 ViT-L/14", "1024-dim", "~1.2 GB"),
         ]
-        for variant_id, hub_name, name, dims, size_est in dinov2_variants:
-            # DINOv2 caches in torch hub dir
-            dinov2_hub = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+        for variant_id, name, dims, size_est in dinov2_variants:
+            variant_dir = os.path.join(models_dir, f"dinov2-{variant_id}")
+            model_path = os.path.join(variant_dir, "model.onnx")
             status = "not downloaded"
             size = None
-            # Check HuggingFace cache too (newer versions use HF)
-            hf_dinov2 = os.path.join(hf_hub_dir, f"models--facebook--{hub_name}")
-            # torch.hub caches the repo, check if model file exists
-            if os.path.exists(dinov2_hub):
-                # The model is loaded via torch.hub.load which downloads the repo
-                # Weights are auto-downloaded on first model creation
-                status = "repo cached"
-            if os.path.exists(hf_dinov2):
-                pt_files = glob.glob(os.path.join(hf_dinov2, "snapshots", "**", "*.bin"), recursive=True)
-                if pt_files:
-                    total_size = sum(os.path.getsize(f) for f in pt_files)
-                    size = round(total_size / 1024 / 1024, 1)
-                    status = "downloaded"
-            # Also check torch hub checkpoints
-            ckpt_files = glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth"))
-            if ckpt_files:
-                size = round(os.path.getsize(ckpt_files[0]) / 1024 / 1024, 1)
+            if os.path.isfile(model_path):
+                size = round(os.path.getsize(model_path) / 1024 / 1024, 1)
                 status = "downloaded"
             models.append({
                 "id": variant_id,
                 "name": name,
                 "role": "Embeddings",
-                "description": f"{dims} embeddings for grouping",
+                "description": f"{dims} embeddings for grouping (ONNX)",
                 "size_estimate": size_est,
                 "status": status,
                 "size": f"{size} MB" if size else None,
@@ -2792,7 +2710,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/models/pipeline/download", methods=["POST"])
     def api_models_pipeline_download():
-        """Download a pipeline model by ID."""
+        """Download a pipeline model (ONNX) by ID from jss367/vireo-onnx-models."""
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
@@ -2801,143 +2719,105 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        # Map each pipeline model ID to its HF subfolder and required files
+        PIPELINE_MODELS = {
+            "megadetector-v6": {
+                "subfolder": "megadetector-v6",
+                "files": ["model.onnx"],
+            },
+            "sam2-tiny": {
+                "subfolder": "sam2-tiny",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-small": {
+                "subfolder": "sam2-small",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-base-plus": {
+                "subfolder": "sam2-base-plus",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-large": {
+                "subfolder": "sam2-large",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "vit-s14": {
+                "subfolder": "dinov2-vit-s14",
+                "files": ["model.onnx"],
+            },
+            "vit-b14": {
+                "subfolder": "dinov2-vit-b14",
+                "files": ["model.onnx"],
+            },
+            "vit-l14": {
+                "subfolder": "dinov2-vit-l14",
+                "files": ["model.onnx"],
+            },
+        }
+
+        if model_id not in PIPELINE_MODELS:
+            return json_error(f"Unknown pipeline model: {model_id}")
+
         def work(job):
-            import urllib.request
+            import shutil
 
-            import torch
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
 
-            MAX_RETRIES = 3
+            spec = PIPELINE_MODELS[model_id]
+            subfolder = spec["subfolder"]
+            files = spec["files"]
+            model_dir = os.path.join(os.path.expanduser("~/.vireo/models"), subfolder)
+            os.makedirs(model_dir, exist_ok=True)
 
-            def _retry(fn, description):
-                """Retry a download function up to MAX_RETRIES times with backoff."""
+            total = len(files)
+            for fi, filename in enumerate(files):
+                runner.push_event(job["id"], "progress", {
+                    "phase": f"Downloading {fi + 1}/{total}: {filename}...",
+                    "current": fi,
+                    "total": total,
+                })
+
+                MAX_RETRIES = 3
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
-                        return fn()
+                        cached = hf_hub_download(
+                            repo_id=ONNX_REPO,
+                            filename=filename,
+                            subfolder=subfolder,
+                        )
+                        dest = os.path.join(model_dir, filename)
+                        if cached != dest:
+                            shutil.copy2(cached, dest)
+                        break
                     except Exception as exc:
-                        mro_names = [cls.__name__ for cls in type(exc).__mro__]
-                        is_network = isinstance(exc, (OSError, ConnectionError)) or \
-                            any(kw in name for name in mro_names for kw in ("Timeout", "Transport", "ReadError"))
-                        if not is_network or attempt == MAX_RETRIES:
+                        if attempt == MAX_RETRIES:
                             raise
                         wait = 2 ** attempt
-                        log.warning("Download attempt %d/%d for %s failed (%s), retrying in %ds...",
-                                    attempt, MAX_RETRIES, description, exc, wait)
-                        runner.push_event(job["id"], "progress", {
-                            "phase": f"Connection error, retrying in {wait}s (attempt {attempt}/{MAX_RETRIES})...",
-                            "current": 0, "total": 1,
-                        })
                         import time
+                        log.warning(
+                            "Download attempt %d/%d for %s/%s failed (%s), "
+                            "retrying in %ds...",
+                            attempt, MAX_RETRIES, subfolder, filename, exc, wait,
+                        )
+                        runner.push_event(job["id"], "progress", {
+                            "phase": f"Retrying {filename} in {wait}s "
+                                     f"(attempt {attempt}/{MAX_RETRIES})...",
+                            "current": fi, "total": total,
+                        })
                         time.sleep(wait)
 
-            def _download_url(url, dest, label):
-                """Download a URL with byte-level progress reporting."""
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req) as resp:
-                    total = int(resp.headers.get("Content-Length", 0))
-                    total_mb = round(total / 1024 / 1024, 1) if total else "?"
-                    downloaded = 0
-                    chunk_size = 64 * 1024
-                    with open(dest, "wb") as f:
-                        while True:
-                            chunk = resp.read(chunk_size)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            mb = round(downloaded / 1024 / 1024, 1)
-                            pct = round(downloaded / total * 100) if total else 0
-                            runner.push_event(job["id"], "progress", {
-                                "phase": f"{label}: {mb}/{total_mb} MB ({pct}%)",
-                                "current": downloaded,
-                                "total": total,
-                            })
-
             runner.push_event(job["id"], "progress", {
-                "phase": f"Starting download: {model_id}...", "current": 0, "total": 1,
+                "phase": "Download complete", "current": total, "total": total,
             })
-
-            if model_id == "megadetector-v6":
-                hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-                os.makedirs(hub_dir, exist_ok=True)
-                dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
-                for f in [dest, os.path.join(hub_dir, "MDV6-yolov9-c.pt")]:
-                    if os.path.exists(f):
-                        os.remove(f)
-                url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
-                _retry(lambda: _download_url(url, dest, "MegaDetector V6"), "MegaDetector V6")
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Validating weights...", "current": 1, "total": 1,
-                })
-                _prev = os.environ.get("TORCH_FORCE_WEIGHTS_ONLY_LOAD")
-                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-                try:
-                    ckpt = torch.load(dest, map_location="cpu", weights_only=False)
-                    if not isinstance(ckpt, dict):
-                        raise RuntimeError("Invalid checkpoint format")
-                    del ckpt
-                finally:
-                    os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
-                    if _prev:
-                        os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = _prev
-                return {"status": "downloaded", "model_id": model_id}
-
-            elif model_id.startswith("sam2-"):
-                hf_map = {
-                    "sam2-tiny": "facebook/sam2.1-hiera-tiny",
-                    "sam2-small": "facebook/sam2.1-hiera-small",
-                    "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
-                    "sam2-large": "facebook/sam2.1-hiera-large",
-                }
-                hf_id = hf_map.get(model_id)
-                if not hf_id:
-                    raise ValueError(f"Unknown SAM2 variant: {model_id}")
-                # Download weights via huggingface_hub with progress
-                from huggingface_hub import snapshot_download
-                runner.push_event(job["id"], "progress", {
-                    "phase": f"Downloading {model_id} from HuggingFace...",
-                    "current": 0, "total": 1,
-                })
-                _retry(lambda: snapshot_download(hf_id), model_id)
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Verifying model loads...", "current": 1, "total": 1,
-                })
-                from sam2.build_sam import build_sam2_hf
-                model = build_sam2_hf(hf_id, device="cpu")
-                del model
-                return {"status": "downloaded", "model_id": model_id}
-
-            elif model_id.startswith("vit-"):
-                hub_map = {
-                    "vit-s14": "dinov2_vits14",
-                    "vit-b14": "dinov2_vitb14",
-                    "vit-l14": "dinov2_vitl14",
-                }
-                hub_name = hub_map.get(model_id)
-                if not hub_name:
-                    raise ValueError(f"Unknown DINOv2 variant: {model_id}")
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Downloading DINOv2 repo from torch hub...",
-                    "current": 0, "total": 1,
-                })
-                # torch.hub.load downloads repo + weights automatically
-                model = _retry(lambda: torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True), model_id)
-                del model
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Model loaded and verified", "current": 1, "total": 1,
-                })
-                return {"status": "downloaded", "model_id": model_id}
-
-            else:
-                raise ValueError(f"Unknown model: {model_id}")
+            return {"status": "downloaded", "model_id": model_id}
 
         job_id = runner.start(f"download-{model_id}", work, config={"model_id": model_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/models/pipeline/delete", methods=["POST"])
     def api_models_pipeline_delete():
-        """Delete a pipeline model's cached weights."""
-        import glob
+        """Delete a pipeline model's ONNX files from ~/.vireo/models/."""
         import shutil
 
         body = request.get_json(silent=True) or {}
@@ -2945,36 +2825,22 @@ def create_app(db_path, thumb_cache_dir=None):
         if not model_id:
             return json_error("model_id required")
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
-
-        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
+        models_dir = os.path.expanduser("~/.vireo/models")
         removed = []
 
         if model_id == "megadetector-v6":
-            for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
-                for f in glob.glob(os.path.join(hub_dir, pattern)):
-                    os.remove(f)
-                    removed.append(f)
+            model_dir = os.path.join(models_dir, "megadetector-v6")
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             import detector
             detector._session = None
 
         elif model_id.startswith("sam2-"):
-            hf_map = {
-                "sam2-tiny": "facebook/sam2.1-hiera-tiny",
-                "sam2-small": "facebook/sam2.1-hiera-small",
-                "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
-                "sam2-large": "facebook/sam2.1-hiera-large",
-            }
-            hf_repo = hf_map.get(model_id)
-            if hf_repo:
-                repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
-                if os.path.exists(repo_dir):
-                    shutil.rmtree(repo_dir)
-                    removed.append(repo_dir)
+            model_dir = os.path.join(models_dir, model_id)
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             # Clear singleton
             import masking
             masking._encoder_session = None
@@ -2982,16 +2848,10 @@ def create_app(db_path, thumb_cache_dir=None):
             masking._sam2_variant_loaded = None
 
         elif model_id.startswith("vit-"):
-            hub_map = {
-                "vit-s14": "dinov2_vits14",
-                "vit-b14": "dinov2_vitb14",
-                "vit-l14": "dinov2_vitl14",
-            }
-            hub_name = hub_map.get(model_id)
-            if hub_name:
-                for f in glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth")):
-                    os.remove(f)
-                    removed.append(f)
+            model_dir = os.path.join(models_dir, f"dinov2-{model_id}")
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             # Clear singleton
             import dino_embed as dinov2_mod
             dinov2_mod._session = None
