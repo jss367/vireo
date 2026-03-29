@@ -630,6 +630,7 @@ def download_taxonomy(output_path, progress_callback=None):
     _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
     taxa_by_common = {}
     taxa_by_scientific = {}
+    entries_by_taxon = {}
 
     for taxon_id, taxon in taxa_by_id.items():
         rank = taxon["rank"]
@@ -646,13 +647,24 @@ def download_taxonomy(output_path, progress_callback=None):
             "lineage_names": lineage_names,
             "lineage_ranks": lineage_ranks,
         }
+        entries_by_taxon[taxon_id] = entry
 
         # Index by scientific name
         sci_key = taxon["scientific_name"].lower()
         taxa_by_scientific[sci_key] = entry
 
-        # Index by all English common names (preferred + alternates)
-        for cn in alt_names.get(taxon_id, []):
+    # Index preferred common names first so they always win
+    for taxon_id, cn in common_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        if entry:
+            taxa_by_common[cn.lower()] = entry
+
+    # Then index alternate names only for still-unmapped keys
+    for taxon_id, names in alt_names.items():
+        entry = entries_by_taxon.get(taxon_id)
+        if not entry:
+            continue
+        for cn in names:
             cn_key = cn.lower()
             if cn_key not in taxa_by_common:
                 taxa_by_common[cn_key] = entry
