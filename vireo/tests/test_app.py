@@ -835,3 +835,49 @@ def test_update_keyword_name(app_and_db):
     assert resp.status_code == 200
     row = db.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["name"] == "new_name"
+
+
+def test_rename_keyword_queues_sidecar_changes(app_and_db):
+    """Renaming a keyword queues remove+add pending changes for affected photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    # conftest photos: p1 is in folder '/photos/2024'
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    # Clear any prior pending changes
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "NewBird") in actions
+
+
+def test_delete_keyword_queues_sidecar_removals(app_and_db):
+    """Deleting a keyword queues removal pending changes for affected photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("ToDelete")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.delete(f"/api/keywords/{kid}")
+    assert resp.status_code == 200
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (p1,),
+    ).fetchall()
+    assert any(c["change_type"] == "keyword_remove" and c["value"] == "ToDelete" for c in changes)
+    # Keyword should be gone
+    assert db.conn.execute("SELECT id FROM keywords WHERE id = ?", (kid,)).fetchone() is None
