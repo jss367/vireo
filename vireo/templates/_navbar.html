@@ -1427,7 +1427,7 @@ function openPipeline(photoId) {
 
   safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
     .then(function(data) { renderPipeline(data, photoId); })
-    .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + e.message + '</p>'; });
+    .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + escapeHtml(e.message) + '</p>'; });
 }
 
 function closePipeline() {
@@ -1575,7 +1575,7 @@ function findSimilar(photoId) {
   safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
     .then(function(data) {
       if (data.error) {
-        content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + data.error + '</p>';
+        content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + escapeHtml(data.error) + '</p>';
         return;
       }
       var html = '<p style="font-size:12px;color:var(--text-dim,#888);margin-bottom:12px;">Compared against ' +
@@ -1601,7 +1601,7 @@ function findSimilar(photoId) {
       content.innerHTML = html;
     })
     .catch(function(e) {
-      content.innerHTML = '<p style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</p>';
+      content.innerHTML = '<p style="color:var(--danger,#e74c3c);">Failed: ' + escapeHtml(e.message) + '</p>';
     });
 }
 
