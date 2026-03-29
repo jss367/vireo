@@ -1,12 +1,20 @@
 """Tests for vireo/metadata.py — ExifTool wrapper."""
 
 import os
+import shutil
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
 from PIL.ExifTags import IFD, Base
+
+requires_exiftool = pytest.mark.skipif(
+    shutil.which("exiftool") is None,
+    reason="exiftool not installed",
+)
 
 
 def _create_jpg_with_exif(path):
@@ -32,6 +40,7 @@ def _create_plain_jpg(path):
     img.save(path)
 
 
+@requires_exiftool
 def test_extract_metadata_single_file(tmp_path):
     """extract_metadata returns grouped tag dict for a single file."""
     from metadata import extract_metadata
@@ -60,6 +69,7 @@ def test_extract_metadata_single_file(tmp_path):
     assert meta["File"]["ImageHeight"] == 100
 
 
+@requires_exiftool
 def test_extract_metadata_returns_empty_for_missing_file(tmp_path):
     """extract_metadata returns empty dict for nonexistent file."""
     from metadata import extract_metadata
@@ -71,6 +81,7 @@ def test_extract_metadata_returns_empty_for_missing_file(tmp_path):
     assert results.get(missing) is None or results == {}
 
 
+@requires_exiftool
 def test_extract_metadata_batch(tmp_path):
     """extract_metadata handles multiple files in one call."""
     from metadata import extract_metadata
@@ -94,6 +105,7 @@ def test_extract_metadata_empty_list():
     assert extract_metadata([]) == {}
 
 
+@requires_exiftool
 def test_extract_metadata_with_restricted_tags(tmp_path):
     """extract_metadata can restrict which tags are returned."""
     from metadata import extract_metadata
@@ -214,6 +226,7 @@ def test_group_tags_ungrouped_keys_go_to_meta():
     assert grouped["EXIF"]["Make"] == "Canon"
 
 
+@requires_exiftool
 def test_extract_metadata_integration_with_summary(tmp_path):
     """End-to-end: extract_metadata then extract_summary_fields."""
     from metadata import extract_metadata, extract_summary_fields

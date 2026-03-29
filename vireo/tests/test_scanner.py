@@ -1,12 +1,20 @@
 # vireo/tests/test_scanner.py
 import json
 import os
+import shutil
 import sys
 import time
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
+
+requires_exiftool = pytest.mark.skipif(
+    shutil.which("exiftool") is None,
+    reason="exiftool not installed",
+)
 
 
 def _create_test_images(root, structure):
@@ -285,6 +293,7 @@ def test_incremental_scan_detects_xmp_changes(tmp_path):
     assert 'Cardinal' in kw_names
 
 
+@requires_exiftool
 def test_scan_populates_exif_data(tmp_path):
     """scan() populates the exif_data JSON column when extract_full_metadata is on."""
     from db import Database
