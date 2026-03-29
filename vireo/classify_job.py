@@ -488,6 +488,10 @@ def _classify_photos(
         image_path = os.path.join(folder_path, photo["filename"])
 
         if photo["id"] in existing_preds:
+            # Flush pending batch to preserve photo ordering in raw_results
+            if batch:
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                batch = []
             skipped_existing += 1
             pred_row = db.get_prediction_for_photo(photo["id"], model_name)
             if pred_row:
