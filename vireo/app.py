@@ -2993,8 +2993,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     removed.append(f)
             # Clear singleton
             import dino_embed as dinov2_mod
-            dinov2_mod._dinov2_model = None
-            dinov2_mod._dinov2_variant_loaded = None
+            dinov2_mod._session = None
+            dinov2_mod._variant_loaded = None
 
         return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id})
 
