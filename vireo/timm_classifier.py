@@ -126,10 +126,12 @@ class TimmClassifier:
         Returns:
             list of dicts with species, score, auto_tag, confidence_tag, taxonomy
         """
+        import os
+
         import torch
         from PIL import Image as PILImage
 
-        if isinstance(image, str):
+        if isinstance(image, (str, os.PathLike)):
             with PILImage.open(image) as img:
                 input_tensor = self._transform(img.convert("RGB")).unsqueeze(0).to(self._device)
         else:
