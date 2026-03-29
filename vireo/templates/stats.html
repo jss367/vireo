@@ -15,19 +15,19 @@ body { padding-bottom: 36px; }
   display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px;
 }
 .bar-label {
-  width: 180px; text-align: right; color: var(--text-secondary, #B0CCCC); overflow: hidden;
+  width: 180px; text-align: right; color: var(--text-secondary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0;
 }
 .bar-track {
-  flex: 1; height: 18px; background: var(--bg-tertiary, #14374E); border-radius: 3px; overflow: hidden;
+  flex: 1; height: 18px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden;
 }
 .bar-fill {
   height: 100%; border-radius: 3px; transition: width 0.3s;
 }
-.bar-value { width: 60px; color: var(--text-dim, #888); font-variant-numeric: tabular-nums; flex-shrink: 0; }
-.species-bar .bar-fill { background: #24E5CA; }
-.month-bar .bar-fill { background: #7ec8e3; }
-.rating-bar .bar-fill { background: #f0c040; }
+.bar-value { width: 60px; color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.species-bar .bar-fill { background: var(--accent); }
+.month-bar .bar-fill { background: var(--info); }
+.rating-bar .bar-fill { background: var(--warning); }
 .hour-bar .bar-fill { background: #a78bfa; }
 .quality-bar .bar-fill { background: #f97316; }
 .pred-bar .bar-fill { background: #38bdf8; }
@@ -36,67 +36,67 @@ body { padding-bottom: 36px; }
 @media (max-width: 768px) { .grid-2col { grid-template-columns: 1fr; } }
 
 .stat-big { text-align: center; padding: 16px; }
-.stat-big .number { font-size: 36px; font-weight: 700; color: var(--accent, #24E5CA); }
-.stat-big .label { font-size: 12px; color: var(--text-dim, #888); margin-top: 4px; }
+.stat-big .number { font-size: 36px; font-weight: 700; color: var(--accent); }
+.stat-big .label { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
 
 .stats-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 12px;
 }
 .stat-card {
-  background: var(--bg-tertiary, #14374E); border-radius: 6px; padding: 14px 16px; text-align: center;
+  background: var(--bg-tertiary); border-radius: 6px; padding: 14px 16px; text-align: center;
 }
 .stat-number {
-  font-size: 24px; font-weight: 700; color: var(--accent, #24E5CA); font-variant-numeric: tabular-nums;
+  font-size: 24px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;
 }
-.stat-label { font-size: 11px; color: var(--text-dim, #888); margin-top: 4px; }
-#pendingCard:hover, #folderCard:hover { background: var(--border-secondary, #1A4560); }
+.stat-label { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+#pendingCard:hover, #folderCard:hover { background: var(--border-secondary); }
 
 .modal-overlay {
   display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-  background: rgba(0,0,0,0.6); z-index: 1000; justify-content: center; align-items: center;
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent); z-index: 1000; justify-content: center; align-items: center;
 }
 .modal-overlay.open { display: flex; }
 .modal {
-  background: var(--bg-secondary, #0E2A3D); border: 1px solid var(--border-primary, #14374E); border-radius: 8px;
+  background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px;
   width: 90%; max-width: 560px; max-height: 80vh; display: flex; flex-direction: column;
 }
 .modal-header {
-  padding: 16px 20px; border-bottom: 1px solid var(--border-primary, #14374E);
+  padding: 16px 20px; border-bottom: 1px solid var(--border-primary);
   display: flex; justify-content: space-between; align-items: center;
 }
-.modal-header h3 { font-size: 15px; font-weight: 600; color: var(--text-primary, #fff); margin: 0; }
+.modal-header h3 { font-size: 15px; font-weight: 600; color: var(--text-primary); margin: 0; }
 .modal-close {
-  background: none; border: none; color: var(--text-dim, #888); font-size: 20px; cursor: pointer; padding: 0 4px;
+  background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; padding: 0 4px;
 }
 .modal-close:hover { color: var(--text-primary); }
 .modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
 .modal-footer {
-  padding: 12px 20px; border-top: 1px solid var(--border-primary, #14374E);
+  padding: 12px 20px; border-top: 1px solid var(--border-primary);
   display: flex; justify-content: space-between; align-items: center;
 }
-.modal-desc { font-size: 12px; color: var(--text-dim, #888); margin-bottom: 14px; line-height: 1.5; }
+.modal-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 14px; line-height: 1.5; }
 .file-list { margin: 0; padding: 0; list-style: none; }
 .file-item {
   display: flex; align-items: center; gap: 8px; padding: 5px 0;
-  border-bottom: 1px solid var(--border-primary, #14374E); font-size: 12px;
+  border-bottom: 1px solid var(--border-primary); font-size: 12px;
 }
-.file-item label { flex: 1; color: var(--text-secondary, #B0CCCC); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-item .file-size { color: var(--text-ghost, #666); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.file-item label { flex: 1; color: var(--text-secondary); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item .file-size { color: var(--text-ghost); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .file-select-bar { display: flex; gap: 12px; margin-bottom: 8px; font-size: 11px; }
-.file-select-bar a { color: var(--accent, #24E5CA); cursor: pointer; text-decoration: none; }
+.file-select-bar a { color: var(--accent); cursor: pointer; text-decoration: none; }
 .file-select-bar a:hover { text-decoration: underline; }
 .btn-danger {
-  background: var(--danger, #e74c3c); color: #fff; border: none; border-radius: 4px;
+  background: var(--danger); color: var(--text-primary); border: none; border-radius: 4px;
   padding: 6px 16px; font-size: 12px; cursor: pointer; font-weight: 500;
 }
-.btn-danger:hover { background: #c0392b; }
+.btn-danger:hover { background: color-mix(in srgb, var(--danger) 80%, black); }
 .btn-danger:disabled { opacity: 0.4; cursor: default; }
 .btn-secondary {
-  background: none; color: var(--text-dim, #888); border: 1px solid var(--border-primary, #14374E); border-radius: 4px;
+  background: none; color: var(--text-dim); border: 1px solid var(--border-primary); border-radius: 4px;
   padding: 6px 16px; font-size: 12px; cursor: pointer;
 }
-.btn-secondary:hover { color: var(--text-secondary, #B0CCCC); border-color: var(--border-secondary, #1A4560); }
+.btn-secondary:hover { color: var(--text-secondary); border-color: var(--border-secondary); }
 </style>
 </head>
 <body>
@@ -126,14 +126,14 @@ body { padding-bottom: 36px; }
         <div class="stat-label">Pending Sync &#9662;</div>
       </div>
     </div>
-    <div id="folderDetail" style="display:none;margin-top:16px;border-top:1px solid #14374E;padding-top:16px;"></div>
-    <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid #14374E;padding-top:16px;"></div>
+    <div id="folderDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
+    <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
   </div>
 
   <!-- Top Species -->
   <div class="section">
     <div class="section-title">Top Species</div>
-    <div class="bar-chart" id="speciesChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div class="bar-chart" id="speciesChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <div class="grid-2col">
@@ -154,36 +154,36 @@ body { padding-bottom: 36px; }
   <div class="grid-2col">
     <div class="section">
       <div class="section-title">Classification</div>
-      <div id="classificationStats"><span style="color:#555;font-size:13px;">Loading...</span></div>
+      <div id="classificationStats"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     </div>
     <div class="section">
       <div class="section-title">Detection Coverage</div>
-      <div id="detectionStats"><span style="color:#555;font-size:13px;">Loading...</span></div>
+      <div id="detectionStats"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     </div>
   </div>
 
   <!-- Quality Score Distribution -->
   <div class="section">
     <div class="section-title">Quality Score Distribution</div>
-    <div class="bar-chart" id="qualityChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div class="bar-chart" id="qualityChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Photos by Hour -->
   <div class="section">
     <div class="section-title">Photos by Time of Day</div>
-    <div class="bar-chart" id="hourChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div class="bar-chart" id="hourChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Photos by Month -->
   <div class="section">
     <div class="section-title">Photos by Month</div>
-    <div class="bar-chart" id="monthChart"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div class="bar-chart" id="monthChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Storage Management -->
   <div class="section">
-    <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:#888;margin-left:8px;">-</span></div>
-    <div id="storageGrid" class="stats-grid"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:8px;">-</span></div>
+    <div id="storageGrid" class="stats-grid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 </div>
 
@@ -195,12 +195,12 @@ body { padding-bottom: 36px; }
     </div>
     <div class="modal-body">
       <div class="modal-desc" id="modalDesc"></div>
-      <div id="modalLoading" style="color:#555;font-size:13px;">Loading files...</div>
+      <div id="modalLoading" style="color:var(--text-ghost);font-size:13px;">Loading files...</div>
       <div id="modalFileList" style="display:none;">
         <div class="file-select-bar">
           <a onclick="selectAllFiles(true)">Select all</a>
           <a onclick="selectAllFiles(false)">Select none</a>
-          <span id="modalSelectedInfo" style="color:#888;margin-left:auto;"></span>
+          <span id="modalSelectedInfo" style="color:var(--text-dim);margin-left:auto;"></span>
         </div>
         <ul class="file-list" id="modalFiles"></ul>
       </div>
@@ -240,7 +240,7 @@ function renderSpecies(keywords) {
   var species = keywords.filter(function(k) { return k.is_species; });
   var container = document.getElementById('speciesChart');
   if (species.length === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No species classified yet. Run classification on the Classify page.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No species classified yet. Run classification on the Classify page.</span>';
     return;
   }
   var max = species[0].photo_count;
@@ -257,12 +257,12 @@ function renderSpecies(keywords) {
   // Also show top non-species keywords
   var nonSpecies = keywords.filter(function(k) { return !k.is_species; }).slice(0, 10);
   if (nonSpecies.length > 0) {
-    html += '<div style="margin-top:16px;font-size:11px;color:#666;text-transform:uppercase;margin-bottom:8px;">Other Keywords</div>';
+    html += '<div style="margin-top:16px;font-size:11px;color:var(--text-faint);text-transform:uppercase;margin-bottom:8px;">Other Keywords</div>';
     nonSpecies.forEach(function(k) {
       var pct = Math.round((k.photo_count / max) * 100);
       html += '<div class="bar-row">' +
         '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
-        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:#555;"></div></div>' +
+        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:var(--text-ghost);"></div></div>' +
         '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
       '</div>';
     });
@@ -273,7 +273,7 @@ function renderSpecies(keywords) {
 function renderMonths(months) {
   var container = document.getElementById('monthChart');
   if (months.length === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No timestamp data available.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No timestamp data available.</span>';
     return;
   }
   var max = Math.max.apply(null, months.map(function(m) { return m.count; }));
@@ -314,10 +314,10 @@ function renderFlags(flags) {
   var container = document.getElementById('flagStats');
   var html = '';
   flags.forEach(function(f) {
-    var color = f.flag === 'flagged' ? '#24E5CA' : f.flag === 'rejected' ? '#e74c3c' : '#888';
-    html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #0E2A3D;">' +
+    var color = f.flag === 'flagged' ? 'var(--accent)' : f.flag === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle);">' +
       '<span style="color:' + color + ';font-size:14px;font-weight:600;text-transform:capitalize;">' + f.flag + '</span>' +
-      '<span style="margin-left:auto;font-size:14px;color:#B0CCCC;font-variant-numeric:tabular-nums;">' + f.count.toLocaleString() + '</span>' +
+      '<span style="margin-left:auto;font-size:14px;color:var(--text-secondary);font-variant-numeric:tabular-nums;">' + f.count.toLocaleString() + '</span>' +
     '</div>';
   });
   container.innerHTML = html;
@@ -328,21 +328,21 @@ function renderClassification(predStatus, classified, total) {
   var unclassified = total - classified;
   // Summary line
   var html = '<div style="margin-bottom:12px;font-size:13px;">' +
-    '<span style="color:#24E5CA;font-weight:600;">' + classified.toLocaleString() + '</span>' +
-    ' <span style="color:#888;">of ' + total.toLocaleString() + ' photos classified</span>' +
-    (unclassified > 0 ? ' <span style="color:#f0c040;">(' + unclassified.toLocaleString() + ' unclassified)</span>' : '') +
+    '<span style="color:var(--accent);font-weight:600;">' + classified.toLocaleString() + '</span>' +
+    ' <span style="color:var(--text-dim);">of ' + total.toLocaleString() + ' photos classified</span>' +
+    (unclassified > 0 ? ' <span style="color:var(--warning);">(' + unclassified.toLocaleString() + ' unclassified)</span>' : '') +
   '</div>';
   if (predStatus.length === 0 && classified === 0) {
-    html += '<span style="color:#555;font-size:13px;">No predictions yet. Run classification first.</span>';
+    html += '<span style="color:var(--text-ghost);font-size:13px;">No predictions yet. Run classification first.</span>';
     container.innerHTML = html;
     return;
   }
   // Bar chart of prediction statuses
   var max = Math.max.apply(null, predStatus.map(function(p) { return p.count; })) || 1;
-  var colors = {pending: '#f0c040', accepted: '#24E5CA', rejected: '#e74c3c'};
+  var colors = {pending: 'var(--warning)', accepted: 'var(--accent)', rejected: 'var(--danger)'};
   predStatus.forEach(function(p) {
     var pct = Math.round((p.count / max) * 100);
-    var color = colors[p.status] || '#888';
+    var color = colors[p.status] || 'var(--text-dim)';
     html += '<div class="bar-row pred-bar">' +
       '<span class="bar-label" style="text-transform:capitalize;">' + (p.status || 'unknown') + '</span>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>' +
@@ -355,7 +355,7 @@ function renderClassification(predStatus, classified, total) {
 async function renderDetection(detected, total) {
   var container = document.getElementById('detectionStats');
   if (total === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No photos.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No photos.</span>';
     return;
   }
   if (detected === 0) {
@@ -364,9 +364,9 @@ async function renderDetection(detected, total) {
       var info = await safeFetch('/api/system/info', {}, { toast: false });
       if (info.megadetector !== 'installed') {
         container.innerHTML = '<div style="text-align:center;padding:16px 0;">' +
-          '<div style="font-size:13px;color:#888;">Subject detection requires MegaDetector.</div>' +
-          '<div style="font-size:12px;color:#555;margin-top:8px;">Install with: <code style="background:#14374E;padding:2px 6px;border-radius:3px;">pip install PytorchWildlife</code></div>' +
-          '<div style="font-size:12px;color:#555;margin-top:4px;">Detection runs automatically during classification.</div>' +
+          '<div style="font-size:13px;color:var(--text-dim);">Subject detection requires MegaDetector.</div>' +
+          '<div style="font-size:12px;color:var(--text-ghost);margin-top:8px;">Install with: <code style="background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;">pip install PytorchWildlife</code></div>' +
+          '<div style="font-size:12px;color:var(--text-ghost);margin-top:4px;">Detection runs automatically during classification.</div>' +
         '</div>';
         return;
       }
@@ -375,13 +375,13 @@ async function renderDetection(detected, total) {
   var pct = Math.round((detected / total) * 100);
   var undetected = total - detected;
   var html = '<div style="text-align:center;padding:16px 0;">' +
-    '<div style="font-size:36px;font-weight:700;color:#24E5CA;">' + pct + '%</div>' +
-    '<div style="font-size:12px;color:#888;margin-top:4px;">subjects detected</div>' +
+    '<div style="font-size:36px;font-weight:700;color:var(--accent);">' + pct + '%</div>' +
+    '<div style="font-size:12px;color:var(--text-dim);margin-top:4px;">subjects detected</div>' +
   '</div>' +
-  '<div style="height:8px;background:#14374E;border-radius:4px;overflow:hidden;margin:8px 0;">' +
-    '<div style="height:100%;width:' + pct + '%;background:#24E5CA;border-radius:4px;transition:width 0.3s;"></div>' +
+  '<div style="height:8px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden;margin:8px 0;">' +
+    '<div style="height:100%;width:' + pct + '%;background:var(--accent);border-radius:4px;transition:width 0.3s;"></div>' +
   '</div>' +
-  '<div style="display:flex;justify-content:space-between;font-size:12px;color:#888;">' +
+  '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-dim);">' +
     '<span>' + detected.toLocaleString() + ' detected</span>' +
     '<span>' + undetected.toLocaleString() + ' no detection</span>' +
   '</div>';
@@ -398,11 +398,11 @@ function renderQuality(dist) {
     buckets.push(d);
   });
   if (buckets.length === 0 && unscored === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No quality data. Run sharpness scoring first.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No quality data. Run sharpness scoring first.</span>';
     return;
   }
   if (buckets.length === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No scored photos yet (' + unscored.toLocaleString() + ' unscored). Run sharpness scoring first.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No scored photos yet (' + unscored.toLocaleString() + ' unscored). Run sharpness scoring first.</span>';
     return;
   }
   var max = Math.max.apply(null, buckets.map(function(b) { return b.count; }));
@@ -420,7 +420,7 @@ function renderQuality(dist) {
     '</div>';
   }
   if (unscored > 0) {
-    html += '<div style="margin-top:8px;font-size:12px;color:#666;">' + unscored.toLocaleString() + ' photos not yet scored</div>';
+    html += '<div style="margin-top:8px;font-size:12px;color:var(--text-faint);">' + unscored.toLocaleString() + ' photos not yet scored</div>';
   }
   container.innerHTML = html;
 }
@@ -428,7 +428,7 @@ function renderQuality(dist) {
 function renderHours(hours) {
   var container = document.getElementById('hourChart');
   if (hours.length === 0) {
-    container.innerHTML = '<span style="color:#555;font-size:13px;">No timestamp data available.</span>';
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No timestamp data available.</span>';
     return;
   }
   var max = Math.max.apply(null, hours.map(function(h) { return h.count; }));
@@ -474,29 +474,29 @@ async function toggleFolderDetail() {
     return;
   }
   panel.style.display = 'block';
-  panel.innerHTML = '<span style="color:#555;font-size:13px;">Loading...</span>';
+  panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">Loading...</span>';
   folderOpen = true;
   try {
     var folders = await safeFetch('/api/folders', {}, { toast: false });
     if (folders.length === 0) {
-      panel.innerHTML = '<span style="color:#555;font-size:13px;">No folders scanned yet.</span>';
+      panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders scanned yet.</span>';
       return;
     }
     var html = '';
     folders.forEach(function(f) {
       if (f.photo_count === 0) return;
-      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #14374E;font-size:12px;">' +
-        '<span style="color:#B0CCCC;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-right:12px;" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.path) + '</span>' +
-        '<span style="color:#888;font-variant-numeric:tabular-nums;flex-shrink:0;">' + f.photo_count.toLocaleString() + ' photos</span>' +
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-primary);font-size:12px;">' +
+        '<span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-right:12px;" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.path) + '</span>' +
+        '<span style="color:var(--text-dim);font-variant-numeric:tabular-nums;flex-shrink:0;">' + f.photo_count.toLocaleString() + ' photos</span>' +
       '</div>';
     });
     if (!html) {
-      panel.innerHTML = '<span style="color:#555;font-size:13px;">No folders with photos.</span>';
+      panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders with photos.</span>';
       return;
     }
     panel.innerHTML = html;
   } catch(e) {
-    panel.innerHTML = '<span style="color:#e74c3c;font-size:12px;">Failed to load folders.</span>';
+    panel.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load folders.</span>';
   }
 }
 
@@ -509,29 +509,29 @@ async function togglePendingDetail() {
     return;
   }
   panel.style.display = 'block';
-  panel.innerHTML = '<span style="color:#555;font-size:13px;">Loading...</span>';
+  panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">Loading...</span>';
   pendingOpen = true;
   try {
     var data = await safeFetch('/api/sync/preview', {}, { toast: false });
     if (data.total_changes === 0) {
-      panel.innerHTML = '<span style="color:#555;font-size:13px;">No pending changes.</span>';
+      panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No pending changes.</span>';
       return;
     }
-    var html = '<div style="font-size:12px;color:#888;margin-bottom:12px;">' + data.total_changes + ' change(s) across ' + data.photos.length + ' photo(s)</div>';
+    var html = '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">' + data.total_changes + ' change(s) across ' + data.photos.length + ' photo(s)</div>';
     data.photos.forEach(function(p) {
-      html += '<div style="margin-bottom:10px;padding:8px 10px;background:#14374E;border-radius:4px;">' +
-        '<div style="font-size:12px;color:#E0F0F0;font-weight:500;margin-bottom:4px;">' + escapeHtml(p.filename) + '</div>' +
-        '<div style="font-size:11px;color:#666;margin-bottom:6px;">' + escapeHtml(p.folder) + '</div>';
+      html += '<div style="margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary);border-radius:4px;">' +
+        '<div style="font-size:12px;color:var(--text-primary);font-weight:500;margin-bottom:4px;">' + escapeHtml(p.filename) + '</div>' +
+        '<div style="font-size:11px;color:var(--text-faint);margin-bottom:6px;">' + escapeHtml(p.folder) + '</div>';
       p.changes.forEach(function(c) {
-        var color = c.type === 'keyword_add' ? '#24E5CA' : c.type === 'keyword_remove' ? '#e74c3c' : '#B0CCCC';
+        var color = c.type === 'keyword_add' ? 'var(--accent)' : c.type === 'keyword_remove' ? 'var(--danger)' : 'var(--text-secondary)';
         var label = c.type === 'keyword_add' ? '+ ' : c.type === 'keyword_remove' ? '- ' : '';
-        html += '<div style="font-size:12px;color:' + color + ';padding:2px 0;">' + label + escapeHtml(c.value) + ' <span style="color:#555;">(' + c.type.replace('_', ' ') + ')</span></div>';
+        html += '<div style="font-size:12px;color:' + color + ';padding:2px 0;">' + label + escapeHtml(c.value) + ' <span style="color:var(--text-ghost);">(' + c.type.replace('_', ' ') + ')</span></div>';
       });
       html += '</div>';
     });
     panel.innerHTML = html;
   } catch(e) {
-    panel.innerHTML = '<span style="color:#e74c3c;font-size:12px;">Failed to load pending changes.</span>';
+    panel.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load pending changes.</span>';
   }
 }
 
@@ -560,13 +560,13 @@ async function loadStoragePanel() {
         '</div>';
       if (c.type) {
         html += '<button onclick="openStorageModal(\'' + c.type + '\')" ' +
-          'style="background:none;color:#24E5CA;border:1px solid #24E5CA;border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer;margin-top:8px;">Manage</button>';
+          'style="background:none;color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer;margin-top:8px;">Manage</button>';
       }
       html += '</div>';
     });
     document.getElementById('storageGrid').innerHTML = html;
   } catch(e) {
-    document.getElementById('storageGrid').innerHTML = '<span style="color:#e74c3c;font-size:12px;">Failed to load storage info</span>';
+    document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
   }
 }
 
@@ -605,7 +605,7 @@ async function openStorageModal(type) {
     document.getElementById('modalFileList').style.display = 'block';
 
     if (_modalFiles.length === 0) {
-      document.getElementById('modalFiles').innerHTML = '<li style="color:#555;font-size:13px;padding:12px 0;">Cache is empty.</li>';
+      document.getElementById('modalFiles').innerHTML = '<li style="color:var(--text-ghost);font-size:13px;padding:12px 0;">Cache is empty.</li>';
       document.getElementById('modalDeleteAll').disabled = true;
       updateSelectedInfo();
       return;
@@ -617,9 +617,9 @@ async function openStorageModal(type) {
       var displayName = escapeHtml(f.name);
       if (f.meta) {
         displayName = escapeHtml(f.meta.model || 'Unknown model') +
-          ' <span style="color:#666;">\u00b7 ' + (f.meta.label_count || '?') + ' labels</span>';
+          ' <span style="color:var(--text-faint);">\u00b7 ' + (f.meta.label_count || '?') + ' labels</span>';
         if (f.meta.created) {
-          displayName += ' <span style="color:#555;">\u00b7 ' + escapeHtml(f.meta.created.split('T')[0]) + '</span>';
+          displayName += ' <span style="color:var(--text-ghost);">\u00b7 ' + escapeHtml(f.meta.created.split('T')[0]) + '</span>';
         }
       }
       html += '<li class="file-item">' +
@@ -631,7 +631,7 @@ async function openStorageModal(type) {
     document.getElementById('modalFiles').innerHTML = html;
     updateSelectedInfo();
   } catch(e) {
-    document.getElementById('modalLoading').innerHTML = '<span style="color:#e74c3c;">Failed to load files.</span>';
+    document.getElementById('modalLoading').innerHTML = '<span style="color:var(--danger);">Failed to load files.</span>';
   }
 }
 

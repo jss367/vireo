@@ -23,28 +23,28 @@
 .species-sidebar {
   width: 280px;
   min-width: 280px;
-  background: var(--bg-secondary, #0E2A3D);
-  border-right: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-primary);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 .species-search {
   padding: 12px;
-  border-bottom: 1px solid var(--border-primary, #14374E);
+  border-bottom: 1px solid var(--border-primary);
 }
 .species-search input {
   width: 100%;
-  background: var(--bg-input, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
   box-sizing: border-box;
 }
-.species-search input:focus { border-color: var(--accent, #24E5CA); }
+.species-search input:focus { border-color: var(--accent); }
 .species-list {
   flex: 1;
   overflow-y: auto;
@@ -54,24 +54,24 @@
   padding: 8px 12px;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-secondary, #B0CCCC);
+  color: var(--text-secondary);
   border-left: 3px solid transparent;
   transition: background 0.1s;
 }
-.species-item:hover { background: var(--bg-tertiary, #14374E); }
+.species-item:hover { background: var(--bg-tertiary); }
 .species-item.active {
-  background: var(--bg-tertiary, #14374E);
-  border-left-color: var(--accent, #24E5CA);
-  color: var(--text-primary, #E0F0F0);
+  background: var(--bg-tertiary);
+  border-left-color: var(--accent);
+  color: var(--text-primary);
 }
 .species-item-count {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   float: right;
 }
 .species-item-tax {
   font-size: 10px;
-  color: var(--text-ghost, #555);
+  color: var(--text-ghost);
   font-style: italic;
 }
 
@@ -84,7 +84,7 @@
 .cluster-empty {
   text-align: center;
   padding: 60px 20px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   font-size: 14px;
 }
 .cluster-header {
@@ -96,11 +96,11 @@
 .cluster-header h2 {
   margin: 0;
   font-size: 18px;
-  color: var(--text-primary, #E0F0F0);
+  color: var(--text-primary);
 }
 .cluster-header .cluster-meta {
   font-size: 12px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
 }
 .cluster-controls {
   display: flex;
@@ -108,17 +108,17 @@
   gap: 10px;
   margin-bottom: 16px;
   font-size: 12px;
-  color: var(--text-muted, #a0a0a0);
+  color: var(--text-muted);
 }
 .cluster-controls input[type="range"] {
   width: 120px;
-  accent-color: var(--accent, #24E5CA);
+  accent-color: var(--accent);
 }
 
 /* Individual cluster groups */
 .cluster-group {
-  background: var(--bg-secondary, #0E2A3D);
-  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
   border-radius: 8px;
   margin-bottom: 16px;
   overflow: hidden;
@@ -128,12 +128,12 @@
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  background: var(--bg-tertiary, #14374E);
-  border-bottom: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-primary);
 }
 .cluster-group-num {
-  background: var(--accent, #24E5CA);
-  color: #000;
+  background: var(--accent);
+  color: var(--accent-text);
   width: 24px;
   height: 24px;
   border-radius: 50%;
@@ -147,11 +147,11 @@
 .cluster-group-title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--text-primary, #E0F0F0);
+  color: var(--text-primary);
 }
 .cluster-group-count {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
 }
 .cluster-label-input {
   margin-left: auto;
@@ -160,19 +160,19 @@
   gap: 6px;
 }
 .cluster-label-input input {
-  background: var(--bg-primary, #0A1F2E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 12px;
   width: 120px;
   outline: none;
 }
-.cluster-label-input input:focus { border-color: var(--accent, #24E5CA); }
+.cluster-label-input input:focus { border-color: var(--accent); }
 .cluster-label-btn {
-  background: var(--accent, #24E5CA);
-  color: var(--bg-primary, #0A1F2E);
+  background: var(--accent);
+  color: var(--bg-primary);
   border: none;
   border-radius: 4px;
   padding: 4px 10px;
@@ -180,7 +180,7 @@
   font-weight: 600;
   cursor: pointer;
 }
-.cluster-label-btn:hover { background: var(--accent-hover, #5AF0DA); }
+.cluster-label-btn:hover { background: var(--accent-hover); }
 .cluster-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
@@ -198,7 +198,7 @@
 .cluster-thumb:hover { transform: scale(1.03); }
 .cluster-labeled {
   font-size: 11px;
-  color: var(--accent, #24E5CA);
+  color: var(--accent);
   padding: 6px 14px;
   font-style: italic;
 }
@@ -211,7 +211,7 @@
       <input type="text" id="speciesSearch" placeholder="Search species..." oninput="filterSpecies()">
     </div>
     <div class="species-list" id="speciesList">
-      <div style="padding:20px;color:var(--text-dim,#888);font-size:13px;">Loading species...</div>
+      <div style="padding:20px;color:var(--text-dim);font-size:13px;">Loading species...</div>
     </div>
   </div>
 
@@ -237,14 +237,14 @@ async function loadSpecies() {
     renderSpeciesList(allSpecies);
   } catch(e) {
     document.getElementById('speciesList').innerHTML =
-      '<div style="padding:20px;color:var(--danger,#e74c3c);font-size:13px;">Failed to load species</div>';
+      '<div style="padding:20px;color:var(--danger);font-size:13px;">Failed to load species</div>';
   }
 }
 
 function renderSpeciesList(species) {
   var list = document.getElementById('speciesList');
   if (species.length === 0) {
-    list.innerHTML = '<div style="padding:20px;color:var(--text-dim,#888);font-size:13px;">No classified species yet. Run classification first.</div>';
+    list.innerHTML = '<div style="padding:20px;color:var(--text-dim);font-size:13px;">No classified species yet. Run classification first.</div>';
     return;
   }
   var html = '';
@@ -289,7 +289,7 @@ async function selectSpecies(name) {
     var data = await safeFetch('/api/species/' + encodeURIComponent(name) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
-    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed to analyze: ' + e.message + '</div>';
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed to analyze: ' + e.message + '</div>';
   }
 }
 
@@ -310,7 +310,7 @@ function renderClusters(data) {
       'oninput="document.getElementById(\'threshVal\').textContent=this.value+\'%\'" ' +
       'onchange="recluster(\'' + escapeAttr(data.species) + '\', this.value/100)">' +
     '<span id="threshVal">' + Math.round(data.distance_threshold * 100) + '%</span>' +
-    '<span style="color:var(--text-ghost,#555);margin-left:8px;">(lower = more groups)</span>' +
+    '<span style="color:var(--text-ghost);margin-left:8px;">(lower = more groups)</span>' +
   '</div>';
 
   if (data.num_clusters <= 1) {
@@ -356,7 +356,7 @@ async function recluster(species, threshold) {
     var data = await safeFetch('/api/species/' + encodeURIComponent(species) + '/clusters?threshold=' + threshold, {}, { toast: false });
     renderClusters(data);
   } catch(e) {
-    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</div>';
+    area.innerHTML = '<div class="cluster-empty" style="color:var(--danger);">Failed: ' + e.message + '</div>';
   }
 }
 

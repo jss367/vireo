@@ -27,8 +27,8 @@ body {
 .sidebar {
   width: 260px;
   min-width: 260px;
-  background: var(--bg-secondary, #0E2A3D);
-  border-right: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 12px 0;
   flex-shrink: 0;
@@ -38,28 +38,28 @@ body {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-ghost, #666);
+  color: var(--text-ghost);
   margin-bottom: 8px;
   padding-bottom: 4px;
-  border-bottom: 1px solid var(--border-primary, #14374E);
+  border-bottom: 1px solid var(--border-primary);
 }
 .tree-item {
   display: flex;
   align-items: center;
   padding: 4px 8px;
   font-size: 13px;
-  color: var(--text-secondary, #B0CCCC);
+  color: var(--text-secondary);
   cursor: pointer;
   border-radius: 4px;
   transition: background 0.1s;
   user-select: none;
 }
-.tree-item:hover { background: var(--bg-tertiary, #14374E); }
-.tree-item.active { background: var(--bg-tertiary, #14374E); color: var(--accent, #24E5CA); }
+.tree-item:hover { background: var(--bg-tertiary); }
+.tree-item.active { background: var(--bg-tertiary); color: var(--accent); }
 .tree-item .count {
   margin-left: auto;
   font-size: 11px;
-  color: var(--text-faint, #555);
+  color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 .tree-indent { width: 16px; flex-shrink: 0; }
@@ -67,7 +67,7 @@ body {
   width: 16px;
   flex-shrink: 0;
   font-size: 10px;
-  color: var(--text-faint, #555);
+  color: var(--text-faint);
   cursor: pointer;
   text-align: center;
 }
@@ -84,50 +84,50 @@ body {
 
 /* ---------- Filter Bar ---------- */
 .filter-bar {
-  background: var(--bg-primary, #0A1F2E);
+  background: var(--bg-primary);
   padding: 10px 20px;
   display: flex;
   gap: 12px;
   align-items: center;
   flex-wrap: wrap;
-  border-bottom: 1px solid var(--border-primary, #14374E);
+  border-bottom: 1px solid var(--border-primary);
   flex-shrink: 0;
 }
 .filter-bar input[type=text], .filter-bar input[type=date] {
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 13px;
   outline: none;
 }
-.filter-bar input:focus { border-color: var(--accent, #24E5CA); }
+.filter-bar input:focus { border-color: var(--accent); }
 .filter-bar select {
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 13px;
   cursor: pointer;
   outline: none;
 }
-.filter-bar label { font-size: 12px; color: var(--text-dim, #888); }
+.filter-bar label { font-size: 12px; color: var(--text-dim); }
 
 /* Rating filter */
 .rating-filter { display: flex; align-items: center; gap: 2px; }
 .rating-star {
   font-size: 18px;
   cursor: pointer;
-  color: #333;
+  color: var(--text-invisible);
   transition: color 0.1s;
   user-select: none;
 }
-.rating-star.active { color: var(--warning, #f0c040); }
-.rating-star:hover { color: var(--warning, #f0c040); }
+.rating-star.active { color: var(--warning); }
+.rating-star:hover { color: var(--warning); }
 
-.filter-summary { font-size: 12px; color: var(--text-ghost, #666); margin-left: auto; }
+.filter-summary { font-size: 12px; color: var(--text-ghost); margin-left: auto; }
 
 /* ---------- Photo Grid ---------- */
 .grid-container {
@@ -141,15 +141,15 @@ body {
   gap: 12px;
 }
 .grid-card {
-  background: var(--bg-secondary, #0E2A3D);
+  background: var(--bg-secondary);
   border-radius: 6px;
   overflow: hidden;
-  border: 1px solid var(--border-primary, #14374E);
+  border: 1px solid var(--border-primary);
   cursor: pointer;
   transition: transform 0.1s, border-color 0.15s;
 }
-.grid-card:hover { transform: translateY(-1px); border-color: var(--accent, #24E5CA); }
-.grid-card.selected { border-color: var(--accent, #24E5CA); box-shadow: 0 0 0 1px var(--accent, #24E5CA); }
+.grid-card:hover { transform: translateY(-1px); border-color: var(--accent); }
+.grid-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .grid-card-img-wrap {
   position: relative;
   width: 100%;
@@ -160,22 +160,22 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
-  background: var(--bg-tertiary, #14374E);
+  background: var(--bg-tertiary);
 }
 .det-box {
   position: absolute;
-  border: 2px solid var(--accent, #24E5CA);
+  border: 2px solid var(--accent);
   border-radius: 2px;
   pointer-events: none;
-  box-shadow: 0 0 4px rgba(78, 204, 163, 0.4);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .det-box-label {
   position: absolute;
   top: -18px;
   left: 0;
   font-size: 9px;
-  background: rgba(78, 204, 163, 0.85);
-  color: #000;
+  background: color-mix(in srgb, var(--accent) 85%, transparent);
+  color: var(--accent-text);
   padding: 1px 4px;
   border-radius: 2px;
   white-space: nowrap;
@@ -184,8 +184,8 @@ body {
   position: absolute;
   top: 6px;
   right: 6px;
-  background: rgba(36, 229, 202, 0.85);
-  color: #000;
+  background: color-mix(in srgb, var(--accent) 85%, transparent);
+  color: var(--accent-text);
   font-size: 10px;
   font-weight: 600;
   padding: 2px 6px;
@@ -197,7 +197,7 @@ body {
 }
 .grid-card-name {
   font-size: 12px;
-  color: #999;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -208,22 +208,22 @@ body {
   gap: 6px;
   margin-top: 4px;
 }
-.grid-card-rating { font-size: 12px; color: var(--warning, #f0c040); }
+.grid-card-rating { font-size: 12px; color: var(--warning); }
 .grid-card-flag {
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 3px;
   font-weight: 600;
 }
-.flag-flagged { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
-.flag-rejected { background: var(--danger, #e74c3c); color: #fff; }
+.flag-flagged { background: var(--accent); color: var(--bg-primary); }
+.flag-rejected { background: var(--danger); color: var(--text-primary); }
 
 /* ---------- Detail Panel ---------- */
 .detail-panel {
   width: 340px;
   min-width: 340px;
-  background: var(--bg-secondary, #0E2A3D);
-  border-left: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 16px;
   display: none;
@@ -234,7 +234,7 @@ body {
   float: right;
   background: none;
   border: none;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   font-size: 18px;
   cursor: pointer;
   padding: 0 4px;
@@ -257,7 +257,7 @@ body {
 .detail-section-title {
   font-size: 11px;
   text-transform: uppercase;
-  color: var(--text-ghost, #666);
+  color: var(--text-ghost);
   margin-bottom: 6px;
 }
 .detail-rating {
@@ -268,30 +268,30 @@ body {
 .detail-star {
   font-size: 22px;
   cursor: pointer;
-  color: #333;
+  color: var(--text-invisible);
   transition: color 0.1s;
   user-select: none;
 }
-.detail-star.active { color: var(--warning, #f0c040); }
-.detail-star:hover { color: var(--warning, #f0c040); }
+.detail-star.active { color: var(--warning); }
+.detail-star:hover { color: var(--warning); }
 .detail-flags { display: flex; gap: 6px; margin-bottom: 8px; }
 .detail-flag-btn {
   padding: 5px 14px;
-  border: 1px solid var(--border-primary, #14374E);
+  border: 1px solid var(--border-primary);
   border-radius: 4px;
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-secondary, #B0CCCC);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
-.detail-flag-btn:hover { border-color: var(--accent, #24E5CA); }
-.detail-flag-btn.active-flag { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); border-color: var(--accent, #24E5CA); }
-.detail-flag-btn.active-reject { background: var(--danger, #e74c3c); color: #fff; border-color: var(--danger, #e74c3c); }
+.detail-flag-btn:hover { border-color: var(--accent); }
+.detail-flag-btn.active-flag { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); }
+.detail-flag-btn.active-reject { background: var(--danger); color: var(--text-primary); border-color: var(--danger); }
 .keyword-tag {
   display: inline-block;
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-secondary, #B0CCCC);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
   padding: 3px 8px;
   border-radius: 3px;
   font-size: 12px;
@@ -299,11 +299,11 @@ body {
 }
 .keyword-tag .remove-kw {
   margin-left: 4px;
-  color: var(--text-ghost, #666);
+  color: var(--text-ghost);
   cursor: pointer;
   font-weight: bold;
 }
-.keyword-tag .remove-kw:hover { color: var(--danger, #e74c3c); }
+.keyword-tag .remove-kw:hover { color: var(--danger); }
 .keyword-type-indicator {
   display: inline-block;
   font-size: 10px;
@@ -319,12 +319,12 @@ body {
   position: absolute;
   top: 100%;
   left: 0;
-  background: var(--bg-secondary, #0B2636);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   z-index: 1000;
   min-width: 140px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--bg-primary) 40%, transparent);
   padding: 4px 0;
 }
 .keyword-type-dropdown.open { display: block; }
@@ -332,22 +332,22 @@ body {
   display: block;
   padding: 4px 12px;
   font-size: 12px;
-  color: var(--text-secondary, #B0CCCC);
+  color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
 }
 .keyword-type-option:hover {
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 .keyword-type-option.active {
-  color: var(--accent, #24E5CA);
+  color: var(--accent);
   font-weight: bold;
 }
 .add-kw-input {
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 4px 8px;
   font-size: 12px;
@@ -355,18 +355,18 @@ body {
   margin-top: 6px;
   outline: none;
 }
-.add-kw-input:focus { border-color: var(--accent, #24E5CA); }
+.add-kw-input:focus { border-color: var(--accent); }
 .detail-summary {
   font-size: 12px;
-  color: var(--text-dim, #999);
+  color: var(--text-dim);
   line-height: 1.8;
 }
 .detail-summary .summary-camera {
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
   font-weight: 500;
 }
 .detail-summary .summary-lens {
-  color: var(--text-secondary, #ccc);
+  color: var(--text-secondary);
   font-style: italic;
 }
 .detail-summary .summary-exposure {
@@ -375,12 +375,12 @@ body {
 }
 .detail-path {
   font-size: 11px;
-  color: var(--text-faint, #555);
+  color: var(--text-faint);
   word-break: break-all;
   margin-top: 6px;
 }
 .meta-group {
-  border: 1px solid var(--border-primary, #14374E);
+  border: 1px solid var(--border-primary);
   border-radius: 4px;
   margin-bottom: 4px;
 }
@@ -392,17 +392,17 @@ body {
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
-  color: var(--text-secondary, #ccc);
-  background: var(--bg-tertiary, #14374E);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
   border-radius: 4px;
   user-select: none;
 }
 .meta-group-header:hover {
-  background: var(--bg-hover, #1A4560);
+  background: var(--bg-hover);
 }
 .meta-group-count {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
 }
 .meta-group-body {
   display: none;
@@ -420,19 +420,19 @@ body {
   display: flex;
   gap: 8px;
   padding: 2px 0;
-  border-bottom: 1px solid var(--border-primary, #14374E);
+  border-bottom: 1px solid var(--border-primary);
 }
 .meta-tag-row:last-child {
   border-bottom: none;
 }
 .meta-tag-name {
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   min-width: 120px;
   flex-shrink: 0;
   word-break: break-word;
 }
 .meta-tag-value {
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
   word-break: break-all;
 }
 
@@ -440,8 +440,8 @@ body {
 .calendar-container {
   display: none;
   padding: 12px 20px;
-  border-bottom: 1px solid var(--border-secondary, #1A4560);
-  background: var(--bg-secondary, #0E2A3D);
+  border-bottom: 1px solid var(--border-secondary);
+  background: var(--bg-secondary);
 }
 .calendar-container.active { display: block; }
 
@@ -452,9 +452,9 @@ body {
   margin-bottom: 8px;
 }
 .calendar-header button {
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-muted, #a0a0a0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 2px 8px;
   cursor: pointer;
@@ -467,7 +467,7 @@ body {
 .calendar-header .year-label {
   font-size: 14px;
   font-weight: 600;
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
   min-width: 40px;
   text-align: center;
 }
@@ -475,7 +475,7 @@ body {
 .calendar-months {
   display: flex;
   font-size: 10px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   padding-left: 28px;
   margin-bottom: 2px;
 }
@@ -492,7 +492,7 @@ body {
 }
 .calendar-grid .day-label {
   font-size: 9px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -500,24 +500,24 @@ body {
 }
 .calendar-grid .day-cell {
   border-radius: 2px;
-  background: var(--bg-tertiary, #14374E);
+  background: var(--bg-tertiary);
   cursor: pointer;
   position: relative;
 }
-.calendar-grid .day-cell:hover { outline: 1px solid var(--text-muted, #a0a0a0); }
-.calendar-grid .day-cell.selected { outline: 2px solid var(--accent, #24E5CA); }
+.calendar-grid .day-cell:hover { outline: 1px solid var(--text-muted); }
+.calendar-grid .day-cell.selected { outline: 2px solid var(--accent); }
 .calendar-grid .day-cell.empty { cursor: default; }
 .calendar-grid .day-cell.outside { visibility: hidden; }
-.calendar-grid .day-cell.level-1 { background: color-mix(in srgb, var(--accent, #24E5CA) 25%, var(--bg-tertiary, #14374E)); }
-.calendar-grid .day-cell.level-2 { background: color-mix(in srgb, var(--accent, #24E5CA) 45%, var(--bg-tertiary, #14374E)); }
-.calendar-grid .day-cell.level-3 { background: color-mix(in srgb, var(--accent, #24E5CA) 65%, var(--bg-tertiary, #14374E)); }
-.calendar-grid .day-cell.level-4 { background: var(--accent, #24E5CA); }
+.calendar-grid .day-cell.level-1 { background: color-mix(in srgb, var(--accent) 25%, var(--bg-tertiary)); }
+.calendar-grid .day-cell.level-2 { background: color-mix(in srgb, var(--accent) 45%, var(--bg-tertiary)); }
+.calendar-grid .day-cell.level-3 { background: color-mix(in srgb, var(--accent) 65%, var(--bg-tertiary)); }
+.calendar-grid .day-cell.level-4 { background: var(--accent); }
 
 .day-tooltip {
   position: fixed;
-  background: var(--bg-primary, #091A27);
-  color: var(--text-primary, #e0e0e0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -530,9 +530,9 @@ body {
   display: none;
   padding: 6px 20px;
   font-size: 12px;
-  color: var(--text-primary, #e0e0e0);
-  background: var(--bg-tertiary, #14374E);
-  border-bottom: 1px solid var(--border-secondary, #1A4560);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-secondary);
   align-items: center;
   gap: 8px;
 }
@@ -540,24 +540,24 @@ body {
 .calendar-selection .clear-btn {
   background: none;
   border: none;
-  color: var(--text-muted, #a0a0a0);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 14px;
   padding: 0 4px;
 }
-.calendar-selection .clear-btn:hover { color: var(--accent, #24E5CA); }
+.calendar-selection .clear-btn:hover { color: var(--accent); }
 
 /* ---------- Empty / Loading ---------- */
 .empty-state {
   text-align: center;
   padding: 80px 24px;
-  color: var(--text-faint, #555);
+  color: var(--text-faint);
   font-size: 15px;
 }
 .loading-state {
   text-align: center;
   padding: 80px 24px;
-  color: var(--text-faint, #555);
+  color: var(--text-faint);
   font-size: 15px;
 }
 
@@ -569,15 +569,15 @@ body {
   display: none;
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.6);
+  background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
   z-index: 500;
   justify-content: center;
   align-items: center;
 }
 .modal-overlay.open { display: flex; }
 .modal {
-  background: var(--bg-secondary, #0E2A3D);
-  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
   border-radius: 8px;
   padding: 24px;
   width: 460px;
@@ -587,35 +587,35 @@ body {
 .modal h3 { font-size: 16px; margin-bottom: 16px; }
 .modal-input {
   width: 100%;
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 13px;
   margin-bottom: 12px;
   outline: none;
 }
-.modal-input:focus { border-color: var(--accent, #24E5CA); }
+.modal-input:focus { border-color: var(--accent); }
 .rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
 .rule-row select, .rule-row input {
-  background: var(--bg-tertiary, #14374E); color: var(--text-primary, #E0F0F0); border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary);
   border-radius: 4px; padding: 5px 8px; font-size: 12px; outline: none;
 }
-.rule-row select:focus, .rule-row input:focus { border-color: var(--accent, #24E5CA); }
-.rule-row .remove-rule { color: var(--text-ghost, #666); cursor: pointer; font-size: 16px; }
-.rule-row .remove-rule:hover { color: var(--danger, #e74c3c); }
+.rule-row select:focus, .rule-row input:focus { border-color: var(--accent); }
+.rule-row .remove-rule { color: var(--text-ghost); cursor: pointer; font-size: 16px; }
+.rule-row .remove-rule:hover { color: var(--danger); }
 .modal-actions { display: flex; gap: 8px; margin-top: 16px; }
 .modal-btn {
   padding: 7px 18px; border: none; border-radius: 4px;
   cursor: pointer; font-size: 13px; font-weight: 500;
 }
-.modal-btn-primary { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
-.modal-btn-cancel { background: var(--bg-tertiary, #14374E); color: var(--text-secondary, #B0CCCC); }
-.modal-preview { font-size: 12px; color: var(--text-dim, #888); margin-top: 8px; }
+.modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
+.modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
+.modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
 .inat-badge {
   position: absolute; top: 4px; right: 4px;
-  background: rgba(116,172,0,0.85); color: #fff;
+  background: rgba(116,172,0,0.85); color: var(--text-primary);
   font-size: 9px; padding: 1px 5px; border-radius: 3px;
   pointer-events: none; z-index: 2;
 }
@@ -641,7 +641,7 @@ body {
       <div class="sidebar-title">Collections</div>
       <div id="collectionList"></div>
       <div style="margin-top:6px;">
-        <button onclick="showCollectionModal()" style="background:#14374E;color:#7ec8e3;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
+        <button onclick="showCollectionModal()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;">+ New Collection</button>
       </div>
     </div>
   </aside>
@@ -656,10 +656,10 @@ body {
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
       <button id="clipSearchBtn" onclick="runClipSearch()"
-              style="background:var(--bg-tertiary,#14374E);color:var(--accent,#24E5CA);border:1px solid var(--accent,#24E5CA);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
+              style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
         Search
       </button>
-      <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
+      <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
         Clear
       </button>
       <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
@@ -686,16 +686,16 @@ body {
       </select>
       <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
         <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
-               style="width:80px;accent-color:var(--accent, #24E5CA);"
+               style="width:80px;accent-color:var(--accent);"
                oninput="updateThumbSize(this.value)">
-        <span style="font-size:10px;color:var(--text-faint, #666);">&#9638;</span>
+        <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
       </label>
       <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
-              style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
         &#9634; Boxes
       </button>
       <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
-              style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#a0a0a0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
         &#128197; Calendar
       </button>
       <span class="filter-summary" id="filterSummary"></span>
@@ -718,18 +718,18 @@ body {
     <div class="day-tooltip" id="dayTooltip"></div>
 
     <!-- Batch Action Bar -->
-    <div id="batchBar" style="display:none;background:#0E2A3D;padding:8px 20px;border-bottom:1px solid #14374E;align-items:center;gap:10px;flex-shrink:0;">
-      <span id="batchCount" style="font-size:12px;color:#24E5CA;font-weight:600;"></span>
-      <button onclick="batchSetRating(1)" style="background:#14374E;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
-      <button onclick="batchSetRating(3)" style="background:#14374E;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
-      <button onclick="batchSetRating(5)" style="background:#14374E;color:#f0c040;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;5</button>
-      <button onclick="batchSetFlag('flagged')" style="background:#14374E;color:#24E5CA;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
-      <button onclick="batchSetFlag('rejected')" style="background:#14374E;color:#e74c3c;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
-      <button onclick="batchAddKeyword()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button onclick="addToCollection()" style="background:#14374E;color:#7ec8e3;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
-      <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
-      <button onclick="batchSubmitInat()" style="background:#14374E;color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
-      <button onclick="clearSelection()" style="background:none;color:#666;border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
+    <div id="batchBar" style="display:none;background:var(--bg-secondary);padding:8px 20px;border-bottom:1px solid var(--border-primary);align-items:center;gap:10px;flex-shrink:0;">
+      <span id="batchCount" style="font-size:12px;color:var(--accent);font-weight:600;"></span>
+      <button onclick="batchSetRating(1)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;1</button>
+      <button onclick="batchSetRating(3)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;3</button>
+      <button onclick="batchSetRating(5)" style="background:var(--bg-tertiary);color:var(--warning);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">&#9733;5</button>
+      <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
+      <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
+      <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
+      <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
+      <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
+      <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
     <!-- Grid -->
@@ -738,12 +738,12 @@ body {
       <div class="scroll-sentinel" id="scrollSentinel"></div>
       <div class="empty-state" id="emptyState" style="display:none;">No photos match the current filters.</div>
       <div class="empty-state" id="welcomeState" style="display:none;">
-        <div style="margin-bottom:16px;font-size:18px;color:#fff;font-weight:600;">Welcome to Vireo</div>
-        <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:#999;">
+        <div style="margin-bottom:16px;font-size:18px;color:var(--text-primary);font-weight:600;">Welcome to Vireo</div>
+        <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:var(--text-muted);">
           To get started, import your photos. You can scan a folder of images
           (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
         </p>
-        <a href="/import" style="display:inline-block;background:#24E5CA;color:#0A1F2E;padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
+        <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
       <div class="loading-state" id="loadingState">Loading...</div>
     </div>
@@ -777,7 +777,7 @@ body {
 
     <div class="detail-section">
       <div class="detail-section-title">XMP Sidecar</div>
-      <div id="detailXmp" style="font-size:12px;color:var(--text-dim,#888);">—</div>
+      <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
     </div>
 
     <div class="detail-section">
@@ -796,10 +796,10 @@ body {
     </div>
 
     <div class="detail-section" style="display:flex;gap:8px;">
-      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#14374E);color:var(--info,#7ec8e3);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
         Find Similar
       </button>
-      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary,#14374E);color:var(--accent,#24E5CA);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
         Inspect Pipeline
       </button>
     </div>
@@ -813,7 +813,7 @@ body {
     <h3>New Smart Collection</h3>
     <input class="modal-input" id="collectionName" placeholder="Collection name">
     <div id="ruleRows"></div>
-    <button onclick="addRuleRow()" style="background:#14374E;color:#7ec8e3;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
+    <button onclick="addRuleRow()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-bottom:8px;">+ Add Rule</button>
     <div class="modal-preview" id="rulePreview"></div>
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="saveCollection()">Save</button>
@@ -907,7 +907,7 @@ function renderCollectionList(collections) {
     html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
       '<span>' + escapeHtml(c.name) + '</span></div>';
   });
-  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:#555;padding:4px 8px;">No collections</div>';
+  document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
 
 /* ---------- Folder Tree ---------- */
@@ -1196,8 +1196,8 @@ async function loadPhotos() {
 function toggleTimelineMode() {
   timelineMode = !timelineMode;
   var btn = document.getElementById('calToggle');
-  btn.style.color = timelineMode ? 'var(--accent, #24E5CA)' : 'var(--text-muted, #a0a0a0)';
-  btn.style.borderColor = timelineMode ? 'var(--accent, #24E5CA)' : 'var(--border-secondary, #1A4560)';
+  btn.style.color = timelineMode ? 'var(--accent)' : 'var(--text-muted)';
+  btn.style.borderColor = timelineMode ? 'var(--accent)' : 'var(--border-secondary)';
 
   var container = document.getElementById('calendarContainer');
   if (timelineMode) {
@@ -1383,8 +1383,8 @@ function updateThumbSize(val) {
 function toggleDetectionBoxes() {
   showDetectionBoxes = !showDetectionBoxes;
   var btn = document.getElementById('detBoxToggle');
-  btn.style.color = showDetectionBoxes ? 'var(--accent, #24E5CA)' : 'var(--text-muted, #a0a0a0)';
-  btn.style.borderColor = showDetectionBoxes ? 'var(--accent, #24E5CA)' : 'var(--border-secondary, #1A4560)';
+  btn.style.color = showDetectionBoxes ? 'var(--accent)' : 'var(--text-muted)';
+  btn.style.borderColor = showDetectionBoxes ? 'var(--accent)' : 'var(--border-secondary)';
   renderGrid();
 }
 
@@ -1549,7 +1549,7 @@ function renderGrid() {
         '<div class="grid-card-meta">' +
           (stars ? '<span class="grid-card-rating">' + stars + '</span>' : '') +
           flagHtml +
-          (p.sharpness != null ? '<span style="font-size:10px;color:var(--text-ghost,#555);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>' : '') +
+          (p.sharpness != null ? '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>' : '') +
         '</div>' +
       '</div>' +
     '</div>';
@@ -1798,30 +1798,30 @@ function renderDetail(photo) {
   // XMP sidecar
   var xmpEl = document.getElementById('detailXmp');
   if (photo.xmp_exists === false) {
-    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">No .xmp sidecar file</span>';
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost);">No .xmp sidecar file</span>';
   } else if (photo.xmp_keywords && photo.xmp_keywords.length > 0) {
     var dbKwNames = (photo.keywords || []).map(function(k) { return k.name.toLowerCase(); });
     var xmpHtml = '';
     photo.xmp_keywords.forEach(function(kw) {
       var inDb = dbKwNames.indexOf(kw.toLowerCase()) !== -1;
-      var color = inDb ? 'var(--accent,#24E5CA)' : 'var(--warning,#f0c040)';
+      var color = inDb ? 'var(--accent)' : 'var(--warning)';
       var title = inDb ? 'In sync with database' : 'In XMP but not in database';
-      xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#14374E);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid ' + color + ';color:' + color + ';" title="' + title + '">' + escapeHtml(kw) + '</span>';
+      xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid ' + color + ';color:' + color + ';" title="' + title + '">' + escapeHtml(kw) + '</span>';
     });
     // Check for DB keywords not in XMP
     var xmpLower = photo.xmp_keywords.map(function(k) { return k.toLowerCase(); });
     (photo.keywords || []).forEach(function(k) {
       if (xmpLower.indexOf(k.name.toLowerCase()) === -1) {
-        xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary,#14374E);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid var(--info,#7ec8e3);color:var(--info,#7ec8e3);" title="In database but not in XMP (pending sync)">+ ' + escapeHtml(k.name) + '</span>';
+        xmpHtml += '<span style="display:inline-block;background:var(--bg-tertiary);padding:2px 6px;border-radius:3px;margin:2px;font-size:11px;border:1px solid var(--info);color:var(--info);" title="In database but not in XMP (pending sync)">+ ' + escapeHtml(k.name) + '</span>';
       }
     });
-    xmpHtml += '<div style="margin-top:4px;font-size:10px;color:var(--text-ghost,#555);">' +
-      '<span style="color:var(--accent,#24E5CA);">&#9632;</span> synced ' +
-      '<span style="color:var(--warning,#f0c040);">&#9632;</span> XMP only ' +
-      '<span style="color:var(--info,#7ec8e3);">&#9632;</span> DB only (pending sync)</div>';
+    xmpHtml += '<div style="margin-top:4px;font-size:10px;color:var(--text-ghost);">' +
+      '<span style="color:var(--accent);">&#9632;</span> synced ' +
+      '<span style="color:var(--warning);">&#9632;</span> XMP only ' +
+      '<span style="color:var(--info);">&#9632;</span> DB only (pending sync)</div>';
     xmpEl.innerHTML = xmpHtml;
   } else if (photo.xmp_exists) {
-    xmpEl.innerHTML = '<span style="color:var(--text-ghost,#555);">XMP file exists but has no keywords</span>';
+    xmpEl.innerHTML = '<span style="color:var(--text-ghost);">XMP file exists but has no keywords</span>';
   }
 
   // Quick summary
@@ -2233,7 +2233,7 @@ async function developSelected() {
     // Scroll to and highlight the target photo
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      el.style.outline = '3px solid var(--accent, #24E5CA)';
+      el.style.outline = '3px solid var(--accent)';
       el.style.outlineOffset = '2px';
       setTimeout(function() {
         el.style.outline = '';

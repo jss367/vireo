@@ -186,7 +186,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
 .navbar .nav-spacer { flex: 1; }
 .navbar .nav-icon {
-  color: #555;
+  color: var(--text-ghost);
   text-decoration: none;
   font-size: 16px;
   padding: 8px;
@@ -194,7 +194,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   transition: color 0.15s;
   position: relative;
 }
-.navbar .nav-icon:hover { color: #fff; }
+.navbar .nav-icon:hover { color: var(--text-primary); }
 
 /* Activity indicator */
 .activity-dot {
@@ -205,7 +205,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #4ecca3;
+  background: var(--accent);
   animation: pulse 1.5s ease-in-out infinite;
 }
 .activity-dot.active { display: block; }
@@ -230,17 +230,17 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   height: 28px;
   user-select: none;
 }
-.bottom-toggle span { font-size: 11px; color: #555; }
-.bottom-toggle:hover span { color: #888; }
+.bottom-toggle span { font-size: 11px; color: var(--text-ghost); }
+.bottom-toggle:hover span { color: var(--text-dim); }
 .bottom-toggle .toggle-arrow {
-  font-size: 10px; color: #555; transition: transform 0.2s; cursor: pointer;
+  font-size: 10px; color: var(--text-ghost); transition: transform 0.2s; cursor: pointer;
 }
 .bottom-toggle.open .toggle-arrow { transform: rotate(180deg); }
 .bottom-toggle .job-summary {
-  font-size: 11px; color: #4ecca3; margin-left: 8px;
+  font-size: 11px; color: var(--accent); margin-left: 8px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
 }
-.bottom-toggle .job-summary.idle { color: #444; }
+.bottom-toggle .job-summary.idle { color: var(--text-invisible); }
 
 .bottom-panel {
   position: fixed;
@@ -267,7 +267,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   position: relative;
 }
 .bp-drag-handle:hover, .bp-drag-handle.dragging {
-  background: #4ecca3;
+  background: var(--accent);
 }
 .bp-drag-handle::before {
   content: '';
@@ -281,22 +281,22 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 /* Tabs */
 .bp-tabs {
   display: flex;
-  border-bottom: 1px solid #0f3460;
+  border-bottom: 1px solid var(--border-primary);
   flex-shrink: 0;
 }
 .bp-tab {
   padding: 5px 16px;
   font-size: 11px;
-  color: #666;
+  color: var(--text-faint);
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
   user-select: none;
 }
-.bp-tab:hover { color: #ccc; }
-.bp-tab.active { color: #e0e0e0; border-bottom-color: #4ecca3; }
+.bp-tab:hover { color: var(--text-secondary); }
+.bp-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
 .bp-tab .bp-tab-badge {
-  margin-left: 5px; font-size: 10px; background: #0f3460;
+  margin-left: 5px; font-size: 10px; background: var(--bg-tertiary);
   padding: 1px 5px; border-radius: 8px; font-variant-numeric: tabular-nums;
 }
 
@@ -310,62 +310,62 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   padding: 4px 12px; display: flex; gap: 8px; align-items: center;
   flex-shrink: 0;
 }
-.bp-jobs-toolbar span { font-size: 11px; color: #444; }
+.bp-jobs-toolbar span { font-size: 11px; color: var(--text-invisible); }
 .bp-jobs-list {
   flex: 1; overflow-y: auto; padding: 4px 12px;
 }
 .bp-job {
-  padding: 6px 0; border-bottom: 1px solid #0a1a35; font-size: 12px;
+  padding: 6px 0; border-bottom: 1px solid var(--border-subtle); font-size: 12px;
 }
 .bp-job:last-child { border-bottom: none; }
 .bp-job-header {
   display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
 }
-.bp-job-type { color: #c0c0c0; font-weight: 600; text-transform: capitalize; }
+.bp-job-type { color: var(--text-secondary); font-weight: 600; text-transform: capitalize; }
 .bp-job-status { font-size: 11px; }
-.bp-job-status.running { color: #4ecca3; }
-.bp-job-status.completed { color: #555; }
-.bp-job-status.failed { color: #e74c3c; }
-.bp-job-elapsed { font-size: 11px; color: #444; margin-left: auto; font-variant-numeric: tabular-nums; }
+.bp-job-status.running { color: var(--accent); }
+.bp-job-status.completed { color: var(--text-ghost); }
+.bp-job-status.failed { color: var(--danger); }
+.bp-job-elapsed { font-size: 11px; color: var(--text-invisible); margin-left: auto; font-variant-numeric: tabular-nums; }
 .bp-job-progress {
-  height: 3px; background: #0f3460; border-radius: 2px; overflow: hidden; margin-bottom: 3px;
+  height: 3px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden; margin-bottom: 3px;
 }
 .bp-job-progress-fill {
-  height: 100%; background: #4ecca3; border-radius: 2px; transition: width 0.3s;
+  height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
 }
 .bp-job-detail {
-  font-size: 11px; color: #666;
+  font-size: 11px; color: var(--text-faint);
   font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.bp-job-detail .rate { color: #4ecca3; margin-left: 8px; }
-.bp-jobs-empty { font-size: 12px; color: #444; padding: 16px 0; text-align: center; }
+.bp-job-detail .rate { color: var(--accent); margin-left: 8px; }
+.bp-jobs-empty { font-size: 12px; color: var(--text-invisible); padding: 16px 0; text-align: center; }
 
 /* Logs tab */
 .bp-logs-toolbar {
   padding: 4px 12px; display: flex; gap: 8px; align-items: center;
-  border-bottom: 1px solid #0f3460; flex-shrink: 0;
+  border-bottom: 1px solid var(--border-primary); flex-shrink: 0;
 }
 .bp-logs-toolbar select {
-  background: #0f3460; color: #c0c0c0; border: 1px solid #1a3a6e;
+  background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border-secondary);
   border-radius: 3px; padding: 2px 6px; font-size: 11px; outline: none;
 }
 .bp-logs-toolbar label {
-  font-size: 11px; color: #555; display: flex; align-items: center; gap: 3px; cursor: pointer;
+  font-size: 11px; color: var(--text-ghost); display: flex; align-items: center; gap: 3px; cursor: pointer;
 }
-.bp-logs-toolbar .lp-count { font-size: 11px; color: #444; margin-left: auto; }
+.bp-logs-toolbar .lp-count { font-size: 11px; color: var(--text-invisible); margin-left: auto; }
 .bp-logs-content {
   flex: 1; overflow-y: auto; padding: 4px 12px;
   font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
   font-size: 11px; line-height: 1.5;
 }
 .lp-line { white-space: pre-wrap; word-break: break-all; padding: 0; }
-.lp-line .lp-time { color: #444; margin-right: 6px; }
+.lp-line .lp-time { color: var(--text-invisible); margin-right: 6px; }
 .lp-line .lp-level { margin-right: 6px; font-weight: 600; }
-.lp-line.lp-DEBUG .lp-level { color: #555; }
-.lp-line.lp-INFO .lp-level { color: #888; }
-.lp-line.lp-WARNING .lp-level { color: #f0c040; }
-.lp-line.lp-ERROR .lp-level { color: #e74c3c; }
+.lp-line.lp-DEBUG .lp-level { color: var(--text-ghost); }
+.lp-line.lp-INFO .lp-level { color: var(--text-dim); }
+.lp-line.lp-WARNING .lp-level { color: var(--warning); }
+.lp-line.lp-ERROR .lp-level { color: var(--danger); }
 
 /* ---------- Lightbox ---------- */
 .lightbox-overlay {
@@ -417,7 +417,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   top: 8px;
   left: 8px;
   background: rgba(0,0,0,0.6);
-  color: #fff;
+  color: var(--text-primary);
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -429,7 +429,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   top: 16px;
   right: 24px;
   font-size: 28px;
-  color: #fff;
+  color: var(--text-primary);
   cursor: pointer;
   opacity: 0.7;
   z-index: 10000;
@@ -440,7 +440,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%);
-  color: #aaa;
+  color: var(--text-muted);
   font-size: 13px;
   background: rgba(0,0,0,0.6);
   padding: 4px 12px;
@@ -460,15 +460,15 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .pipeline-panel {
   max-width: 900px;
   margin: 40px auto;
-  background: var(--bg-secondary, #16213e);
+  background: var(--bg-secondary);
   border-radius: 8px;
   padding: 24px;
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
 }
 .pipeline-panel h2 {
   margin: 0 0 16px;
   font-size: 16px;
-  color: var(--accent, #4ecca3);
+  color: var(--accent);
 }
 .pipeline-steps {
   display: flex;
@@ -476,10 +476,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   gap: 20px;
 }
 .pipeline-step {
-  background: var(--bg-primary, #1a1a2e);
+  background: var(--bg-primary);
   border-radius: 6px;
   padding: 16px;
-  border: 1px solid var(--border-primary, #0f3460);
+  border: 1px solid var(--border-primary);
 }
 .pipeline-step-header {
   display: flex;
@@ -488,8 +488,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   margin-bottom: 10px;
 }
 .pipeline-step-num {
-  background: var(--accent, #4ecca3);
-  color: #000;
+  background: var(--accent);
+  color: var(--accent-text);
   width: 24px;
   height: 24px;
   border-radius: 50%;
@@ -520,19 +520,19 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .pipeline-img-label {
   font-size: 11px;
-  color: var(--text-muted, #a0a0a0);
+  color: var(--text-muted);
   margin-top: 4px;
   text-align: center;
 }
 .pipeline-det-box {
   position: absolute;
-  border: 2px solid #4ecca3;
+  border: 2px solid var(--accent);
   border-radius: 2px;
   pointer-events: none;
 }
 .pipeline-crop-box {
   position: absolute;
-  border: 2px dashed #f0c040;
+  border: 2px dashed var(--warning);
   border-radius: 2px;
   pointer-events: none;
 }
@@ -544,13 +544,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .pipeline-table td, .pipeline-table th {
   padding: 4px 8px;
   text-align: left;
-  border-bottom: 1px solid var(--border-primary, #0f3460);
+  border-bottom: 1px solid var(--border-primary);
 }
-.pipeline-table th { color: var(--text-muted, #a0a0a0); font-weight: 500; }
+.pipeline-table th { color: var(--text-muted); font-weight: 500; }
 .pipeline-conf-bar {
   display: inline-block;
   height: 10px;
-  background: var(--accent, #4ecca3);
+  background: var(--accent);
   border-radius: 3px;
   vertical-align: middle;
 }
@@ -559,14 +559,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   top: 12px;
   right: 16px;
   font-size: 24px;
-  color: var(--text-muted, #a0a0a0);
+  color: var(--text-muted);
   cursor: pointer;
   background: none;
   border: none;
 }
-.pipeline-close:hover { color: var(--text-primary, #e0e0e0); }
-.pipeline-stat { display: inline-block; margin-right: 16px; font-size: 12px; color: var(--text-dim, #888); }
-.pipeline-stat b { color: var(--text-primary, #e0e0e0); }
+.pipeline-close:hover { color: var(--text-primary); }
+.pipeline-stat { display: inline-block; margin-right: 16px; font-size: 12px; color: var(--text-dim); }
+.pipeline-stat b { color: var(--text-primary); }
 
 /* ---------- Similar Photos ---------- */
 .similar-overlay {
@@ -581,16 +581,16 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .similar-panel {
   max-width: 1000px;
   margin: 40px auto;
-  background: var(--bg-secondary, #16213e);
+  background: var(--bg-secondary);
   border-radius: 8px;
   padding: 24px;
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
   position: relative;
 }
 .similar-panel h2 {
   margin: 0 0 16px;
   font-size: 16px;
-  color: var(--accent, #4ecca3);
+  color: var(--accent);
 }
 .similar-grid {
   display: grid;
@@ -598,14 +598,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   gap: 10px;
 }
 .similar-card {
-  background: var(--bg-primary, #1a1a2e);
+  background: var(--bg-primary);
   border-radius: 6px;
   overflow: hidden;
-  border: 1px solid var(--border-primary, #0f3460);
+  border: 1px solid var(--border-primary);
   cursor: pointer;
   transition: border-color 0.15s;
 }
-.similar-card:hover { border-color: var(--accent, #4ecca3); }
+.similar-card:hover { border-color: var(--accent); }
 .similar-card img {
   width: 100%;
   aspect-ratio: 3/2;
@@ -617,13 +617,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-size: 11px;
 }
 .similar-card-name {
-  color: var(--text-muted, #a0a0a0);
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .similar-card-score {
-  color: var(--accent, #4ecca3);
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -639,46 +639,46 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .modal-overlay.open { display: flex; }
 .modal {
-  background: var(--bg-secondary, #0E2A3D);
-  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
   border-radius: 8px;
   padding: 24px;
   width: 460px;
   max-height: 80vh;
   overflow-y: auto;
 }
-.modal h3 { font-size: 16px; margin-bottom: 16px; color: var(--text-primary, #E0F0F0); }
+.modal h3 { font-size: 16px; margin-bottom: 16px; color: var(--text-primary); }
 .modal-label {
-  font-size: 13px; color: var(--text-muted, #7FAAB0);
+  font-size: 13px; color: var(--text-muted);
   display: block; margin-bottom: 4px;
 }
-.modal-hint { font-size: 11px; color: var(--text-dim, #666); margin-top: 4px; }
+.modal-hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 .modal-input {
   width: 100%;
-  background: var(--bg-tertiary, #14374E);
-  color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 14px;
   outline: none;
   box-sizing: border-box;
 }
-.modal-input:focus { border-color: var(--accent, #24E5CA); }
+.modal-input:focus { border-color: var(--accent); }
 .modal-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
 .modal-btn {
   padding: 7px 18px; border: none; border-radius: 4px;
   cursor: pointer; font-size: 13px; font-weight: 500;
 }
-.modal-btn-primary { background: var(--accent, #24E5CA); color: var(--accent-text, #0A1F2E); }
-.modal-btn-cancel { background: var(--bg-tertiary, #14374E); color: var(--text-secondary, #B0CCCC); }
-.modal-error { color: var(--danger, #E74C3C); font-size: 13px; margin-top: 8px; display: none; }
+.modal-btn-primary { background: var(--accent); color: var(--accent-text); }
+.modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
+.modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
 /* ---------- iNat Submission Modal ---------- */
 .inat-modal { width: 560px; }
 .inat-card {
-  background: var(--bg-tertiary, #14374E);
-  border: 1px solid var(--border-secondary, #1A4560);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
   border-radius: 6px;
   padding: 12px;
   margin-bottom: 10px;
@@ -686,63 +686,63 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .inat-card-header { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
 .inat-card-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 4px; }
 .inat-card-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.inat-card-fields label { font-size: 11px; color: var(--text-muted, #7FAAB0); display: block; margin-bottom: 2px; }
+.inat-card-fields label { font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 2px; }
 .inat-card-fields input, .inat-card-fields select, .inat-card-fields textarea {
-  width: 100%; background: var(--bg-secondary, #0E2A3D); color: var(--text-primary, #E0F0F0);
-  border: 1px solid var(--border-secondary, #1A4560); border-radius: 3px;
+  width: 100%; background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border-secondary); border-radius: 3px;
   padding: 5px 8px; font-size: 12px; outline: none; box-sizing: border-box;
 }
 .inat-card-fields textarea { grid-column: 1 / -1; resize: vertical; min-height: 36px; }
 .inat-card-status { font-size: 12px; margin-top: 6px; }
-.inat-card-status.success { color: #24E5CA; }
-.inat-card-status.error { color: #E74C3C; }
-.inat-card-status.warning { color: #f0c040; }
+.inat-card-status.success { color: var(--accent); }
+.inat-card-status.error { color: var(--danger); }
+.inat-card-status.warning { color: var(--warning); }
 .inat-progress { margin-top: 12px; }
 .inat-progress-bar {
-  height: 4px; background: var(--bg-tertiary, #14374E); border-radius: 2px; overflow: hidden;
+  height: 4px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden;
 }
 .inat-progress-fill {
-  height: 100%; background: var(--accent, #24E5CA); width: 0%; transition: width 0.3s;
+  height: 100%; background: var(--accent); width: 0%; transition: width 0.3s;
 }
-.inat-progress-text { font-size: 11px; color: var(--text-muted, #7FAAB0); margin-top: 4px; }
+.inat-progress-text { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 
 /* ---------- Workspace switcher ---------- */
 .ws-dropdown { position: relative; }
 .ws-current {
-  background: none; border: 1px solid var(--border-primary, #14374E);
-  color: var(--text-secondary, #B0CCCC); border-radius: 4px;
+  background: none; border: 1px solid var(--border-primary);
+  color: var(--text-secondary); border-radius: 4px;
   padding: 4px 10px; font-size: 13px; cursor: pointer;
   display: flex; align-items: center; gap: 4px;
   max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ws-current:hover { border-color: var(--accent, #4ecca3); color: var(--text-primary, #E0F0F0); }
+.ws-current:hover { border-color: var(--accent); color: var(--text-primary); }
 .ws-arrow { font-size: 10px; }
 .ws-menu {
   display: none; position: absolute; top: calc(100% + 4px); left: 0;
-  background: var(--bg-secondary, #0E2A3D); border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary); border: 1px solid var(--border-primary);
   border-radius: 6px; min-width: 220px; z-index: 1000;
   box-shadow: 0 8px 24px rgba(0,0,0,0.4); padding: 4px 0;
 }
 .ws-menu.open { display: block; }
 .ws-menu-header {
-  font-size: 11px; color: var(--text-muted, #7FAAB0); padding: 8px 12px 4px;
+  font-size: 11px; color: var(--text-muted); padding: 8px 12px 4px;
   text-transform: uppercase; letter-spacing: 0.5px;
 }
 .ws-menu-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 12px; cursor: pointer; font-size: 13px;
-  color: var(--text-secondary, #B0CCCC);
+  color: var(--text-secondary);
 }
-.ws-menu-item:hover { background: var(--bg-tertiary, #14374E); }
-.ws-menu-item.active { color: var(--accent, #4ecca3); }
+.ws-menu-item:hover { background: var(--bg-tertiary); }
+.ws-menu-item.active { color: var(--accent); }
 .ws-menu-item .ws-item-check { font-size: 14px; }
-.ws-menu-divider { border-top: 1px solid var(--border-primary, #14374E); margin: 4px 0; }
+.ws-menu-divider { border-top: 1px solid var(--border-primary); margin: 4px 0; }
 .ws-menu-action {
   display: block; width: 100%; text-align: left; background: none; border: none;
   padding: 8px 12px; cursor: pointer; font-size: 13px;
-  color: var(--accent, #4ecca3);
+  color: var(--accent);
 }
-.ws-menu-action:hover { background: var(--bg-tertiary, #14374E); }
+.ws-menu-action:hover { background: var(--bg-tertiary); }
 </style>
 
 <nav class="navbar">
@@ -793,7 +793,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     </div>
     <div style="margin-bottom:16px;">
       <label class="modal-label">Folders</label>
-      <div id="newWsFolderList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border-primary, #14374E); border-radius:4px; padding:4px;"></div>
+      <div id="newWsFolderList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border-primary); border-radius:4px; padding:4px;"></div>
       <div class="modal-hint">Select which folders to include. You can change this later.</div>
     </div>
     <div class="modal-actions">
@@ -929,11 +929,11 @@ async function showCreateWorkspaceModal() {
     var list = document.getElementById('newWsFolderList');
     list.innerHTML = '';
     if (folders.length === 0) {
-      list.innerHTML = '<div style="padding:8px; color:var(--text-muted, #7FAAB0); font-size:13px;">No folders scanned yet</div>';
+      list.innerHTML = '<div style="padding:8px; color:var(--text-muted); font-size:13px;">No folders scanned yet</div>';
     } else {
       folders.forEach(function(f) {
         var label = document.createElement('label');
-        label.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; font-size:13px; color:var(--text-secondary, #B0CCCC); cursor:pointer;';
+        label.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; font-size:13px; color:var(--text-secondary); cursor:pointer;';
         label.innerHTML = '<input type="checkbox" value="' + f.id + '" checked> ' + wsEscapeHtml(f.path);
         list.appendChild(label);
       });
@@ -985,13 +985,13 @@ async function createWorkspace() {
     safeFetch('/api/audit/drift', {}, { toast: false }).then(function(drifts) {
       if (drifts && drifts.length > 0) {
         var driftToast = document.createElement('div');
-        driftToast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-secondary,#0E2A3D);border:1px solid var(--warning,#f0c040);border-radius:8px;padding:12px 16px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:360px;font-size:13px;color:var(--text-primary,#E0F0F0);';
-        driftToast.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--warning,#f0c040);">XMP Drift Detected</div>'
-          + '<div style="color:var(--text-secondary,#B0CCCC);">' + drifts.length + ' photo' + (drifts.length > 1 ? 's have' : ' has')
+        driftToast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:var(--bg-secondary);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;z-index:2000;box-shadow:0 4px 16px rgba(0,0,0,0.4);max-width:360px;font-size:13px;color:var(--text-primary);';
+        driftToast.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--warning);">XMP Drift Detected</div>'
+          + '<div style="color:var(--text-secondary);">' + drifts.length + ' photo' + (drifts.length > 1 ? 's have' : ' has')
           + ' keywords that differ between the database and XMP sidecars.</div>'
           + '<div style="margin-top:8px;display:flex;gap:8px;">'
-          + '<a href="/audit" style="color:var(--accent,#4ecca3);text-decoration:none;font-weight:500;">Review in Audit</a>'
-          + '<span onclick="this.parentElement.parentElement.remove()" style="color:var(--text-muted,#666);cursor:pointer;margin-left:auto;">Dismiss</span>'
+          + '<a href="/audit" style="color:var(--accent);text-decoration:none;font-weight:500;">Review in Audit</a>'
+          + '<span onclick="this.parentElement.parentElement.remove()" style="color:var(--text-muted);cursor:pointer;margin-left:auto;">Dismiss</span>'
           + '</div>';
         document.body.appendChild(driftToast);
         setTimeout(function() { if (driftToast.parentElement) driftToast.remove(); }, 15000);
@@ -1017,10 +1017,10 @@ async function createWorkspace() {
     <button id="lightboxInat" onclick="" style="background:rgba(0,0,0,0.6);color:#74ac00;border:1px solid #74ac00;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       iNaturalist
     </button>
-    <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:#7ec8e3;border:1px solid #7ec8e3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+    <button id="lightboxSimilar" onclick="" style="background:rgba(0,0,0,0.6);color:var(--info);border:1px solid var(--info);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Find Similar
     </button>
-    <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:#4ecca3;border:1px solid #4ecca3;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+    <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Inspect Pipeline
     </button>
   </div>
@@ -1249,13 +1249,13 @@ function openInatModal() {
   inatQueue.forEach(function(item, idx) {
     var warn = '';
     if (item.already_submitted) {
-      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" style="color:#f0c040;">' + escapeHtml(item.existing_url) + '</a></div>';
+      warn = '<div class="inat-card-status warning">&#9888; Already submitted: <a href="' + escapeAttr(item.existing_url) + '" target="_blank" style="color:var(--warning);">' + escapeHtml(item.existing_url) + '</a></div>';
     }
     html += '<div class="inat-card" id="inatCard' + idx + '">' +
       '<div class="inat-card-header">' +
         '<img class="inat-card-thumb" src="/thumbnails/' + item.photo_id + '.jpg" alt="">' +
         '<div style="flex:1;min-width:0;">' +
-          '<div style="font-size:13px;color:var(--text-primary,#E0F0F0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
+          '<div style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</div>' +
           warn +
         '</div>' +
       '</div>' +
@@ -1324,7 +1324,7 @@ async function inatDoSubmit() {
         statusEl.textContent = '✗ ' + result.error;
       } else {
         statusEl.className = 'inat-card-status success';
-        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" style="color:#24E5CA;">View on iNaturalist</a>';
+        statusEl.innerHTML = '&#10003; Submitted — <a href="' + escapeAttr(result.observation_url) + '" target="_blank" style="color:var(--accent);">View on iNaturalist</a>';
         succeeded++;
       }
     } catch(e) {
@@ -1423,11 +1423,11 @@ function openPipeline(photoId) {
   var content = document.getElementById('pipelineContent');
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
-  content.innerHTML = '<p style="color:#888;">Loading pipeline data...</p>';
+  content.innerHTML = '<p style="color:var(--text-dim);">Loading pipeline data...</p>';
 
   safeFetch('/api/photos/' + photoId + '/pipeline', {}, { toast: false })
     .then(function(data) { renderPipeline(data, photoId); })
-    .catch(function(e) { content.innerHTML = '<p style="color:#e74c3c;">Failed to load: ' + e.message + '</p>'; });
+    .catch(function(e) { content.innerHTML = '<p style="color:var(--danger);">Failed to load: ' + e.message + '</p>'; });
 }
 
 function closePipeline() {
@@ -1468,7 +1468,7 @@ function renderPipeline(data, photoId) {
       '<div class="pipeline-stat">Subject size: <b>' + Math.round((db.w * db.h) * 10000) / 100 + '%</b> of frame</div>' +
     '</div>';
   } else {
-    html += '<p style="color:#888;font-size:13px;">No subject detected — full image sent to classifier</p>';
+    html += '<p style="color:var(--text-dim);font-size:13px;">No subject detected — full image sent to classifier</p>';
   }
   html += '</div>';
 
@@ -1491,13 +1491,13 @@ function renderPipeline(data, photoId) {
     html += '<table class="pipeline-table"><tr><th>Species</th><th>Confidence</th><th>Model</th><th>Status</th><th>Category</th></tr>';
     data.predictions.forEach(function(p) {
       var pct = Math.round(p.confidence * 100);
-      var statusColor = p.status === 'accepted' ? '#4ecca3' : p.status === 'rejected' ? '#e74c3c' : '#888';
+      var statusColor = p.status === 'accepted' ? 'var(--accent)' : p.status === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
       html += '<tr>' +
-        '<td>' + p.species + (p.scientific_name ? '<br><span style="font-size:11px;color:#888;font-style:italic;">' + p.scientific_name + '</span>' : '') + '</td>' +
+        '<td>' + p.species + (p.scientific_name ? '<br><span style="font-size:11px;color:var(--text-dim);font-style:italic;">' + p.scientific_name + '</span>' : '') + '</td>' +
         '<td><span class="pipeline-conf-bar" style="width:' + pct + 'px;"></span> ' + pct + '%</td>' +
-        '<td style="color:#888;">' + p.model + '</td>' +
+        '<td style="color:var(--text-dim);">' + p.model + '</td>' +
         '<td style="color:' + statusColor + ';">' + p.status + '</td>' +
-        '<td style="color:#888;">' + p.category + '</td>' +
+        '<td style="color:var(--text-dim);">' + p.category + '</td>' +
       '</tr>';
     });
     html += '</table>';
@@ -1512,8 +1512,8 @@ function renderPipeline(data, photoId) {
       if (withTax.taxonomy_order) parts.push(withTax.taxonomy_order);
       if (withTax.taxonomy_family) parts.push(withTax.taxonomy_family);
       if (withTax.taxonomy_genus) parts.push(withTax.taxonomy_genus);
-      html += '<div style="margin-top:8px;font-size:12px;color:#888;">' +
-        '<span style="color:var(--text-muted,#a0a0a0);">Taxonomy:</span> ' +
+      html += '<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">' +
+        '<span style="color:var(--text-muted);">Taxonomy:</span> ' +
         parts.join(' &rsaquo; ') +
       '</div>';
     }
@@ -1527,7 +1527,7 @@ function renderPipeline(data, photoId) {
       '</div>';
     }
   } else {
-    html += '<p style="color:#888;font-size:13px;">No predictions yet — run classification first</p>';
+    html += '<p style="color:var(--text-dim);font-size:13px;">No predictions yet — run classification first</p>';
   }
   html += '</div>';
 
@@ -1545,7 +1545,7 @@ function renderPipeline(data, photoId) {
       '<div class="pipeline-step-header"><span class="pipeline-step-num">6</span><span class="pipeline-step-title">Current Keywords</span></div>' +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
     data.keywords.forEach(function(k) {
-      html += '<span style="background:var(--bg-tertiary,#0f3460);padding:3px 8px;border-radius:4px;font-size:12px;">' + k.name + '</span>';
+      html += '<span style="background:var(--bg-tertiary);padding:3px 8px;border-radius:4px;font-size:12px;">' + k.name + '</span>';
     });
     html += '</div></div>';
   }
@@ -1570,19 +1570,19 @@ function findSimilar(photoId) {
   var content = document.getElementById('similarContent');
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
-  content.innerHTML = '<p style="color:#888;">Searching for similar photos...</p>';
+  content.innerHTML = '<p style="color:var(--text-dim);">Searching for similar photos...</p>';
 
   safeFetch('/api/photos/' + photoId + '/similar?limit=40', {}, { toast: false })
     .then(function(data) {
       if (data.error) {
-        content.innerHTML = '<p style="color:var(--warning,#f0c040);">' + data.error + '</p>';
+        content.innerHTML = '<p style="color:var(--warning);">' + data.error + '</p>';
         return;
       }
-      var html = '<p style="font-size:12px;color:var(--text-dim,#888);margin-bottom:12px;">Compared against ' +
+      var html = '<p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">Compared against ' +
         data.total_compared.toLocaleString() + ' photos with embeddings</p>';
 
       if (data.similar.length === 0) {
-        html += '<p style="color:#888;">No similar photos found.</p>';
+        html += '<p style="color:var(--text-dim);">No similar photos found.</p>';
       } else {
         html += '<div class="similar-grid">';
         data.similar.forEach(function(item) {
@@ -1601,7 +1601,7 @@ function findSimilar(photoId) {
       content.innerHTML = html;
     })
     .catch(function(e) {
-      content.innerHTML = '<p style="color:var(--danger,#e74c3c);">Failed: ' + e.message + '</p>';
+      content.innerHTML = '<p style="color:var(--danger);">Failed: ' + e.message + '</p>';
     });
 }
 
@@ -1642,7 +1642,7 @@ function closeSimilar() {
           <option value="ERROR">ERROR+</option>
         </select>
         <label>
-          <input type="checkbox" id="lpAutoScroll" checked style="accent-color:#4ecca3;"> Auto-scroll
+          <input type="checkbox" id="lpAutoScroll" checked style="accent-color:var(--accent);"> Auto-scroll
         </label>
         <span class="lp-count" id="lpCount">0</span>
       </div>
@@ -1669,8 +1669,8 @@ function showToast(msg, type) {
   var container = document.getElementById('toastContainer');
   if (!container) return;
   var toast = document.createElement('div');
-  var bg = type === 'error' ? 'var(--danger, #e74c3c)' : 'var(--accent, #24E5CA)';
-  var color = type === 'error' ? '#fff' : 'var(--accent-text, #0A1F2E)';
+  var bg = type === 'error' ? 'var(--danger)' : 'var(--accent)';
+  var color = type === 'error' ? 'var(--text-primary)' : 'var(--accent-text)';
   toast.style.cssText = 'pointer-events:auto;padding:10px 16px;border-radius:6px;font-size:14px;max-width:400px;word-break:break-word;background:' + bg + ';color:' + color + ';box-shadow:0 2px 8px rgba(0,0,0,0.3);opacity:0;transition:opacity 0.2s;';
   toast.textContent = msg;
   container.appendChild(toast);
@@ -2126,7 +2126,7 @@ function formatDuration(seconds) {
 
       if (j.status === 'running') {
         if (j.progress && j.progress.phase) {
-          html += '<div class="bp-job-detail" style="color:var(--accent,#4ecca3);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
+          html += '<div class="bp-job-detail" style="color:var(--accent);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
         }
         html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
         var detail = '';
@@ -2161,7 +2161,7 @@ function formatDuration(seconds) {
         }
         html += '<div class="bp-job-detail">' + bpEscape(parts.join(', ')) + '</div>';
       } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
-        html += '<div class="bp-job-detail" style="color:#e74c3c;">' + bpEscape(j.errors[0]) + '</div>';
+        html += '<div class="bp-job-detail" style="color:var(--danger);">' + bpEscape(j.errors[0]) + '</div>';
       }
 
       html += '</div>';

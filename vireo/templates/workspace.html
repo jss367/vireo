@@ -28,17 +28,17 @@
   <!-- Folders -->
   <div class="section">
     <div class="section-title">Folders</div>
-    <div id="wsFoldersContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
-    <div style="margin-top:12px;border-top:1px solid var(--border,#14374E);padding-top:12px;">
-      <div style="font-size:12px;color:#888;margin-bottom:6px;">Add a folder by path:</div>
+    <div id="wsFoldersContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div style="margin-top:12px;border-top:1px solid var(--border-primary);padding-top:12px;">
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">Add a folder by path:</div>
       <div style="display:flex;gap:8px;">
         <input type="text" id="addFolderPath" placeholder="/Volumes/Photography/Raw Files"
-               style="flex:1;background:var(--bg-tertiary,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border,#14374E);border-radius:4px;padding:6px 10px;font-size:13px;font-family:monospace;"
+               style="flex:1;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:4px;padding:6px 10px;font-size:13px;font-family:monospace;"
                list="scanRootHints"
                onkeydown="if(event.key==='Enter')scanAndAddFolder()">
         <datalist id="scanRootHints"></datalist>
         <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
-        <button id="addFolderBtn" onclick="scanAndAddFolder()" style="background:var(--accent,#24E5CA);color:#0A1F2E;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;white-space:nowrap;">Scan &amp; Add</button>
+        <button id="addFolderBtn" onclick="scanAndAddFolder()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;white-space:nowrap;">Scan &amp; Add</button>
       </div>
       <div id="addFolderStatus" style="font-size:12px;margin-top:6px;display:none;"></div>
     </div>
@@ -59,7 +59,7 @@
         <input type="range" id="wsVal_classification_threshold" min="1" max="99" disabled
                oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWorkspaceConfig()"
                style="width:120px;">
-        <span id="wsThresholdVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
+        <span id="wsThresholdVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
       </div>
     </div>
     <div class="setting-row">
@@ -72,9 +72,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120" disabled
-               style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               style="width:60px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveWorkspaceConfig()">
-        <span style="font-size:13px;color:#888;">seconds</span>
+        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
       </div>
     </div>
     <div class="setting-row">
@@ -89,7 +89,7 @@
         <input type="range" id="wsVal_similarity_threshold" min="50" max="99" disabled
                oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWorkspaceConfig()"
                style="width:120px;">
-        <span id="wsSimilarityVal" style="font-size:12px;color:#888;min-width:30px;">-</span>
+        <span id="wsSimilarityVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
       </div>
     </div>
   </div>
@@ -97,15 +97,15 @@
   <!-- Recent Jobs -->
   <div class="section">
     <div class="section-title">Recent Jobs</div>
-    <div id="historyContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div id="historyContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- All Workspaces -->
   <div class="section">
     <div class="section-title">All Workspaces</div>
-    <div id="workspacesContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
-    <div style="margin-top:12px; border-top:1px solid var(--border,#14374E); padding-top:12px;">
-      <button onclick="showCreateWorkspaceModal()" style="background:var(--accent,#24E5CA);color:#0A1F2E;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">+ New Workspace</button>
+    <div id="workspacesContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div style="margin-top:12px; border-top:1px solid var(--border-primary); padding-top:12px;">
+      <button onclick="showCreateWorkspaceModal()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">+ New Workspace</button>
     </div>
   </div>
 
@@ -131,13 +131,13 @@ async function loadWsFolders() {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var container = document.getElementById('wsFoldersContent');
     if (!ws.folders || ws.folders.length === 0) {
-      container.innerHTML = '<span style="color:#555;font-size:13px;">No folders in this workspace. Add one below.</span>';
+      container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders in this workspace. Add one below.</span>';
     } else {
       var html = '';
       ws.folders.forEach(function(f) {
         html += '<div class="setting-row">';
         html += '<div class="setting-label" style="font-family:monospace;font-size:13px;">' + escapeHtml(f.path) + '</div>';
-        html += '<button onclick="removeFolderFromWs(' + ws.id + ', ' + f.id + ')" style="background:none;border:none;color:var(--danger,#e74c3c);cursor:pointer;font-size:16px;" title="Remove from workspace">&times;</button>';
+        html += '<button onclick="removeFolderFromWs(' + ws.id + ', ' + f.id + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;" title="Remove from workspace">&times;</button>';
         html += '</div>';
       });
       container.innerHTML = html;
@@ -171,7 +171,7 @@ async function scanAndAddFolder() {
   btn.disabled = true;
   btn.textContent = 'Scanning...';
   status.style.display = 'block';
-  status.style.color = 'var(--text-muted, #888)';
+  status.style.color = 'var(--text-muted)';
   status.textContent = 'Starting scan...';
 
   var data;
@@ -182,7 +182,7 @@ async function scanAndAddFolder() {
       body: JSON.stringify({ root: path })
     }, { toast: false });
   } catch(e) {
-    status.style.color = 'var(--danger, #e74c3c)';
+    status.style.color = 'var(--danger)';
     status.textContent = e.message;
     btn.disabled = false;
     btn.textContent = 'Scan & Add';
@@ -201,12 +201,12 @@ async function scanAndAddFolder() {
     },
     onComplete: function(result) {
       if (result.status === 'completed') {
-        status.style.color = 'var(--accent, #24E5CA)';
+        status.style.color = 'var(--accent)';
         status.textContent = 'Done! Folder added to workspace.';
         input.value = '';
         loadWsFolders();
       } else {
-        status.style.color = 'var(--danger, #e74c3c)';
+        status.style.color = 'var(--danger)';
         status.textContent = 'Scan failed' + (result.errors && result.errors.length ? ': ' + result.errors[0] : '');
       }
       btn.disabled = false;
@@ -312,7 +312,7 @@ async function loadHistory() {
   try {
     var rows = await safeFetch('/api/jobs/history?limit=10', {}, { toast: false });
     if (rows.length === 0) {
-      document.getElementById('historyContent').innerHTML = '<span style="color:#555;font-size:13px;">No jobs have run yet.</span>';
+      document.getElementById('historyContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No jobs have run yet.</span>';
       return;
     }
     var html = '<table class="data-table-sm"><thead><tr><th>Type</th><th>Status</th><th>Started</th><th>Duration</th><th>Result</th></tr></thead><tbody>';
@@ -343,12 +343,12 @@ async function loadHistory() {
         } catch(e2) {}
       }
       html += '<tr><td>' + escapeHtml(r.type) + '</td><td class="' + cls + '">' + r.status + '</td>' +
-        '<td>' + started + '</td><td>' + duration + '</td><td style="' + (r.status === 'failed' ? 'color:#e74c3c;' : '') + '">' + escapeHtml(result) + '</td></tr>';
+        '<td>' + started + '</td><td>' + duration + '</td><td style="' + (r.status === 'failed' ? 'color:var(--danger);' : '') + '">' + escapeHtml(result) + '</td></tr>';
     });
     html += '</tbody></table>';
     document.getElementById('historyContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('historyContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+    document.getElementById('historyContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
@@ -360,7 +360,7 @@ async function loadWorkspaces() {
     var container = document.getElementById('workspacesContent');
 
     if (workspaces.length === 0) {
-      container.innerHTML = '<span style="color:#555;font-size:13px;">No workspaces</span>';
+      container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No workspaces</span>';
       return;
     }
 
@@ -372,25 +372,25 @@ async function loadWorkspaces() {
       html += '  <div class="setting-label" style="display:flex;align-items:center;gap:8px;">';
       html += '    <input type="text" value="' + escapeAttr(ws.name) + '" '
             + 'onchange="renameWorkspace(' + ws.id + ', this.value)" '
-            + 'style="background:transparent;border:1px solid transparent;color:var(--text-primary,#E0F0F0);'
+            + 'style="background:transparent;border:1px solid transparent;color:var(--text-primary);'
             + 'font-size:14px;padding:2px 6px;border-radius:3px;width:200px;" '
-            + 'onfocus="this.style.borderColor=\'var(--border,#14374E)\'" '
+            + 'onfocus="this.style.borderColor=\'var(--border-primary)\'" '
             + 'onblur="this.style.borderColor=\'transparent\'">';
       if (isActive) {
-        html += '    <span style="font-size:11px;color:var(--accent,#24E5CA);background:rgba(36,229,202,0.1);'
+        html += '    <span style="font-size:11px;color:var(--accent);background:rgba(36,229,202,0.1);'
               + 'padding:2px 8px;border-radius:3px;">Active</span>';
       }
       html += '  </div>';
       html += '  <div style="display:flex;align-items:center;gap:6px;">';
       if (!isActive) {
         html += '    <button onclick="activateWorkspace(' + ws.id + ')" '
-              + 'style="background:none;border:1px solid var(--border,#14374E);color:var(--text-secondary,#B0CCCC);'
+              + 'style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);'
               + 'border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;" '
               + 'title="Switch to this workspace">Switch</button>';
       }
       if (!isActive && workspaces.length > 1) {
         html += '    <button onclick="deleteWorkspaceConfirm(' + ws.id + ', \'' + escapeAttr(ws.name) + '\')" '
-              + 'style="background:none;border:1px solid var(--border,#14374E);color:var(--danger,#e74c3c);'
+              + 'style="background:none;border:1px solid var(--border-primary);color:var(--danger);'
               + 'border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;" '
               + 'title="Delete this workspace">Delete</button>';
       }
@@ -399,7 +399,7 @@ async function loadWorkspaces() {
     });
     container.innerHTML = html;
   } catch(e) {
-    document.getElementById('workspacesContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Error loading workspaces</span>';
+    document.getElementById('workspacesContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Error loading workspaces</span>';
   }
 }
 

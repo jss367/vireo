@@ -23,12 +23,12 @@
   .header h1 { font-size: 18px; font-weight: 600; white-space: nowrap; }
   .header-left { display: flex; align-items: center; gap: 16px; }
   .header-right { display: flex; align-items: center; gap: 8px; }
-  .stats { font-size: 13px; color: #a0a0a0; display: flex; gap: 14px; }
+  .stats { font-size: 13px; color: var(--text-muted); display: flex; gap: 14px; }
   .stats .stat { white-space: nowrap; }
   .stats .new-count { color: var(--accent, #24E5CA); }
   .stats .ref-count { color: var(--warning, #f0c040); }
   .stats .dis-count { color: var(--danger, #e74c3c); }
-  .stats .accepted-count { color: #7ec8e3; }
+  .stats .accepted-count { color: var(--info); }
 
   /* Model selector */
   .model-selector {
@@ -46,7 +46,7 @@
 
   /* Gear icon links to /settings */
   .gear-link {
-    color: #a0a0a0;
+    color: var(--text-muted);
     font-size: 22px;
     padding: 4px 8px;
     line-height: 1;
@@ -69,7 +69,7 @@
     flex-wrap: wrap;
   }
   .setting-group { display: flex; align-items: center; gap: 8px; }
-  .setting-group label { font-size: 13px; color: #a0a0a0; white-space: nowrap; }
+  .setting-group label { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
   .setting-group input[type=range] {
     width: 180px;
     accent-color: var(--accent, #24E5CA);
@@ -94,7 +94,7 @@
     padding: 11px 18px;
     cursor: pointer;
     font-size: 13px;
-    color: #a0a0a0;
+    color: var(--text-muted);
     border-bottom: 2px solid transparent;
     white-space: nowrap;
     transition: color 0.15s, border-color 0.15s;
@@ -133,7 +133,7 @@
   .btn-batch-accept { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
   .btn-batch-accept:hover { background: var(--accent-hover, #5AF0DA); }
   .btn-batch-accept:disabled { background: var(--accent-dim, #2a5a4a); color: var(--text-faint, #555); cursor: default; }
-  .batch-info { font-size: 13px; color: #a0a0a0; }
+  .batch-info { font-size: 13px; color: var(--text-muted); }
 
   /* ---------- Photo Grid ---------- */
   .grid {
@@ -164,7 +164,7 @@
   .card-body { padding: 12px 14px; }
   .card-filename {
     font-size: 12px;
-    color: #777;
+    color: var(--text-faint);
     margin-bottom: 6px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -183,7 +183,7 @@
   }
   .badge-new { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
   .badge-refinement { background: var(--warning, #f0c040); color: var(--bg-primary, #0A1F2E); }
-  .badge-disagreement { background: var(--danger, #e74c3c); color: #fff; }
+  .badge-disagreement { background: var(--danger, #e74c3c); color: var(--text-primary); }
 
   /* Group badge */
   .badge-group {
@@ -195,7 +195,7 @@
     margin-bottom: 8px;
     margin-left: 6px;
     background: var(--bg-tertiary, #14374E);
-    color: #7ec8e3;
+    color: var(--info);
   }
 
   /* Existing keywords */
@@ -204,7 +204,7 @@
     margin-bottom: 6px;
     line-height: 1.4;
   }
-  .card-existing .label-prefix { color: #777; }
+  .card-existing .label-prefix { color: var(--text-faint); }
   .card-existing .label-value { color: var(--text-secondary, #B0CCCC); }
 
   /* Arrow for refinement */
@@ -237,7 +237,7 @@
   }
   .card-confidence {
     font-size: 12px;
-    color: #777;
+    color: var(--text-faint);
     margin-bottom: 10px;
     font-variant-numeric: tabular-nums;
   }
@@ -256,20 +256,20 @@
   }
   .btn-accept { background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E); }
   .btn-accept:hover { background: var(--accent-hover, #5AF0DA); }
-  .btn-skip { background: #2a2a3e; color: #a0a0a0; }
-  .btn-skip:hover { background: #3a3a4e; }
+  .btn-skip { background: var(--bg-tertiary); color: var(--text-muted); }
+  .btn-skip:hover { background: var(--border-secondary); }
   .btn-done {
     background: var(--bg-tertiary, #14374E);
     color: var(--accent, #24E5CA);
     cursor: default;
     text-transform: capitalize;
   }
-  .btn-done.skipped-btn { color: #777; }
+  .btn-done.skipped-btn { color: var(--text-faint); }
 
   /* Expand / collapse for group cards */
   .group-expand-btn {
     background: var(--bg-tertiary, #14374E);
-    color: #7ec8e3;
+    color: var(--info);
     border: none;
     border-radius: 4px;
     padding: 4px 10px;
@@ -278,7 +278,7 @@
     margin-bottom: 8px;
     transition: background 0.15s;
   }
-  .group-expand-btn:hover { background: #1a4a7e; }
+  .group-expand-btn:hover { background: var(--border-secondary); }
   .group-members {
     display: none;
     margin-top: 8px;
@@ -297,7 +297,7 @@
   }
   .group-member-list {
     font-size: 12px;
-    color: #777;
+    color: var(--text-faint);
     margin-top: 4px;
     line-height: 1.6;
   }
@@ -542,7 +542,7 @@
   </div>
   <span class="kbd-hint" id="kbdHintReview">Keyboard: A = accept, S = skip</span>
   <span style="margin-left:auto;">
-    <a href="/classify" style="color:#555;font-size:12px;text-decoration:none;">Back to Classify</a>
+    <a href="/classify" style="color:var(--text-ghost);font-size:12px;text-decoration:none;">Back to Classify</a>
   </span>
 </div>
 
@@ -832,7 +832,7 @@ function renderPredictionCard(pred) {
   var thumbUrl = '/thumbnails/' + pred.photo_id + '.jpg';
   var displaySpecies = pred.group_id ? getConsensusSpecies(pred) : pred.species;
   var confPct = Math.round(pred.confidence * 100);
-  var confColor = confPct >= 70 ? '#24E5CA' : confPct >= 50 ? '#f0c040' : '#e74c3c';
+  var confColor = confPct >= 70 ? 'var(--accent)' : confPct >= 50 ? 'var(--warning)' : 'var(--danger)';
   var cardClass = 'card';
   if (pred.status === 'accepted') cardClass += ' accepted';
   if (pred.status === 'rejected') cardClass += ' skipped';
@@ -891,7 +891,7 @@ function renderPredictionCard(pred) {
   }
 
   // Model badge — always show
-  var modelHtml = '<span style="font-size:10px;background:#14374E;color:#7ec8e3;padding:1px 6px;border-radius:3px;margin-left:4px;">' + escapeHtml(pred.model || '') + '</span>';
+  var modelHtml = '<span style="font-size:10px;background:var(--bg-tertiary);color:var(--info);padding:1px 6px;border-radius:3px;margin-left:4px;">' + escapeHtml(pred.model || '') + '</span>';
 
   // Other models' predictions for the same photo
   var otherModelsHtml = '';
@@ -903,10 +903,10 @@ function renderPredictionCard(pred) {
       var parts = [];
       others.forEach(function(o) {
         var oPct = Math.round(o.confidence * 100);
-        var oColor = o.species === pred.species ? '#24E5CA' : '#f0c040';
+        var oColor = o.species === pred.species ? 'var(--accent)' : 'var(--warning)';
         parts.push('<span style="color:' + oColor + '">' + escapeHtml(o.model) + ': ' + escapeHtml(o.species) + ' (' + oPct + '%)</span>');
       });
-      otherModelsHtml = '<div class="individual-preds" style="margin-top:4px;border-top:1px solid #14374E;padding-top:4px;">' + parts.join('') + '</div>';
+      otherModelsHtml = '<div class="individual-preds" style="margin-top:4px;border-top:1px solid var(--border-primary);padding-top:4px;">' + parts.join('') + '</div>';
     }
   }
 
