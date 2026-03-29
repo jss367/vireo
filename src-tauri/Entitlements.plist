@@ -18,8 +18,12 @@
     <key>com.apple.security.network.server</key>
     <true/>
 
-    <!-- Allow read access to user-selected files (photo folders) -->
-    <key>com.apple.security.files.user-selected.read-only</key>
+    <!-- Allow read access to all files (sidecar reads photo paths directly, not via NSOpenPanel) -->
+    <key>com.apple.security.files.all</key>
+    <true/>
+
+    <!-- Allow access to network volumes (NAS, SMB shares with photos) -->
+    <key>com.apple.security.files.network.volumes.read-only</key>
     <true/>
 </dict>
 </plist>
