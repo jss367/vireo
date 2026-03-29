@@ -79,30 +79,9 @@ class TimmClassifier:
 
         return scientific_name
 
-    def classify(self, image_path, threshold=0.1):
-        """Classify an image and return predictions above threshold.
-
-        Args:
-            image_path: path to image file
-            threshold: minimum confidence to include (default 0.1 — lower than
-                BioCLIP's 0.4 since probability is spread across 10K classes)
-
-        Returns:
-            list of dicts with species, score, auto_tag, confidence_tag, taxonomy
-        """
-        import torch
-        from PIL import Image
-
-        with Image.open(image_path) as img:
-            input_tensor = self._transform(img.convert("RGB")).unsqueeze(0).to(self._device)
-
-        with torch.no_grad():
-            output = self._model(input_tensor)
-            probs = torch.softmax(output, dim=-1).cpu().numpy().flatten()
-
-        # Build sorted predictions
+    def _build_results(self, probs, threshold):
+        """Build sorted prediction dicts from a probability array."""
         indexed = sorted(enumerate(probs), key=lambda x: x[1], reverse=True)
-
         results = []
         for idx, score in indexed:
             score = float(score)
@@ -119,7 +98,6 @@ class TimmClassifier:
                 if hierarchy:
                     taxonomy = hierarchy
                 elif common_name != scientific_name:
-                    # Try lookup by common name
                     hierarchy = self._taxonomy.get_hierarchy(common_name)
                     if hierarchy:
                         taxonomy = hierarchy
@@ -135,5 +113,51 @@ class TimmClassifier:
                     "taxonomy": taxonomy,
                 }
             )
-
         return results
+
+    def classify(self, image, threshold=0.1):
+        """Classify an image and return predictions above threshold.
+
+        Args:
+            image: file path (str) or PIL Image
+            threshold: minimum confidence to include (default 0.1 — lower than
+                BioCLIP's 0.4 since probability is spread across 10K classes)
+
+        Returns:
+            list of dicts with species, score, auto_tag, confidence_tag, taxonomy
+        """
+        import torch
+        from PIL import Image as PILImage
+
+        if isinstance(image, str):
+            with PILImage.open(image) as img:
+                input_tensor = self._transform(img.convert("RGB")).unsqueeze(0).to(self._device)
+        else:
+            input_tensor = self._transform(image.convert("RGB")).unsqueeze(0).to(self._device)
+
+        with torch.no_grad():
+            output = self._model(input_tensor)
+            probs = torch.softmax(output, dim=-1).cpu().numpy().flatten()
+
+        return self._build_results(probs, threshold)
+
+    def classify_batch(self, images, threshold=0.1):
+        """Classify multiple PIL images in a single forward pass.
+
+        Args:
+            images: list of PIL Images
+            threshold: minimum confidence to include
+
+        Returns:
+            list of prediction lists (one per image)
+        """
+        import torch
+
+        tensors = [self._transform(img.convert("RGB")) for img in images]
+        batch = torch.stack(tensors).to(self._device)
+
+        with torch.no_grad():
+            output = self._model(batch)
+            all_probs = torch.softmax(output, dim=-1).cpu().numpy()
+
+        return [self._build_results(all_probs[i], threshold) for i in range(len(images))]

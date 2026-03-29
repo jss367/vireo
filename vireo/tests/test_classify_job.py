@@ -287,6 +287,7 @@ def test_classify_photos_new_photo(tmp_path):
 
     mock_clf = MagicMock()
     mock_clf.classify_with_embedding.return_value = (fake_preds, fake_embedding)
+    mock_clf.classify_batch_with_embedding.return_value = [(fake_preds, fake_embedding)]
 
     mock_db = MagicMock()
     mock_db.get_photo_embedding.return_value = None
@@ -490,6 +491,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
 
     mock_clf = MagicMock()
     mock_clf.classify_with_embedding.return_value = (fake_preds, fake_embedding)
+    mock_clf.classify_batch_with_embedding.return_value = [(fake_preds, fake_embedding)]
 
     params = ClassifyParams(
         collection_id="col-1",
