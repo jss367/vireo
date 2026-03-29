@@ -1456,3 +1456,17 @@ def test_add_keyword_no_auto_detect_for_general(tmp_path):
     row = db.conn.execute("SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row["type"] == "general"
     assert row["taxon_id"] is None
+
+
+def test_database_supports_in_memory_sqlite():
+    """Database init succeeds for SQLite's special in-memory path."""
+    from db import Database
+
+    db = Database(":memory:")
+    row = db.conn.execute(
+        "SELECT name FROM workspaces WHERE id = ?",
+        (db._active_workspace_id,),
+    ).fetchone()
+
+    assert row is not None
+    assert row["name"] == "Default"
