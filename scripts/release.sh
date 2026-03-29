@@ -107,7 +107,7 @@ if ! $FULL_SIGNING; then
     DMG_MOUNT=$(mktemp -d)
     DMG_STAGING=$(mktemp -d)
     hdiutil attach "$DMG" -mountpoint "$DMG_MOUNT" -nobrowse -readonly -noverify
-    cp -a "$DMG_MOUNT"/ "$DMG_STAGING"/
+    cp -a "$DMG_MOUNT"/. "$DMG_STAGING"/
     hdiutil detach "$DMG_MOUNT"
     rm -rf "$DMG_STAGING/Vireo.app"
     cp -a "$APP_PATH" "$DMG_STAGING/"
