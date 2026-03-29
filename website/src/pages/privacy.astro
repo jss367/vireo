@@ -27,14 +27,14 @@ import Base from '../layouts/Base.astro';
       <p>All AI classification and detection runs locally on your device. No photos are sent to any server for analysis.</p>
 
       <h2>Data that leaves your device</h2>
-      <p>Vireo only contacts external services when you explicitly initiate an action:</p>
+      <p>Vireo contacts external services in the following ways:</p>
       <ul class="service-list">
-        <li><strong>iNaturalist</strong> — When you submit an observation, your photo, GPS coordinates, species name, observation date, and geoprivacy setting are sent to iNaturalist. This requires an API token you provide. Submitted data is governed by <a href="https://www.inaturalist.org/pages/privacy" target="_blank" rel="noopener">iNaturalist's privacy policy</a>.</li>
+        <li><strong>iNaturalist</strong> — Vireo contacts iNaturalist in two ways. First, on startup it may query the iNaturalist taxonomy API to resolve unknown keyword names — only the keyword text is sent, no photos or personal data. Second, when you submit an observation, your photo, GPS coordinates, species name, observation date, and geoprivacy setting are sent to iNaturalist. Observation submissions require an API token you provide. Submitted data is governed by <a href="https://www.inaturalist.org/pages/privacy" target="_blank" rel="noopener">iNaturalist's privacy policy</a>.</li>
         <li><strong>HuggingFace Hub</strong> — When you download AI models, Vireo fetches model weights from HuggingFace. No photos or personal data are sent. If you provide a HuggingFace token for private model access, it is sent as an authentication header.</li>
         <li><strong>iNaturalist Open Data / AWS</strong> — Vireo downloads public taxonomy and species list data. No personal data is sent.</li>
         <li><strong>Zenodo</strong> — Vireo downloads the MegaDetector model weights from Zenodo. No personal data is sent.</li>
       </ul>
-      <p>Vireo has no analytics, telemetry, or automated crash reporting. If you do not use any of the features above, Vireo makes zero network requests.</p>
+      <p>Vireo has no analytics, telemetry, or automated crash reporting.</p>
 
       <h2>Credentials</h2>
       <p>API tokens you provide (for iNaturalist and HuggingFace) are stored in plaintext in <code>~/.vireo/config.json</code> on your device. Vireo does not transmit these tokens to anyone other than the respective service they belong to. Protect this file as you would any file containing credentials.</p>
