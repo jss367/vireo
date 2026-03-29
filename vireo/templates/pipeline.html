@@ -37,8 +37,8 @@ body { padding-bottom: 36px; }
   color: var(--text-dim, #5A8890);
   flex-shrink: 0;
 }
-.stage-num.complete { background: var(--accent, #24E5CA); color: #000; }
-.stage-num.running { background: var(--info, #12C3B5); color: #000; animation: pulse 1.2s infinite; }
+.stage-num.complete { background: var(--accent, #24E5CA); color: var(--accent-text); }
+.stage-num.running { background: var(--info, #12C3B5); color: var(--accent-text); animation: pulse 1.2s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 .stage-name { font-size: 15px; font-weight: 600; }
 .stage-summary {
@@ -165,7 +165,7 @@ body { padding-bottom: 36px; }
   margin-top: 12px;
   padding: 10px 20px;
   background: var(--accent, #24E5CA);
-  color: #000;
+  color: var(--accent-text);
   font-weight: 600;
   font-size: 13px;
   border-radius: 4px;
@@ -717,14 +717,14 @@ async function loadLabels() {
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
 
     if (!data.labels || data.labels.length === 0) {
-      div.innerHTML = '<span style="color:#888;font-size:12px;">(Tree of Life — all species)</span>';
+      div.innerHTML = '<span style="color:var(--text-dim);font-size:12px;">(Tree of Life — all species)</span>';
     } else {
       var html = '';
       data.labels.forEach(function(l) {
         var isActive = activePaths.has(l.labels_file);
-        html += '<label style="display:flex;align-items:center;gap:4px;color:#B0CCCC;cursor:pointer;padding:2px 0;">' +
+        html += '<label style="display:flex;align-items:center;gap:4px;color:var(--text-secondary);cursor:pointer;padding:2px 0;">' +
           '<input type="checkbox" class="labels-run-cb" value="' + l.labels_file.replace(/"/g, '&quot;') + '"' +
-          (isActive ? ' checked' : '') + ' onchange="updateReadiness()" style="accent-color:#24E5CA;"> ' +
+          (isActive ? ' checked' : '') + ' onchange="updateReadiness()" style="accent-color:var(--accent);"> ' +
           l.name + ' (' + (l.species_count || 0) + ')</label>';
       });
       div.innerHTML = html;

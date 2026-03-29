@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="stylesheet" href="/static/vireo-theme.css">
 <link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Setup</title>
 <style>
@@ -17,27 +18,27 @@
   .setup-card {
     max-width: 640px;
     width: 100%;
-    background: var(--bg-secondary, #0E2A3D);
-    border: 1px solid var(--border-primary, #14374E);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
     border-radius: 12px;
     padding: 40px;
   }
   .setup-title {
     font-size: 28px;
     font-weight: 700;
-    color: var(--text-primary, #E0F0F0);
+    color: var(--text-primary);
     margin-bottom: 8px;
   }
   .setup-subtitle {
     font-size: 14px;
-    color: var(--text-secondary, #7FA8A8);
+    color: var(--text-secondary);
     margin-bottom: 32px;
     line-height: 1.5;
   }
   .section-label {
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-primary, #E0F0F0);
+    color: var(--text-primary);
     margin-bottom: 12px;
   }
   .model-option {
@@ -45,38 +46,38 @@
     align-items: flex-start;
     gap: 12px;
     padding: 12px;
-    border: 1px solid var(--border-primary, #14374E);
+    border: 1px solid var(--border-primary);
     border-radius: 8px;
     margin-bottom: 8px;
     cursor: pointer;
     transition: border-color 0.2s;
   }
-  .model-option:hover { border-color: var(--accent, #24E5CA); }
-  .model-option.selected { border-color: var(--accent, #24E5CA); background: rgba(36,229,202,0.05); }
+  .model-option:hover { border-color: var(--accent); }
+  .model-option.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
   .model-option input[type="radio"],
-  .model-option input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent, #24E5CA); }
-  .model-name { font-size: 13px; font-weight: 600; color: var(--text-primary, #E0F0F0); }
-  .model-desc { font-size: 12px; color: var(--text-secondary, #7FA8A8); margin-top: 2px; }
-  .model-size { font-size: 11px; color: var(--text-dim, #5A8890); margin-top: 2px; }
+  .model-option input[type="checkbox"] { margin-top: 3px; accent-color: var(--accent); }
+  .model-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .model-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .model-size { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .model-badge {
     font-size: 10px; padding: 2px 6px; border-radius: 4px;
-    background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E);
+    background: var(--accent); color: var(--bg-primary);
     font-weight: 600; margin-left: 8px;
   }
 
   .progress-container { display: none; margin-top: 8px; }
   .progress-bar-track {
-    height: 6px; background: var(--bg-tertiary, #14374E); border-radius: 3px; overflow: hidden;
+    height: 6px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden;
   }
   .progress-bar-fill {
-    height: 100%; background: var(--accent, #24E5CA); border-radius: 3px;
+    height: 100%; background: var(--accent); border-radius: 3px;
     width: 0%; transition: width 0.3s;
   }
-  .progress-label { font-size: 11px; color: var(--text-secondary, #7FA8A8); margin-top: 4px; }
+  .progress-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
 
   .btn-primary {
     display: inline-block; padding: 12px 32px; border: none; border-radius: 8px;
-    background: var(--accent, #24E5CA); color: var(--bg-primary, #0A1F2E);
+    background: var(--accent); color: var(--bg-primary);
     font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 24px;
     transition: opacity 0.2s;
   }
@@ -85,20 +86,20 @@
 
   .skip-link {
     display: inline-block; margin-top: 12px; font-size: 12px;
-    color: var(--text-dim, #5A8890); text-decoration: none;
+    color: var(--text-dim); text-decoration: none;
   }
-  .skip-link:hover { color: var(--text-secondary, #7FA8A8); }
+  .skip-link:hover { color: var(--text-secondary); }
 
   .download-status {
     margin-top: 24px; padding: 16px; border-radius: 8px;
-    background: var(--bg-tertiary, #14374E); display: none;
+    background: var(--bg-tertiary); display: none;
   }
   .status-item { margin-bottom: 12px; }
   .status-item:last-child { margin-bottom: 0; }
-  .status-name { font-size: 12px; font-weight: 500; color: var(--text-primary, #E0F0F0); margin-bottom: 4px; }
+  .status-name { font-size: 12px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px; }
 
-  .done-icon { color: var(--accent, #24E5CA); margin-left: 8px; }
-  .error-icon { color: var(--danger, #E74C3C); margin-left: 8px; }
+  .done-icon { color: var(--accent); margin-left: 8px; }
+  .error-icon { color: var(--danger); margin-left: 8px; }
 </style>
 </head>
 <body>
@@ -118,7 +119,7 @@
   <!-- Pipeline Models (optional) -->
   <div class="section-label" style="margin-top:24px;">
     Pipeline Models (optional)
-    <span style="font-weight:400;color:var(--text-dim,#5A8890);font-size:11px;margin-left:8px;">
+    <span style="font-weight:400;color:var(--text-dim);font-size:11px;margin-left:8px;">
       Used for advanced culling features
     </span>
   </div>
@@ -313,7 +314,7 @@ async function startDownloads() {
     btn.textContent = 'Download & Get Started';
     isDownloading = false;
     var errorDiv = document.createElement('div');
-    errorDiv.style.cssText = 'margin-top:16px;padding:12px;border-radius:8px;background:rgba(231,76,60,0.1);border:1px solid var(--danger,#E74C3C);color:var(--danger,#E74C3C);font-size:13px;';
+    errorDiv.style.cssText = 'margin-top:16px;padding:12px;border-radius:8px;background:color-mix(in srgb, var(--danger) 10%, transparent);border:1px solid var(--danger);color:var(--danger);font-size:13px;';
     errorDiv.textContent = 'Classification model download failed. Please check your connection and try again.';
     statusDiv.appendChild(errorDiv);
   }
@@ -364,7 +365,7 @@ function downloadModel(item) {
           } else {
             if (labelEl) {
               labelEl.textContent = 'Failed: ' + (result.errors && result.errors[0] || 'Unknown error');
-              labelEl.style.color = 'var(--danger, #E74C3C)';
+              labelEl.style.color = 'var(--danger)';
             }
             resolve(false);
           }
@@ -372,7 +373,7 @@ function downloadModel(item) {
         onError: function() {
           if (labelEl) {
             labelEl.textContent = 'Connection lost during download';
-            labelEl.style.color = 'var(--danger, #E74C3C)';
+            labelEl.style.color = 'var(--danger)';
           }
           resolve(false);
         }
@@ -380,7 +381,7 @@ function downloadModel(item) {
     }).catch(function(e) {
       if (labelEl) {
         labelEl.textContent = 'Error: ' + e.message;
-        labelEl.style.color = 'var(--danger, #E74C3C)';
+        labelEl.style.color = 'var(--danger)';
       }
       resolve(false);
     });

@@ -12,14 +12,14 @@
 
 .tabs { display: flex; gap: 0; margin-bottom: 24px; }
 .tab {
-  padding: 10px 20px; cursor: pointer; font-size: 13px; color: #a0a0a0;
+  padding: 10px 20px; cursor: pointer; font-size: 13px; color: var(--text-muted);
   border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
   user-select: none;
 }
-.tab:hover { color: #fff; }
-.tab.active { color: #fff; border-bottom-color: #24E5CA; }
+.tab:hover { color: var(--text-primary); }
+.tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
 .tab .badge {
-  margin-left: 6px; font-size: 11px; background: #14374E;
+  margin-left: 6px; font-size: 11px; background: var(--bg-tertiary);
   padding: 2px 7px; border-radius: 10px; font-variant-numeric: tabular-nums;
 }
 
@@ -29,16 +29,16 @@
   width: 100%; border-collapse: collapse; font-size: 13px;
 }
 .audit-table th {
-  text-align: left; padding: 8px 12px; color: #888;
-  font-weight: 500; border-bottom: 1px solid #14374E;
+  text-align: left; padding: 8px 12px; color: var(--text-dim);
+  font-weight: 500; border-bottom: 1px solid var(--border-primary);
 }
 .audit-table td {
-  padding: 8px 12px; border-bottom: 1px solid #0E2A3D; color: #B0CCCC;
+  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary);
 }
-.audit-table tr:hover { background: #14374E; }
+.audit-table tr:hover { background: var(--bg-tertiary); }
 
-.kw-added { color: #24E5CA; }
-.kw-removed { color: #e74c3c; }
+.kw-added { color: var(--accent); }
+.kw-removed { color: var(--danger); }
 
 .status-msg { margin-left: 8px; }
 
@@ -129,10 +129,10 @@ async function runDriftCheck() {
     status.textContent = driftData.length > 0
       ? driftData.length + ' drift(s) found'
       : 'No drift — everything in sync';
-    status.style.color = driftData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#24E5CA)';
+    status.style.color = driftData.length > 0 ? 'var(--warning)' : 'var(--accent)';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--danger,#e74c3c)';
+    status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
 }
@@ -193,10 +193,10 @@ async function runOrphanCheck() {
     status.textContent = orphanData.length > 0
       ? orphanData.length + ' orphan(s) found'
       : 'No orphans — all entries have files';
-    status.style.color = orphanData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#24E5CA)';
+    status.style.color = orphanData.length > 0 ? 'var(--warning)' : 'var(--accent)';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--danger,#e74c3c)';
+    status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
 }
@@ -259,10 +259,10 @@ async function runUntrackedCheck() {
     status.textContent = untrackedData.length > 0
       ? untrackedData.length + ' untracked file(s) found'
       : 'No untracked files';
-    status.style.color = untrackedData.length > 0 ? 'var(--warning,#f0c040)' : 'var(--accent,#24E5CA)';
+    status.style.color = untrackedData.length > 0 ? 'var(--warning)' : 'var(--accent)';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--danger,#e74c3c)';
+    status.style.color = 'var(--danger)';
   }
   btn.disabled = false;
 }

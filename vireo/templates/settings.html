@@ -12,47 +12,47 @@
   .content { max-width: 800px; }
   .btn-sm {
     padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
-    border: 1px solid var(--border-secondary, #1A4560);
-    background: var(--bg-tertiary, #14374E); color: var(--text-primary, #E0F0F0);
+    border: 1px solid var(--border-secondary);
+    background: var(--bg-tertiary); color: var(--text-primary);
     margin-left: 6px;
   }
-  .btn-sm:hover { background: var(--border-secondary, #1A4560); }
+  .btn-sm:hover { background: var(--border-secondary); }
   .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-sm.btn-danger { border-color: var(--danger, #E74C3C); color: var(--danger, #E74C3C); }
-  .btn-sm.btn-danger:hover { background: rgba(231,76,60,0.15); }
+  .btn-sm.btn-danger { border-color: var(--danger); color: var(--danger); }
+  .btn-sm.btn-danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
   .shortcut-context-title {
-    font-size: 13px; font-weight: 600; color: #B0CCCC;
+    font-size: 13px; font-weight: 600; color: var(--text-secondary);
     margin: 16px 0 8px 0; padding-bottom: 6px;
-    border-bottom: 1px solid #14374E;
+    border-bottom: 1px solid var(--border-primary);
     display: flex; justify-content: space-between; align-items: center;
   }
   .shortcut-context-title:first-child { margin-top: 0; }
   .shortcut-row {
     display: flex; align-items: center; padding: 8px 0;
-    border-bottom: 1px solid rgba(20,55,78,0.5);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 50%, transparent);
   }
   .shortcut-row:last-child { border-bottom: none; }
-  .shortcut-action { flex: 1; font-size: 13px; color: #B0CCCC; }
+  .shortcut-action { flex: 1; font-size: 13px; color: var(--text-secondary); }
   .shortcut-key-btn {
-    background: #14374E; color: #24E5CA; border: 1px solid #1A4560;
+    background: var(--bg-tertiary); color: var(--accent); border: 1px solid var(--border-secondary);
     border-radius: 4px; padding: 4px 14px; font-size: 13px;
     font-family: monospace; cursor: pointer; min-width: 70px;
     text-align: center; transition: border-color 0.2s;
   }
-  .shortcut-key-btn:hover { border-color: #24E5CA; }
+  .shortcut-key-btn:hover { border-color: var(--accent); }
   .shortcut-key-btn.capturing {
-    border-color: #f0c040; color: #f0c040; animation: pulse 1s infinite;
+    border-color: var(--warning); color: var(--warning); animation: pulse 1s infinite;
   }
   .shortcut-default-hint {
-    font-size: 11px; color: #555; margin-left: 8px; min-width: 80px;
+    font-size: 11px; color: var(--text-ghost); margin-left: 8px; min-width: 80px;
   }
   .shortcut-reset-btn {
-    background: none; border: none; color: #555; cursor: pointer;
+    background: none; border: none; color: var(--text-ghost); cursor: pointer;
     font-size: 14px; margin-left: 6px; padding: 2px 6px;
   }
-  .shortcut-reset-btn:hover { color: #e74c3c; }
-  .shortcut-conflict { font-size: 11px; color: #e74c3c; margin-left: 8px; }
+  .shortcut-reset-btn:hover { color: var(--danger); }
+  .shortcut-conflict { font-size: 11px; color: var(--danger); margin-left: 8px; }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
@@ -62,7 +62,7 @@
     cursor: pointer; user-select: none;
   }
   .collapsible-header .toggle-icon {
-    font-size: 14px; color: #888; transition: transform 0.2s;
+    font-size: 14px; color: var(--text-dim); transition: transform 0.2s;
   }
   .collapsible-header.open .toggle-icon { transform: rotate(90deg); }
   .collapsible-body { display: none; }
@@ -78,72 +78,72 @@
   <!-- Models -->
   <div class="section">
     <div class="section-title">Models</div>
-    <div id="modelsContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
-    <div style="margin-top:12px; border-top:1px solid #14374E; padding-top:12px;">
-      <div style="font-size:12px; color:#888; margin-bottom:8px;">Add from HuggingFace:</div>
+    <div id="modelsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div style="margin-top:12px; border-top:1px solid var(--border-primary); padding-top:12px;">
+      <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Add from HuggingFace:</div>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
         <input type="text" id="hfRepoId" placeholder="e.g. imageomics/bioclip-2.5-vith14"
-               style="background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
-        <button onclick="addHfModel()" style="background:#24E5CA;color:#0A1F2E;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Download</button>
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
+        <button onclick="addHfModel()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Download</button>
       </div>
-      <div style="font-size:12px; color:#888; margin-bottom:8px;">Or add local weights file:</div>
+      <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Or add local weights file:</div>
       <div style="display:flex; gap:8px;">
         <input type="text" id="customModelName" placeholder="Model name"
-               style="background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
         <input type="text" id="customModelPath" placeholder="/path/to/weights.bin"
-               style="background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;flex:2;">
-        <button onclick="addCustomModel()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Add</button>
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:2;">
+        <button onclick="addCustomModel()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Add</button>
       </div>
     </div>
-    <span id="modelActionStatus" style="font-size:12px;color:#888;margin-top:6px;display:block;"></span>
+    <span id="modelActionStatus" style="font-size:12px;color:var(--text-dim);margin-top:6px;display:block;"></span>
   </div>
 
   <!-- Taxonomy -->
   <div class="section">
     <div class="section-title">Taxonomy</div>
-    <div id="taxonomyContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div id="taxonomyContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Labels -->
   <div class="section">
     <div class="section-title">Species Labels</div>
-    <p style="font-size:13px;color:#888;margin-bottom:12px;">
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px;">
       Download a regional species list from iNaturalist for classification.
       The classifier compares photos against these labels — a focused list gives much better results than a generic one.
     </p>
 
     <!-- Saved labels -->
-    <div id="labelsContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div id="labelsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
 
     <!-- Download new labels -->
-    <div style="margin-top:16px; border-top:1px solid #14374E; padding-top:16px;">
-      <div style="font-size:13px; color:#E0F0F0; margin-bottom:10px; font-weight:600;">Download species list</div>
+    <div style="margin-top:16px; border-top:1px solid var(--border-primary); padding-top:16px;">
+      <div style="font-size:13px; color:var(--text-primary); margin-bottom:10px; font-weight:600;">Download species list</div>
 
       <div style="margin-bottom:8px;">
-        <div style="font-size:12px; color:#888; margin-bottom:4px;">Region (search iNaturalist places):</div>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Region (search iNaturalist places):</div>
         <input type="text" id="placeSearch" placeholder="e.g. California, Virginia, Costa Rica"
-               style="width:100%;background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:8px 10px;font-size:13px;outline:none;"
+               style="width:100%;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px 10px;font-size:13px;outline:none;"
                oninput="searchPlacesDebounced()" autocomplete="off">
-        <div id="placeDropdown" style="background:var(--bg-secondary,#0a1530);border:1px solid var(--border-secondary,#1A4560);border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;"></div>
+        <div id="placeDropdown" style="background:var(--bg-secondary);border:1px solid var(--border-secondary);border-top:none;border-radius:0 0 4px 4px;max-height:200px;overflow-y:auto;"></div>
       </div>
 
       <div style="margin-bottom:10px;">
-        <div style="font-size:12px; color:#888; margin-bottom:4px;">Include:</div>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Include:</div>
         <div id="taxonCheckboxes" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
       </div>
 
       <div style="margin-bottom:10px;">
-        <div style="font-size:12px; color:#888; margin-bottom:4px;">Observation quality:</div>
+        <div style="font-size:12px; color:var(--text-dim); margin-bottom:4px;">Observation quality:</div>
         <div id="observationFilterRadios" style="display:flex;flex-direction:column;gap:4px;"></div>
       </div>
 
       <button id="fetchLabelsBtn" onclick="fetchLabels()" disabled
-              style="background:#24E5CA;color:#0A1F2E;border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;font-weight:500;">
+              style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;font-weight:500;">
         Download Species List
       </button>
-      <span id="fetchLabelsStatus" style="font-size:12px;color:#888;margin-left:8px;"></span>
+      <span id="fetchLabelsStatus" style="font-size:12px;color:var(--text-dim);margin-left:8px;"></span>
       <div id="fetchLabelsProgress" style="display:none;margin-top:6px;">
-        <div style="height:4px;background:#14374E;border-radius:2px;overflow:hidden;"><div id="fetchLabelsFill" style="height:100%;background:#24E5CA;border-radius:2px;width:0%;transition:width 0.3s;"></div></div>
+        <div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;"><div id="fetchLabelsFill" style="height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>
       </div>
     </div>
   </div>
@@ -159,9 +159,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="range" id="cfgThreshold" min="10" max="90" step="5" value="40"
-               style="width:120px;accent-color:#24E5CA;"
+               style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgThresholdVal').textContent = this.value + '%'; saveConfig()">
-        <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgThresholdVal">40%</span>
+        <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgThresholdVal">40%</span>
       </div>
     </div>
     <div class="setting-row">
@@ -171,9 +171,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="number" id="cfgGroupingWindow" min="1" max="120" value="10"
-               style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
-        <span style="font-size:13px;color:#888;">seconds</span>
+        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
       </div>
     </div>
     <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
@@ -186,7 +186,7 @@
                style="width:100px;"
                oninput="document.getElementById('cfgSimilarityVal').textContent=this.value+'%'"
                onchange="saveConfig()">
-        <span id="cfgSimilarityVal" style="font-size:13px;color:#E0F0F0;min-width:30px;">85%</span>
+        <span id="cfgSimilarityVal" style="font-size:13px;color:var(--text-primary);min-width:30px;">85%</span>
       </div>
     </div>
     <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
@@ -195,7 +195,7 @@
         <small>How species names are capitalized when added as keywords. "Auto" matches your existing keywords.</small>
       </div>
       <select id="cfgKeywordCase" onchange="saveConfig()"
-              style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:4px 8px;font-size:13px;">
+              style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;">
         <option value="auto">Auto-detect</option>
         <option value="title">Title Case (House Finch)</option>
         <option value="lower">Sentence case (House fench)</option>
@@ -208,9 +208,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="number" id="cfgMaxEditHistory" min="100" max="10000" step="100" value="1000"
-               style="width:80px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               style="width:80px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
-        <span style="font-size:13px;color:#888;">entries</span>
+        <span style="font-size:13px;color:var(--text-dim);">entries</span>
       </div>
     </div>
   </div>
@@ -225,7 +225,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="number" id="cfgPhotosPerPage" min="10" max="200" step="10" value="50"
-               style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
       </div>
     </div>
@@ -236,9 +236,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
-               style="width:120px;accent-color:#24E5CA;"
+               style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveConfig()">
-        <span style="font-size:13px;color:#E0F0F0;min-width:42px;" id="cfgThumbSizeVal">400px</span>
+        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgThumbSizeVal">400px</span>
       </div>
     </div>
     <div class="setting-row">
@@ -248,9 +248,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
-               style="width:120px;accent-color:#24E5CA;"
+               style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgThumbQualityVal">85</span>
+        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgThumbQualityVal">85</span>
       </div>
     </div>
     <div class="setting-row">
@@ -260,9 +260,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
-               style="width:120px;accent-color:#24E5CA;"
+               style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgPreviewQualityVal">90</span>
+        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
       </div>
     </div>
     <div class="setting-row">
@@ -272,9 +272,9 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="range" id="cfgBrowseThumbDefault" min="100" max="400" step="10" value="220"
-               style="width:120px;accent-color:#24E5CA;"
+               style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgBrowseThumbVal').textContent = this.value + 'px'; saveConfig()">
-        <span style="font-size:13px;color:#E0F0F0;min-width:42px;" id="cfgBrowseThumbVal">220px</span>
+        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgBrowseThumbVal">220px</span>
       </div>
     </div>
   </div>
@@ -293,9 +293,9 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgDetectorConf" min="5" max="50" step="1" value="20"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgDetectorConfVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgDetectorConfVal">0.20</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectorConfVal">0.20</span>
         </div>
       </div>
       <div class="setting-row">
@@ -305,9 +305,9 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgDetectionPadding" min="0" max="50" step="1" value="20"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgDetectionPaddingVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgDetectionPaddingVal">0.20</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectionPaddingVal">0.20</span>
         </div>
       </div>
       <div class="setting-row">
@@ -317,7 +317,7 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgTopK" min="1" max="20" value="5"
-                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
         </div>
       </div>
@@ -328,9 +328,9 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgRedundancy" min="50" max="99" step="1" value="88"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRedundancyVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRedundancyVal">0.88</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRedundancyVal">0.88</span>
         </div>
       </div>
       <div class="setting-row">
@@ -340,9 +340,9 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgCullTimeWindow" min="5" max="600" step="5" value="60"
-                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
-          <span style="font-size:13px;color:#888;">seconds</span>
+          <span style="font-size:13px;color:var(--text-dim);">seconds</span>
         </div>
       </div>
       <div class="setting-row">
@@ -352,9 +352,9 @@
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgCullPhash" min="0" max="32" step="1" value="19"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgCullPhashVal').textContent = this.value; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:24px;" id="cfgCullPhashVal">19</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:24px;" id="cfgCullPhashVal">19</span>
         </div>
       </div>
     </div>
@@ -368,135 +368,135 @@
     </div>
     <div class="collapsible-body">
 
-      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:12px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Quality Scoring Weights</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:12px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Quality Scoring Weights</div>
       <div class="setting-row">
         <div class="setting-label">Focus</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWFocus" min="0" max="100" value="45"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWFocusVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWFocusVal">45%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWFocusVal">45%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Exposure</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWExposure" min="0" max="100" value="20"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWExposureVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWExposureVal">20%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWExposureVal">20%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Composition</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWComposition" min="0" max="100" value="15"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWCompositionVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWCompositionVal">15%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWCompositionVal">15%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Subject area</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWArea" min="0" max="100" value="10"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWAreaVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWAreaVal">10%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWAreaVal">10%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Noise</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgWNoise" min="0" max="100" value="10"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgWNoiseVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgWNoiseVal">10%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgWNoiseVal">10%</span>
         </div>
       </div>
 
-      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Rejection Thresholds</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Rejection Thresholds</div>
       <div class="setting-row">
         <div class="setting-label">Crop completeness</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgRejectCrop" min="0" max="100" value="60"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectCropVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectCropVal">60%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectCropVal">60%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Focus</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgRejectFocus" min="0" max="100" value="35"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectFocusVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectFocusVal">35%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectFocusVal">35%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Highlight clipping</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgRejectClip" min="0" max="100" value="30"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectClipVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectClipVal">30%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectClipVal">30%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Composite quality floor</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgRejectComposite" min="0" max="100" value="40"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgRejectCompositeVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgRejectCompositeVal">40%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgRejectCompositeVal">40%</span>
         </div>
       </div>
 
-      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Burst Detection</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Burst Detection</div>
       <div class="setting-row">
         <div class="setting-label">Time gap</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgBurstTimeGap" min="1" max="30" value="3"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstTimeGapVal').textContent = this.value + 's'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:30px;" id="cfgBurstTimeGapVal">3s</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgBurstTimeGapVal">3s</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">pHash threshold</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgBurstPhash" min="1" max="32" value="12"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstPhashVal').textContent = this.value; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:24px;" id="cfgBurstPhashVal">12</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:24px;" id="cfgBurstPhashVal">12</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Embedding similarity</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgBurstEmb" min="50" max="99" value="80"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstEmbVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgBurstEmbVal">80%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstEmbVal">80%</span>
         </div>
       </div>
 
-      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Selection (MMR)</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Selection (MMR)</div>
       <div class="setting-row">
         <div class="setting-label">Burst quality bias (lambda)</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgBurstLambda" min="0" max="100" value="85"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgBurstLambdaVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgBurstLambdaVal">85%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgBurstLambdaVal">85%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Burst max keep</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgBurstMaxKeep" min="1" max="10" value="3"
-                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
         </div>
       </div>
@@ -504,21 +504,21 @@
         <div class="setting-label">Encounter quality bias (lambda)</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgEncLambda" min="0" max="100" value="70"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgEncLambdaVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgEncLambdaVal">70%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgEncLambdaVal">70%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Encounter max keep</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgEncMaxKeep" min="1" max="20" value="5"
-                 style="width:60px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
         </div>
       </div>
 
-      <div style="font-size:13px;font-weight:600;color:#B0CCCC;margin:16px 0 8px 0;border-bottom:1px solid #14374E;padding-bottom:6px;">Encounter Segmentation</div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Encounter Segmentation</div>
       <div class="setting-row">
         <div class="setting-label">
           Encounter weights
@@ -526,71 +526,71 @@
         </div>
         <div style="display:flex;align-items:center;gap:6px;">
           <input type="number" id="cfgWTime" min="0" max="100" value="35" title="Time"
-                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
           <input type="number" id="cfgWSubj" min="0" max="100" value="35" title="Subject"
-                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
           <input type="number" id="cfgWGlobal" min="0" max="100" value="15" title="Global"
-                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
           <input type="number" id="cfgWSpecies" min="0" max="100" value="10" title="Species"
-                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
           <input type="number" id="cfgWMeta" min="0" max="100" value="5" title="Meta"
-                 style="width:48px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px;font-size:12px;text-align:center;"
+                 style="width:48px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px;font-size:12px;text-align:center;"
                  onchange="saveConfig()">
-          <span style="font-size:11px;color:#888;">T/S/G/Sp/M</span>
+          <span style="font-size:11px;color:var(--text-dim);">T/S/G/Sp/M</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Hard cut time</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgHardCutTime" min="30" max="600" value="180"
-                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
-          <span style="font-size:13px;color:#888;">seconds</span>
+          <span style="font-size:13px;color:var(--text-dim);">seconds</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Hard cut score</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgHardCutScore" min="0" max="100" value="42"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgHardCutScoreVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgHardCutScoreVal">42%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgHardCutScoreVal">42%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Soft cut score</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgSoftCutScore" min="0" max="100" value="52"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgSoftCutScoreVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgSoftCutScoreVal">52%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgSoftCutScoreVal">52%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Merge score</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgMergeScore" min="0" max="100" value="62"
-                 style="width:120px;accent-color:#24E5CA;"
+                 style="width:120px;accent-color:var(--accent);"
                  oninput="document.getElementById('cfgMergeScoreVal').textContent = this.value + '%'; saveConfig()">
-          <span style="font-size:13px;color:#E0F0F0;min-width:36px;" id="cfgMergeScoreVal">62%</span>
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMergeScoreVal">62%</span>
         </div>
       </div>
       <div class="setting-row">
         <div class="setting-label">Merge max gap</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="cfgMergeMaxGap" min="10" max="300" value="60"
-                 style="width:70px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+                 style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                  onchange="saveConfig()">
-          <span style="font-size:13px;color:#888;">seconds</span>
+          <span style="font-size:13px;color:var(--text-dim);">seconds</span>
         </div>
       </div>
 
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid #14374E;">
-        <button onclick="resetPipelineDefaults()" style="background:#14374E;color:#B0CCCC;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Reset to defaults</button>
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-primary);">
+        <button onclick="resetPipelineDefaults()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Reset to defaults</button>
       </div>
     </div>
   </div>
@@ -601,11 +601,11 @@
     <div class="setting-row">
       <div class="setting-label">
         Access token
-        <small>Optional. Enables faster downloads and access to gated models. Get one at <span style="color:#24E5CA;">huggingface.co/settings/tokens</span></small>
+        <small>Optional. Enables faster downloads and access to gated models. Get one at <span style="color:var(--accent);">huggingface.co/settings/tokens</span></small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="text" id="cfgHfToken" placeholder="hf_..."
-               style="width:220px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               style="width:220px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
       </div>
     </div>
@@ -614,9 +614,9 @@
   <!-- iNaturalist -->
   <div class="section">
     <div class="section-title">iNaturalist</div>
-    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Submit observations directly from Vireo.
-      Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" style="color:#24E5CA;text-decoration:none;">inaturalist.org/users/api_token</a>
+      Get your API token from <a href="https://www.inaturalist.org/users/api_token" target="_blank" style="color:var(--accent);text-decoration:none;">inaturalist.org/users/api_token</a>
     </p>
     <div class="setting-row">
       <div class="setting-label">
@@ -625,10 +625,10 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="password" id="cfgInatToken" placeholder="eyJhbGciOi..."
-               style="width:260px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               style="width:260px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
-        <button onclick="toggleInatTokenVisibility()" style="background:#14374E;color:#888;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
-        <button onclick="validateInatToken()" style="background:#14374E;color:#24E5CA;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Validate</button>
+        <button onclick="toggleInatTokenVisibility()" style="background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
+        <button onclick="validateInatToken()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Validate</button>
       </div>
     </div>
     <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
@@ -637,12 +637,12 @@
   <!-- darktable Development -->
   <div class="section">
     <div class="section-title">RAW Development (darktable)</div>
-    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Configure darktable-cli for developing RAW photos into JPEGs or TIFFs.
-      <a href="https://www.darktable.org/" style="color:#24E5CA;text-decoration:none;">darktable.org</a>
+      <a href="https://www.darktable.org/" style="color:var(--accent);text-decoration:none;">darktable.org</a>
     </p>
     <div id="darktableStatus" style="margin-bottom:12px;">
-      <span style="color:#555;font-size:13px;">Checking...</span>
+      <span style="color:var(--text-ghost);font-size:13px;">Checking...</span>
     </div>
     <div class="setting-row">
       <div class="setting-label">
@@ -651,7 +651,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <input type="text" id="cfgDarktableBin" placeholder="auto-detect"
-               style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="browseForDarktable()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       </div>
@@ -662,7 +662,7 @@
         <small>A darktable style to apply during development (e.g. "Wildlife"). Leave empty for no style.</small>
       </div>
       <input type="text" id="cfgDarktableStyle" placeholder="none"
-             style="width:200px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;"
+             style="width:200px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;"
              onchange="saveConfig()">
     </div>
     <div class="setting-row">
@@ -671,7 +671,7 @@
         <small>File format for developed photos.</small>
       </div>
       <select id="cfgDarktableFormat" onchange="saveConfig()"
-              style="background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:4px 8px;font-size:13px;">
+              style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;">
         <option value="jpg">JPEG</option>
         <option value="tiff">TIFF</option>
       </select>
@@ -683,7 +683,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <input type="text" id="cfgDarktableOutputDir" placeholder="alongside originals"
-               style="width:280px;background:#14374E;color:#E0F0F0;border:1px solid #1A4560;border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
                onchange="saveConfig()">
         <button onclick="browseForOutputDir()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
       </div>
@@ -724,12 +724,12 @@
   </div>
 
   <!-- First-Launch Setup -->
-  <div class="section" style="border-bottom:1px solid var(--border-primary,#14374E);padding-bottom:16px;margin-bottom:16px;">
+  <div class="section" style="border-bottom:1px solid var(--border-primary);padding-bottom:16px;margin-bottom:16px;">
     <div class="section-title">Model Setup</div>
-    <p style="font-size:12px;color:#888;margin-bottom:8px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
       Re-run the first-launch setup wizard to download or change classification models.
     </p>
-    <a href="/welcome?force=1" style="display:inline-block;padding:6px 14px;border-radius:4px;font-size:12px;background:var(--bg-tertiary,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);text-decoration:none;">
+    <a href="/welcome?force=1" style="display:inline-block;padding:6px 14px;border-radius:4px;font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);text-decoration:none;">
       Open Setup Wizard
     </a>
   </div>
@@ -737,30 +737,30 @@
   <!-- Pipeline Models -->
   <div class="section">
     <div class="section-title">Pipeline Models</div>
-    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Models used by the culling pipeline. Download the ones you need before running Extract Features.
     </p>
-    <div id="pipelineModelsContainer" style="font-size:12px;color:#888;">Loading...</div>
+    <div id="pipelineModelsContainer" style="font-size:12px;color:var(--text-dim);">Loading...</div>
   </div>
 
 
   <!-- Embedding Matrix -->
   <div class="section">
     <div class="section-title">Embedding Cache</div>
-    <p style="font-size:12px;color:#888;margin-bottom:12px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
       Each model+labels combination needs pre-computed text embeddings. Cached combinations classify instantly.
       Uncached ones will compute on first use (~30s on CPU).
     </p>
-    <div id="matrixContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Scan Roots -->
   <div class="section">
     <div class="section-title">Saved Scan Roots</div>
-    <p style="font-size:12px;color:#888;margin-bottom:10px;">
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
       Directories you've scanned before. These appear as suggestions on the Import page.
     </p>
-    <div id="scanRootsContent"><span style="color:#555;font-size:13px;">Loading...</span></div>
+    <div id="scanRootsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Theme -->
@@ -778,16 +778,16 @@
   <!-- Keyboard Shortcuts -->
   <div class="section">
     <div class="section-title">Keyboard Shortcuts</div>
-    <p style="font-size:12px;color:#888;margin-bottom:10px;">Click a key to change it. Shortcuts are grouped by page context.</p>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Click a key to change it. Shortcuts are grouped by page context.</p>
     <div id="shortcutsEditor">
-      <span style="color:#555;font-size:13px;">Loading...</span>
+      <span style="color:var(--text-ghost);font-size:13px;">Loading...</span>
     </div>
   </div>
 
   <!-- Advanced -->
   <div class="section">
     <div class="section-title" style="cursor:pointer;" onclick="document.getElementById('advancedContent').style.display = document.getElementById('advancedContent').style.display === 'none' ? '' : 'none'; this.querySelector('span').textContent = document.getElementById('advancedContent').style.display === 'none' ? '\u25B6' : '\u25BC';">
-      Advanced <span style="font-size:12px;color:var(--text-dim,#888);">&#9654;</span>
+      Advanced <span style="font-size:12px;color:var(--text-dim);">&#9654;</span>
     </div>
     <div id="advancedContent" style="display:none;">
       <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
@@ -796,8 +796,8 @@
           <small>Merge duplicate keywords that differ only in capitalization (e.g. "House Finch" and "House finch").</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <button onclick="cleanKeywords()" style="background:var(--bg-tertiary,#14374E);color:var(--text-secondary,#B0CCCC);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clean Keywords</button>
-          <span id="cleanKeywordsStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
+          <button onclick="cleanKeywords()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clean Keywords</button>
+          <span id="cleanKeywordsStatus" style="font-size:12px;color:var(--text-dim);"></span>
         </div>
       </div>
     </div>
@@ -810,9 +810,9 @@
       <div class="setting-label">Vireo</div>
       <span class="setting-value" id="appVersion">-</span>
     </div>
-    <div style="font-size:12px;color:#666;margin-top:8px;">
+    <div style="font-size:12px;color:var(--text-faint);margin-top:8px;">
       AI-powered wildlife photo organizer.
-      <a href="https://github.com/jss367/vireo" style="color:#24E5CA;text-decoration:none;">GitHub</a>
+      <a href="https://github.com/jss367/vireo" style="color:var(--accent);text-decoration:none;">GitHub</a>
     </div>
   </div>
 
@@ -820,19 +820,19 @@
   <div class="section" id="updateSection" style="display:none;">
     <div class="section-title">About & Updates</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <span style="font-size:13px;color:#B0CCCC;">Vireo v<span id="currentVersion">0.1.0</span></span>
+      <span style="font-size:13px;color:var(--text-secondary);">Vireo v<span id="currentVersion">0.1.0</span></span>
       <button class="btn-sm" id="checkUpdateBtn" onclick="doCheckForUpdate()">Check for Updates</button>
-      <span id="updateStatus" style="font-size:12px;color:#888;"></span>
+      <span id="updateStatus" style="font-size:12px;color:var(--text-dim);"></span>
     </div>
-    <div id="updateAvailable" style="display:none;background:var(--bg-tertiary,#14374E);border:1px solid var(--border-secondary,#1A4560);border-radius:6px;padding:12px;margin-top:8px;">
-      <div style="font-size:13px;color:#24E5CA;margin-bottom:6px;">
+    <div id="updateAvailable" style="display:none;background:var(--bg-tertiary);border:1px solid var(--border-secondary);border-radius:6px;padding:12px;margin-top:8px;">
+      <div style="font-size:13px;color:var(--accent);margin-bottom:6px;">
         Update available: v<span id="updateVersion"></span>
       </div>
-      <div id="updateNotes" style="font-size:12px;color:#B0CCCC;margin-bottom:10px;white-space:pre-line;"></div>
-      <button class="btn-sm" id="installUpdateBtn" onclick="doInstallUpdate()" style="background:#24E5CA;color:#0A1C28;border-color:#24E5CA;">
+      <div id="updateNotes" style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;white-space:pre-line;"></div>
+      <button class="btn-sm" id="installUpdateBtn" onclick="doInstallUpdate()" style="background:var(--accent);color:var(--accent-text);border-color:var(--accent);">
         Download & Install
       </button>
-      <span id="installStatus" style="font-size:12px;color:#888;margin-left:8px;"></span>
+      <span id="installStatus" style="font-size:12px;color:var(--text-dim);margin-left:8px;"></span>
     </div>
   </div>
 
@@ -1082,7 +1082,7 @@ async function validateInatToken() {
   var token = document.getElementById('cfgInatToken').value.trim();
   var status = document.getElementById('inatTokenStatus');
   if (!token) { status.innerHTML = ''; return; }
-  status.innerHTML = '<span style="color:#888;">Validating...</span>';
+  status.innerHTML = '<span style="color:var(--text-dim);">Validating...</span>';
   try {
     var data = await safeFetch('/api/inat/validate-token', {
       method: 'POST',
@@ -1090,12 +1090,12 @@ async function validateInatToken() {
       body: JSON.stringify({token: token}),
     }, { toast: false });
     if (data.error) {
-      status.innerHTML = '<span style="color:#e74c3c;">&#10007; Invalid or expired token</span>';
+      status.innerHTML = '<span style="color:var(--danger);">&#10007; Invalid or expired token</span>';
     } else {
-      status.innerHTML = '<span style="color:#24E5CA;">&#10003; Logged in as <strong>' + escapeHtml(data.login) + '</strong></span>';
+      status.innerHTML = '<span style="color:var(--accent);">&#10003; Logged in as <strong>' + escapeHtml(data.login) + '</strong></span>';
     }
   } catch(e) {
-    status.innerHTML = '<span style="color:#e74c3c;">&#10007; ' + escapeHtml(e.message) + '</span>';
+    status.innerHTML = '<span style="color:var(--danger);">&#10007; ' + escapeHtml(e.message) + '</span>';
   }
 }
 
@@ -1145,7 +1145,7 @@ function renderShortcutsEditor() {
     var defaults = SHORTCUT_DEFAULTS[ctx] || {};
     html += '<div class="shortcut-context-title">' + labels._title +
       '<button onclick="resetContext(\'' + ctx + '\')" ' +
-      'style="background:none;border:1px solid #555;color:#888;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;">Reset All</button></div>';
+      'style="background:none;border:1px solid var(--text-ghost);color:var(--text-dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;">Reset All</button></div>';
     for (var action in labels) {
       if (action === '_title') continue;
       var current = values[action] || defaults[action] || '';
@@ -1201,8 +1201,8 @@ function startCapture(btn, ctx, action) {
       capturingBtn = null;
       document.removeEventListener('keydown', onKey, true);
       btn.textContent = 'Conflict: ' + SHORTCUT_LABELS[ctx][conflict];
-      btn.style.borderColor = '#e74c3c';
-      btn.style.color = '#e74c3c';
+      btn.style.borderColor = 'var(--danger)';
+      btn.style.color = 'var(--danger)';
       setTimeout(function() { renderShortcutsEditor(); }, 1500);
       return;
     }
@@ -1254,11 +1254,11 @@ async function loadDarktableStatus() {
     var data = await safeFetch('/api/darktable/status', {}, { toast: false });
     var el = document.getElementById('darktableStatus');
     if (data.available) {
-      el.innerHTML = '<span style="color:#24E5CA;font-size:13px;">&#10003; darktable-cli found</span>' +
-        '<span style="color:#888;font-size:12px;margin-left:8px;">' + escapeHtml(data.bin) + '</span>';
+      el.innerHTML = '<span style="color:var(--accent);font-size:13px;">&#10003; darktable-cli found</span>' +
+        '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">' + escapeHtml(data.bin) + '</span>';
     } else {
-      el.innerHTML = '<span style="color:#e74c3c;font-size:13px;">&#10007; darktable-cli not found</span>' +
-        '<span style="color:#888;font-size:12px;margin-left:8px;">Install darktable or set the path below</span>';
+      el.innerHTML = '<span style="color:var(--danger);font-size:13px;">&#10007; darktable-cli not found</span>' +
+        '<span style="color:var(--text-dim);font-size:12px;margin-left:8px;">Install darktable or set the path below</span>';
     }
   } catch(e) {}
 }
@@ -1275,15 +1275,15 @@ async function loadSystemInfo() {
     var mdDetail = document.getElementById('megadetectorDetail');
     if (d.megadetector === 'installed') {
       mdStatus.textContent = 'Installed';
-      mdStatus.style.color = '#24E5CA';
+      mdStatus.style.color = 'var(--accent)';
       mdDetail.textContent = d.megadetector_detail;
     } else if (d.megadetector === 'not installed') {
       mdStatus.textContent = 'Not installed';
-      mdStatus.style.color = '#f0c040';
+      mdStatus.style.color = 'var(--warning)';
       mdDetail.textContent = 'Subject detection disabled — ' + d.megadetector_detail;
     } else {
       mdStatus.textContent = 'Error';
-      mdStatus.style.color = '#e74c3c';
+      mdStatus.style.color = 'var(--danger)';
       mdDetail.textContent = d.megadetector_detail;
     }
   } catch(e) {}
@@ -1296,21 +1296,21 @@ async function loadPipelineModels() {
   try {
     var data = await safeFetch('/api/models/pipeline', {}, { toast: false });
     var html = '<table style="width:100%;border-collapse:collapse;">';
-    html += '<tr style="border-bottom:1px solid var(--border-primary,#14374E);font-size:11px;color:var(--text-dim,#5A8890);">';
+    html += '<tr style="border-bottom:1px solid var(--border-primary);font-size:11px;color:var(--text-dim);">';
     html += '<td style="padding:6px 8px;">Model</td><td>Role</td><td>Status</td><td>Size</td><td></td></tr>';
     data.models.forEach(function(m) {
-      var statusColor = '#888';
+      var statusColor = 'var(--text-dim)';
       var statusText = m.status;
-      if (m.status === 'downloaded') { statusColor = '#24E5CA'; statusText = 'Downloaded'; }
-      else if (m.status === 'corrupt' || m.status === 'incomplete') { statusColor = '#e74c3c'; statusText = m.status.charAt(0).toUpperCase() + m.status.slice(1); }
-      else if (m.status === 'repo cached') { statusColor = '#f0c040'; statusText = 'Repo only'; }
-      else { statusColor = '#f0c040'; statusText = 'Not downloaded'; }
+      if (m.status === 'downloaded') { statusColor = 'var(--accent)'; statusText = 'Downloaded'; }
+      else if (m.status === 'corrupt' || m.status === 'incomplete') { statusColor = 'var(--danger)'; statusText = m.status.charAt(0).toUpperCase() + m.status.slice(1); }
+      else if (m.status === 'repo cached') { statusColor = 'var(--warning)'; statusText = 'Repo only'; }
+      else { statusColor = 'var(--warning)'; statusText = 'Not downloaded'; }
 
-      html += '<tr style="border-bottom:1px solid var(--border-primary,#14374E);">';
-      html += '<td style="padding:8px;"><strong>' + m.name + '</strong><br><span style="color:#888;font-size:11px;">' + m.description + '</span></td>';
-      html += '<td style="padding:8px;color:#888;">' + m.role + '</td>';
+      html += '<tr style="border-bottom:1px solid var(--border-primary);">';
+      html += '<td style="padding:8px;"><strong>' + m.name + '</strong><br><span style="color:var(--text-dim);font-size:11px;">' + m.description + '</span></td>';
+      html += '<td style="padding:8px;color:var(--text-dim);">' + m.role + '</td>';
       html += '<td style="padding:8px;color:' + statusColor + ';">' + statusText + '</td>';
-      html += '<td style="padding:8px;color:#888;">' + (m.size || m.size_estimate) + '</td>';
+      html += '<td style="padding:8px;color:var(--text-dim);">' + (m.size || m.size_estimate) + '</td>';
       html += '<td style="padding:8px;text-align:right;">';
       if (m.status === 'downloaded') {
         html += '<button class="btn-sm btn-danger" onclick="deletePipelineModel(\'' + m.id + '\',\'' + m.name + '\')">Delete</button>';
@@ -1344,19 +1344,19 @@ async function downloadPipelineModel(modelId, btn) {
         },
         onComplete: function(result) {
           if (result.status === 'completed') {
-            if (btn) { btn.textContent = 'Done!'; btn.style.color = '#24E5CA'; }
+            if (btn) { btn.textContent = 'Done!'; btn.style.color = 'var(--accent)'; }
           } else {
-            if (btn) { btn.textContent = 'Failed'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+            if (btn) { btn.textContent = 'Failed'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
           }
           setTimeout(loadPipelineModels, 500);
         },
         onError: function() {
-          if (btn) { btn.textContent = 'Error'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+          if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
         }
       });
     }
   } catch(e) {
-    if (btn) { btn.textContent = 'Error'; btn.style.color = '#e74c3c'; btn.disabled = false; }
+    if (btn) { btn.textContent = 'Error'; btn.style.color = 'var(--danger)'; btn.disabled = false; }
   }
 }
 
@@ -1389,7 +1389,7 @@ async function loadLabels() {
     var activePaths = new Set(active.map(function(a) { return a.labels_file; }));
 
     if (labels.length === 0) {
-      document.getElementById('labelsContent').innerHTML = '<span style="color:#666;font-size:13px;">No species lists downloaded yet. Use the form below to download one.</span>';
+      document.getElementById('labelsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No species lists downloaded yet. Use the form below to download one.</span>';
       return;
     }
 
@@ -1398,17 +1398,17 @@ async function loadLabels() {
       var isActive = activePaths.has(l.labels_file);
       var groups = (l.taxon_groups || []).map(function(g) { return g.charAt(0).toUpperCase() + g.slice(1); }).join(', ');
 
-      html += '<div style="padding:8px 0;border-bottom:1px solid #0E2A3D;display:flex;align-items:center;gap:8px;">';
+      html += '<div style="padding:8px 0;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:8px;">';
       html += '<label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer;">';
       html += '<input type="checkbox" class="label-active-cb" value="' + escapeAttr(l.labels_file) + '"' +
-              (isActive ? ' checked' : '') + ' onchange="updateActiveLabels()" style="accent-color:#24E5CA;">';
+              (isActive ? ' checked' : '') + ' onchange="updateActiveLabels()" style="accent-color:var(--accent);">';
       html += '<div>';
-      html += '<span style="font-size:13px;color:#E0F0F0;font-weight:600;">' + escapeHtml(l.name) + '</span>';
-      html += '<div style="font-size:11px;color:#888;">' + (l.species_count || 0) + ' species &middot; ' + groups + '</div>';
+      html += '<span style="font-size:13px;color:var(--text-primary);font-weight:600;">' + escapeHtml(l.name) + '</span>';
+      html += '<div style="font-size:11px;color:var(--text-dim);">' + (l.species_count || 0) + ' species &middot; ' + groups + '</div>';
       html += '</div>';
       html += '</label>';
       html += '<button onclick="deleteLabelSet(\'' + escapeAttr(l.labels_file) + '\',\'' + escapeAttr(l.name) + '\')" ' +
-              'style="background:none;color:#e74c3c;border:1px solid #e74c3c;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;white-space:nowrap;" ' +
+              'style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;white-space:nowrap;" ' +
               'title="Delete this label set">Delete</button>';
       html += '</div>';
     });
@@ -1416,14 +1416,14 @@ async function loadLabels() {
     // Summary line
     var totalSpecies = active.reduce(function(sum, a) { return sum + (a.species_count || 0); }, 0);
     if (active.length > 0) {
-      html += '<div style="padding:8px 0;font-size:12px;color:#24E5CA;">' +
+      html += '<div style="padding:8px 0;font-size:12px;color:var(--accent);">' +
               active.length + ' label set' + (active.length > 1 ? 's' : '') + ' active &middot; ~' +
               totalSpecies.toLocaleString() + ' species</div>';
     }
 
     document.getElementById('labelsContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('labelsContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+    document.getElementById('labelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
@@ -1460,8 +1460,8 @@ async function loadTaxonGroups() {
     var html = '';
     groups.forEach(function(g, i) {
       var checked = (g.key === 'birds') ? ' checked' : '';
-      html += '<label style="font-size:12px;color:#B0CCCC;display:flex;align-items:center;gap:4px;cursor:pointer;">' +
-        '<input type="checkbox" class="taxon-cb" value="' + g.key + '"' + checked + ' style="accent-color:#24E5CA;"> ' +
+      html += '<label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;">' +
+        '<input type="checkbox" class="taxon-cb" value="' + g.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
         g.name + '</label>';
     });
     document.getElementById('taxonCheckboxes').innerHTML = html;
@@ -1474,9 +1474,9 @@ async function loadObservationFilters() {
     var html = '';
     filters.forEach(function(f) {
       var checked = (f.key === 'research') ? ' checked' : '';
-      html += '<label style="font-size:12px;color:#B0CCCC;display:flex;align-items:center;gap:4px;cursor:pointer;">' +
-        '<input type="radio" name="obs-filter" value="' + f.key + '"' + checked + ' style="accent-color:#24E5CA;"> ' +
-        f.name + ' <span style="color:#666;">— ' + f.description + '</span></label>';
+      html += '<label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;cursor:pointer;">' +
+        '<input type="radio" name="obs-filter" value="' + f.key + '"' + checked + ' style="accent-color:var(--accent);"> ' +
+        f.name + ' <span style="color:var(--text-faint);">— ' + f.description + '</span></label>';
     });
     document.getElementById('observationFilterRadios').innerHTML = html;
   } catch(e) {}
@@ -1488,7 +1488,7 @@ function searchPlacesDebounced() {
     selectedPlaceId = null;
     selectedPlaceName = '';
     document.getElementById('fetchLabelsBtn').disabled = true;
-    document.getElementById('placeSearch').style.borderColor = '#1A4560';
+    document.getElementById('placeSearch').style.borderColor = 'var(--border-secondary)';
   }
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(searchPlaces, 300);
@@ -1504,21 +1504,21 @@ async function searchPlaces() {
   try {
     var places = await safeFetch('/api/labels/search-places?q=' + encodeURIComponent(q), {}, { toast: false });
     if (places.length === 0) {
-      dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim,#555);">No places found</div>';
+      dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim);">No places found</div>';
       return;
     }
     var html = '';
     places.slice(0, 8).forEach(function(p) {
       var dn = p.display_name || p.name || '';
-      html += '<div style="padding:8px 10px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;border-bottom:1px solid var(--border-secondary,#1A4560);" ' +
-        'onmouseover="this.style.background=\'var(--bg-tertiary,#0E2A3D)\'" onmouseout="this.style.background=\'\'" ' +
+      html += '<div style="padding:8px 10px;font-size:13px;color:var(--text-secondary);cursor:pointer;border-bottom:1px solid var(--border-secondary);" ' +
+        'onmouseover="this.style.background=\'var(--bg-tertiary)\'" onmouseout="this.style.background=\'\'" ' +
         'data-place-id="' + p.id + '" data-place-name="' + escapeAttr(dn) + '" ' +
         'onclick="selectPlace(this.dataset.placeId, this.dataset.placeName)">' +
         escapeHtml(dn) + '</div>';
     });
     dropdown.innerHTML = html;
   } catch(e) {
-    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger,#e74c3c);">Error: ' + escapeHtml(String(e.message || e)) + '</div>';
+    dropdown.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--danger);">Error: ' + escapeHtml(String(e.message || e)) + '</div>';
   }
 }
 
@@ -1527,7 +1527,7 @@ function selectPlace(id, name) {
   selectedPlaceName = name;
   document.getElementById('placeDropdown').innerHTML = '';
   document.getElementById('placeSearch').value = name;
-  document.getElementById('placeSearch').style.borderColor = '#24E5CA';
+  document.getElementById('placeSearch').style.borderColor = 'var(--accent)';
   document.getElementById('fetchLabelsBtn').disabled = false;
 }
 
@@ -1571,11 +1571,11 @@ async function fetchLabels() {
       onComplete: function(result) {
         if (result.status === 'completed' && result.result) {
           status.textContent = 'Done! ' + result.result.species_count + ' species downloaded.';
-          status.style.color = '#24E5CA';
+          status.style.color = 'var(--accent)';
           progressFill.style.width = '100%';
         } else {
           status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-          status.style.color = '#e74c3c';
+          status.style.color = 'var(--danger)';
         }
         btn.disabled = false;
         loadLabels();
@@ -1600,55 +1600,55 @@ async function loadModels() {
     var activeId = data.active_id;
 
     if (models.length === 0) {
-      document.getElementById('modelsContent').innerHTML = '<span style="color:#555;font-size:13px;">No models available.</span>';
+      document.getElementById('modelsContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
       return;
     }
 
     var html = '';
     models.forEach(function(m) {
       var isActive = m.id === activeId;
-      var statusColor = m.downloaded ? '#24E5CA' : '#666';
+      var statusColor = m.downloaded ? 'var(--accent)' : 'var(--text-faint)';
       var statusText = m.downloaded ? 'Downloaded' : 'Not downloaded';
-      var activeTag = isActive ? ' <span style="color:#24E5CA;font-size:10px;font-weight:600;">ACTIVE</span>' : '';
+      var activeTag = isActive ? ' <span style="color:var(--accent);font-size:10px;font-weight:600;">ACTIVE</span>' : '';
 
-      html += '<div style="padding:10px 0;border-bottom:1px solid #0E2A3D;">';
+      html += '<div style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">';
       html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">';
-      html += '<span style="font-size:14px;color:#E0F0F0;font-weight:600;">' + escapeHtml(m.name) + '</span>';
-      html += '<span style="font-size:11px;color:#666;">' + escapeHtml(m.architecture || m.model_str) + '</span>';
-      if (m.parameters) html += '<span style="font-size:11px;color:#666;">' + escapeHtml(m.parameters) + ' params</span>';
-      if (m.size_mb) html += '<span style="font-size:11px;color:#666;">' + (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') + '</span>';
+      html += '<span style="font-size:14px;color:var(--text-primary);font-weight:600;">' + escapeHtml(m.name) + '</span>';
+      html += '<span style="font-size:11px;color:var(--text-faint);">' + escapeHtml(m.architecture || m.model_str) + '</span>';
+      if (m.parameters) html += '<span style="font-size:11px;color:var(--text-faint);">' + escapeHtml(m.parameters) + ' params</span>';
+      if (m.size_mb) html += '<span style="font-size:11px;color:var(--text-faint);">' + (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') + '</span>';
       html += activeTag;
       html += '</div>';
-      html += '<div style="font-size:12px;color:#888;margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
       html += '<div style="display:flex;align-items:center;gap:8px;">';
       html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
 
       if (m.downloaded && m.weights_path) {
-        html += '<span style="font-size:11px;color:#444;">' + escapeHtml(m.weights_path) + '</span>';
+        html += '<span style="font-size:11px;color:var(--text-invisible);">' + escapeHtml(m.weights_path) + '</span>';
       }
 
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
       if (!m.downloaded && m.source !== 'custom') {
-        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:#24E5CA;color:#0A1F2E;border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
+        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
       if (m.downloaded && !isActive) {
-        html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:#14374E;color:#B0CCCC;border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
+        html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
       if (m.downloaded) {
-        html += '<button onclick="removeModel(\'' + m.id + '\')" style="background:none;color:var(--danger,#e74c3c);border:1px solid var(--danger,#e74c3c);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
+        html += '<button onclick="removeModel(\'' + m.id + '\')" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
       }
       html += '</span>';
       html += '</div>';
       // Progress bar (hidden until download starts)
       html += '<div id="modelProgress-' + m.id + '" style="display:none;margin-top:6px;">';
-      html += '<div style="height:4px;background:#14374E;border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + m.id + '" style="height:100%;background:#24E5CA;border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
-      html += '<div id="modelProgressText-' + m.id + '" style="font-size:11px;color:#888;"></div>';
+      html += '<div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div id="modelProgressFill-' + m.id + '" style="height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 0.3s;"></div></div>';
+      html += '<div id="modelProgressText-' + m.id + '" style="font-size:11px;color:var(--text-dim);"></div>';
       html += '</div>';
       html += '</div>';
     });
     document.getElementById('modelsContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('modelsContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load models</span>';
+    document.getElementById('modelsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load models</span>';
   }
 }
 
@@ -1683,7 +1683,7 @@ async function downloadModel(modelId) {
         } else {
           if (progressText) {
             progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
-            progressText.style.color = '#e74c3c';
+            progressText.style.color = 'var(--danger)';
           }
         }
         setTimeout(loadModels, 1000);
@@ -1691,7 +1691,7 @@ async function downloadModel(modelId) {
       onError: function() {
         if (progressText) {
           progressText.textContent = 'Connection lost';
-          progressText.style.color = '#e74c3c';
+          progressText.style.color = 'var(--danger)';
         }
       }
     });
@@ -1727,7 +1727,7 @@ async function addHfModel() {
 
   var status = document.getElementById('modelActionStatus');
   status.textContent = 'Starting download from HuggingFace...';
-  status.style.color = '#888';
+  status.style.color = 'var(--text-dim)';
 
   try {
     var data = await safeFetch('/api/jobs/download-hf-model', {
@@ -1744,11 +1744,11 @@ async function addHfModel() {
       onComplete: function(result) {
         if (result.status === 'completed') {
           status.textContent = 'Downloaded! Model ready to use.';
-          status.style.color = '#24E5CA';
+          status.style.color = 'var(--accent)';
           document.getElementById('hfRepoId').value = '';
         } else {
           status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-          status.style.color = '#e74c3c';
+          status.style.color = 'var(--danger)';
         }
         loadModels();
       },
@@ -1758,7 +1758,7 @@ async function addHfModel() {
     });
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    status.style.color = '#e74c3c';
+    status.style.color = 'var(--danger)';
   }
 }
 
@@ -1786,29 +1786,29 @@ async function loadTaxonomy() {
     if (d.available) {
       html += '<div style="display:flex;align-items:center;gap:12px;">';
       html += '<div>';
-      html += '<div style="font-size:14px;color:#E0F0F0;">iNaturalist Taxonomy</div>';
-      html += '<div style="font-size:12px;color:#888;">~' + (d.taxa_count || 0).toLocaleString() + ' taxa';
+      html += '<div style="font-size:14px;color:var(--text-primary);">iNaturalist Taxonomy</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);">~' + (d.taxa_count || 0).toLocaleString() + ' taxa';
       if (d.last_updated) html += ' &middot; Updated ' + d.last_updated;
       if (d.file_size) html += ' &middot; ' + formatBytes(d.file_size);
       html += '</div></div>';
-      html += '<button onclick="downloadTaxonomy()" style="margin-left:auto;background:#14374E;color:#B0CCCC;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Re-download</button>';
+      html += '<button onclick="downloadTaxonomy()" style="margin-left:auto;background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Re-download</button>';
       html += '</div>';
     } else {
       html += '<div style="margin-bottom:8px;">';
-      html += '<div style="font-size:13px;color:#888;">No taxonomy downloaded. The taxonomy is used for species classification and keyword categorization.</div>';
+      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded. The taxonomy is used for species classification and keyword categorization.</div>';
       html += '</div>';
-      html += '<button onclick="downloadTaxonomy()" style="background:#24E5CA;color:#0A1F2E;border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
+      html += '<button onclick="downloadTaxonomy()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
     }
     document.getElementById('taxonomyContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('taxonomyContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
 async function downloadTaxonomy() {
   try {
     var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
-    document.getElementById('taxonomyContent').innerHTML = '<span style="color:#888;font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
+    document.getElementById('taxonomyContent').innerHTML = '<span style="color:var(--text-dim);font-size:13px;">Downloading... (check Jobs panel for progress)</span>';
     safeEventSource('/api/jobs/' + data.job_id + '/stream', {
       onComplete: function() {
         loadTaxonomy();
@@ -1836,30 +1836,30 @@ async function loadEmbeddingMatrix() {
 
     if (models.length === 0 || matrix.length === 0) {
       document.getElementById('matrixContent').innerHTML =
-        '<span style="color:#666;font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
+        '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
       return;
     }
 
     var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
-    html += '<thead><tr><th style="text-align:left;padding:6px 10px;color:#666;font-weight:500;border-bottom:1px solid #14374E;">Labels</th>';
+    html += '<thead><tr><th style="text-align:left;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">Labels</th>';
     models.forEach(function(m) {
-      html += '<th style="text-align:center;padding:6px 10px;color:#666;font-weight:500;border-bottom:1px solid #14374E;">' + escapeHtml(m.name) + '</th>';
+      html += '<th style="text-align:center;padding:6px 10px;color:var(--text-faint);font-weight:500;border-bottom:1px solid var(--border-primary);">' + escapeHtml(m.name) + '</th>';
     });
     html += '</tr></thead><tbody>';
 
     matrix.forEach(function(row) {
       html += '<tr>';
-      html += '<td style="padding:6px 10px;border-bottom:1px solid #0E2A3D;color:#B0CCCC;">';
-      html += escapeHtml(row.labels_name) + ' <span style="color:#555;">(' + row.species_count + ')</span>';
+      html += '<td style="padding:6px 10px;border-bottom:1px solid var(--border-subtle);color:var(--text-secondary);">';
+      html += escapeHtml(row.labels_name) + ' <span style="color:var(--text-ghost);">(' + row.species_count + ')</span>';
       html += '</td>';
       models.forEach(function(m) {
         var cell = row.models[m.id];
-        html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid #0E2A3D;">';
+        html += '<td style="text-align:center;padding:6px 10px;border-bottom:1px solid var(--border-subtle);">';
         if (cell && cell.cached) {
-          html += '<span style="color:#24E5CA;">cached</span>';
+          html += '<span style="color:var(--accent);">cached</span>';
         } else {
           html += '<button onclick="precomputeEmbeddings(\'' + escapeAttr(m.id) + '\',\'' + escapeAttr(row.labels_file) + '\')" ' +
-            'style="background:#14374E;color:#B0CCCC;border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
+            'style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:3px 10px;font-size:11px;cursor:pointer;">Compute</button>';
         }
         html += '</td>';
       });
@@ -1868,7 +1868,7 @@ async function loadEmbeddingMatrix() {
     html += '</tbody></table>';
     document.getElementById('matrixContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('matrixContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+    document.getElementById('matrixContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
@@ -1913,19 +1913,19 @@ async function loadScanRoots() {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
     var roots = cfg.scan_roots || [];
     if (roots.length === 0) {
-      document.getElementById('scanRootsContent').innerHTML = '<span style="color:#666;font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
+      document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--text-faint);font-size:13px;">No directories scanned yet. Scan a folder on the Import page to save it here.</span>';
       return;
     }
     var html = '';
     roots.forEach(function(r, i) {
-      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #0E2A3D;">';
-      html += '<span style="font-size:13px;color:#B0CCCC;flex:1;font-family:monospace;">' + escapeHtml(r) + '</span>';
-      html += '<button onclick="removeScanRoot(' + i + ')" style="background:none;border:none;color:#666;font-size:14px;cursor:pointer;padding:2px 6px;" title="Remove">&times;</button>';
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-subtle);">';
+      html += '<span style="font-size:13px;color:var(--text-secondary);flex:1;font-family:monospace;">' + escapeHtml(r) + '</span>';
+      html += '<button onclick="removeScanRoot(' + i + ')" style="background:none;border:none;color:var(--text-faint);font-size:14px;cursor:pointer;padding:2px 6px;" title="Remove">&times;</button>';
       html += '</div>';
     });
     document.getElementById('scanRootsContent').innerHTML = html;
   } catch(e) {
-    document.getElementById('scanRootsContent').innerHTML = '<span style="color:#e74c3c;font-size:13px;">Failed to load</span>';
+    document.getElementById('scanRootsContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
@@ -1951,7 +1951,7 @@ async function cleanKeywords() {
     var dupes = await safeFetch('/api/keywords/duplicates', {}, { toast: false });
     if (dupes.length === 0) {
       status.textContent = 'No duplicates found';
-      status.style.color = 'var(--text-dim,#888)';
+      status.style.color = 'var(--text-dim)';
       return;
     }
 
@@ -1967,16 +1967,16 @@ async function cleanKeywords() {
 
     if (!confirm(msg)) {
       status.textContent = 'Cancelled';
-      status.style.color = 'var(--text-dim,#888)';
+      status.style.color = 'var(--text-dim)';
       return;
     }
 
     var data = await safeFetch('/api/keywords/clean', {method: 'POST'}, { toast: false });
     status.textContent = 'Merged ' + data.merged + ' duplicate(s)';
-    status.style.color = 'var(--accent,#24E5CA)';
+    status.style.color = 'var(--accent)';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--danger,#e74c3c)';
+    status.style.color = 'var(--danger)';
   }
 }
 

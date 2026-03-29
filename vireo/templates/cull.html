@@ -17,17 +17,17 @@ body { padding-bottom: 36px; }
   align-items: center;
   margin-bottom: 20px;
   padding: 16px 20px;
-  background: var(--bg-secondary, #0E2A3D);
+  background: var(--bg-secondary);
   border-radius: 8px;
-  border: 1px solid var(--border-primary, #14374E);
+  border: 1px solid var(--border-primary);
 }
 .summary-stat { text-align: center; }
-.summary-stat .num { font-size: 28px; font-weight: 700; color: var(--accent, #24E5CA); }
-.summary-stat .label { font-size: 11px; color: var(--text-dim, #888); margin-top: 2px; }
+.summary-stat .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+.summary-stat .label { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
 .species-section {
-  background: var(--bg-secondary, #0E2A3D);
-  border: 1px solid var(--border-primary, #14374E);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
   border-radius: 8px;
   margin-bottom: 16px;
   overflow: hidden;
@@ -38,21 +38,21 @@ body { padding-bottom: 36px; }
   gap: 12px;
   padding: 12px 16px;
   cursor: pointer;
-  background: var(--bg-tertiary, #14374E);
+  background: var(--bg-tertiary);
 }
-.species-header:hover { background: var(--border-secondary, #1A4560); }
+.species-header:hover { background: var(--border-secondary); }
 .species-name { font-size: 15px; font-weight: 600; flex: 1; }
-.species-stats { font-size: 12px; color: var(--text-dim, #888); }
-.species-keep { color: var(--accent, #24E5CA); }
-.species-reject { color: var(--danger, #e74c3c); }
+.species-stats { font-size: 12px; color: var(--text-dim); }
+.species-keep { color: var(--accent); }
+.species-reject { color: var(--danger); }
 
 .pose-group {
   padding: 12px 16px;
-  border-top: 1px solid var(--border-subtle, #0E2A3D);
+  border-top: 1px solid var(--border-subtle);
 }
 .pose-label {
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.1em;
   margin-bottom: 8px;
@@ -66,7 +66,7 @@ body { padding-bottom: 36px; }
 .cull-card {
   flex-shrink: 0;
   width: 180px;
-  background: var(--bg-primary, #0A1F2E);
+  background: var(--bg-primary);
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid transparent;
@@ -74,10 +74,10 @@ body { padding-bottom: 36px; }
   transition: border-color 0.15s;
   position: relative;
 }
-.cull-card:hover { border-color: var(--text-ghost, #555); }
-.cull-card.keep { border-color: var(--accent, #24E5CA); }
-.cull-card.reject { border-color: var(--danger, #e74c3c); opacity: 0.6; }
-.cull-card.best { box-shadow: 0 0 0 2px var(--accent, #24E5CA), 0 0 8px rgba(36,229,202,0.3); }
+.cull-card:hover { border-color: var(--text-ghost); }
+.cull-card.keep { border-color: var(--accent); }
+.cull-card.reject { border-color: var(--danger); opacity: 0.6; }
+.cull-card.best { box-shadow: 0 0 0 2px var(--accent), 0 0 8px rgba(36,229,202,0.3); }
 .cull-card img {
   width: 100%;
   aspect-ratio: 3/2;
@@ -103,16 +103,16 @@ body { padding-bottom: 36px; }
   cursor: pointer;
 }
 .cull-card-action.keep-badge {
-  background: var(--accent, #24E5CA);
-  color: var(--bg-primary, #0A1F2E);
+  background: var(--accent);
+  color: var(--accent-text);
 }
 .cull-card-action.reject-badge {
-  background: var(--danger, #e74c3c);
-  color: #fff;
+  background: var(--danger);
+  color: var(--text-primary);
 }
-.cull-quality { color: var(--text-muted, #888); }
+.cull-quality { color: var(--text-muted); }
 .cull-filename {
-  color: var(--text-ghost, #555);
+  color: var(--text-ghost);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -129,14 +129,14 @@ body { padding-bottom: 36px; }
   width: 48px;
   font-size: 9px;
   line-height: 1.4;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   gap: 2px;
 }
-.dev-connector .dev-label { color: var(--text-ghost, #555); text-transform: uppercase; letter-spacing: 0.05em; }
+.dev-connector .dev-label { color: var(--text-ghost); text-transform: uppercase; letter-spacing: 0.05em; }
 .dev-connector .dev-val { font-weight: 600; font-variant-numeric: tabular-nums; }
-.dev-connector .dev-val.similar { color: var(--accent, #24E5CA); }
-.dev-connector .dev-val.different { color: var(--danger, #e74c3c); }
-.dev-connector .dev-val.mid { color: #d4a843; }
+.dev-connector .dev-val.similar { color: var(--accent); }
+.dev-connector .dev-val.different { color: var(--danger); }
+.dev-connector .dev-val.mid { color: var(--warning); }
 
 .action-bar {
   display: flex;
@@ -152,9 +152,9 @@ body { padding-bottom: 36px; }
   font-size: 13px;
   font-weight: 500;
 }
-.btn-primary { background: var(--accent, #24E5CA); color: var(--accent-text, #0A1F2E); }
-.btn-secondary { background: var(--bg-tertiary, #14374E); color: var(--text-secondary, #B0CCCC); }
-.btn-danger { background: none; color: var(--danger, #e74c3c); border: 1px solid var(--danger, #e74c3c); }
+.btn-primary { background: var(--accent); color: var(--accent-text); }
+.btn-secondary { background: var(--bg-tertiary); color: var(--text-secondary); }
+.btn-danger { background: none; color: var(--danger); border: 1px solid var(--danger); }
 </style>
 </head>
 <body>
@@ -163,7 +163,7 @@ body { padding-bottom: 36px; }
 
 <div class="content">
   <h2 style="margin-bottom:8px;font-size:20px;">Cull Photos</h2>
-  <p style="font-size:13px;color:var(--text-dim,#888);margin-bottom:20px;">
+  <p style="font-size:13px;color:var(--text-dim);margin-bottom:20px;">
     AI analyzes your photos to find redundant shots and suggest the best keepers.
     Photos are grouped by species and scene — you keep the best of each unique moment.
   </p>
@@ -174,54 +174,54 @@ body { padding-bottom: 36px; }
     </select>
     <button class="btn btn-primary" onclick="runCulling()">Analyze for Culling</button>
     <button class="btn btn-secondary" onclick="toggleCullSettings()" id="cullSettingsBtn" style="font-size:12px;">Settings &#9662;</button>
-    <span id="cullStatus" style="font-size:12px;color:var(--text-dim,#888);"></span>
+    <span id="cullStatus" style="font-size:12px;color:var(--text-dim);"></span>
     <button class="btn btn-primary" id="applyBtn" onclick="applyCulling()" style="display:none;margin-left:auto;">
       Apply Culling Decisions
     </button>
   </div>
 
-  <div id="cullSettings" style="display:none;background:var(--bg-secondary,#0E2A3D);border:1px solid var(--border-primary,#14374E);border-radius:8px;padding:16px;margin-bottom:16px;">
-    <div style="font-size:13px;color:var(--text-primary,#E0F0F0);font-weight:500;margin-bottom:12px;">Culling Settings</div>
-    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;">
-      <input type="checkbox" id="cullSeparateTypes" checked style="accent-color:var(--accent,#24E5CA);margin-top:2px;">
+  <div id="cullSettings" style="display:none;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:8px;padding:16px;margin-bottom:16px;">
+    <div style="font-size:13px;color:var(--text-primary);font-weight:500;margin-bottom:12px;">Culling Settings</div>
+    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary);cursor:pointer;">
+      <input type="checkbox" id="cullSeparateTypes" checked style="accent-color:var(--accent);margin-top:2px;">
       <div>
         Don't compare across file types
-        <div style="font-size:11px;color:var(--text-dim,#888);margin-top:2px;">RAW and JPEG of the same scene are culled separately. A JPEG usually means someone has processed it, so it shouldn't compete with the RAW original.</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">RAW and JPEG of the same scene are culled separately. A JPEG usually means someone has processed it, so it shouldn't compete with the RAW original.</div>
       </div>
     </label>
 
-    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary,#B0CCCC);">
+    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary);">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
         <label for="cullTimeWindow">Time window</label>
         <input type="range" id="cullTimeWindow" min="5" max="600" value="60" step="5"
-          style="flex:1;max-width:200px;accent-color:var(--accent,#24E5CA);">
+          style="flex:1;max-width:200px;accent-color:var(--accent);">
         <span id="cullTimeValue" style="font-size:12px;min-width:60px;">60s</span>
       </div>
-      <div style="font-size:11px;color:var(--text-dim,#888);">Photos taken within this window are grouped as the same scene.</div>
+      <div style="font-size:11px;color:var(--text-dim);">Photos taken within this window are grouped as the same scene.</div>
     </div>
 
-    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary,#B0CCCC);">
+    <div style="margin-top:14px;font-size:13px;color:var(--text-secondary);">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
         <label for="cullPhashThreshold">Scene similarity</label>
         <input type="range" id="cullPhashThreshold" min="0" max="32" value="19" step="1"
-          style="flex:1;max-width:200px;accent-color:var(--accent,#24E5CA);">
+          style="flex:1;max-width:200px;accent-color:var(--accent);">
         <span id="cullPhashValue" style="font-size:12px;min-width:80px;">Loose (19)</span>
       </div>
-      <div style="font-size:11px;color:var(--text-dim,#888);">How visually similar photos must be to belong to the same scene. Lower = stricter matching, higher = more lenient.</div>
+      <div style="font-size:11px;color:var(--text-dim);">How visually similar photos must be to belong to the same scene. Lower = stricter matching, higher = more lenient.</div>
     </div>
 
-    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary,#B0CCCC);cursor:pointer;margin-top:14px;">
-      <input type="checkbox" id="cullCrossBucket" style="accent-color:var(--accent,#24E5CA);margin-top:2px;">
+    <label style="display:flex;align-items:start;gap:8px;font-size:13px;color:var(--text-secondary);cursor:pointer;margin-top:14px;">
+      <input type="checkbox" id="cullCrossBucket" style="accent-color:var(--accent);margin-top:2px;">
       <div>
         Merge scenes that look similar even if taken far apart
-        <div style="font-size:11px;color:var(--text-dim,#888);margin-top:2px;">When enabled, scenes with visually similar photos are merged even if they were taken outside the time window (e.g. bird returned to same perch).</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">When enabled, scenes with visually similar photos are merged even if they were taken outside the time window (e.g. bird returned to same perch).</div>
       </div>
     </label>
   </div>
 
   <div id="cullSummary" style="display:none;"></div>
   <div id="cullContent">
-    <div style="text-align:center;padding:60px 20px;color:var(--text-dim,#888);">
+    <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
       Click "Analyze for Culling" to find redundant photos and suggest keepers.
     </div>
   </div>
@@ -565,11 +565,11 @@ async function runCulling() {
       onComplete: function(result) {
         if (result.status === 'completed') {
           status.textContent = 'Analysis complete!';
-          status.style.color = 'var(--accent,#24E5CA)';
+          status.style.color = 'var(--accent)';
           loadCullingResults();
         } else {
           status.textContent = 'Failed: ' + (result.errors || []).join(', ');
-          status.style.color = 'var(--danger,#e74c3c)';
+          status.style.color = 'var(--danger)';
         }
       },
     });
@@ -588,15 +588,15 @@ async function loadCullingResults() {
 function renderCulling() {
   if (!cullData || !cullData.species_groups || cullData.species_groups.length === 0) {
     document.getElementById('cullContent').innerHTML =
-      '<div style="text-align:center;padding:40px;color:var(--text-dim,#888);">No results. Run culling analysis first.</div>';
+      '<div style="text-align:center;padding:40px;color:var(--text-dim);">No results. Run culling analysis first.</div>';
     return;
   }
 
   // Summary bar
   var summaryHtml = '<div class="summary-bar">' +
     '<div class="summary-stat"><div class="num">' + cullData.total_photos + '</div><div class="label">Photos</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--accent,#24E5CA);">' + cullData.suggested_keepers + '</div><div class="label">Keepers</div></div>' +
-    '<div class="summary-stat"><div class="num" style="color:var(--danger,#e74c3c);">' + cullData.suggested_rejects + '</div><div class="label">Reject Candidates</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--accent);">' + cullData.suggested_keepers + '</div><div class="label">Keepers</div></div>' +
+    '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject Candidates</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
   '</div>';
   document.getElementById('cullSummary').innerHTML = summaryHtml;
@@ -752,7 +752,7 @@ async function applyCulling() {
       body: JSON.stringify({keepers: keepers, rejects: rejects}),
     }, { toast: false });
     document.getElementById('cullStatus').textContent = 'Applied! ' + keepers.length + ' keepers, ' + rejects.length + ' rejected';
-    document.getElementById('cullStatus').style.color = 'var(--accent,#24E5CA)';
+    document.getElementById('cullStatus').style.color = 'var(--accent)';
   } catch(e) {
     document.getElementById('cullStatus').textContent = 'Error: ' + e.message;
   }
