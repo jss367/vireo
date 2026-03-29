@@ -22,7 +22,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- Parse args ---
-BUMP="${1:?Usage: release.sh <patch|minor|major|X.Y.Z> [--publish]}"
+BUMP="${1:-patch}"
 PUBLISH=false
 if [[ "${2:-}" == "--publish" ]]; then
     PUBLISH=true
