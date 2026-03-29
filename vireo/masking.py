@@ -1,7 +1,7 @@
 """SAM2-based subject masking pipeline for wildlife photos.
 
-Given a MegaDetector bounding box, refines it to a pixel-level mask using SAM2,
-then provides utilities for subject cropping and background blurring.
+Given a MegaDetector bounding box, refines it to a pixel-level mask using SAM2
+ONNX models, then provides utilities for subject cropping and background blurring.
 
 Masks are saved as single-channel PNGs in ~/.vireo/masks/{photo_id}.png.
 """
@@ -10,35 +10,48 @@ import logging
 import os
 
 import numpy as np
+import onnx_runtime
 from PIL import Image, ImageFilter
 
 log = logging.getLogger(__name__)
 
-# SAM2 variant → (config name, checkpoint name) for huggingface hub
+# SAM2 variant names (used for model directory lookup)
 SAM2_VARIANTS = {
-    "sam2-tiny": ("sam2.1_hiera_t", "sam2.1_hiera_tiny.pt"),
-    "sam2-small": ("sam2.1_hiera_s", "sam2.1_hiera_small.pt"),
-    "sam2-base-plus": ("sam2.1_hiera_b+", "sam2.1_hiera_base_plus.pt"),
-    "sam2-large": ("sam2.1_hiera_l", "sam2.1_hiera_large.pt"),
+    "sam2-tiny": "sam2-tiny",
+    "sam2-small": "sam2-small",
+    "sam2-base-plus": "sam2-base-plus",
+    "sam2-large": "sam2-large",
 }
 
-_sam2_predictor = None
+# SAM2 image encoder native input size
+SAM2_INPUT_SIZE = 1024
+
+# ImageNet normalization (used by SAM2 image encoder)
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
+
+_encoder_session = None
+_decoder_session = None
 _sam2_variant_loaded = None
 
 
-def _get_sam2_predictor(variant="sam2-small"):
-    """Load SAM2 image predictor (cached singleton). Downloads weights on first use.
+def _get_sam2_sessions(variant="sam2-small"):
+    """Load SAM2 ONNX sessions (cached singleton with variant tracking).
 
     Args:
         variant: one of sam2-tiny, sam2-small, sam2-base-plus, sam2-large
 
     Returns:
-        SAM2ImagePredictor instance
+        (image_encoder_session, mask_decoder_session) tuple
     """
-    global _sam2_predictor, _sam2_variant_loaded
+    global _encoder_session, _decoder_session, _sam2_variant_loaded
 
-    if _sam2_predictor is not None and _sam2_variant_loaded == variant:
-        return _sam2_predictor
+    if (
+        _encoder_session is not None
+        and _decoder_session is not None
+        and _sam2_variant_loaded == variant
+    ):
+        return _encoder_session, _decoder_session
 
     if variant not in SAM2_VARIANTS:
         raise ValueError(
@@ -46,39 +59,32 @@ def _get_sam2_predictor(variant="sam2-small"):
             f"Choose from: {list(SAM2_VARIANTS.keys())}"
         )
 
-    try:
-        import torch
-        logging.getLogger("sam2").setLevel(logging.WARNING)
-        from sam2.build_sam import build_sam2_hf
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
-    except ImportError:
-        raise RuntimeError(
-            "SAM2 not installed. Run: pip install sam-2\n"
-            "This provides SAM2 for subject segmentation masks."
+    model_dir = os.path.join(
+        os.path.expanduser("~"), ".vireo", "models", variant
+    )
+    encoder_path = os.path.join(model_dir, "image_encoder.onnx")
+    decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
+
+    if not os.path.isfile(encoder_path):
+        raise FileNotFoundError(
+            f"SAM2 image encoder not found at {encoder_path}. "
+            f"Download it first via the models page."
+        )
+    if not os.path.isfile(decoder_path):
+        raise FileNotFoundError(
+            f"SAM2 mask decoder not found at {decoder_path}. "
+            f"Download it first via the models page."
         )
 
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
+    log.info("Loading SAM2 ONNX (%s)...", variant)
+    enc_sess = onnx_runtime.create_session(encoder_path)
+    dec_sess = onnx_runtime.create_session(decoder_path)
 
-    hf_model_id = "facebook/sam2.1-hiera-small"
-    # Map variant to HF model ID
-    variant_to_hf = {
-        "sam2-tiny": "facebook/sam2.1-hiera-tiny",
-        "sam2-small": "facebook/sam2.1-hiera-small",
-        "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
-        "sam2-large": "facebook/sam2.1-hiera-large",
-    }
-    hf_model_id = variant_to_hf[variant]
-
-    log.info("Loading SAM2 (%s) on %s...", variant, device)
-    model = build_sam2_hf(hf_model_id, device=device)
-    _sam2_predictor = SAM2ImagePredictor(model)
+    _encoder_session = enc_sess
+    _decoder_session = dec_sess
     _sam2_variant_loaded = variant
-    log.info("SAM2 loaded")
-    return _sam2_predictor
+    log.info("SAM2 ONNX loaded (%s)", variant)
+    return enc_sess, dec_sess
 
 
 def generate_mask(image, detection_box, variant="sam2-small"):
@@ -92,29 +98,83 @@ def generate_mask(image, detection_box, variant="sam2-small"):
     Returns:
         numpy boolean array (H, W) — True where subject is, or None on failure
     """
-    import torch
-
-    predictor = _get_sam2_predictor(variant)
-    img_array = np.array(image)
-    h, w = img_array.shape[:2]
+    encoder_session, decoder_session = _get_sam2_sessions(variant)
+    img_array = np.array(image.convert("RGB"))
+    orig_h, orig_w = img_array.shape[:2]
 
     # Convert normalized box to pixel coordinates [x1, y1, x2, y2]
-    bx = detection_box["x"] * w
-    by = detection_box["y"] * h
-    bw = detection_box["w"] * w
-    bh = detection_box["h"] * h
-    box = np.array([bx, by, bx + bw, by + bh])
+    bx = detection_box["x"] * orig_w
+    by = detection_box["y"] * orig_h
+    bw = detection_box["w"] * orig_w
+    bh = detection_box["h"] * orig_h
 
     try:
-        with torch.inference_mode():
-            predictor.set_image(img_array)
-            masks, scores, _ = predictor.predict(
-                box=box,
-                multimask_output=True,
+        # Step 1: Preprocess image and run encoder
+        input_tensor = onnx_runtime.preprocess_image(
+            image,
+            size=(SAM2_INPUT_SIZE, SAM2_INPUT_SIZE),
+            mean=_IMAGENET_MEAN,
+            std=_IMAGENET_STD,
+        )
+
+        enc_input_name = encoder_session.get_inputs()[0].name
+        enc_outputs = encoder_session.run(None, {enc_input_name: input_tensor})
+        image_embeddings = enc_outputs[0]  # (1, C, H', W')
+
+        # Step 2: Encode box prompt as numpy arrays
+        # For box prompts: point_coords has shape (1, 2, 2) with top-left
+        # and bottom-right corners; point_labels has shape (1, 2) with
+        # values [2, 3] (SAM2 box prompt markers)
+        point_coords = np.array(
+            [[[bx, by], [bx + bw, by + bh]]], dtype=np.float32
+        )  # (1, 2, 2)
+        point_labels = np.array([[2, 3]], dtype=np.float32)  # (1, 2)
+
+        # No previous mask input
+        mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
+        has_mask_input = np.array([0], dtype=np.float32)
+        orig_im_size = np.array([orig_h, orig_w], dtype=np.int64)
+
+        # Step 3: Run mask decoder
+        # Build decoder input dict from session input names
+        decoder_inputs = {}
+        dec_input_names = [inp.name for inp in decoder_session.get_inputs()]
+
+        # Map expected input names to our arrays
+        input_map = {
+            "image_embeddings": image_embeddings,
+            "point_coords": point_coords,
+            "point_labels": point_labels,
+            "mask_input": mask_input,
+            "has_mask_input": has_mask_input,
+            "orig_im_size": orig_im_size,
+        }
+        for name in dec_input_names:
+            if name in input_map:
+                decoder_inputs[name] = input_map[name]
+
+        dec_outputs = decoder_session.run(None, decoder_inputs)
+        # Outputs: masks (1, N, H, W) and scores (1, N)
+        masks = dec_outputs[0]  # (1, N, H, W)
+        scores = dec_outputs[1]  # (1, N)
+
+        # Step 4: Pick highest-scoring mask
+        best_idx = int(np.argmax(scores.flatten()))
+
+        # Extract the best mask and resize to original dimensions if needed
+        best_mask = masks[0, best_idx]  # (H_out, W_out)
+
+        if best_mask.shape != (orig_h, orig_w):
+            # Resize mask to original image dimensions
+            mask_img = Image.fromarray(
+                (best_mask > 0).astype(np.uint8) * 255, mode="L"
             )
-        # Pick the highest-scoring mask
-        best_idx = int(np.argmax(scores))
-        return masks[best_idx].astype(bool)
+            mask_img = mask_img.resize(
+                (orig_w, orig_h), Image.BILINEAR
+            )
+            best_mask = np.array(mask_img) > 127
+
+        return best_mask.astype(bool)
     except Exception:
         log.warning("SAM2 mask generation failed", exc_info=True)
         return None

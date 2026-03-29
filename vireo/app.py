@@ -2977,7 +2977,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     removed.append(repo_dir)
             # Clear singleton
             import masking
-            masking._sam2_predictor = None
+            masking._encoder_session = None
+            masking._decoder_session = None
             masking._sam2_variant_loaded = None
 
         elif model_id.startswith("vit-"):
