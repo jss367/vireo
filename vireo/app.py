@@ -2668,7 +2668,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Clear the cached singleton so it reloads next time
         import detector
-        detector._detector = None
+        detector._session = None
 
         return jsonify({"deleted": removed, "count": len(removed)})
 
@@ -2960,7 +2960,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     os.remove(f)
                     removed.append(f)
             import detector
-            detector._detector = None
+            detector._session = None
 
         elif model_id.startswith("sam2-"):
             hf_map = {
