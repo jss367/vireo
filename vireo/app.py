@@ -587,19 +587,19 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
-    def _queue_keyword_add(photo_id, keyword_name):
+    def _queue_keyword_add(photo_id, keyword_name, workspace_id=None):
         """Queue a keyword add unless it cancels a pending removal."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name)
+        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
         if removed == 0:
-            db.queue_change(photo_id, "keyword_add", keyword_name)
+            db.queue_change(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
 
-    def _queue_keyword_remove(photo_id, keyword_name):
+    def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None):
         """Queue a keyword removal unless it cancels a pending add."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name)
+        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
         if removed == 0:
-            db.queue_change(photo_id, "keyword_remove", keyword_name)
+            db.queue_change(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
 
     # -- Edit API routes --
 
@@ -682,37 +682,39 @@ def create_app(db_path, thumb_cache_dir=None):
             db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
-        # Queue sidecar updates only after successful DB update, scoped to active workspace
+        # Queue sidecar updates only after successful DB update, for all affected workspaces
         if old_name:
-            photo_ids = db.conn.execute(
-                """SELECT pk.photo_id FROM photo_keywords pk
+            affected = db.conn.execute(
+                """SELECT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE pk.keyword_id = ? AND wf.workspace_id = ?""",
-                (keyword_id, db._ws_id()),
+                   WHERE pk.keyword_id = ?""",
+                (keyword_id,),
             ).fetchall()
-            for row in photo_ids:
-                _queue_keyword_remove(row["photo_id"], old_name)
-                _queue_keyword_add(row["photo_id"], new_name)
+            for row in affected:
+                _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
+                _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
         return jsonify({"ok": True})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
         db = _get_db()
-        # Queue sidecar removals scoped to the active workspace
+        # Queue sidecar removals for all affected workspaces
         kw_row = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if kw_row:
-            photo_ids = db.conn.execute(
-                """SELECT pk.photo_id FROM photo_keywords pk
+            affected = db.conn.execute(
+                """SELECT pk.photo_id, wf.workspace_id
+                   FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   WHERE pk.keyword_id = ? AND wf.workspace_id = ?""",
-                (keyword_id, db._ws_id()),
+                   WHERE pk.keyword_id = ?""",
+                (keyword_id,),
             ).fetchall()
-            for row in photo_ids:
-                _queue_keyword_remove(row["photo_id"], kw_row["name"])
+            for row in affected:
+                _queue_keyword_remove(row["photo_id"], kw_row["name"], workspace_id=row["workspace_id"])
         db.conn.execute("UPDATE keywords SET parent_id = NULL WHERE parent_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
