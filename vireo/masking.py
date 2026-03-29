@@ -152,8 +152,8 @@ def load_mask(masks_dir, photo_id):
     path = os.path.join(masks_dir, f"{photo_id}.png")
     if not os.path.exists(path):
         return None
-    mask_img = Image.open(path).convert("L")
-    return np.array(mask_img) > 127
+    with Image.open(path) as mask_img:
+        return np.array(mask_img.convert("L")) > 127
 
 
 def crop_subject(image, mask, margin=0.15):
