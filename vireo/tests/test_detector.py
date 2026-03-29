@@ -32,9 +32,12 @@ def test_megadetector_loads_after_bioclip():
     except ImportError:
         pytest.skip("torch not installed")
 
-    # Phase 1: Import BioCLIP (same as classify job phase 3)
+    # Phase 1: Import BioCLIP/open_clip (same as classify job phase 3)
+    # Must import the actual bioclip package to trigger ultralytics/open_clip
+    # imports that cache references to torch.load. A bare `import classifier`
+    # is not enough because classifier.py defers these imports to __init__().
     try:
-        pass
+        from bioclip import CustomLabelsClassifier  # noqa: F401
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 
@@ -72,7 +75,7 @@ def test_megadetector_loads_with_force_weights_only_env():
         pytest.skip("torch not installed")
 
     try:
-        pass
+        from bioclip import CustomLabelsClassifier  # noqa: F401
     except Exception:
         pytest.skip("BioCLIP/classifier not available")
 
