@@ -1,13 +1,14 @@
 # vireo/tests/test_timm_classifier.py
-"""Tests for TimmClassifier — uses mocked model to avoid downloading weights."""
+"""Tests for TimmClassifier -- uses mocked ONNX session to avoid downloading models."""
 
+import json
 import os
 import sys
 import tempfile
+from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
-
-pytest.importorskip("torch")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -24,16 +25,15 @@ def _make_test_image():
     return path
 
 
-def _make_fake_classifier(label_descriptions=None):
-    """Build a TimmClassifier with fake internals — no timm download needed."""
-    import torch
-    from timm_classifier import TimmClassifier
-    from torchvision import transforms
+def _make_model_dir(tmp_path, label_descriptions=None):
+    """Create a fake model directory with JSON config files.
 
-    # Bypass __init__ entirely
-    clf = object.__new__(TimmClassifier)
+    Returns the model directory path.
+    """
+    model_dir = tmp_path / "timm-eva02-large-inat21"
+    model_dir.mkdir(parents=True, exist_ok=True)
 
-    clf._class_names = [
+    class_names = [
         "Sturnus vulgaris",
         "Turdus migratorius",
         "Corvus brachyrhynchos",
@@ -46,36 +46,104 @@ def _make_fake_classifier(label_descriptions=None):
             "Corvus brachyrhynchos": "American Crow, Bird",
         }
 
-    clf._common_names = {}
-    for sci_name, desc in label_descriptions.items():
-        parts = desc.rsplit(", ", 1)
-        common = parts[0] if len(parts) > 1 else desc
-        if common.lower() != sci_name.lower():
-            clf._common_names[sci_name.lower()] = common
+    config = {
+        "input_size": [3, 336, 336],
+        "mean": [0.485, 0.456, 0.406],
+        "std": [0.229, 0.224, 0.225],
+    }
 
-    clf._taxonomy = None
-    clf._device = "cpu"
+    with open(model_dir / "class_names.json", "w") as f:
+        json.dump(class_names, f)
+    with open(model_dir / "label_descriptions.json", "w") as f:
+        json.dump(label_descriptions, f)
+    with open(model_dir / "config.json", "w") as f:
+        json.dump(config, f)
+    # Create a dummy model.onnx file (just needs to exist for file checks)
+    (model_dir / "model.onnx").write_text("dummy")
 
-    # Simple transform that resizes to 336x336 and converts to tensor
-    clf._transform = transforms.Compose([
-        transforms.Resize((336, 336)),
-        transforms.ToTensor(),
-    ])
+    return model_dir
 
-    # Fake model that returns fixed logits: class 0 highest
-    class FakeModel:
-        def __call__(self, x):
-            batch_size = x.shape[0]
-            return torch.tensor([[5.0, 2.0, 0.5]] * batch_size)
 
-    clf._model = FakeModel()
+def _make_fake_session(num_classes=3):
+    """Create a mock ONNX InferenceSession that returns fixed logits."""
+    session = MagicMock()
+
+    # Mock get_inputs to return an input with a name
+    mock_input = MagicMock()
+    mock_input.name = "input"
+    session.get_inputs.return_value = [mock_input]
+
+    # Mock run to return logits: class 0 highest
+    def fake_run(output_names, input_dict):
+        batch_size = list(input_dict.values())[0].shape[0]
+        logits = np.array([[5.0, 2.0, 0.5]] * batch_size, dtype=np.float32)
+        return [logits]
+
+    session.run = fake_run
+    return session
+
+
+def _make_fake_classifier(tmp_path, label_descriptions=None):
+    """Build a TimmClassifier with fake ONNX session -- no model download needed."""
+    from timm_classifier import TimmClassifier
+
+    model_dir = _make_model_dir(tmp_path, label_descriptions)
+    fake_session = _make_fake_session()
+
+    # Patch the models root and create_session to avoid real ONNX loading
+    with patch("timm_classifier._MODELS_ROOT", str(tmp_path)), \
+         patch("timm_classifier.onnx_runtime.create_session", return_value=fake_session):
+        clf = TimmClassifier(
+            "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21"
+        )
 
     return clf
 
 
-def test_classify_returns_predictions():
+def test_json_config_loading(tmp_path):
+    """Verify that JSON config files are loaded correctly during __init__."""
+    from timm_classifier import TimmClassifier
+
+    model_dir = _make_model_dir(tmp_path)
+    fake_session = _make_fake_session()
+
+    with patch("timm_classifier._MODELS_ROOT", str(tmp_path)), \
+         patch("timm_classifier.onnx_runtime.create_session", return_value=fake_session):
+        clf = TimmClassifier(
+            "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21"
+        )
+
+    assert len(clf._class_names) == 3
+    assert clf._class_names[0] == "Sturnus vulgaris"
+    assert clf._input_size == (336, 336)
+    assert clf._mean == [0.485, 0.456, 0.406]
+    assert clf._std == [0.229, 0.224, 0.225]
+    assert "sturnus vulgaris" in clf._common_names
+    assert clf._common_names["sturnus vulgaris"] == "European Starling"
+
+
+def test_missing_model_dir(tmp_path):
+    """__init__ raises FileNotFoundError when model directory is missing."""
+    from timm_classifier import TimmClassifier
+
+    with patch("timm_classifier._MODELS_ROOT", str(tmp_path)):
+        with pytest.raises(FileNotFoundError, match="ONNX model not found"):
+            TimmClassifier(
+                "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21"
+            )
+
+
+def test_unknown_model_str():
+    """__init__ raises ValueError for unknown model_str."""
+    from timm_classifier import TimmClassifier
+
+    with pytest.raises(ValueError, match="Unknown timm model"):
+        TimmClassifier("some-unknown-model")
+
+
+def test_classify_returns_predictions(tmp_path):
     """classify() returns a list of dicts with species, score, auto_tag."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -92,9 +160,9 @@ def test_classify_returns_predictions():
         os.unlink(path)
 
 
-def test_classify_maps_scientific_to_common():
+def test_classify_maps_scientific_to_common(tmp_path):
     """Top prediction maps scientific name to common name."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -106,9 +174,9 @@ def test_classify_maps_scientific_to_common():
         os.unlink(path)
 
 
-def test_classify_includes_taxonomy():
+def test_classify_includes_taxonomy(tmp_path):
     """Each prediction includes taxonomy with scientific_name."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -121,9 +189,9 @@ def test_classify_includes_taxonomy():
         os.unlink(path)
 
 
-def test_classify_threshold_filters():
+def test_classify_threshold_filters(tmp_path):
     """classify() filters results below threshold."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -135,9 +203,9 @@ def test_classify_threshold_filters():
         os.unlink(path)
 
 
-def test_classify_confidence_tag():
+def test_classify_confidence_tag(tmp_path):
     """Each result includes a confidence tag."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -149,9 +217,9 @@ def test_classify_confidence_tag():
         os.unlink(path)
 
 
-def test_classify_fallback_to_scientific_name():
+def test_classify_fallback_to_scientific_name(tmp_path):
     """If no common name mapping, use scientific name as-is."""
-    clf = _make_fake_classifier(label_descriptions={})
+    clf = _make_fake_classifier(tmp_path, label_descriptions={})
 
     path = _make_test_image()
     try:
@@ -162,9 +230,9 @@ def test_classify_fallback_to_scientific_name():
         os.unlink(path)
 
 
-def test_classify_all_results_sorted_by_score():
+def test_classify_all_results_sorted_by_score(tmp_path):
     """Results are sorted by descending score."""
-    clf = _make_fake_classifier()
+    clf = _make_fake_classifier(tmp_path)
 
     path = _make_test_image()
     try:
@@ -173,6 +241,32 @@ def test_classify_all_results_sorted_by_score():
         assert scores == sorted(scores, reverse=True)
     finally:
         os.unlink(path)
+
+
+def test_classify_batch(tmp_path):
+    """classify_batch() returns one result list per image."""
+    clf = _make_fake_classifier(tmp_path)
+
+    img1 = Image.new("RGB", (336, 336), color="red")
+    img2 = Image.new("RGB", (336, 336), color="blue")
+
+    results = clf.classify_batch([img1, img2], threshold=0.0)
+    assert len(results) == 2
+    assert isinstance(results[0], list)
+    assert isinstance(results[1], list)
+    # Each image should produce results for all 3 classes
+    assert len(results[0]) == 3
+    assert len(results[1]) == 3
+
+
+def test_classify_with_pil_image(tmp_path):
+    """classify() accepts PIL Image directly."""
+    clf = _make_fake_classifier(tmp_path)
+
+    img = Image.new("RGB", (500, 400), color="green")
+    results = clf.classify(img)
+    assert isinstance(results, list)
+    assert len(results) > 0
 
 
 def test_known_models_have_model_type():

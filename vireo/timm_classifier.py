@@ -1,15 +1,30 @@
-"""timm-based classifier for species classification (iNaturalist 2021)."""
+"""timm-based classifier for species classification (iNaturalist 2021).
 
+Uses ONNX Runtime for inference with pre-exported EVA-02 models.
+Model files are stored in ~/.vireo/models/timm-eva02-large-inat21/.
+"""
+
+import json
 import logging
+import os
+
+import onnx_runtime
 
 log = logging.getLogger(__name__)
 
+# Map model_str identifiers to local model directory names
+_MODEL_DIR_MAP = {
+    "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21": "timm-eva02-large-inat21",
+}
+
+_MODELS_ROOT = os.path.expanduser("~/.vireo/models")
+
 
 class TimmClassifier:
-    """Wraps a timm model for species classification.
+    """Wraps an ONNX model for species classification.
 
-    Unlike BioCLIP's Classifier, this uses a supervised model with a fixed
-    class set (10K iNat21 species). No label files or text embeddings needed.
+    Uses a supervised model with a fixed class set (10K iNat21 species).
+    No label files or text embeddings needed.
 
     Args:
         model_str: timm model identifier (e.g. "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21")
@@ -17,42 +32,62 @@ class TimmClassifier:
     """
 
     def __init__(self, model_str, taxonomy=None):
-        import timm
-        import torch
-        from timm.data import create_transform, resolve_data_config
-
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        log.info("Loading timm model: %s (device=%s)", model_str, self._device)
-        self._model = timm.create_model(model_str, pretrained=True)
-        self._model.to(self._device)
-        self._model.eval()
-
-        # Build data transform from model config
-        data_cfg = resolve_data_config(self._model.pretrained_cfg)
-        self._transform = create_transform(**data_cfg, is_training=False)
-
-        # Extract class names from model config
-        cfg = self._model.pretrained_cfg
-        self._class_names = cfg.get("label_names", [])
-        if not self._class_names:
-            raise RuntimeError(
-                f"Model {model_str} has no label_names in its config — "
-                "cannot map class indices to species names."
+        # Resolve model directory from model_str
+        dir_name = _MODEL_DIR_MAP.get(model_str)
+        if dir_name is None:
+            raise ValueError(
+                f"Unknown timm model: {model_str}. "
+                f"Known models: {list(_MODEL_DIR_MAP.keys())}"
             )
 
-        # Build scientific → common name mapping from label_descriptions
+        model_dir = os.path.join(_MODELS_ROOT, dir_name)
+        model_path = os.path.join(model_dir, "model.onnx")
+        class_names_path = os.path.join(model_dir, "class_names.json")
+        label_desc_path = os.path.join(model_dir, "label_descriptions.json")
+        config_path = os.path.join(model_dir, "config.json")
+
+        # Validate required files exist
+        for path, desc in [
+            (model_path, "ONNX model"),
+            (class_names_path, "class names"),
+            (config_path, "preprocessing config"),
+        ]:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(
+                    f"{desc} not found at {path}. "
+                    "Download the model from the Models page in Settings."
+                )
+
+        # Load ONNX session
+        log.info("Loading timm ONNX model: %s", model_path)
+        self._session = onnx_runtime.create_session(model_path)
+        self._input_name = self._session.get_inputs()[0].name
+
+        # Load class names (list of scientific names, index = class id)
+        with open(class_names_path) as f:
+            self._class_names = json.load(f)
+
+        # Load preprocessing config (input_size, mean, std)
+        with open(config_path) as f:
+            preproc = json.load(f)
+        self._input_size = tuple(preproc["input_size"][-2:])  # (H, W) from [C, H, W]
+        self._mean = preproc["mean"]
+        self._std = preproc["std"]
+
+        # Build scientific -> common name mapping from label_descriptions
         # Format: {"Sturnus vulgaris": "European Starling, Bird"}
         self._common_names = {}
-        descs = cfg.get("label_descriptions", {})
-        if isinstance(descs, dict):
-            for sci_name, desc in descs.items():
-                # desc format: "Common Name, Category" — take part before last comma
-                parts = desc.rsplit(", ", 1)
-                common = parts[0] if len(parts) > 1 else desc
-                # If common name equals scientific name, it has no common name
-                if common.lower() != sci_name.lower():
-                    self._common_names[sci_name.lower()] = common
+        if os.path.isfile(label_desc_path):
+            with open(label_desc_path) as f:
+                descs = json.load(f)
+            if isinstance(descs, dict):
+                for sci_name, desc in descs.items():
+                    # desc format: "Common Name, Category" -- take part before last comma
+                    parts = desc.rsplit(", ", 1)
+                    common = parts[0] if len(parts) > 1 else desc
+                    # If common name equals scientific name, it has no common name
+                    if common.lower() != sci_name.lower():
+                        self._common_names[sci_name.lower()] = common
 
         # Also use taxonomy.json for any names not in label_descriptions
         self._taxonomy = taxonomy
@@ -115,36 +150,49 @@ class TimmClassifier:
             )
         return results
 
+    def _preprocess(self, image):
+        """Preprocess a PIL Image for ONNX inference.
+
+        Args:
+            image: PIL Image (will be converted to RGB)
+
+        Returns:
+            numpy float32 array of shape (1, 3, H, W)
+        """
+        return onnx_runtime.preprocess_image(
+            image,
+            size=self._input_size,
+            mean=self._mean,
+            std=self._std,
+        )
+
     def classify(self, image, threshold=0.1):
         """Classify an image and return predictions above threshold.
 
         Args:
             image: file path (str) or PIL Image
-            threshold: minimum confidence to include (default 0.1 — lower than
+            threshold: minimum confidence to include (default 0.1 -- lower than
                 BioCLIP's 0.4 since probability is spread across 10K classes)
 
         Returns:
             list of dicts with species, score, auto_tag, confidence_tag, taxonomy
         """
-        import os
-
-        import torch
         from PIL import Image as PILImage
 
         if isinstance(image, (str, os.PathLike)):
             with PILImage.open(image) as img:
-                input_tensor = self._transform(img.convert("RGB")).unsqueeze(0).to(self._device)
+                input_arr = self._preprocess(img)
         else:
-            input_tensor = self._transform(image.convert("RGB")).unsqueeze(0).to(self._device)
+            input_arr = self._preprocess(image)
 
-        with torch.no_grad():
-            output = self._model(input_tensor)
-            probs = torch.softmax(output, dim=-1).cpu().numpy().flatten()
+        output = self._session.run(None, {self._input_name: input_arr})
+        logits = output[0]  # shape: (1, num_classes)
+        probs = onnx_runtime.softmax(logits, axis=-1).flatten()
 
         return self._build_results(probs, threshold)
 
     def classify_batch(self, images, threshold=0.1):
-        """Classify multiple PIL images in a single forward pass.
+        """Classify multiple PIL images.
 
         Args:
             images: list of PIL Images
@@ -153,13 +201,11 @@ class TimmClassifier:
         Returns:
             list of prediction lists (one per image)
         """
-        import torch
-
-        tensors = [self._transform(img.convert("RGB")) for img in images]
-        batch = torch.stack(tensors).to(self._device)
-
-        with torch.no_grad():
-            output = self._model(batch)
-            all_probs = torch.softmax(output, dim=-1).cpu().numpy()
-
-        return [self._build_results(all_probs[i], threshold) for i in range(len(images))]
+        results = []
+        for img in images:
+            input_arr = self._preprocess(img)
+            output = self._session.run(None, {self._input_name: input_arr})
+            logits = output[0]
+            probs = onnx_runtime.softmax(logits, axis=-1).flatten()
+            results.append(self._build_results(probs, threshold))
+        return results
