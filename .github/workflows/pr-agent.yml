@@ -54,7 +54,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
@@ -135,7 +134,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
@@ -217,7 +215,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
@@ -342,7 +339,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install dependencies
         if: steps.pr.outputs.should_fix == 'true'
@@ -437,7 +433,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
@@ -487,7 +482,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
@@ -564,7 +558,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         if: steps.approved.outputs.has_approved == 'true'
@@ -640,7 +633,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-          allow-prereleases: true
 
       - name: Install test dependencies
         if: steps.conflicts.outputs.has_conflicts == 'true'
