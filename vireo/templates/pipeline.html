@@ -200,24 +200,35 @@ body { padding-bottom: 36px; }
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
               <div class="setting-item">
-                <div class="setting-label">Source</div>
-                <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
-                  <option value="">Select a volume...</option>
-                </select>
-              </div>
-              <div class="setting-item">
-                <div class="setting-label">Custom Source Path</div>
-                <input type="text" class="setting-select" id="cfgSourceCustom"
-                       placeholder="/path/to/source" style="font-family:inherit;"
-                       oninput="updateStartButton()">
+                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                  <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
+                </label>
               </div>
             </div>
             <div class="setting-row">
-              <div class="setting-item">
-                <div class="setting-label">Destination</div>
-                <input type="text" class="setting-select" id="cfgDestination"
-                       placeholder="/path/to/photo/library" style="font-family:inherit;"
+              <div class="setting-item" id="folderLabelItem">
+                <div class="setting-label" id="lblFolder">Folder</div>
+                <input type="text" class="setting-select" id="cfgSourceCustom"
+                       placeholder="/path/to/photos" style="font-family:inherit;"
                        oninput="updateStartButton()">
+              </div>
+            </div>
+            <div id="copyOnlyFields" style="display:none;">
+              <div class="setting-row">
+                <div class="setting-item">
+                  <div class="setting-label">Source Volume</div>
+                  <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
+                    <option value="">Select a volume...</option>
+                  </select>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-item">
+                  <div class="setting-label">Destination</div>
+                  <input type="text" class="setting-select" id="cfgDestination"
+                         placeholder="/path/to/photo/library" style="font-family:inherit;"
+                         oninput="updateStartButton()">
+                </div>
               </div>
             </div>
             <div class="setting-row">
@@ -230,7 +241,7 @@ body { padding-bottom: 36px; }
                   <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="updateStartButton()"> RAW
                 </label>
               </div>
-              <div class="setting-item">
+              <div class="setting-item" id="skipDuplicatesItem" style="display:none;">
                 <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
                   <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
                 </label>
@@ -459,6 +470,28 @@ async function loadCollections() {
 
 // -- Card 1: Source --
 var _sourceMode = 'import'; // 'import' or 'collection'
+var _copyMode = false;
+
+function onCopyModeChange() {
+  _copyMode = document.getElementById('chkCopyPhotos').checked;
+  var copyFields = document.getElementById('copyOnlyFields');
+  var skipDup = document.getElementById('skipDuplicatesItem');
+  var lbl = document.getElementById('lblFolder');
+  var customInput = document.getElementById('cfgSourceCustom');
+
+  if (_copyMode) {
+    copyFields.style.display = '';
+    skipDup.style.display = '';
+    lbl.textContent = 'Source';
+    customInput.placeholder = '/path/to/source';
+  } else {
+    copyFields.style.display = 'none';
+    skipDup.style.display = 'none';
+    lbl.textContent = 'Folder';
+    customInput.placeholder = '/path/to/photos';
+  }
+  updateStartButton();
+}
 
 function selectSourceMode(mode) {
   _sourceMode = mode;
@@ -525,12 +558,19 @@ function updateStartButton() {
   if (_pipelineRunning) { btn.disabled = true; return; }
 
   if (_sourceMode === 'import') {
-    var source = (document.getElementById('cfgSourceCustom').value.trim() ||
-                  document.getElementById('cfgSource').value);
-    var dest = document.getElementById('cfgDestination').value.trim();
-    var jpeg = document.getElementById('chkJpeg').checked;
-    var raw = document.getElementById('chkRaw').checked;
-    btn.disabled = !source || !dest || (!jpeg && !raw);
+    if (_copyMode) {
+      var source = (document.getElementById('cfgSourceCustom').value.trim() ||
+                    document.getElementById('cfgSource').value);
+      var dest = document.getElementById('cfgDestination').value.trim();
+      var jpeg = document.getElementById('chkJpeg').checked;
+      var raw = document.getElementById('chkRaw').checked;
+      btn.disabled = !source || !dest || (!jpeg && !raw);
+    } else {
+      var folder = document.getElementById('cfgSourceCustom').value.trim();
+      var jpeg = document.getElementById('chkJpeg').checked;
+      var raw = document.getElementById('chkRaw').checked;
+      btn.disabled = !folder || (!jpeg && !raw);
+    }
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
@@ -594,9 +634,13 @@ function stopPipeline() {
 }
 
 async function runImportStep() {
-  var source = document.getElementById('cfgSourceCustom').value.trim() ||
-               document.getElementById('cfgSource').value;
-  var destination = document.getElementById('cfgDestination').value.trim();
+  var folder = document.getElementById('cfgSourceCustom').value.trim();
+  var source = _copyMode
+    ? (folder || document.getElementById('cfgSource').value)
+    : folder;
+  var destination = _copyMode
+    ? document.getElementById('cfgDestination').value.trim()
+    : '';
 
   var num = document.getElementById('numSource');
   var status = document.getElementById('statusSource');
@@ -605,7 +649,7 @@ async function runImportStep() {
   var text = document.getElementById('textSource');
 
   num.className = 'stage-num running';
-  status.textContent = 'Starting import...';
+  status.textContent = _copyMode ? 'Starting import...' : 'Scanning folder...';
   progressWrap.style.display = '';
   fill.style.width = '0%';
 
@@ -613,15 +657,20 @@ async function runImportStep() {
   document.getElementById('card-source').classList.add('expanded');
 
   try {
+    var body = {
+      source: source,
+      copy: _copyMode,
+      file_types: getIngestFileTypes(),
+    };
+    if (_copyMode) {
+      body.destination = destination;
+      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+    }
+
     var data = await safeFetch('/api/jobs/import-full', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        source: source,
-        destination: destination,
-        file_types: getIngestFileTypes(),
-        skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
-      }),
+      body: JSON.stringify(body),
     }, { toast: false });
 
     if (!data.job_id) {
@@ -651,15 +700,15 @@ async function runImportStep() {
             num.className = 'stage-num complete';
             var r = result.result;
             var summary = [];
-            if (r.copied != null) summary.push(r.copied + ' imported');
-            if (r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
+            if (_copyMode && r.copied != null) summary.push(r.copied + ' imported');
+            if (_copyMode && r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
             if (r.photos_indexed) summary.push(r.photos_indexed + ' indexed');
             document.getElementById('txtSource').textContent = summary.join(', ');
             status.textContent = 'Done!';
             status.className = 'status-msg ok';
             resolve(r.collection_id);
           } else {
-            status.textContent = 'Import failed';
+            status.textContent = _copyMode ? 'Import failed' : 'Scan failed';
             num.className = 'stage-num';
             resolve(null);
           }
