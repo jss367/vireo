@@ -208,9 +208,12 @@ body { padding-bottom: 36px; }
             <div class="setting-row">
               <div class="setting-item" id="folderLabelItem">
                 <div class="setting-label" id="lblFolder">Folder</div>
-                <input type="text" class="setting-select" id="cfgSourceCustom"
-                       placeholder="/path/to/photos" style="font-family:inherit;"
-                       oninput="updateStartButton()">
+                <div style="display:flex;gap:6px;">
+                  <input type="text" class="setting-select" id="cfgSourceCustom"
+                         placeholder="/path/to/photos" style="font-family:inherit;flex:1;"
+                         oninput="updateStartButton()">
+                  <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+                </div>
               </div>
             </div>
             <div id="copyOnlyFields" style="display:none;">
@@ -225,9 +228,12 @@ body { padding-bottom: 36px; }
               <div class="setting-row">
                 <div class="setting-item">
                   <div class="setting-label">Destination</div>
-                  <input type="text" class="setting-select" id="cfgDestination"
-                         placeholder="/path/to/photo/library" style="font-family:inherit;"
-                         oninput="updateStartButton()">
+                  <div style="display:flex;gap:6px;">
+                    <input type="text" class="setting-select" id="cfgDestination"
+                           placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                           oninput="updateStartButton()">
+                    <button onclick="browseForDestination()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1382,6 +1388,31 @@ function updateCardStates() {
     document.getElementById('card-group').classList.add('expanded');
   }
   updateStartButton();
+}
+
+/* ---------- Native folder picker (Tauri only) ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForFolder() {
+  var path = await pickDirectory('Select photo folder');
+  if (path) {
+    document.getElementById('cfgSourceCustom').value = path;
+    updateStartButton();
+  }
+}
+
+async function browseForDestination() {
+  var path = await pickDirectory('Select destination folder');
+  if (path) {
+    document.getElementById('cfgDestination').value = path;
+    updateStartButton();
+  }
 }
 
 </script>
