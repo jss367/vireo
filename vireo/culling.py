@@ -66,11 +66,15 @@ def analyze_for_culling(
     if not photo_ids:
         return {"species_groups": [], "total_photos": 0, "suggested_keepers": 0, "suggested_rejects": 0}
 
-    # Load predictions
+    # Load predictions (highest confidence per photo via detections)
     predictions = {}
     for pid in photo_ids:
         pred = db.conn.execute(
-            "SELECT species, confidence FROM predictions WHERE photo_id = ?",
+            """SELECT pr.species, pr.confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?
+               ORDER BY pr.confidence DESC LIMIT 1""",
             (pid,),
         ).fetchone()
         if pred:

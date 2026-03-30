@@ -834,16 +834,23 @@ class Database:
         row = self.conn.execute(
             """SELECT
                 SUM(CASE WHEN p.mask_path IS NOT NULL THEN 1 ELSE 0 END) as masks,
-                SUM(CASE WHEN p.detection_box IS NOT NULL THEN 1 ELSE 0 END) as detections,
                 SUM(CASE WHEN p.subject_tenengrad IS NOT NULL THEN 1 ELSE 0 END) as sharpness
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
             WHERE wf.workspace_id = ?""",
             (ws,),
         ).fetchone()
+        det_count = self.conn.execute(
+            """SELECT COUNT(DISTINCT d.photo_id)
+               FROM detections d
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
+            (ws, ws),
+        ).fetchone()[0]
         return {
             "masks": row["masks"] or 0,
-            "detections": row["detections"] or 0,
+            "detections": det_count or 0,
             "sharpness": row["sharpness"] or 0,
         }
 
@@ -894,14 +901,19 @@ class Database:
         ).fetchall()
 
         prediction_status = self.conn.execute(
-            """SELECT status, COUNT(*) as count
-            FROM predictions WHERE workspace_id = ?
-            GROUP BY status""",
+            """SELECT pr.status, COUNT(*) as count
+            FROM predictions pr
+            JOIN detections d ON d.id = pr.detection_id
+            WHERE d.workspace_id = ?
+            GROUP BY pr.status""",
             (ws,),
         ).fetchall()
 
         classified_count = self.conn.execute(
-            "SELECT COUNT(DISTINCT photo_id) FROM predictions WHERE workspace_id = ?",
+            """SELECT COUNT(DISTINCT d.photo_id)
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.workspace_id = ?""",
             (ws,),
         ).fetchone()[0]
 
@@ -931,11 +943,12 @@ class Database:
         ).fetchall()
 
         detected_count = self.conn.execute(
-            """SELECT COUNT(*) FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.detection_conf IS NOT NULL AND p.detection_conf > 0
-            AND wf.workspace_id = ?""",
-            (ws,),
+            """SELECT COUNT(DISTINCT d.photo_id)
+               FROM detections d
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
+            (ws, ws),
         ).fetchone()[0]
 
         return {
@@ -1167,8 +1180,9 @@ class Database:
             SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
                    p.timestamp, p.rating, p.folder_id,
                    (SELECT pr.species FROM predictions pr
-                    WHERE pr.photo_id = p.id
-                      AND pr.workspace_id = ?
+                    JOIN detections d ON d.id = pr.detection_id
+                    WHERE d.photo_id = p.id
+                      AND d.workspace_id = ?
                       AND pr.status = 'accepted'
                     ORDER BY pr.confidence DESC LIMIT 1) AS species
             FROM photos p
@@ -1196,8 +1210,9 @@ class Database:
                 """
                 SELECT DISTINCT top_species FROM (
                     SELECT (SELECT pr.species FROM predictions pr
-                            WHERE pr.photo_id = p.id
-                              AND pr.workspace_id = ?
+                            JOIN detections d ON d.id = pr.detection_id
+                            WHERE d.photo_id = p.id
+                              AND d.workspace_id = ?
                               AND pr.status = 'accepted'
                             ORDER BY pr.confidence DESC LIMIT 1) AS top_species
                     FROM photos p
@@ -1324,7 +1339,8 @@ class Database:
         # Delete associated data (non-cascading FKs)
         self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
         self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
-        self.conn.execute(f"DELETE FROM predictions WHERE photo_id IN ({ph})", all_ids)
+        # Deleting detections cascades to predictions via ON DELETE CASCADE
+        self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
 
         # Clean collection rules
         import json as _json
@@ -2458,8 +2474,9 @@ class Database:
             join_clause += " JOIN keywords k ON k.id = pk.keyword_id"
         if need_prediction_join:
             join_clause += (
-                " JOIN predictions pred ON pred.photo_id = p.id"
-                " AND pred.workspace_id = ?"
+                " JOIN detections det ON det.photo_id = p.id"
+                " AND det.workspace_id = ?"
+                " JOIN predictions pred ON pred.detection_id = det.id"
             )
             # Insert workspace param before the existing condition params
             params.insert(0, self._ws_id())

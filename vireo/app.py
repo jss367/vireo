@@ -1318,6 +1318,7 @@ def create_app(db_path, thumb_cache_dir=None):
         preds = db.get_predictions(photo_ids=photo_ids)
 
         # Collect distinct models and build per-photo lookup
+        # With multi-detection, each photo may have multiple predictions per model
         models = set()
         by_photo = {}
         for pr in preds:
@@ -1328,10 +1329,15 @@ def create_app(db_path, thumb_cache_dir=None):
             if pid not in by_photo:
                 by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
             if model not in by_photo[pid]["predictions"]:
-                by_photo[pid]["predictions"][model] = {
-                    "species": d["species"],
-                    "confidence": d["confidence"],
-                }
+                by_photo[pid]["predictions"][model] = []
+            by_photo[pid]["predictions"][model].append({
+                "species": d["species"],
+                "confidence": d["confidence"],
+                "box_x": d.get("box_x"),
+                "box_y": d.get("box_y"),
+                "box_w": d.get("box_w"),
+                "box_h": d.get("box_h"),
+            })
 
         return jsonify({
             "models": sorted(models),
@@ -1359,7 +1365,11 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_reject_prediction(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            "SELECT photo_id, species FROM predictions WHERE id = ?", (pred_id,)
+            """SELECT pr.id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.id = ?""",
+            (pred_id,),
         ).fetchone()
         db.update_prediction_status(pred_id, "rejected")
         if pred:
@@ -1440,6 +1450,15 @@ def create_app(db_path, thumb_cache_dir=None):
         for pred_id in removed:
             db.ungroup_prediction(pred_id)
         return jsonify({"ok": True})
+
+    # -- Detection API routes --
+
+    @app.route("/api/detections/<int:photo_id>")
+    def api_detections(photo_id):
+        """Get all detections for a photo."""
+        db = _get_db()
+        dets = db.get_detections(photo_id)
+        return jsonify([dict(d) for d in dets])
 
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
@@ -2428,7 +2447,11 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         pred = db.conn.execute(
-            "SELECT species, scientific_name, confidence FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+            """SELECT pr.species, pr.scientific_name, pr.confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC LIMIT 1""",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2517,7 +2540,11 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Use overrides from request, or fall back to DB data
         pred = db.conn.execute(
-            "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+            """SELECT pr.species, pr.scientific_name
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC LIMIT 1""",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2581,7 +2608,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 continue
 
             pred = db.conn.execute(
-                "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+                """SELECT pr.species, pr.scientific_name
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   WHERE d.photo_id = ? AND d.workspace_id = ?
+                   ORDER BY pr.confidence DESC LIMIT 1""",
                 (photo_id, db._active_workspace_id),
             ).fetchone()
 
@@ -3905,11 +3936,12 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Find all photos with this species prediction
         rows = db.conn.execute(
-            """SELECT pr.photo_id, p.embedding, p.filename, p.thumb_path,
+            """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
-               JOIN photos p ON p.id = pr.photo_id
-               WHERE pr.species = ? AND pr.workspace_id = ? AND p.embedding IS NOT NULL""",
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               WHERE pr.species = ? AND d.workspace_id = ? AND p.embedding IS NOT NULL""",
             (species_name, db._active_workspace_id),
         ).fetchall()
 
@@ -4020,12 +4052,13 @@ def create_app(db_path, thumb_cache_dir=None):
         """List all species with prediction counts, for the variant explorer."""
         db = _get_db()
         rows = db.conn.execute(
-            """SELECT species, COUNT(*) as photo_count,
-                      taxonomy_order, taxonomy_family, taxonomy_genus,
-                      scientific_name
-               FROM predictions
-               WHERE status != 'rejected' AND workspace_id = ?
-               GROUP BY species
+            """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
+                      pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
+                      pr.scientific_name
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.status != 'rejected' AND d.workspace_id = ?
+               GROUP BY pr.species
                ORDER BY photo_count DESC""",
             (db._active_workspace_id,),
         ).fetchall()
@@ -5112,16 +5145,23 @@ def create_app(db_path, thumb_cache_dir=None):
         # Remove binary embedding from response
         result.pop("embedding", None)
 
-        # Parse detection_box from JSON string
+        # Parse detection_box from JSON string (legacy field, may still be on photo)
         if result.get("detection_box") and isinstance(result["detection_box"], str):
             result["detection_box"] = json.loads(result["detection_box"])
 
-        # Get predictions for this photo
+        # Get detections for this photo (from detections table)
+        dets = db.get_detections(photo_id)
+        result["detections"] = [dict(d) for d in dets]
+
+        # Get predictions for this photo (through detections JOIN)
         preds = db.conn.execute(
-            """SELECT species, confidence, model, category, status,
-                      group_id, vote_count, total_votes, individual
-               FROM predictions WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY confidence DESC""",
+            """SELECT pr.species, pr.confidence, pr.model, pr.category, pr.status,
+                      pr.group_id, pr.vote_count, pr.total_votes, pr.individual,
+                      d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC""",
             (photo_id, db._active_workspace_id),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
@@ -5130,10 +5170,12 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Compute crop info if detection exists
-        if result.get("detection_box"):
+        # Compute crop info from primary detection (highest confidence)
+        primary_det = dets[0] if dets else None
+        if primary_det:
             import config as cfg
-            box = result["detection_box"]
+            box = {"x": primary_det["box_x"], "y": primary_det["box_y"],
+                   "w": primary_det["box_w"], "h": primary_det["box_h"]}
             pad = cfg.load().get("detection_padding", 0.2)
             result["crop_box"] = {
                 "x": max(0, box["x"] - box["w"] * pad),
