@@ -679,13 +679,15 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
 
 
 def test_all_keywords_scoped_by_workspace(app_and_db):
-    """GET /api/keywords/all only returns keywords used in the active workspace."""
+    """GET /api/keywords/all only returns keywords used in the active workspace, plus ancestors."""
     app, db = app_and_db
     ws_a = db._active_workspace_id
 
-    # Tag a photo in workspace A with keyword "Hawk"
+    # Create parent keyword "Birds" and child "Hawk" under it
+    k_birds = db.add_keyword("Birds")
+    k_hawk = db.add_keyword("Hawk", parent_id=k_birds)
+    # Tag a photo in workspace A with the child only
     photos_a = db.get_photos()
-    k_hawk = db.add_keyword("Hawk")
     db.tag_photo(photos_a[0]["id"], k_hawk)
 
     # Create workspace B with its own folder, photo, and keyword "Penguin"
@@ -704,7 +706,13 @@ def test_all_keywords_scoped_by_workspace(app_and_db):
         resp = c.get("/api/keywords/all")
         data = resp.get_json()
         names = [k["name"] for k in data]
+        # Child keyword tagged in workspace A — present
         assert "Hawk" in names
+        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        assert "Birds" in names
+        birds = next(k for k in data if k["name"] == "Birds")
+        assert birds["photo_count"] == 0
+        # Keyword only in workspace B — absent
         assert "Penguin" not in names
 
 

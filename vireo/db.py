@@ -1667,22 +1667,42 @@ class Database:
         self.conn.commit()
 
     def get_all_keywords(self):
-        """Return keywords used in the active workspace with photo counts, type, and taxon info."""
+        """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""
         ws = self._ws_id()
         return self.conn.execute(
-            """SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
+            """WITH RECURSIVE
+               ws_kw AS (
+                   SELECT DISTINCT pk.keyword_id AS id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE wf.workspace_id = ?
+               ),
+               ancestors AS (
+                   SELECT id FROM ws_kw
+                   UNION
+                   SELECT k.parent_id
+                   FROM keywords k
+                   JOIN ancestors a ON a.id = k.id
+                   WHERE k.parent_id IS NOT NULL
+               )
+               SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
                       k.latitude, k.longitude,
                       t.name AS taxon_name, t.common_name AS taxon_common_name,
-                      COUNT(pk.photo_id) AS photo_count
+                      COUNT(ws_photo.photo_id) AS photo_count
                FROM keywords k
-               JOIN photo_keywords pk ON pk.keyword_id = k.id
-               JOIN photos p ON p.id = pk.photo_id
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN ancestors a ON a.id = k.id
                LEFT JOIN taxa t ON t.id = k.taxon_id
-               WHERE wf.workspace_id = ?
+               LEFT JOIN (
+                   SELECT pk.keyword_id, pk.photo_id
+                   FROM photo_keywords pk
+                   JOIN photos p ON p.id = pk.photo_id
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   WHERE wf.workspace_id = ?
+               ) ws_photo ON ws_photo.keyword_id = k.id
                GROUP BY k.id
                ORDER BY k.name""",
-            (ws,),
+            (ws, ws),
         ).fetchall()
 
     # -- Predictions --
