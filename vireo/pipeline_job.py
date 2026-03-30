@@ -102,9 +102,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         {"id": "scan", "label": "Scan photos"},
         {"id": "thumbnails", "label": "Generate thumbnails"},
         {"id": "previews", "label": "Generate previews"},
-        {"id": "model_loader", "label": "Load models"},
-        {"id": "classify", "label": "Classify species"},
     ]
+    if not params.skip_classify:
+        step_defs.append({"id": "model_loader", "label": "Load models"})
+        step_defs.append({"id": "classify", "label": "Classify species"})
     if not params.skip_extract_masks:
         step_defs.append({"id": "extract_masks", "label": "Extract features"})
     if not params.skip_regroup:
@@ -363,6 +364,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         _update_stages(runner, job["id"], stages)
 
     def model_loader_stage():
+        if params.skip_classify:
+            stages["model_loader"]["status"] = "skipped"
+            runner.update_step(job["id"], "model_loader", status="completed",
+                               summary="Skipped")
+            _update_stages(runner, job["id"], stages)
+            models_ready.set()
+            return
         stages["model_loader"]["status"] = "running"
         runner.update_step(job["id"], "model_loader", status="running")
         _update_stages(runner, job["id"], stages)
@@ -450,10 +458,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         collection_ready.wait()
         models_ready.wait()
 
-        if abort.is_set() or not collection_id or "clf" not in loaded_models:
+        if params.skip_classify or abort.is_set() or not collection_id or "clf" not in loaded_models:
             stages["classify"]["status"] = "skipped"
             runner.update_step(job["id"], "classify", status="completed",
                                summary="Skipped")
+            _update_stages(runner, job["id"], stages)
             return
 
         stages["classify"]["status"] = "running"

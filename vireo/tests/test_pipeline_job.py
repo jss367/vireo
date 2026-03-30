@@ -523,3 +523,38 @@ def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
                     if e[1] == "progress" and "stages" in e[2]]
     assert any("previews" in s for s in stage_events), \
         "Expected 'previews' stage in progress events"
+
+
+def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
+    """When skip_classify=True, model_loader and classify should be skipped."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        collection_id=1,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Check that classify was skipped in the last stages event
+    last_stages = None
+    for _, evt_type, data in reversed(runner.events):
+        if evt_type == "progress" and "stages" in data:
+            last_stages = data["stages"]
+            break
+
+    assert last_stages is not None
+    assert last_stages["classify"]["status"] == "skipped"
+    assert last_stages["model_loader"]["status"] == "skipped"
