@@ -1935,9 +1935,9 @@ class Database:
         return {r["photo_id"] for r in rows}
 
     def get_prediction_for_photo(self, photo_id, model):
-        """Return species and confidence for a photo's prediction by model, or None."""
+        """Return species, confidence, and detection_id for a photo's prediction by model, or None."""
         return self.conn.execute(
-            """SELECT pr.species, pr.confidence FROM predictions pr
+            """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE d.photo_id = ? AND pr.model = ? AND d.workspace_id = ?""",
             (photo_id, model, self._ws_id()),
