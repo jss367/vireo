@@ -168,8 +168,12 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
         # Clip to image bounds and normalize to 0-1
         x1 = max(0, x1) / orig_w
         y1 = max(0, y1) / orig_h
-        x2 = min(orig_w, x2) / orig_w
-        y2 = min(orig_h, y2) / orig_h
+        x2 = max(0, min(orig_w, x2)) / orig_w
+        y2 = max(0, min(orig_h, y2)) / orig_h
+
+        # Drop invalid boxes where width or height would be non-positive
+        if x2 <= x1 or y2 <= y1:
+            continue
 
         category = CLASS_NAMES.get(int(class_ids[i]), "animal")
         detections.append(

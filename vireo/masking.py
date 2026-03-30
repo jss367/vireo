@@ -122,14 +122,21 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         image_embeddings = enc_outputs[0]  # (1, C, H', W')
 
         # Step 2: Encode box prompt as numpy arrays
+        # The image encoder resizes to SAM2_INPUT_SIZE x SAM2_INPUT_SIZE,
+        # so the decoder expects prompt coordinates in that same space.
+        # Scale the original-pixel box into encoder input coordinates.
+        scale_x = SAM2_INPUT_SIZE / orig_w
+        scale_y = SAM2_INPUT_SIZE / orig_h
+        enc_x1 = bx * scale_x
+        enc_y1 = by * scale_y
+        enc_x2 = (bx + bw) * scale_x
+        enc_y2 = (by + bh) * scale_y
+
         # For box prompts: point_coords has shape (1, 2, 2) with top-left
         # and bottom-right corners; point_labels has shape (1, 2) with
         # values [2, 3] (SAM2 box prompt markers)
-        # TODO(export-script): Verify coordinate space matches ONNX export.
-        # These are original pixel coords; may need rescaling to 1024x1024
-        # if the decoder doesn't use orig_im_size for internal rescaling.
         point_coords = np.array(
-            [[[bx, by], [bx + bw, by + bh]]], dtype=np.float32
+            [[[enc_x1, enc_y1], [enc_x2, enc_y2]]], dtype=np.float32
         )  # (1, 2, 2)
         point_labels = np.array([[2, 3]], dtype=np.float32)  # (1, 2)
 
