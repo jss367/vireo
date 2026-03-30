@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import imagehash
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
@@ -53,24 +53,41 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
             db.tag_photo(photo_id, kid)
 
 
-def _extract_dimensions(exif_group, file_group):
+def _extract_dimensions(exif_group, file_group, extension=None):
     """Extract width and height from ExifTool metadata groups.
 
-    Priority:
-    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight (actual image dimensions for JPEGs)
+    For standard images (JPEG, PNG, etc.):
+    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight
     2. EXIF:ImageWidth / EXIF:ImageHeight
     3. File:ImageWidth / File:ImageHeight
+
+    For RAW files (NEF, CR2, ARW, etc.), ExifImageWidth/Height contains the
+    embedded JPEG thumbnail dimensions (e.g. 160x120), not the actual image.
+    Priority for RAW:
+    1. File:ImageWidth / File:ImageHeight (actual decoded dimensions)
+    2. EXIF:ImageWidth / EXIF:ImageHeight
     """
-    width = exif_group.get("ExifImageWidth")
-    if width is None:
-        width = exif_group.get("ImageWidth")
-    if width is None:
+    is_raw = extension and extension.lower() in RAW_EXTENSIONS
+
+    if is_raw:
         width = file_group.get("ImageWidth")
-    height = exif_group.get("ExifImageHeight")
-    if height is None:
-        height = exif_group.get("ImageHeight")
-    if height is None:
+        if width is None:
+            width = exif_group.get("ImageWidth")
         height = file_group.get("ImageHeight")
+        if height is None:
+            height = exif_group.get("ImageHeight")
+    else:
+        width = exif_group.get("ExifImageWidth")
+        if width is None:
+            width = exif_group.get("ImageWidth")
+        if width is None:
+            width = file_group.get("ImageWidth")
+        height = exif_group.get("ExifImageHeight")
+        if height is None:
+            height = exif_group.get("ImageHeight")
+        if height is None:
+            height = file_group.get("ImageHeight")
+
     if width is not None:
         width = int(width)
     if height is not None:
@@ -350,15 +367,26 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         composite = file_meta.get("Composite", {})
 
         # Dimensions from ExifTool (works for all file types including RAW)
-        width, height = _extract_dimensions(exif_group, file_group)
+        width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
 
-        # Fallback to Pillow if ExifTool didn't provide dimensions
+        # Fallback if ExifTool didn't provide dimensions
         if width is None or height is None:
-            try:
-                with Image.open(str(image_path)) as img:
-                    width, height = img.size
-            except Exception:
-                log.debug("Could not read dimensions from %s", image_path)
+            ext = image_path.suffix.lower()
+            if ext in RAW_EXTENSIONS:
+                try:
+                    import rawpy
+
+                    with rawpy.imread(str(image_path)) as raw:
+                        width = raw.sizes.width
+                        height = raw.sizes.height
+                except Exception:
+                    log.debug("Could not read RAW dimensions from %s", image_path)
+            else:
+                try:
+                    with Image.open(str(image_path)) as img:
+                        width, height = img.size
+                except Exception:
+                    log.debug("Could not read dimensions from %s", image_path)
 
         # Timestamp from ExifTool
         timestamp = _extract_timestamp(exif_group)
