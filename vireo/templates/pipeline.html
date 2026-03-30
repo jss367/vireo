@@ -159,19 +159,6 @@ body { padding-bottom: 36px; }
   letter-spacing: 0.5px;
 }
 
-/* View results link */
-.view-results-btn {
-  display: inline-block;
-  margin-top: 12px;
-  padding: 10px 20px;
-  background: var(--accent, #24E5CA);
-  color: var(--accent-text);
-  font-weight: 600;
-  font-size: 13px;
-  border-radius: 4px;
-  text-decoration: none;
-}
-.view-results-btn:hover { background: var(--accent-hover, #5AF0DA); }
 </style>
 </head>
 <body>
@@ -366,31 +353,6 @@ body { padding-bottom: 36px; }
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
         <div class="progress-text" id="textExtract"></div>
       </div>
-    </div>
-  </div>
-
-  <!-- Card 4: Group & Score -->
-  <div class="stage-card" id="card-group">
-    <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">4</span>
-      <span class="stage-name">Group &amp; Score</span>
-      <span class="stage-summary" id="summaryGroup">
-        <span id="txtResults"></span>
-      </span>
-      <span class="stage-chevron">&#9656;</span>
-    </div>
-    <div class="stage-body">
-      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
-        Runs encounter segmentation, burst clustering, quality scoring, and triage.
-        Tune scoring and grouping thresholds on the
-        <a href="/pipeline/review" style="color:var(--accent);">Pipeline Review</a> page.
-      </p>
-      <span class="status-msg" id="statusGroup"></span>
-      <div class="progress-wrap" id="progressGroup" style="display:none;">
-        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillGroup"></div></div>
-        <div class="progress-text" id="textGroup"></div>
-      </div>
-      <a id="viewResultsLink" href="/pipeline/review" class="view-results-btn" style="display:none;">View Results</a>
     </div>
   </div>
 
