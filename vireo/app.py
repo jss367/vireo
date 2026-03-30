@@ -10,6 +10,7 @@ import logging
 import logging.handlers
 import os
 import queue
+import subprocess
 import time
 import webbrowser
 from pathlib import Path
@@ -63,6 +64,30 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
+
+
+def _trash_via_finder(filepath):
+    """Trash a file via Finder using AppleScript.
+
+    Fallback for when send2trash fails (e.g. external volumes where the
+    legacy Carbon API can't locate .Trashes).
+    """
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e", "on run argv",
+            "-e", "set posixPath to item 1 of argv",
+            "-e", "set fileRef to POSIX file posixPath",
+            "-e", "tell application \"Finder\" to delete fileRef",
+            "-e", "end run",
+            "--",
+            filepath,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
 
 
 def create_app(db_path, thumb_cache_dir=None):
@@ -881,8 +906,13 @@ def create_app(db_path, thumb_cache_dir=None):
                             _trash(filepath)
                             trashed += 1
                         except Exception:
-                            log.warning("Trash failed for %s", filepath, exc_info=True)
-                            trash_failed.append({"path": filepath})
+                            log.debug("send2trash failed for %s, trying Finder", filepath)
+                            try:
+                                _trash_via_finder(filepath)
+                                trashed += 1
+                            except Exception:
+                                log.warning("Trash failed for %s", filepath, exc_info=True)
+                                trash_failed.append({"path": filepath})
                     else:  # disk_permanent
                         try:
                             os.remove(filepath)
