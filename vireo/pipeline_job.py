@@ -63,7 +63,7 @@ def _update_stages(runner, job_id, stages):
 def _current_phase(stages):
     """Determine the primary phase label from stage statuses."""
     for name in ["regroup", "extract_masks", "classify", "model_loader",
-                 "thumbnails", "scan"]:
+                 "previews", "thumbnails", "scan"]:
         info = stages.get(name, {})
         if info.get("status") == "running":
             return info.get("label", name)
@@ -90,6 +90,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     stages = {
         "scan": {"status": "pending", "count": 0, "label": "Scanning photos"},
         "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
+        "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
         "model_loader": {"status": "pending", "label": "Loading models"},
         "classify": {"status": "pending", "count": 0, "label": "Classifying species"},
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
@@ -100,6 +101,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     step_defs = [
         {"id": "scan", "label": "Scan photos"},
         {"id": "thumbnails", "label": "Generate thumbnails"},
+        {"id": "previews", "label": "Generate previews"},
         {"id": "model_loader", "label": "Load models"},
         {"id": "classify", "label": "Classify species"},
     ]
@@ -287,6 +289,77 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             log.exception("Pipeline thumbnail stage failed")
             stages["thumbnails"]["status"] = "failed"
             runner.update_step(job["id"], "thumbnails", status="failed", error=str(e))
+        _update_stages(runner, job["id"], stages)
+
+    def previews_stage():
+        """Generate preview images for browsed photos."""
+        stages["previews"]["status"] = "running"
+        runner.update_step(job["id"], "previews", status="running")
+        _update_stages(runner, job["id"], stages)
+
+        try:
+            import config as cfg
+            from image_loader import load_image
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+
+            max_size = params.preview_max_size
+            if max_size == 0:
+                max_size = None  # Full resolution
+            preview_quality = cfg.load().get("preview_quality", 90)
+            base_dir = os.path.dirname(db_path)
+            preview_dir = os.path.join(base_dir, "previews")
+            os.makedirs(preview_dir, exist_ok=True)
+
+            if collection_id:
+                photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            else:
+                photos = thread_db.get_photos(per_page=999999)
+
+            folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+            total = len(photos)
+            generated = 0
+            skipped = 0
+
+            for i, photo in enumerate(photos):
+                if _should_abort(abort):
+                    break
+                cache_path = os.path.join(preview_dir, f'{photo["id"]}.jpg')
+                if os.path.exists(cache_path):
+                    skipped += 1
+                else:
+                    folder_path = folders.get(photo["folder_id"], "")
+                    image_path = os.path.join(folder_path, photo["filename"])
+                    img = load_image(image_path, max_size=max_size)
+                    if img:
+                        img.save(cache_path, format="JPEG", quality=preview_quality)
+                        generated += 1
+
+                stages["previews"]["count"] = i + 1
+                runner.push_event(job["id"], "progress", {
+                    "phase": "Generating previews",
+                    "current": i + 1,
+                    "total": total,
+                    "current_file": photo["filename"],
+                    "rate": round(
+                        (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "stages": {k: dict(v) for k, v in stages.items()},
+                })
+
+            result["stages"]["previews"] = {
+                "generated": generated, "skipped": skipped, "total": total
+            }
+            stages["previews"]["status"] = "completed"
+            runner.update_step(job["id"], "previews", status="completed",
+                               summary=f"{generated} generated")
+        except Exception as e:
+            errors.append(f"[previews] Fatal: {e}")
+            log.exception("Pipeline previews stage failed")
+            stages["previews"]["status"] = "failed"
+            runner.update_step(job["id"], "previews", status="failed", error=str(e))
+
         _update_stages(runner, job["id"], stages)
 
     def model_loader_stage():
@@ -716,6 +789,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     threads["collection"].join()
     threads["thumbnail"].join()
     threads["model_loader"].join()
+
+    # Phase 1.5: previews (needs scan complete, runs before classify)
+    if not abort.is_set():
+        previews_stage()
 
     # Phase 2: classify (needs collection + models)
     if not abort.is_set():

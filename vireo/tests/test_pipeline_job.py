@@ -295,7 +295,7 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     assert len(stage_events) > 0
 
     # Each stages dict should have all expected stage keys
-    expected_keys = {"scan", "thumbnails", "model_loader", "classify", "extract_masks", "regroup"}
+    expected_keys = {"scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup"}
     for _, _, data in stage_events:
         assert expected_keys.issubset(data["stages"].keys())
 
@@ -487,3 +487,39 @@ def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
     db2.set_active_workspace(ws_id)
     photos = db2.get_collection_photos(result["collection_id"], per_page=999999)
     assert len(photos) == 3
+
+
+def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
+    """Pipeline should run a previews stage after thumbnails."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Create an empty collection so classify has something to query
+    col_id = db.add_collection("Test", "[]")
+
+    # Patch scanner, thumbnails, etc. to be no-ops — we just need to verify
+    # the previews stage appears in the result
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The stages dict in progress events should include "previews"
+    stage_events = [e[2]["stages"] for e in runner.events
+                    if e[1] == "progress" and "stages" in e[2]]
+    assert any("previews" in s for s in stage_events), \
+        "Expected 'previews' stage in progress events"
