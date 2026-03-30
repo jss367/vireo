@@ -581,6 +581,7 @@ function updateStartButton() {
 var _pipelineRunning = false;
 var _pipelineAbort = false;
 var _pipelineEventSource = null;
+var _pipelineResolve = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
@@ -648,17 +649,20 @@ async function startPipeline() {
     document.getElementById('card-source').classList.add('expanded');
 
     await new Promise(function(resolve) {
+      _pipelineResolve = resolve;
       _pipelineEventSource = safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
           if (_pipelineAbort) return;
           _updatePipelineStageUI(p);
         },
         onComplete: function(result) {
+          _pipelineResolve = null;
           window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
           _onPipelineComplete(result);
           resolve();
         },
         onError: function() {
+          _pipelineResolve = null;
           document.getElementById('statusSource').textContent = 'Connection lost';
           resolve();
         }
@@ -836,6 +840,11 @@ function stopPipeline() {
   if (_pipelineEventSource) {
     _pipelineEventSource.close();
     _pipelineEventSource = null;
+  }
+  // Resolve the pending stream promise so the finally block runs
+  if (_pipelineResolve) {
+    _pipelineResolve();
+    _pipelineResolve = null;
   }
   var btn = document.getElementById('btnStartPipeline');
   btn.disabled = true;

@@ -4340,10 +4340,14 @@ def create_app(db_path, thumb_cache_dir=None):
         if source and not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
 
+        destination = body.get("destination")
+        if destination and not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
-            destination=body.get("destination"),
+            destination=destination,
             file_types=body.get("file_types", "both"),
             folder_template=body.get("folder_template", "%Y/%m-%d"),
             skip_duplicates=body.get("skip_duplicates", True),

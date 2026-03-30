@@ -147,6 +147,20 @@ def test_pipeline_job_requires_source_or_collection(app_and_db):
         assert resp.status_code == 400
 
 
+def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
+    """Pipeline endpoint should reject relative destination paths."""
+    app, _ = app_and_db
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "source": str(src),
+            "destination": "relative/path",
+        })
+        assert resp.status_code == 400
+        assert "absolute" in resp.get_json()["error"]
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
