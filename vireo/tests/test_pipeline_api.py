@@ -83,3 +83,57 @@ def test_import_full_rejects_relative_destination(setup):
             assert "absolute" in resp.get_json()["error"].lower()
     finally:
         shutil.rmtree(src, ignore_errors=True)
+
+
+def test_import_full_scan_only_returns_job_id(setup):
+    """copy=false skips ingest, just scans the source folder."""
+    app, db_path = setup
+    src = tempfile.mkdtemp()
+    try:
+        jpeg_bytes = bytes([
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9
+        ])
+        with open(os.path.join(src, "test.jpg"), "wb") as f:
+            f.write(jpeg_bytes)
+
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/import-full", json={
+                "source": src,
+                "copy": False,
+            })
+            data = resp.get_json()
+            assert resp.status_code == 200
+            assert "job_id" in data
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def test_import_full_scan_only_no_destination_required(setup):
+    """copy=false does not require destination."""
+    app, db_path = setup
+    src = tempfile.mkdtemp()
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/import-full", json={
+                "source": src,
+                "copy": False,
+            })
+            assert resp.status_code == 200
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def test_import_full_copy_true_still_requires_destination(setup):
+    """copy=true (explicit) still requires destination."""
+    app, db_path = setup
+    src = tempfile.mkdtemp()
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/import-full", json={
+                "source": src,
+                "copy": True,
+            })
+            assert resp.status_code == 400
+    finally:
+        shutil.rmtree(src, ignore_errors=True)
