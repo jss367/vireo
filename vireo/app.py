@@ -4329,7 +4329,6 @@ def create_app(db_path, thumb_cache_dir=None):
         Overlaps I/O stages and interleaves detection with classification.
         Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
         """
-        import config as cfg
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
@@ -4342,8 +4341,6 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("destination required when source is provided")
         if source and not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
-
-        user_cfg = _get_db().get_effective_config(cfg.load())
 
         params = PipelineParams(
             collection_id=collection_id,
