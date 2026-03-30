@@ -209,9 +209,11 @@ def test_api_photos_geo_species_filter(app_and_db):
     app, db = app_and_db
     db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE filename IN ('bird1.jpg','bird3.jpg')")
     db.conn.commit()
-    # Add accepted predictions
-    db.add_prediction(1, 'Cardinal', 0.9, 'bioclip')
-    db.add_prediction(3, 'Sparrow', 0.8, 'bioclip')
+    # Add detections then predictions
+    det1 = db.save_detections(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    det3 = db.save_detections(3, [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det1[0], 'Cardinal', 0.9, 'bioclip')
+    db.add_prediction(det3[0], 'Sparrow', 0.8, 'bioclip')
     preds = db.get_predictions(photo_ids=[1, 3])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -228,7 +230,8 @@ def test_api_species_list(app_and_db):
     """GET /api/species returns accepted species from geolocated photos."""
     app, db = app_and_db
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=1")
-    db.add_prediction(1, 'Cardinal', 0.9, 'bioclip')
+    det_ids = db.save_detections(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Cardinal', 0.9, 'bioclip')
     preds = db.get_predictions(photo_ids=[1])
     db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
     db.conn.commit()
