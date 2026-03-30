@@ -895,10 +895,13 @@ async function bootstrapBrowse() {
     renderFolderTree(data.folders || []);
     renderKeywordTree(data.keywords || []);
     renderCollectionList(data.collections || []);
+    loadCollectionCounts();
     renderGrid();
     updateFilterSummary();
 
     document.getElementById('loadingState').style.display = 'none';
+    // Lazy-load collection photo counts to avoid N+1 on init
+    loadCollectionCounts();
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
@@ -1039,6 +1042,25 @@ async function loadCollections() {
   try {
     var data = await safeFetch('/api/collections', {}, { toast: false });
     renderCollectionList(data);
+  } catch(e) {}
+}
+
+async function loadCollectionCounts() {
+  try {
+    var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (!data) return;
+    var items = document.querySelectorAll('#collectionList .tree-item');
+    var countsById = {};
+    data.forEach(function(c) { countsById[c.id] = c.photo_count; });
+    items.forEach(function(el) {
+      var onclick = el.getAttribute('onclick') || '';
+      var m = onclick.match(/filterByCollection\((\d+)\)/);
+      if (m) {
+        var id = parseInt(m[1], 10);
+        var span = el.querySelector('.count');
+        if (span && countsById[id] != null) span.textContent = countsById[id];
+      }
+    });
   } catch(e) {}
 }
 
@@ -2243,6 +2265,7 @@ async function developSelected() {
       renderFolderTree(initData.folders || []);
       renderKeywordTree(initData.keywords || []);
       renderCollectionList(initData.collections || []);
+      loadCollectionCounts();
       photos = initData.photos || [];
       totalPhotos = initData.total || 0;
       currentPage = 2;

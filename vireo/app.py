@@ -343,11 +343,6 @@ def create_app(db_path, thumb_cache_dir=None):
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
-        coll_list = []
-        for c in collections:
-            d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
-            coll_list.append(d)
 
         return jsonify(
             {
@@ -357,7 +352,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "per_page": per_page,
                 "folders": [dict(f) for f in folders],
                 "keywords": [dict(k) for k in keywords],
-                "collections": coll_list,
+                "collections": [dict(c) for c in collections],
             }
         )
 
