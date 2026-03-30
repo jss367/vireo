@@ -1101,6 +1101,23 @@ async function validateInatToken() {
 
 /* ---------- Keyboard Shortcuts Editor ---------- */
 var SHORTCUT_LABELS = {
+  navigation: {
+    _title: 'Navigation',
+    import: 'Go to Import',
+    pipeline: 'Go to Pipeline',
+    pipeline_review: 'Go to Pipeline Review',
+    review: 'Go to Review',
+    cull: 'Go to Cull',
+    browse: 'Go to Browse',
+    map: 'Go to Map',
+    variants: 'Go to Variants',
+    dashboard: 'Go to Dashboard',
+    audit: 'Go to Audit',
+    compare: 'Go to Compare',
+    workspace: 'Go to Workspace',
+    settings: 'Go to Settings',
+    keywords: 'Go to Keywords',
+  },
   review: {
     _title: 'Review (Classify page)',
     accept: 'Accept prediction',
@@ -1124,6 +1141,12 @@ var SHORTCUT_LABELS = {
 };
 
 var SHORTCUT_DEFAULTS = {
+  navigation: {
+    import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+    cull: 'c', browse: 'b', map: 'm', variants: 'v',
+    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+    settings: ',', keywords: 'k',
+  },
   review: { accept: 'a', skip: 's' },
   browse: {
     rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
