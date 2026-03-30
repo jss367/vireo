@@ -3310,19 +3310,22 @@ def create_app(db_path, thumb_cache_dir=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
+        copy = body.get("copy", True)
 
-        if not source or not destination:
-            return json_error("source and destination are required")
+        if not source:
+            return json_error("source is required")
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
-        if not os.path.isabs(destination):
-            return json_error("destination must be an absolute path")
+        if copy:
+            if not destination:
+                return json_error("source and destination are required")
+            if not os.path.isabs(destination):
+                return json_error("destination must be an absolute path")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from ingest import ingest as do_ingest
             from scanner import scan as do_scan
             from thumbnails import generate_all
 
@@ -3330,31 +3333,35 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db.set_active_workspace(active_ws)
             job["_start_time"] = time.time()
 
-            # Phase 1: Copy files
-            def ingest_cb(current, total, filename):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                job["progress"]["current_file"] = filename
-                runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": filename,
-                    "phase": "Importing photos",
-                })
+            scan_target = source  # default: scan source in place
 
-            ingest_result = do_ingest(
-                source_dir=source,
-                destination_dir=destination,
-                db=thread_db,
-                file_types=file_types,
-                folder_template=folder_template,
-                skip_duplicates=skip_duplicates,
-                progress_callback=ingest_cb,
-            )
+            if copy:
+                from ingest import ingest as do_ingest
 
-            # Track destination paths of files actually copied
-            copied_paths = ingest_result.get("copied_paths", [])
+                # Phase 1: Copy files
+                def ingest_cb(current, total, filename):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    job["progress"]["current_file"] = filename
+                    runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total,
+                        "current_file": filename,
+                        "phase": "Importing photos",
+                    })
 
-            # Phase 2: Scan destination to index into DB
+                ingest_result = do_ingest(
+                    source_dir=source,
+                    destination_dir=destination,
+                    db=thread_db,
+                    file_types=file_types,
+                    folder_template=folder_template,
+                    skip_duplicates=skip_duplicates,
+                    progress_callback=ingest_cb,
+                )
+                copied_paths = ingest_result.get("copied_paths", [])
+                scan_target = destination
+
+            # Phase 2: Scan to index into DB
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3364,7 +3371,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(destination, thread_db, progress_callback=scan_cb)
+            do_scan(scan_target, thread_db, progress_callback=scan_cb)
 
             # Phase 3: Generate thumbnails
             runner.push_event(job["id"], "progress", {
@@ -3387,27 +3394,36 @@ def create_app(db_path, thumb_cache_dir=None):
                 progress_callback=thumb_cb,
             )
 
-            # Phase 4: Create collection from files actually copied
-            # Use a temp table to avoid SQLite variable-limit issues
-            # and match by exact path (unique per file, unlike hashes)
+            # Phase 4: Create collection
             photo_ids = []
-            if copied_paths:
-                thread_db.conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                )
-                thread_db.conn.execute("DELETE FROM _imported_paths")
-                thread_db.conn.executemany(
-                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                )
+            if copy:
+                # Collection from copied files (existing logic)
+                if copied_paths:
+                    thread_db.conn.execute(
+                        "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                    )
+                    thread_db.conn.execute("DELETE FROM _imported_paths")
+                    thread_db.conn.executemany(
+                        "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                        [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                    )
+                    rows = thread_db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON p.folder_id = f.id
+                           JOIN _imported_paths ip ON f.path = ip.dirpath
+                                                   AND p.filename = ip.fname"""
+                    ).fetchall()
+                    photo_ids = [r["id"] for r in rows]
+                    thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+            else:
+                # Collection from all photos in the scanned folder
                 rows = thread_db.conn.execute(
                     """SELECT p.id FROM photos p
                        JOIN folders f ON p.folder_id = f.id
-                       JOIN _imported_paths ip ON f.path = ip.dirpath
-                                               AND p.filename = ip.fname"""
+                       WHERE f.path = ? OR f.path LIKE ?""",
+                    (source, source.rstrip("/") + "/%"),
                 ).fetchall()
                 photo_ids = [r["id"] for r in rows]
-                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
 
             collection_id = None
             collection_name = None
@@ -3419,19 +3435,22 @@ def create_app(db_path, thumb_cache_dir=None):
                     json.dumps([{"field": "photo_ids", "value": photo_ids}]),
                 )
 
-            return {
-                "copied": ingest_result.get("copied", 0),
-                "skipped_duplicate": ingest_result.get("skipped_duplicate", 0),
-                "failed": ingest_result.get("failed", 0),
-                "total": ingest_result.get("total", 0),
+            result = {
                 "photos_indexed": len(photo_ids),
                 "collection_id": collection_id,
                 "collection_name": collection_name,
             }
+            if copy:
+                result["copied"] = ingest_result.get("copied", 0)
+                result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
+                result["failed"] = ingest_result.get("failed", 0)
+                result["total"] = ingest_result.get("total", 0)
+
+            return result
 
         job_id = runner.start(
             "import-full", work,
-            config={"source": source, "destination": destination, "file_types": file_types},
+            config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
