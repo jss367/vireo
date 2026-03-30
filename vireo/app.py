@@ -11,8 +11,8 @@ import logging.handlers
 import os
 import queue
 import time
-from pathlib import Path
 import webbrowser
+from pathlib import Path
 
 from db import Database
 from flask import (
