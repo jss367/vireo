@@ -351,6 +351,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def keywords_page():
         return render_template("keywords.html")
 
+    @app.route("/jobs")
+    def jobs_page():
+        return render_template("jobs.html")
+
     # -- API routes --
 
     @app.route("/api/browse/init")
@@ -3219,6 +3223,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            runner.set_steps(job["id"], [
+                {"id": "scan", "label": "Scan photos"},
+                {"id": "thumbnails", "label": "Generate thumbnails"},
+            ])
+            runner.update_step(job["id"], "scan", status="running")
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
             do_scan(
@@ -3226,6 +3235,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
             )
             photo_count = job["progress"].get("total", 0)
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{photo_count} photos")
+            runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
             from thumbnails import generate_all
@@ -3263,6 +3275,8 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
             )
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=f"{thumb_result.get('generated', 0)} generated")
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
@@ -3474,10 +3488,23 @@ def create_app(db_path, thumb_cache_dir=None):
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
 
+            # Define steps based on whether we're copying
+            steps = []
+            if copy:
+                steps.append({"id": "ingest", "label": "Import photos"})
+            steps.extend([
+                {"id": "scan", "label": "Scan photos"},
+                {"id": "thumbnails", "label": "Generate thumbnails"},
+                {"id": "collection", "label": "Create collection"},
+            ])
+            runner.set_steps(job["id"], steps)
+
             if copy:
                 from ingest import ingest as do_ingest
 
                 # Phase 1: Copy files
+                runner.update_step(job["id"], "ingest", status="running")
+
                 def ingest_cb(current, total, filename):
                     job["progress"]["current"] = current
                     job["progress"]["total"] = total
@@ -3499,8 +3526,12 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
                 copied_paths = ingest_result.get("copied_paths", [])
                 scan_target = destination
+                runner.update_step(job["id"], "ingest", status="completed",
+                                   summary=f"{ingest_result.get('copied', 0)} copied")
 
             # Phase 2: Scan to index into DB
+            runner.update_step(job["id"], "scan", status="running")
+
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3511,8 +3542,12 @@ def create_app(db_path, thumb_cache_dir=None):
                 })
 
             do_scan(scan_target, thread_db, progress_callback=scan_cb)
+            scan_count = job["progress"].get("total", 0)
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{scan_count} photos")
 
             # Phase 3: Generate thumbnails
+            runner.update_step(job["id"], "thumbnails", status="running")
             runner.push_event(job["id"], "progress", {
                 "current": 0, "total": 0,
                 "current_file": "Checking for new thumbnails...",
@@ -3528,12 +3563,15 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Generating thumbnails",
                 })
 
-            generate_all(
+            thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
             )
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=f"{thumb_result.get('generated', 0)} generated")
 
             # Phase 4: Create collection
+            runner.update_step(job["id"], "collection", status="running")
             photo_ids = []
             if copy:
                 # Collection from copied files (existing logic)
@@ -3573,6 +3611,10 @@ def create_app(db_path, thumb_cache_dir=None):
                     collection_name,
                     json.dumps([{"field": "photo_ids", "value": photo_ids}]),
                 )
+
+            col_summary = collection_name if collection_name else "no photos"
+            runner.update_step(job["id"], "collection", status="completed",
+                               summary=col_summary)
 
             result = {
                 "photos_indexed": len(photo_ids),
@@ -3681,6 +3723,12 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db.set_active_workspace(active_ws)
             job["_start_time"] = time.time()
 
+            runner.set_steps(job["id"], [
+                {"id": "score", "label": "Score sharpness"},
+                {"id": "save", "label": "Save results & auto-flag"},
+            ])
+            runner.update_step(job["id"], "score", status="running")
+
             def progress_cb(current, total, msg):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3704,8 +3752,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 collection_id,
                 progress_callback=progress_cb,
             )
+            runner.update_step(job["id"], "score", status="completed",
+                               summary=f"{len(result['results'])} scored")
 
             # Save scores to database
+            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -3728,6 +3779,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     best_count += 1
 
             result["auto_flagged"] = best_count
+            runner.update_step(job["id"], "save", status="completed",
+                               summary=f"{best_count} flagged")
             # Don't return the full results list (could be huge)
             del result["results"]
             return result
@@ -4416,6 +4469,13 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
 
+            runner.set_steps(job["id"], [
+                {"id": "load", "label": "Load features"},
+                {"id": "group", "label": "Group encounters & bursts"},
+                {"id": "save", "label": "Save results"},
+            ])
+
+            runner.update_step(job["id"], "load", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4424,8 +4484,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
             photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
             if not photos:
+                runner.update_step(job["id"], "load", status="failed",
+                                   error="No photos with pipeline features found")
                 return {"error": "No photos with pipeline features found. Run extract-masks first."}
+            runner.update_step(job["id"], "load", status="completed",
+                               summary=f"{len(photos)} photos")
 
+            runner.update_step(job["id"], "group", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4433,7 +4498,11 @@ def create_app(db_path, thumb_cache_dir=None):
             )
 
             results = run_full_pipeline(photos, config=pipeline_cfg)
+            summary = results.get("summary", {})
+            runner.update_step(job["id"], "group", status="completed",
+                               summary=f"{summary.get('encounters', 0)} encounters")
 
+            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4442,6 +4511,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, active_ws)
+            runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]
 
