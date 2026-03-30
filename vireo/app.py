@@ -326,6 +326,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def keywords_page():
         return render_template("keywords.html")
 
+    @app.route("/jobs")
+    def jobs_page():
+        return render_template("jobs.html")
+
     # -- API routes --
 
     @app.route("/api/browse/init")

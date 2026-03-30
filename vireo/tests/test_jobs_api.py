@@ -161,6 +161,15 @@ def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
         assert "absolute" in resp.get_json()["error"]
 
 
+def test_jobs_page_returns_200(app_and_db):
+    """GET /jobs returns the jobs page."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/jobs')
+    assert resp.status_code == 200
+    assert b'Jobs' in resp.data
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
