@@ -315,6 +315,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def import_page():
         return render_template("import.html")
 
+    @app.route("/lightroom")
+    def lightroom_page():
+        return render_template("lightroom.html")
+
     @app.route("/audit")
     def audit():
         return render_template("audit.html")
