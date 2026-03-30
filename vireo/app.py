@@ -3188,6 +3188,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            runner.set_steps(job["id"], [
+                {"id": "scan", "label": "Scan photos"},
+                {"id": "thumbnails", "label": "Generate thumbnails"},
+            ])
+            runner.update_step(job["id"], "scan", status="running")
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
             do_scan(
@@ -3195,6 +3200,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
             )
             photo_count = job["progress"].get("total", 0)
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{photo_count} photos")
+            runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
             from thumbnails import generate_all
@@ -3232,6 +3240,8 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
             )
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=f"{thumb_result.get('generated', 0)} generated")
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 

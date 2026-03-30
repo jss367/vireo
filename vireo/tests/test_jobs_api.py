@@ -187,6 +187,33 @@ def test_bottom_panel_has_compact_jobs(app_and_db):
     assert 'bp-compact-job' in html or 'View history' in html or 'No active jobs' in html
 
 
+def test_scan_job_has_steps(app_and_db, tmp_path):
+    """Scan job defines steps for the jobs page tree view."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'test.jpg'))
+
+    resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(50):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    assert 'steps' in data
+    assert len(data['steps']) >= 2
+    assert data['steps'][0]['id'] == 'scan'
+    assert data['steps'][0]['status'] == 'completed'
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
