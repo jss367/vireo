@@ -303,6 +303,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         start_time = job.get("_start_time", time.time())
 
         for i, photo in enumerate(photos):
+            runner.update_step(
+                job["id"], "detect",
+                progress={"current": i + 1, "total": total},
+            )
             runner.push_event(
                 job["id"],
                 "progress",
@@ -531,6 +535,10 @@ def _classify_photos(
     for i, photo in enumerate(photos):
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
+        runner.update_step(
+            job["id"], "classify",
+            progress={"current": i + 1, "total": total},
+        )
         runner.push_event(
             job["id"],
             "progress",
@@ -753,6 +761,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     thread_db.set_active_workspace(workspace_id)
     job["_start_time"] = time.time()
 
+    runner.set_steps(job["id"], [
+        {"id": "load_taxonomy", "label": "Load taxonomy"},
+        {"id": "load_photos", "label": "Load photos"},
+        {"id": "load_model", "label": "Load model"},
+        {"id": "detect", "label": "Detect subjects"},
+        {"id": "classify", "label": "Classify species"},
+        {"id": "finalize", "label": "Finalize results"},
+    ])
+
     # Resolve model
     if params.model_id:
         all_models = get_models()
@@ -776,6 +793,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     model_name = params.model_name or effective_name
 
     # Phase 1: Load taxonomy
+    runner.update_step(job["id"], "load_taxonomy", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -798,8 +816,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         labels_files=params.labels_files,
         db=thread_db,
     )
+    tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+    labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
+    runner.update_step(
+        job["id"], "load_taxonomy", status="completed",
+        summary=f"{tax_summary}, {labels_summary}",
+    )
 
     # Phase 3: Get photos from collection
+    runner.update_step(job["id"], "load_photos", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -815,6 +840,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
     total = len(photos)
     job["progress"]["total"] = total
+    runner.update_step(
+        job["id"], "load_photos", status="completed",
+        summary=f"{total} photos",
+    )
 
     log.info(
         "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
@@ -830,6 +859,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         )
 
     # Phase 4: Initialize classifier
+    runner.update_step(job["id"], "load_model", status="running")
     if model_type == "timm":
         phase_msg = f"Loading {effective_name} timm model..."
     elif use_tol:
@@ -853,6 +883,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         clf = TimmClassifier(model_str, taxonomy=tax)
     else:
         def _emb_progress(current, emb_total):
+            runner.update_step(
+                job["id"], "load_model",
+                progress={"current": current, "total": emb_total},
+            )
             runner.push_event(
                 job["id"],
                 "progress",
@@ -871,8 +905,13 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
             pretrained_str=weights_path,
             embedding_progress_callback=_emb_progress,
         )
+    runner.update_step(
+        job["id"], "load_model", status="completed",
+        summary=effective_name,
+    )
 
     # Phase 5: Detect subjects
+    runner.update_step(job["id"], "detect", status="running")
     detection_map, detected = _detect_subjects(
         photos=photos,
         folders=folders,
@@ -880,6 +919,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         job=job,
         reclassify=params.reclassify,
         db=thread_db,
+    )
+    runner.update_step(
+        job["id"], "detect", status="completed",
+        summary=f"{detected} animals detected in {total} photos",
     )
 
     # Phase 6: Classify each photo
@@ -895,6 +938,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
 
     job["_start_time"] = time.time()  # reset rate timer for classification phase
 
+    runner.update_step(job["id"], "classify", status="running")
     raw_results, failed, skipped_existing = _classify_photos(
         photos=photos,
         folders=folders,
@@ -907,8 +951,19 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         job=job,
         db=thread_db,
     )
+    classified_count = len(raw_results) - skipped_existing
+    parts = [f"{classified_count} classified"]
+    if skipped_existing:
+        parts.append(f"{skipped_existing} cached")
+    if failed:
+        parts.append(f"{failed} failed")
+    runner.update_step(
+        job["id"], "classify", status="completed",
+        summary=", ".join(parts),
+    )
 
     # Phase 7: Group and store predictions
+    runner.update_step(job["id"], "finalize", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -929,6 +984,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         similarity_threshold=params.similarity_threshold,
         tax=tax,
         db=thread_db,
+    )
+    finalize_parts = [f"{group_result['predictions_stored']} predictions"]
+    if group_result["burst_groups"]:
+        finalize_parts.append(f"{group_result['burst_groups']} burst groups")
+    if group_result["already_labeled"]:
+        finalize_parts.append(f"{group_result['already_labeled']} already labeled")
+    runner.update_step(
+        job["id"], "finalize", status="completed",
+        summary=", ".join(finalize_parts),
     )
 
     log.info(
