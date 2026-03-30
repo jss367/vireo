@@ -400,6 +400,11 @@ function initPipelinePage() {
     .then(function(data) {
       var cfg = data.pipeline_config;
 
+      // Stage 1: Source — mark complete if any downstream stage has data
+      if (data.has_detections || data.has_masks || data.results) {
+        document.getElementById('numSource').classList.add('complete');
+      }
+
       // Stage 2: Classify
       if (data.has_detections) {
         document.getElementById('numClassify').classList.add('complete');
@@ -471,6 +476,7 @@ async function loadCollections() {
 // -- Card 1: Source --
 var _sourceMode = 'import'; // 'import' or 'collection'
 var _copyMode = false;
+var _sourceWasReady = false;
 
 function onCopyModeChange() {
   _copyMode = document.getElementById('chkCopyPhotos').checked;
@@ -575,6 +581,19 @@ function updateStartButton() {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
   }
+
+  // Update stage 1 indicator and auto-expand stage 2 when source is ready
+  var sourceReady = !btn.disabled;
+  var numSource = document.getElementById('numSource');
+  if (sourceReady) {
+    numSource.classList.add('complete');
+    if (!_sourceWasReady) {
+      document.getElementById('card-classify').classList.add('expanded');
+    }
+  } else {
+    numSource.className = 'stage-num';
+  }
+  _sourceWasReady = sourceReady;
 }
 
 // -- Pipeline orchestration --
