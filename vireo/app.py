@@ -1647,8 +1647,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids")
-        if not photo_ids:
+        if not isinstance(photo_ids, list) or not photo_ids:
             return jsonify({"error": "photo_ids required"}), 400
+        if not all(isinstance(pid, int) for pid in photo_ids):
+            return jsonify({"error": "photo_ids must be a list of integers"}), 400
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
