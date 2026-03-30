@@ -608,7 +608,7 @@ async function startPipeline() {
   body.reclassify = !!document.getElementById('chkReclassify').checked;
 
   // Reset all stage cards to pending state
-  ['Source', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Classify', 'Extract'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
@@ -665,7 +665,6 @@ var _stageToCard = {
   model_loader: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
-  regroup: 'Group',
 };
 
 // Map pipeline stage names to the progress bar element suffixes
@@ -673,7 +672,6 @@ var _stageToProgress = {
   scan: 'Source',
   classify: 'Classify',
   extract_masks: 'Extract',
-  regroup: 'Group',
 };
 
 function _updatePipelineStageUI(p) {
@@ -780,23 +778,6 @@ function _onPipelineComplete(result) {
     if (statusExt) { statusExt.textContent = 'Done!'; statusExt.className = 'status-msg ok'; }
   }
 
-  // Group card
-  if (stageResults.regroup) {
-    document.getElementById('numGroup').className = 'stage-num complete';
-    var grp = stageResults.regroup;
-    var grpSummary = [];
-    if (grp.encounter_count != null) grpSummary.push(grp.encounter_count + ' encounters');
-    if (grp.keep_count != null) grpSummary.push(grp.keep_count + 'K / ' + (grp.review_count||0) + 'R / ' + (grp.reject_count||0) + 'X');
-    document.getElementById('txtResults').textContent = grpSummary.join(' \u2014 ');
-    var resultsLink = document.getElementById('viewResultsLink');
-    if (resultsLink) resultsLink.style.display = '';
-    _pipelineState.hasResults = true;
-    var statusGrp = document.getElementById('statusGroup');
-    var fillGrp = document.getElementById('fillGroup');
-    if (fillGrp) fillGrp.style.width = '100%';
-    if (statusGrp) { statusGrp.textContent = 'Done!'; statusGrp.className = 'status-msg ok'; }
-  }
-
   // Show errors if any
   if (r.errors && r.errors.length > 0) {
     var errorStages = {};
@@ -812,6 +793,11 @@ function _onPipelineComplete(result) {
         if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
       }
     }
+  }
+
+  // Auto-redirect to review page on success
+  if (succeeded && (!r.errors || r.errors.length === 0)) {
+    window.location.href = '/pipeline/review';
   }
 }
 
