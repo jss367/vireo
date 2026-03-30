@@ -872,6 +872,7 @@ async function createWorkspace() {
     <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Inspect Pipeline
     </button>
+    <button onclick="lightboxDelete()" style="background:var(--danger);color:white;border:none;padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;" title="Delete photo">Delete</button>
   </div>
 </div>
 
@@ -1127,6 +1128,35 @@ async function confirmDelete() {
   showToast(msg, 'success');
 
   if (savedCallback) savedCallback(data);
+}
+
+function lightboxDelete() {
+  if (!_lightboxCurrentId) return;
+  var currentId = _lightboxCurrentId;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
+  var companionCount = (p && p.companion_path) ? 1 : 0;
+
+  showDeleteDialog([currentId], companionCount, function(data) {
+    // Remove from lightbox photo list
+    var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
+    _lightboxPhotoList.splice(idx, 1);
+
+    if (_lightboxPhotoList.length === 0) {
+      closeLightbox(null);
+    } else {
+      var nextIdx = Math.min(idx, _lightboxPhotoList.length - 1);
+      var next = _lightboxPhotoList[nextIdx];
+      openLightbox(next.id, next.filename, _lightboxPhotoList);
+    }
+
+    // Also update browse grid if we're on the browse page
+    if (typeof photos !== 'undefined' && typeof renderGrid === 'function') {
+      photos = photos.filter(function(x) { return x.id !== currentId; });
+      selectedPhotos.delete(currentId);
+      if (selectedPhotoId === currentId) selectedPhotoId = null;
+      renderGrid();
+    }
+  });
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
