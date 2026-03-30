@@ -192,6 +192,16 @@ body { padding-bottom: 36px; }
 .photo-label.keep { background: var(--accent); color: var(--accent-text); }
 .photo-label.review { background: var(--warning); color: var(--accent-text); }
 .photo-label.reject { background: var(--danger); color: var(--text-primary); }
+.photo-flag-badge {
+  position: absolute;
+  bottom: 24px; left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.photo-flag-badge.flag-flagged { background: var(--accent); color: var(--accent-text); }
+.photo-flag-badge.flag-rejected { background: var(--danger); color: var(--text-primary); }
 .photo-rarity {
   position: absolute;
   top: 6px; right: 6px;
@@ -1113,6 +1123,8 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
+  if (p.flag === 'flagged') html += '<span class="photo-flag-badge flag-flagged">P</span>';
+  else if (p.flag === 'rejected') html += '<span class="photo-flag-badge flag-rejected">X</span>';
   if (encIdx != null && burstIdx != null) {
     html += '<button class="detach-btn" onclick="event.stopPropagation();detachPhoto(' + encIdx + ',' + burstIdx + ',' + p.id + ')" title="Detach photo" style="position:absolute;top:2px;right:2px;">&times;</button>';
   }
@@ -1404,6 +1416,8 @@ function openInspect(photoId) {
 
   // Triage badge + reasoning
   html += '<span class="triage-badge ' + label + '">' + (photo.label || 'UNSCORED') + '</span>';
+  if (photo.flag === 'flagged') html += ' <span class="triage-badge" style="background:var(--accent);color:var(--accent-text);">Flagged (P)</span>';
+  else if (photo.flag === 'rejected') html += ' <span class="triage-badge" style="background:var(--danger);color:var(--text-primary);">Rejected (X)</span>';
   if (photo.rarity_protected) {
     html += ' <span class="triage-badge review">Rarity Protected</span>';
   }
@@ -1915,8 +1929,15 @@ function renderGroupModal() {
     var qScore = p.quality_composite != null ? Math.round(p.quality_composite * 100) : '-';
     var sharp = p.subject_tenengrad != null ? Math.round(p.subject_tenengrad) : '-';
 
+    var flagHtml = '';
+    if (p.flag === 'flagged') flagHtml = '<span class="photo-flag-badge flag-flagged" style="bottom:auto;top:4px;left:4px;">P</span>';
+    else if (p.flag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" style="bottom:auto;top:4px;left:4px;">X</span>';
+
     return '<div class="' + cls + '" data-photo-id="' + p.id + '" onclick="grmSelect(' + p.id + ')">' +
-      '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy">' +
+      '<div style="position:relative;">' +
+        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy">' +
+        flagHtml +
+      '</div>' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(p.filename || '') + '</div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
