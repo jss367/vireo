@@ -21,7 +21,7 @@ from db import Database
 
 log = logging.getLogger(__name__)
 
-_SENTINEL = None  # signals "upstream is done"
+_SENTINEL = object()  # unique end-of-stream marker
 
 
 @dataclass
