@@ -4337,8 +4337,6 @@ def create_app(db_path, thumb_cache_dir=None):
 
         if not source and not collection_id:
             return json_error("source or collection_id required")
-        if source and not body.get("destination"):
-            return json_error("destination required when source is provided")
         if source and not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
 
