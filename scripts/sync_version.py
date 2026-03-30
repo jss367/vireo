@@ -22,21 +22,54 @@ def update_json_file(path, version):
 
 
 def update_astro_version(path, version):
-    """Update the version constant in an Astro file."""
+    """Update all per-platform version constants in an Astro file."""
+    with open(path) as f:
+        content = f.read()
+    # Update all per-platform version constants
+    platforms = ["macosArm64Version", "macosX86Version", "windowsVersion", "linuxVersion"]
+    count = 0
+    for plat in platforms:
+        content, n = re.subn(
+            rf"const {plat} = '[^']*'",
+            f"const {plat} = '{version}'",
+            content,
+            count=1,
+        )
+        count += n
+    if count == 0:
+        print(f"  {path}: WARNING - no version constants found")
+        return
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"  {path}: updated {count} platform versions to {version}")
+
+
+def update_astro_platform_version(path, platform, version):
+    """Update a single platform version constant in an Astro file."""
+    var_map = {
+        "macos-arm64": "macosArm64Version",
+        "macos-x86_64": "macosX86Version",
+        "windows-x86_64": "windowsVersion",
+        "linux-x86_64": "linuxVersion",
+    }
+    var_name = var_map.get(platform)
+    if not var_name:
+        print(f"  {path}: WARNING - unknown platform '{platform}'")
+        return
     with open(path) as f:
         content = f.read()
     new_content, count = re.subn(
-        r"const version = '[^']*'",
-        f"const version = '{version}'",
+        rf"const {var_name} = '[^']*'",
+        f"const {var_name} = '{version}'",
         content,
         count=1,
     )
     if count == 0:
-        print(f"  {path}: WARNING - no version constant found")
+        print(f"  {path}: WARNING - {var_name} not found")
         return
     with open(path, "w") as f:
         f.write(new_content)
-    print(f"  {path}: updated to {version}")
+    print(f"  {path}: {var_name} -> {version}")
 
 
 def update_toml_file(path, version):
@@ -59,12 +92,35 @@ def update_toml_file(path, version):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    if len(args) != 1:
-        print(f"Usage: {sys.argv[0]} <version> [--include-website]")
+    # Parse --platform values before stripping flags
+    platform_flags = []
+    skip_next = False
+    positional = []
+    for i, a in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--platform":
+            if i + 1 < len(sys.argv):
+                platform_flags.append(sys.argv[i + 1])
+                skip_next = True
+            continue
+        if a.startswith("--"):
+            continue
+        positional.append(a)
+
+    if len(positional) != 1:
+        print(f"Usage: {sys.argv[0]} <version> [--include-website] [--platform LABEL]")
         sys.exit(1)
 
-    version = args[0].lstrip("v")
+    version = positional[0].lstrip("v")
+    if platform_flags:
+        path = "website/src/pages/download.astro"
+        for plat in platform_flags:
+            update_astro_platform_version(path, plat, version)
+        print("Done.")
+        return
+
     print(f"Syncing version to {version}")
 
     update_json_file("src-tauri/tauri.conf.json", version)
