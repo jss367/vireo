@@ -4015,7 +4015,7 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Labeled %d photos as '%s'", len(photo_ids), label)
         return jsonify({"ok": True, "updated": len(photo_ids), "keyword_id": kid})
 
-    @app.route("/api/species")
+    @app.route("/api/species/summary")
     def api_species_list():
         """List all species with prediction counts, for the variant explorer."""
         db = _get_db()

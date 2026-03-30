@@ -233,7 +233,7 @@ var activeSpecies = null;
 
 async function loadSpecies() {
   try {
-    allSpecies = await safeFetch('/api/species', {}, { toast: false });
+    allSpecies = await safeFetch('/api/species/summary', {}, { toast: false });
     renderSpeciesList(allSpecies);
   } catch(e) {
     document.getElementById('speciesList').innerHTML =
