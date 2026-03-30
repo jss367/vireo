@@ -144,6 +144,9 @@ class JobRunner:
         if job["status"] == "failed" and job["errors"]:
             result_data = {"error": job["errors"][0]}
 
+        tree_json = json.dumps(job.get("steps", []))
+        summary = self._build_summary(job)
+
         params = (
             job["id"],
             job["type"],
@@ -155,6 +158,8 @@ class JobRunner:
             len(job["errors"]),
             json.dumps(job["config"]),
             job.get("workspace_id"),
+            tree_json,
+            summary,
         )
 
         for attempt in range(3):
@@ -163,10 +168,21 @@ class JobRunner:
                 conn.execute(
                     """INSERT OR REPLACE INTO job_history
                        (id, type, status, started_at, finished_at, duration,
-                        result, error_count, config, workspace_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        result, error_count, config, workspace_id, tree, summary)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     params,
                 )
+                ws_id = job.get("workspace_id")
+                if ws_id is not None:
+                    conn.execute(
+                        """DELETE FROM job_history
+                           WHERE workspace_id = ? AND id NOT IN (
+                               SELECT id FROM job_history
+                               WHERE workspace_id = ?
+                               ORDER BY started_at DESC LIMIT 100
+                           )""",
+                        (ws_id, ws_id),
+                    )
                 conn.commit()
                 conn.close()
                 return
@@ -178,6 +194,29 @@ class JobRunner:
                         "Failed to persist job history for %s after 3 attempts",
                         job["id"],
                     )
+
+    def _build_summary(self, job):
+        """Build a one-line summary from job steps or result."""
+        steps = job.get("steps", [])
+        if steps:
+            parts = []
+            for s in steps:
+                if s.get("summary"):
+                    parts.append(s["summary"])
+            if parts:
+                return ", ".join(parts)
+
+        result = job.get("result")
+        if result and isinstance(result, dict):
+            parts = []
+            for k, v in result.items():
+                if isinstance(v, dict):
+                    continue
+                parts.append(f"{k}: {v}")
+            if parts:
+                return ", ".join(parts[:3])
+
+        return job["type"] + " " + job["status"]
 
     def get(self, job_id):
         """Get a job by id."""

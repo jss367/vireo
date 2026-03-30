@@ -228,3 +228,87 @@ def test_job_steps_tracking(tmp_path):
     assert j["steps"][0]["summary"] == "142 folders"
     assert j["steps"][1]["progress"]["current"] == 50
     assert j["steps"][2]["status"] == "pending"
+
+
+def test_job_history_persists_steps_tree(tmp_path):
+    """Completed jobs persist their step tree to job_history."""
+    import json
+    import time
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    runner = JobRunner(db=db)
+
+    def work(job):
+        runner.set_steps(job["id"], [
+            {"id": "scan", "label": "Scan folders"},
+            {"id": "index", "label": "Index photos"},
+        ])
+        runner.update_step(job["id"], "scan", status="running")
+        runner.update_step(job["id"], "scan", status="completed", summary="50 folders")
+        runner.update_step(job["id"], "index", status="running")
+        runner.update_step(job["id"], "index", status="completed", summary="200 photos")
+        return {"photos_indexed": 200}
+
+    job_id = runner.start("scan", work, workspace_id=ws_id)
+
+    for _ in range(50):
+        j = runner.get(job_id)
+        if j and j["status"] != "running":
+            break
+        time.sleep(0.1)
+
+    time.sleep(0.5)
+
+    history = runner.get_history(db, limit=1)
+    assert len(history) > 0
+    row = history[0]
+    assert row["tree"] is not None
+    tree = json.loads(row["tree"]) if isinstance(row["tree"], str) else row["tree"]
+    assert len(tree) == 2
+    assert tree[0]["id"] == "scan"
+    assert tree[0]["status"] == "completed"
+    assert row["summary"] != ""
+
+
+def test_job_history_prunes_to_100(tmp_path):
+    """Job history prunes entries beyond 100 per workspace."""
+    import time
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    runner = JobRunner(db=db)
+
+    for i in range(101):
+        db.conn.execute(
+            """INSERT INTO job_history
+               (id, type, status, started_at, finished_at, duration,
+                result, error_count, config, workspace_id, tree, summary)
+               VALUES (?, 'test', 'completed', ?, ?, 1.0, '{}', 0, '{}', ?, '[]', 'test')""",
+            (f"test-{i}", f"2026-01-01T00:{i:02d}:00", f"2026-01-01T00:{i:02d}:01", ws_id),
+        )
+    db.conn.commit()
+
+    def work(job):
+        return {}
+
+    job_id = runner.start("test", work, workspace_id=ws_id)
+    for _ in range(50):
+        j = runner.get(job_id)
+        if j and j["status"] != "running":
+            break
+        time.sleep(0.1)
+    time.sleep(0.5)
+
+    count = db.conn.execute(
+        "SELECT COUNT(*) FROM job_history WHERE workspace_id = ?", (ws_id,)
+    ).fetchone()[0]
+    assert count <= 100
