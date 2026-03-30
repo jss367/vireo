@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import time
+from pathlib import Path
 import webbrowser
 
 from db import Database
@@ -3333,7 +3334,7 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db.set_active_workspace(active_ws)
             job["_start_time"] = time.time()
 
-            scan_target = source  # default: scan source in place
+            scan_target = str(Path(source))  # normalize (strips trailing slash)
 
             if copy:
                 from ingest import ingest as do_ingest
@@ -3421,7 +3422,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     """SELECT p.id FROM photos p
                        JOIN folders f ON p.folder_id = f.id
                        WHERE f.path = ? OR f.path LIKE ?""",
-                    (source, source.rstrip("/") + "/%"),
+                    (scan_target, scan_target + "/%"),
                 ).fetchall()
                 photo_ids = [r["id"] for r in rows]
 
