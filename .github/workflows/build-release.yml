@@ -268,7 +268,7 @@ jobs:
   update-website:
     needs: [build, release]
     runs-on: ubuntu-latest
-    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
+    if: needs.release.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
 
     steps:
       - name: Checkout repository
