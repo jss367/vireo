@@ -1050,6 +1050,103 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
+    def get_browse_summary(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+    ):
+        """Return summary stats for the browse panel, scoped to active workspace and filters."""
+        ws = self._ws_id()
+
+        # Build shared filter conditions
+        conditions = ["wf.workspace_id = ?"]
+        params = [ws]
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            params.append(date_to)
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        # Total (unfiltered) count
+        total = self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()[0]
+
+        # Filtered count
+        filtered_total = self.conn.execute(
+            f"SELECT COUNT(DISTINCT p.id) FROM photos p {join_clause} {where}",
+            params,
+        ).fetchone()[0]
+
+        # Classified vs unclassified (within filter)
+        classified = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) FROM photos p
+                {join_clause}
+                JOIN predictions pred ON pred.photo_id = p.id AND pred.workspace_id = ?
+                {where}""",
+            [ws] + params,
+        ).fetchone()[0]
+
+        # Top species (within filter)
+        top_species = self.conn.execute(
+            f"""SELECT pred.species, COUNT(DISTINCT p.id) as count
+                FROM photos p
+                {join_clause}
+                JOIN predictions pred ON pred.photo_id = p.id
+                    AND pred.workspace_id = ? AND pred.status != 'rejected'
+                {where}
+                GROUP BY pred.species
+                ORDER BY count DESC
+                LIMIT 5""",
+            [ws] + params,
+        ).fetchall()
+
+        # Folder breakdown (within filter)
+        folder_counts = self.conn.execute(
+            f"""SELECT f.id as folder_id, f.name, COUNT(DISTINCT p.id) as count
+                FROM photos p
+                {join_clause}
+                JOIN folders f ON f.id = p.folder_id
+                {where}
+                GROUP BY f.id
+                ORDER BY count DESC""",
+            params,
+        ).fetchall()
+
+        return {
+            "total": total,
+            "filtered_total": filtered_total,
+            "classified": classified,
+            "unclassified": filtered_total - classified,
+            "top_species": [{"species": r["species"], "count": r["count"]} for r in top_species],
+            "folder_counts": [{"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts],
+        }
+
     def get_geolocated_photos(
         self,
         folder_id=None,

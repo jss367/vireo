@@ -503,6 +503,24 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify(data)
 
+    @app.route("/api/browse/summary")
+    def api_browse_summary():
+        db = _get_db()
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        return jsonify(
+            db.get_browse_summary(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+            )
+        )
+
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
         db = _get_db()
