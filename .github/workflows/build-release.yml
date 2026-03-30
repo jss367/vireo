@@ -17,6 +17,8 @@ permissions:
 env:
   PYTHON_VERSION: "3.14"
   NODE_VERSION: "20"
+  # Limit parallel Rust compilation to avoid OOM on 7GB GitHub runners
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   build:
