@@ -121,28 +121,42 @@ class Database:
                 workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS detections (
+                id                INTEGER PRIMARY KEY,
+                photo_id          INTEGER REFERENCES photos(id),
+                workspace_id      INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                box_x             REAL,
+                box_y             REAL,
+                box_w             REAL,
+                box_h             REAL,
+                detector_confidence REAL,
+                category          TEXT DEFAULT 'animal',
+                detector_model    TEXT,
+                created_at        TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS predictions (
-                id          INTEGER PRIMARY KEY,
-                photo_id    INTEGER REFERENCES photos(id),
-                species     TEXT,
-                confidence  REAL,
-                model       TEXT,
-                category    TEXT,
-                status      TEXT DEFAULT 'pending',
-                group_id    TEXT,
-                vote_count  INTEGER,
-                total_votes INTEGER,
-                individual  TEXT,
+                id              INTEGER PRIMARY KEY,
+                detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+                species         TEXT,
+                confidence      REAL,
+                model           TEXT,
+                category        TEXT,
+                status          TEXT DEFAULT 'pending',
+                group_id        TEXT,
+                vote_count      INTEGER,
+                total_votes     INTEGER,
+                individual      TEXT,
                 taxonomy_kingdom TEXT,
                 taxonomy_phylum TEXT,
-                taxonomy_class TEXT,
-                taxonomy_order TEXT,
+                taxonomy_class  TEXT,
+                taxonomy_order  TEXT,
                 taxonomy_family TEXT,
-                taxonomy_genus TEXT,
+                taxonomy_genus  TEXT,
                 scientific_name TEXT,
-                created_at  TEXT DEFAULT (datetime('now')),
-                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                UNIQUE(photo_id, model, workspace_id)
+                created_at      TEXT DEFAULT (datetime('now')),
+                reviewed_at     TEXT,
+                UNIQUE(detection_id, model)
             );
 
             CREATE TABLE IF NOT EXISTS inat_submissions (
@@ -211,7 +225,9 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
-            CREATE INDEX IF NOT EXISTS idx_predictions_photo ON predictions(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_detections_photo ON detections(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_detections_workspace ON detections(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_predictions_detection ON predictions(detection_id);
             CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
         """
         )
@@ -337,12 +353,14 @@ class Database:
             """)
 
         # Workspace migration for existing databases
-        # Check if predictions has workspace_id (detects legacy DBs even though
-        # the workspaces table was already created by executescript above)
+        # Only triggers for legacy DBs that have predictions with photo_id
+        # but no workspace_id. New schema uses detection_id instead of photo_id,
+        # so this migration is skipped for fresh databases.
         needs_workspace_migration = False
-        try:
-            self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
-        except Exception:
+        pred_schema = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
+        ).fetchone()
+        if pred_schema and "photo_id" in pred_schema[0].lower() and "workspace_id" not in pred_schema[0].lower():
             needs_workspace_migration = True
 
         if needs_workspace_migration:
@@ -453,15 +471,79 @@ class Database:
                 "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
             )
 
+        # Multi-animal migration: add detections table, restructure predictions
+        needs_multi_animal_migration = False
+        try:
+            self.conn.execute("SELECT id FROM detections LIMIT 0")
+        except Exception:
+            needs_multi_animal_migration = True
+
+        if needs_multi_animal_migration:
+            # Create detections table if missing
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS detections (
+                    id                INTEGER PRIMARY KEY,
+                    photo_id          INTEGER REFERENCES photos(id),
+                    workspace_id      INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                    box_x             REAL,
+                    box_y             REAL,
+                    box_w             REAL,
+                    box_h             REAL,
+                    detector_confidence REAL,
+                    category          TEXT DEFAULT 'animal',
+                    detector_model    TEXT,
+                    created_at        TEXT DEFAULT (datetime('now'))
+                )
+            """)
+
+            # Check if predictions still uses old schema (has photo_id column)
+            old_pred_schema = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
+            ).fetchone()
+            if old_pred_schema and "photo_id" in old_pred_schema[0].lower() and "detection_id" not in old_pred_schema[0].lower():
+                # Drop old predictions — accepted keywords are in photo_keywords
+                # and survive. Pending/rejected predictions are lost.
+                self.conn.execute("DROP TABLE IF EXISTS predictions")
+                self.conn.execute("""
+                    CREATE TABLE predictions (
+                        id              INTEGER PRIMARY KEY,
+                        detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+                        species         TEXT,
+                        confidence      REAL,
+                        model           TEXT,
+                        category        TEXT,
+                        status          TEXT DEFAULT 'pending',
+                        group_id        TEXT,
+                        vote_count      INTEGER,
+                        total_votes     INTEGER,
+                        individual      TEXT,
+                        taxonomy_kingdom TEXT,
+                        taxonomy_phylum TEXT,
+                        taxonomy_class  TEXT,
+                        taxonomy_order  TEXT,
+                        taxonomy_family TEXT,
+                        taxonomy_genus  TEXT,
+                        scientific_name TEXT,
+                        created_at      TEXT DEFAULT (datetime('now')),
+                        reviewed_at     TEXT,
+                        UNIQUE(detection_id, model)
+                    )
+                """)
+            self.conn.commit()
+
         # Ensure indexes exist (for fresh DBs that skip migration, and for
         # legacy DBs where DROP TABLE predictions destroys earlier indexes)
         self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_predictions_workspace "
-            "ON predictions(workspace_id)"
+            "CREATE INDEX IF NOT EXISTS idx_detections_photo "
+            "ON detections(photo_id)"
         )
         self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_predictions_photo "
-            "ON predictions(photo_id)"
+            "CREATE INDEX IF NOT EXISTS idx_detections_workspace "
+            "ON detections(workspace_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_predictions_detection "
+            "ON predictions(detection_id)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_predictions_status "

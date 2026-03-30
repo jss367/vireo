@@ -1470,3 +1470,37 @@ def test_database_supports_in_memory_sqlite():
 
     assert row is not None
     assert row["name"] == "Default"
+
+
+def test_detections_table_exists(tmp_path):
+    """The detections table should exist with expected columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='detections'"
+    ).fetchone()
+    assert row is not None
+    schema = row[0].lower()
+    assert "photo_id" in schema
+    assert "workspace_id" in schema
+    assert "box_x" in schema
+    assert "box_y" in schema
+    assert "box_w" in schema
+    assert "box_h" in schema
+    assert "detector_confidence" in schema
+    assert "category" in schema
+    assert "detector_model" in schema
+
+
+def test_predictions_references_detection_id(tmp_path):
+    """The predictions table should reference detection_id, not photo_id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
+    ).fetchone()
+    schema = row[0].lower()
+    assert "detection_id" in schema
+    # photo_id should NOT be a direct column anymore
+    # (it's accessed via JOIN through detections)
+    assert "photo_id" not in schema
