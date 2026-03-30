@@ -68,7 +68,14 @@ jobs:
           cache: pip
 
       - name: Install PyTorch (CPU only)
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # PyTorch CPU index has no macOS wheels; default PyPI serves CPU-only builds for Mac
+            pip install torch torchvision
+          else
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          fi
 
       - name: Install Python dependencies
         run: |
