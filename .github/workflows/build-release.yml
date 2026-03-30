@@ -63,15 +63,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           # Windows: PyInstaller --onefile DLL loading bug with 3.14
-          # macOS x86: no PyTorch CPU wheels for x86_64 + 3.14
-          python-version: ${{ (runner.os == 'Windows' || matrix.label == 'macos-x86_64') && '3.13' || env.PYTHON_VERSION }}
+          # macOS x86: last PyTorch x86_64 macOS wheel (2.2.2) requires Python <=3.12
+          python-version: ${{ matrix.label == 'macos-x86_64' && '3.12' || (runner.os == 'Windows' && '3.13' || env.PYTHON_VERSION) }}
           cache: pip
 
       - name: Install PyTorch (CPU only)
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # PyTorch CPU index has no macOS wheels; default PyPI serves CPU-only builds for Mac
+          if [ "${{ matrix.label }}" = "macos-x86_64" ]; then
+            # PyTorch dropped macOS x86_64 after 2.2.2 — pin to last available wheels
+            pip install torch==2.2.2 torchvision==0.17.2
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # Default PyPI serves CPU-only builds for Mac arm64
             pip install torch torchvision
           else
             pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
