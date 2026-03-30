@@ -729,6 +729,7 @@ body {
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
@@ -1660,6 +1661,31 @@ async function batchAddKeyword() {
     });
   } catch(e) { return; }
   showUndoToast();
+}
+
+function batchDelete() {
+  var ids = Array.from(selectedPhotos);
+  if (ids.length === 0) return;
+  var companionCount = 0;
+  ids.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p && p.companion_path) companionCount++;
+  });
+  showDeleteDialog(ids, companionCount, function(data) {
+    // Remove deleted photos from local array
+    var deletedSet = new Set(ids);
+    photos = photos.filter(function(p) { return !deletedSet.has(p.id); });
+    selectedPhotos.clear();
+    selectedPhotoId = null;
+    document.getElementById('batchBar').style.display = 'none';
+    renderGrid();
+    // Update total count display
+    var countEl = document.getElementById('photoCount');
+    if (countEl) {
+      var current = parseInt(countEl.textContent) || 0;
+      countEl.textContent = (current - data.deleted);
+    }
+  });
 }
 
 async function addToCollection() {

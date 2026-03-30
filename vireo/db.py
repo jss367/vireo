@@ -705,7 +705,7 @@ class Database:
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     detection_box, detection_conf, subject_sharpness, subject_size, quality_score,
-                    latitude, longitude"""
+                    latitude, longitude, companion_path"""
 
     # Columns for single-photo detail queries (includes exif_data JSON)
     PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
@@ -1197,6 +1197,107 @@ class Database:
             [flag] + list(photo_ids),
         )
         self.conn.commit()
+
+    def delete_photos(self, photo_ids, include_companions=False):
+        """Delete photos and all associated data.
+
+        Returns dict with 'deleted' count and 'files' list of
+        {photo_id, folder_path, filename, companion_path} for file cleanup.
+        """
+        if not photo_ids:
+            return {"deleted": 0, "files": []}
+
+        # Resolve to actual existing photos
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+            f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+            f"WHERE p.id IN ({placeholders})",
+            list(photo_ids),
+        ).fetchall()
+
+        if not rows:
+            return {"deleted": 0, "files": []}
+
+        # Resolve companions
+        if include_companions:
+            companion_ids = []
+            for row in rows:
+                if row["companion_path"]:
+                    comp = self.conn.execute(
+                        "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                        (row["folder_id"], row["companion_path"]),
+                    ).fetchone()
+                    if comp and comp["id"] not in photo_ids:
+                        companion_ids.append(comp["id"])
+            if companion_ids:
+                comp_ph = ",".join("?" for _ in companion_ids)
+                comp_rows = self.conn.execute(
+                    f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+                    f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+                    f"WHERE p.id IN ({comp_ph})",
+                    companion_ids,
+                ).fetchall()
+                rows = list(rows) + list(comp_rows)
+
+        all_ids = list({row["id"] for row in rows})
+        ph = ",".join("?" for _ in all_ids)
+
+        # Collect file info before deleting
+        files = [
+            {
+                "photo_id": row["id"],
+                "folder_path": row["folder_path"],
+                "filename": row["filename"],
+                "companion_path": row["companion_path"],
+            }
+            for row in rows
+        ]
+
+        # Count photos per folder for decrementing
+        folder_counts = {}
+        for row in rows:
+            folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
+
+        # Delete associated data (non-cascading FKs)
+        self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
+        self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
+        self.conn.execute(f"DELETE FROM predictions WHERE photo_id IN ({ph})", all_ids)
+
+        # Clean collection rules
+        import json as _json
+        collections = self.conn.execute(
+            "SELECT id, rules FROM collections WHERE workspace_id = ?",
+            (self._ws_id(),),
+        ).fetchall()
+        deleted_set = set(all_ids)
+        for coll in collections:
+            rules = _json.loads(coll["rules"])
+            changed = False
+            for rule in rules:
+                if rule.get("field") == "photo_ids" and "value" in rule:
+                    original_len = len(rule["value"])
+                    rule["value"] = [v for v in rule["value"] if v not in deleted_set]
+                    if len(rule["value"]) != original_len:
+                        changed = True
+            if changed:
+                self.conn.execute(
+                    "UPDATE collections SET rules = ? WHERE id = ?",
+                    (_json.dumps(rules), coll["id"]),
+                )
+
+        # Delete photos (cascades to edit_history_items, inat_submissions)
+        self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
+
+        # Update folder counts
+        for fid, count in folder_counts.items():
+            self.conn.execute(
+                "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
+                (count, fid),
+            )
+
+        self.conn.commit()
+        return {"deleted": len(all_ids), "files": files}
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""

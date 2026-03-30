@@ -812,6 +812,92 @@ def create_app(db_path, thumb_cache_dir=None):
                        str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(photo_ids)})
 
+    @app.route("/api/batch/delete", methods=["POST"])
+    def api_batch_delete():
+        """Delete photos from Vireo, optionally moving files to trash."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        if mode == "disk_permanent" and paths:
+            # Retry path: DB already cleaned up, just delete files
+            trashed = 0
+            trash_failed = []
+            for p in paths:
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    os.remove(p)
+                    trashed += 1
+                except OSError:
+                    log.warning("Permanent delete failed for %s", p, exc_info=True)
+                    trash_failed.append({"path": p})
+            return jsonify({
+                "ok": True, "deleted": 0, "trashed": trashed,
+                "trash_failed": trash_failed,
+            })
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+
+        result = db.delete_photos(photo_ids, include_companions=include_companions)
+
+        # Clean up cached files (thumbnails, previews)
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        preview_dir = os.path.join(os.path.dirname(thumb_dir), "previews")
+        for f in result["files"]:
+            pid = f["photo_id"]
+            for d in [thumb_dir, preview_dir]:
+                cached = os.path.join(d, f"{pid}.jpg")
+                if os.path.isfile(cached):
+                    os.remove(cached)
+
+        trashed = 0
+        trash_failed = []
+        if mode in ("disk", "disk_permanent"):
+            for f in result["files"]:
+                # Collect all files to delete: primary + companion
+                file_paths = []
+                primary = os.path.join(f["folder_path"], f["filename"])
+                file_paths.append(primary)
+                if include_companions and f.get("companion_path"):
+                    companion = os.path.join(f["folder_path"], f["companion_path"])
+                    file_paths.append(companion)
+
+                for filepath in file_paths:
+                    if not os.path.isfile(filepath):
+                        log.warning("File already missing: %s", filepath)
+                        continue
+                    if mode == "disk":
+                        try:
+                            from send2trash import send2trash as _trash
+                            _trash(filepath)
+                            trashed += 1
+                        except Exception:
+                            log.warning("Trash failed for %s", filepath, exc_info=True)
+                            trash_failed.append({"path": filepath})
+                    else:  # disk_permanent
+                        try:
+                            os.remove(filepath)
+                            trashed += 1
+                        except OSError:
+                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                            trash_failed.append({"path": filepath})
+
+        return jsonify({
+            "ok": True,
+            "deleted": result["deleted"],
+            "trashed": trashed,
+            "trash_failed": trash_failed,
+        })
+
     # -- Undo --
 
     @app.route("/api/undo", methods=["POST"])
