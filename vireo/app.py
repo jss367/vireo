@@ -820,6 +820,27 @@ def create_app(db_path, thumb_cache_dir=None):
         photo_ids = body.get("photo_ids", [])
         mode = body.get("mode", "vireo")
         include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        if mode == "disk_permanent" and paths:
+            # Retry path: DB already cleaned up, just delete files
+            trashed = 0
+            trash_failed = []
+            for p in paths:
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    os.remove(p)
+                    trashed += 1
+                except OSError:
+                    log.warning("Permanent delete failed for %s", p, exc_info=True)
+                    trash_failed.append({"path": p})
+            return jsonify({
+                "ok": True, "deleted": 0, "trashed": trashed,
+                "trash_failed": trash_failed,
+            })
 
         if not photo_ids:
             return json_error("photo_ids required")
@@ -840,33 +861,27 @@ def create_app(db_path, thumb_cache_dir=None):
 
         trashed = 0
         trash_failed = []
-        if mode in ("disk", "disk_permanent"):
+        if mode == "disk":
             for f in result["files"]:
-                filepath = os.path.join(f["folder_path"], f["filename"])
-                if not os.path.isfile(filepath):
-                    log.warning("File already missing: %s", filepath)
-                    continue
-                if mode == "disk":
+                # Collect all files to delete: primary + companion
+                file_paths = []
+                primary = os.path.join(f["folder_path"], f["filename"])
+                file_paths.append(primary)
+                if f.get("companion_path"):
+                    companion = os.path.join(f["folder_path"], f["companion_path"])
+                    file_paths.append(companion)
+
+                for filepath in file_paths:
+                    if not os.path.isfile(filepath):
+                        log.warning("File already missing: %s", filepath)
+                        continue
                     try:
                         from send2trash import send2trash as _trash
                         _trash(filepath)
                         trashed += 1
                     except Exception:
                         log.warning("Trash failed for %s", filepath, exc_info=True)
-                        trash_failed.append({
-                            "photo_id": f["photo_id"],
-                            "path": filepath,
-                        })
-                else:  # disk_permanent
-                    try:
-                        os.remove(filepath)
-                        trashed += 1
-                    except OSError:
-                        log.warning("Permanent delete failed for %s", filepath, exc_info=True)
-                        trash_failed.append({
-                            "photo_id": f["photo_id"],
-                            "path": filepath,
-                        })
+                        trash_failed.append({"path": filepath})
 
         return jsonify({
             "ok": True,

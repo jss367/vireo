@@ -261,3 +261,70 @@ def test_api_batch_delete_invalid_mode(app_and_db):
     })
 
     assert resp.status_code == 400
+
+
+def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
+    """disk_permanent retry works with paths after DB rows are already gone."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create files to delete
+    file1 = str(tmp_path / "photo1.jpg")
+    file2 = str(tmp_path / "photo2.jpg")
+    Image.new("RGB", (10, 10)).save(file1)
+    Image.new("RGB", (10, 10)).save(file2)
+    assert os.path.exists(file1)
+    assert os.path.exists(file2)
+
+    # Retry with paths (no photo_ids needed)
+    resp = client.post("/api/batch/delete", json={
+        "mode": "disk_permanent",
+        "paths": [file1, file2],
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["trashed"] == 2
+    assert not os.path.exists(file1)
+    assert not os.path.exists(file2)
+
+
+def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
+    """Disk mode deletes companion files alongside the primary file."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Set up companion_path on the photo
+    db.conn.execute(
+        "UPDATE photos SET companion_path = 'companion.jpg' WHERE id = ?",
+        (pid,),
+    )
+    folder_path = str(tmp_path / "disk_photos")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (folder_path, photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+
+    # Create both primary and companion files
+    os.makedirs(folder_path, exist_ok=True)
+    primary_file = os.path.join(folder_path, photos[0]["filename"])
+    companion_file = os.path.join(folder_path, "companion.jpg")
+    Image.new("RGB", (10, 10)).save(primary_file)
+    Image.new("RGB", (10, 10)).save(companion_file)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "disk",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    # Both primary and companion should have been trashed
+    assert data["trashed"] == 2
+    assert not os.path.exists(primary_file)
+    assert not os.path.exists(companion_file)

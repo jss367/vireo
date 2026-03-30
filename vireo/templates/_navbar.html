@@ -1111,12 +1111,11 @@ async function confirmDelete() {
         paths.slice(0, 5).join('\n') +
         (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
         '\n\nPermanently delete instead?')) {
-      var failedIds = data.trash_failed.map(function(f) { return f.photo_id; });
       try {
         await safeFetch('/api/batch/delete', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({photo_ids: failedIds, mode: 'disk_permanent'}),
+          body: JSON.stringify({paths: paths, mode: 'disk_permanent'}),
         });
       } catch(e) { /* already removed from DB */ }
     }
