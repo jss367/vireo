@@ -86,10 +86,11 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 2. Claude reads review comments, creates a **new fix PR** targeting the original PR's branch.
 3. The fix PR gets the `claude-agent` label automatically.
 4. When a review is submitted on a `claude-agent` PR (not an approval), Claude creates another fix PR.
-5. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
-6. When an **approving review** is submitted or someone comments **👍**, the merge chain starts.
-7. The chain squash-merges from leaf to root, running tests between each merge.
-7. Branches are deleted after merge.
+5. When **Codex Connect** submits a review on any PR (even without the `claude-agent` label), Claude addresses the feedback in a fix PR and adds the `claude-agent` label so future comments are handled automatically.
+6. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
+7. When an **approving review** is submitted or someone comments **👍**, the merge chain starts.
+8. The chain squash-merges from leaf to root, running tests between each merge.
+9. Branches are deleted after merge.
 
 ### PR chain structure
 
