@@ -173,7 +173,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     try:
         if detect_animals is None or get_primary_detection is None:
             raise ImportError(
-                "PytorchWildlife is not installed — cannot run detection"
+                "MegaDetector ONNX model not available — cannot run detection"
             )
 
         runner.push_event(
@@ -285,9 +285,9 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         )
     except (ImportError, RuntimeError) as e:
         msg = str(e)
-        if "PytorchWildlife" in msg:
+        if "ONNX model not available" in msg or "not found" in msg:
             log.info(
-                "PytorchWildlife not installed — skipping detection (classifying full images)"
+                "MegaDetector not available — skipping detection (classifying full images)"
             )
             runner.push_event(
                 job["id"],
@@ -296,7 +296,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                     "current": 0,
                     "total": total,
                     "current_file": "",
-                    "phase": "Step 4/5: Detection skipped (PytorchWildlife not installed)",
+                    "phase": "Step 4/5: Detection skipped (MegaDetector not available)",
                 },
             )
         else:

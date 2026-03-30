@@ -400,16 +400,14 @@ def test_render_proxy_missing_file(tmp_path):
 
 
 def test_sam2_variant_validation():
-    """_get_sam2_predictor rejects unknown variants."""
-    from masking import _get_sam2_predictor
+    """_get_sam2_sessions rejects unknown variants."""
+    from masking import _get_sam2_sessions
 
     try:
-        _get_sam2_predictor("sam2-nonexistent")
+        _get_sam2_sessions("sam2-nonexistent")
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "Unknown SAM2 variant" in str(e)
-    except RuntimeError:
-        pass  # SAM2 not installed — that's fine for CI
 
 
 def test_sam2_variants_dict():
@@ -420,3 +418,157 @@ def test_sam2_variants_dict():
     assert "sam2-small" in SAM2_VARIANTS
     assert "sam2-base-plus" in SAM2_VARIANTS
     assert "sam2-large" in SAM2_VARIANTS
+
+
+def test_sam2_sessions_missing_model(tmp_path):
+    """_get_sam2_sessions raises FileNotFoundError if model files missing."""
+    import masking
+
+    # Reset singletons
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+    from unittest.mock import patch
+
+    with patch("os.path.expanduser", return_value=str(tmp_path)):
+        try:
+            masking._get_sam2_sessions("sam2-small")
+            assert False, "Should have raised FileNotFoundError"
+        except FileNotFoundError as e:
+            assert "SAM2" in str(e)
+
+    # Cleanup
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+
+def test_sam2_sessions_singleton_caching():
+    """Sessions are cached and reused for same variant."""
+    from unittest.mock import MagicMock
+
+    import masking
+
+    mock_enc = MagicMock()
+    mock_dec = MagicMock()
+    masking._encoder_session = mock_enc
+    masking._decoder_session = mock_dec
+    masking._sam2_variant_loaded = "sam2-small"
+
+    enc, dec = masking._get_sam2_sessions("sam2-small")
+    assert enc is mock_enc
+    assert dec is mock_dec
+
+    # Cleanup
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+
+def test_sam2_sessions_reloads_for_different_variant(tmp_path):
+    """Sessions are reloaded when variant changes."""
+    from unittest.mock import MagicMock, patch
+
+    import masking
+
+    mock_old_enc = MagicMock()
+    mock_old_dec = MagicMock()
+    masking._encoder_session = mock_old_enc
+    masking._decoder_session = mock_old_dec
+    masking._sam2_variant_loaded = "sam2-tiny"
+
+    # Create fake model files for sam2-small
+    model_dir = tmp_path / ".vireo" / "models" / "sam2-small"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "mask_decoder.onnx").write_bytes(b"fake")
+
+    mock_new_enc = MagicMock()
+    mock_new_dec = MagicMock()
+    call_count = [0]
+
+    def mock_create_session(path):
+        result = mock_new_enc if call_count[0] == 0 else mock_new_dec
+        call_count[0] += 1
+        return result
+
+    with patch("os.path.expanduser", return_value=str(tmp_path)):
+        with patch("masking.onnx_runtime.create_session", side_effect=mock_create_session):
+            enc, dec = masking._get_sam2_sessions("sam2-small")
+
+    assert enc is mock_new_enc
+    assert dec is mock_new_dec
+    assert masking._sam2_variant_loaded == "sam2-small"
+
+    # Cleanup
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None
+
+
+def test_sam2_input_size_constant():
+    """SAM2 input size should be 1024 (native resolution)."""
+    from masking import SAM2_INPUT_SIZE
+
+    assert SAM2_INPUT_SIZE == 1024
+
+
+def test_generate_mask_with_mock():
+    """generate_mask returns a boolean mask using mocked ONNX sessions."""
+    from unittest.mock import MagicMock
+
+    import masking
+
+    # Create mock sessions
+    mock_enc = MagicMock()
+    mock_dec = MagicMock()
+
+    # Mock encoder output: image embeddings (1, 256, 64, 64)
+    mock_enc.get_inputs.return_value = [MagicMock(name="image")]
+    mock_enc.run.return_value = [np.zeros((1, 256, 64, 64), dtype=np.float32)]
+
+    # Mock decoder output: masks (1, 3, 100, 150) and scores (1, 3)
+    mock_dec_input_1 = MagicMock()
+    mock_dec_input_1.name = "image_embeddings"
+    mock_dec_input_2 = MagicMock()
+    mock_dec_input_2.name = "point_coords"
+    mock_dec_input_3 = MagicMock()
+    mock_dec_input_3.name = "point_labels"
+    mock_dec_input_4 = MagicMock()
+    mock_dec_input_4.name = "mask_input"
+    mock_dec_input_5 = MagicMock()
+    mock_dec_input_5.name = "has_mask_input"
+    mock_dec_input_6 = MagicMock()
+    mock_dec_input_6.name = "orig_im_size"
+    mock_dec.get_inputs.return_value = [
+        mock_dec_input_1, mock_dec_input_2, mock_dec_input_3,
+        mock_dec_input_4, mock_dec_input_5, mock_dec_input_6,
+    ]
+
+    # Create mask output: 3 masks, second one is best
+    masks = np.zeros((1, 3, 100, 150), dtype=np.float32)
+    masks[0, 1, 20:60, 30:90] = 1.0  # best mask has a rectangular region
+    scores = np.array([[0.5, 0.9, 0.3]], dtype=np.float32)
+    mock_dec.run.return_value = [masks, scores]
+
+    masking._encoder_session = mock_enc
+    masking._decoder_session = mock_dec
+    masking._sam2_variant_loaded = "sam2-small"
+
+    img = Image.new("RGB", (150, 100))
+    detection_box = {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}
+
+    result = masking.generate_mask(img, detection_box, variant="sam2-small")
+
+    assert result is not None
+    assert result.shape == (100, 150)
+    assert result.dtype == bool
+    # The best mask (index 1) should have True values in the subject region
+    assert result[40, 60]  # center of the mask region
+    assert not result[5, 5]  # outside the mask region
+
+    # Cleanup
+    masking._encoder_session = None
+    masking._decoder_session = None
+    masking._sam2_variant_loaded = None

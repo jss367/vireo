@@ -1,4 +1,4 @@
-"""Wildlife detection using MegaDetector via PytorchWildlife.
+"""Wildlife detection using MegaDetector via ONNX Runtime.
 
 Provides bounding boxes around animals in photos for quality scoring.
 """
@@ -10,57 +10,186 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-_detector = None
+_session = None
+
+# MegaDetector ONNX model path — downloaded to ~/.vireo/models/megadetector-v6/
+MEGADETECTOR_ONNX_DIR = os.path.expanduser("~/.vireo/models/megadetector-v6")
+MEGADETECTOR_ONNX_PATH = os.path.join(MEGADETECTOR_ONNX_DIR, "model.onnx")
+
+# MegaDetector input size
+INPUT_SIZE = 640
+
+# MegaDetector class mapping (index -> label)
+CLASS_NAMES = {0: "animal", 1: "person", 2: "vehicle"}
 
 
-def _get_detector():
-    """Load MegaDetector (cached singleton). Auto-downloads weights on first use."""
-    global _detector
-    if _detector is not None:
-        return _detector
+def _get_session():
+    """Load MegaDetector ONNX session (cached singleton)."""
+    global _session
+    if _session is not None:
+        return _session
 
-    try:
-        import torch
-        from PytorchWildlife.models import detection as pw_detection
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-
-        log.info(
-            "Loading MegaDetector on %s (weights download automatically on first use)...",
-            device,
-        )
-
-        # PyTorch 2.6+ defaults to weights_only=True which rejects the
-        # pickled classes in MegaDetector/ultralytics weights. The loading
-        # chain passes through multiple wrappers that capture function
-        # references at import time, making monkey-patching unreliable.
-        # Use the env var that torch.serialization.load checks directly.
-        _prev_no = os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD")
-        _prev_force = os.environ.get("TORCH_FORCE_WEIGHTS_ONLY_LOAD")
-        os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-        os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-        try:
-            _detector = pw_detection.MegaDetectorV6(
-                device=device, pretrained=True, version="MDV6-yolov9-c"
-            )
-        finally:
-            if _prev_no is None:
-                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
-            else:
-                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = _prev_no
-            if _prev_force is not None:
-                os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = _prev_force
-
-        log.info("MegaDetector loaded")
-        return _detector
-
-    except ImportError:
+    if not os.path.exists(MEGADETECTOR_ONNX_PATH):
         raise RuntimeError(
-            "PytorchWildlife not installed. Run: pip install PytorchWildlife\n"
-            "This provides MegaDetector for wildlife detection."
+            f"MegaDetector ONNX model not found at {MEGADETECTOR_ONNX_PATH}. "
+            "Download it from the Models page in Settings."
         )
+
+    from onnx_runtime import create_session
+
+    _session = create_session(MEGADETECTOR_ONNX_PATH)
+    log.info("MegaDetector ONNX model loaded")
+    return _session
+
+
+def _preprocess(image_array):
+    """Preprocess image for MegaDetector ONNX input.
+
+    Uses letterbox resize: scale to fit INPUT_SIZE while preserving
+    aspect ratio, then center-pad to a square.
+
+    Args:
+        image_array: numpy RGB array (H, W, 3) uint8
+
+    Returns:
+        (input_tensor, preprocess_info) where:
+            input_tensor: numpy float32 array (1, 3, 640, 640)
+            preprocess_info: tuple (scale, pad_x, pad_y, orig_w, orig_h)
+    """
+    h, w = image_array.shape[:2]
+
+    # Letterbox resize: scale to fit INPUT_SIZE, pad to square
+    scale = min(INPUT_SIZE / h, INPUT_SIZE / w)
+    new_w = int(w * scale + 0.5)
+    new_h = int(h * scale + 0.5)
+
+    from PIL import Image
+
+    img = Image.fromarray(image_array).resize((new_w, new_h), Image.BILINEAR)
+
+    # Pad to INPUT_SIZE x INPUT_SIZE (center padding with gray=114)
+    pad_x = (INPUT_SIZE - new_w) // 2
+    pad_y = (INPUT_SIZE - new_h) // 2
+
+    padded = np.full((INPUT_SIZE, INPUT_SIZE, 3), 114, dtype=np.uint8)
+    padded[pad_y : pad_y + new_h, pad_x : pad_x + new_w] = np.array(img)
+
+    # Normalize to 0-1, HWC -> CHW, add batch dim
+    arr = padded.astype(np.float32) / 255.0
+    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]
+
+    return arr, (scale, pad_x, pad_y, w, h)
+
+
+def _postprocess(outputs, preprocess_info, confidence_threshold):
+    """Post-process ONNX model outputs to detection list.
+
+    Handles common YOLOv9 ONNX output formats flexibly:
+    - (1, N, 4+1+num_classes): N candidate boxes with
+      [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
+    - (1, 4+1+num_classes, N): transposed variant
+    - (1, N, 4+num_classes): no separate objectness score,
+      [cx, cy, w, h, cls0, cls1, ...]
+
+    Args:
+        outputs: list of numpy arrays from ONNX session.run()
+        preprocess_info: tuple from _preprocess (scale, pad_x, pad_y,
+            orig_w, orig_h)
+        confidence_threshold: minimum confidence for a detection
+
+    Returns:
+        list of detection dicts with keys: box, confidence, category
+    """
+    from onnx_runtime import nms
+
+    scale, pad_x, pad_y, orig_w, orig_h = preprocess_info
+    output = outputs[0]  # primary output tensor
+
+    # Handle different output shapes
+    if output.ndim == 3:
+        output = output[0]  # remove batch dim -> (N, C) or (C, N)
+        # Detect transposed (C, N) format: feature count C is small
+        # (typically 7 or 8 for MegaDetector: 4 box + [1 obj] + 3
+        # classes) while N is large (thousands of proposals). Transpose
+        # when the first dim looks like a feature count (5-20 range) and
+        # is smaller than the second dim (detection count).
+        n_rows, n_cols = output.shape
+        if n_rows < n_cols and 5 <= n_rows <= 20:
+            output = output.T  # transpose (C, N) -> (N, C)
+
+    num_cols = output.shape[1]
+
+    if num_cols >= 7:
+        # Format: [x1, y1, x2, y2, obj_conf, cls0, cls1, cls2, ...]
+        # Separate objectness score multiplied by class score
+        boxes_raw = output[:, :4]
+        obj_conf = output[:, 4]
+        class_scores = output[:, 5:]
+        class_ids = class_scores.argmax(axis=1)
+        confidences = obj_conf * class_scores[np.arange(len(class_scores)), class_ids]
+    elif num_cols >= 5:
+        # Format: [cx, cy, w, h, cls0, cls1, ...] (no separate obj_conf)
+        # Box coords are center-x, center-y, width, height
+        cx, cy, bw, bh = output[:, 0], output[:, 1], output[:, 2], output[:, 3]
+        boxes_raw = np.stack(
+            [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], axis=1
+        )
+        class_scores = output[:, 4:]
+        class_ids = class_scores.argmax(axis=1)
+        confidences = class_scores[np.arange(len(class_scores)), class_ids]
+    else:
+        log.warning("Unexpected ONNX output shape: %s", output.shape)
+        return []
+
+    # Filter by confidence
+    mask = confidences >= confidence_threshold
+    boxes_raw = boxes_raw[mask]
+    confidences = confidences[mask]
+    class_ids = class_ids[mask]
+
+    if len(boxes_raw) == 0:
+        return []
+
+    # NMS
+    keep = nms(boxes_raw, confidences, iou_threshold=0.45)
+    boxes_raw = boxes_raw[keep]
+    confidences = confidences[keep]
+    class_ids = class_ids[keep]
+
+    # Convert from padded 640x640 coords back to normalized 0-1
+    detections = []
+    for i in range(len(boxes_raw)):
+        x1, y1, x2, y2 = boxes_raw[i]
+        # Remove padding and undo scale
+        x1 = (x1 - pad_x) / scale
+        y1 = (y1 - pad_y) / scale
+        x2 = (x2 - pad_x) / scale
+        y2 = (y2 - pad_y) / scale
+        # Clip to image bounds and normalize to 0-1
+        x1 = max(0, x1) / orig_w
+        y1 = max(0, y1) / orig_h
+        x2 = max(0, min(orig_w, x2)) / orig_w
+        y2 = max(0, min(orig_h, y2)) / orig_h
+
+        # Drop invalid boxes where width or height would be non-positive
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        category = CLASS_NAMES.get(int(class_ids[i]), "animal")
+        detections.append(
+            {
+                "box": {
+                    "x": float(x1),
+                    "y": float(y1),
+                    "w": float(x2 - x1),
+                    "h": float(y2 - y1),
+                },
+                "confidence": float(confidences[i]),
+                "category": category,
+            }
+        )
+
+    return detections
 
 
 def detect_animals(image_path, confidence_threshold=0.2):
@@ -77,13 +206,11 @@ def detect_animals(image_path, confidence_threshold=0.2):
             category: str ('animal', 'person', 'vehicle')
         Returns empty list on failure.
     """
-    detector = _get_detector()
+    session = _get_session()
 
     try:
         # Load image ourselves using image_loader which supports RAW formats
-        # (NEF, CR2, ARW, etc.). PytorchWildlife's internal loading uses
-        # PIL.Image.open() which cannot read RAW files — it either fails
-        # or reads the tiny embedded JPEG thumbnail, producing bad detections.
+        # (NEF, CR2, ARW, etc.).
         from image_loader import load_image
 
         img = load_image(str(image_path), max_size=1280)
@@ -91,49 +218,16 @@ def detect_animals(image_path, confidence_threshold=0.2):
             log.warning("Could not load image for detection: %s", image_path)
             return []
         img_array = np.array(img.convert("RGB"))
-        results = detector.single_image_detection(img_array, img_path=str(image_path))
+
+        input_tensor, preprocess_info = _preprocess(img_array)
+
+        input_name = session.get_inputs()[0].name
+        outputs = session.run(None, {input_name: input_tensor})
+
+        return _postprocess(outputs, preprocess_info, confidence_threshold)
     except Exception:
         log.warning("Detection failed for %s", image_path, exc_info=True)
         return []
-
-    detections = []
-
-    # PytorchWildlife returns a dict with:
-    #   detections: supervision.Detections with xyxy, confidence, class_id
-    #   normalized_coords: list of [x1, y1, x2, y2] normalized 0-1
-    #   labels: list of "animal 0.28" strings
-    if not hasattr(results, "keys"):
-        log.warning("Unexpected detection result type: %s", type(results))
-        return []
-
-    # Prefer normalized_coords (already 0-1, no image size needed)
-    norm_coords = results.get("normalized_coords", [])
-    det_obj = results.get("detections")
-
-    # Get confidences from the Detections object
-    confs = []
-    if det_obj is not None and hasattr(det_obj, "confidence") and det_obj.confidence is not None:
-        confs = det_obj.confidence
-
-    for i, coords in enumerate(norm_coords):
-        conf = float(confs[i]) if i < len(confs) else 0
-        if conf < confidence_threshold:
-            continue
-        x1, y1, x2, y2 = [float(c) for c in coords]
-        detections.append(
-            {
-                "box": {
-                    "x": x1,
-                    "y": y1,
-                    "w": x2 - x1,
-                    "h": y2 - y1,
-                },
-                "confidence": conf,
-                "category": "animal",
-            }
-        )
-
-    return detections
 
 
 def get_primary_detection(detections):

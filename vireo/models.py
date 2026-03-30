@@ -1,4 +1,8 @@
-"""Model and taxonomy registry for Vireo."""
+"""Model and taxonomy registry for Vireo.
+
+All models are ONNX format, downloaded from the jss367/vireo-onnx-models
+HuggingFace repository into ~/.vireo/models/{model-id}/.
+"""
 
 import json
 import logging
@@ -10,14 +14,25 @@ log = logging.getLogger(__name__)
 DEFAULT_MODELS_DIR = os.path.expanduser("~/.vireo/models")
 CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 
-# Known models that can be downloaded
+# HuggingFace repo containing all ONNX models
+ONNX_REPO = "jss367/vireo-onnx-models"
+
+# Known models that can be downloaded.
+# Each entry specifies which ONNX files are needed and the subdirectory
+# within the HF repo where they live.
 KNOWN_MODELS = [
     {
         "id": "bioclip-vit-b-16",
         "name": "BioCLIP",
         "model_type": "bioclip",
         "model_str": "ViT-B-16",
-        "source": "hf-hub:imageomics/bioclip",
+        "hf_subdir": "bioclip-vit-b-16",
+        "files": [
+            "image_encoder.onnx",
+            "text_encoder.onnx",
+            "tokenizer.json",
+            "config.json",
+        ],
         "description": "2024 model trained on TreeOfLife-10M. Smallest and fastest BioCLIP variant.",
         "size_mb": 400,
         "architecture": "ViT-B/16",
@@ -28,7 +43,15 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2",
-        "source": "hf-hub:imageomics/bioclip-2",
+        "hf_subdir": "bioclip-2",
+        "files": [
+            "image_encoder.onnx",
+            "text_encoder.onnx",
+            "tokenizer.json",
+            "config.json",
+            "tol_embeddings.npy",
+            "tol_classes.json",
+        ],
         "description": "2025 model with ViT-L/14 backbone, 428M parameters. Higher accuracy than v1, slower on CPU.",
         "size_mb": 1500,
         "architecture": "ViT-L/14",
@@ -39,7 +62,15 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2.5",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
-        "source": "hf-hub:imageomics/bioclip-2.5-vith14",
+        "hf_subdir": "bioclip-2.5-vith14",
+        "files": [
+            "image_encoder.onnx",
+            "text_encoder.onnx",
+            "tokenizer.json",
+            "config.json",
+            "tol_embeddings.npy",
+            "tol_classes.json",
+        ],
         "description": "2025 model with ViT-H/14 backbone, 986M parameters. Largest BioCLIP variant.",
         "size_mb": 3900,
         "architecture": "ViT-H/14",
@@ -50,7 +81,13 @@ KNOWN_MODELS = [
         "name": "iNat21 (EVA-02 Large)",
         "model_type": "timm",
         "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
-        "source": "timm",
+        "hf_subdir": "timm-eva02-large-inat21",
+        "files": [
+            "model.onnx",
+            "class_names.json",
+            "label_descriptions.json",
+            "config.json",
+        ],
         "description": "EVA-02 Large fine-tuned on iNaturalist 2021. 10K species, 92% top-1. No label files needed.",
         "size_mb": 1200,
         "architecture": "EVA-02 Large",
@@ -73,6 +110,26 @@ def _save_config(config):
         json.dump(config, f, indent=2)
 
 
+def _check_onnx_downloaded(model_dir, files):
+    """Check if all required ONNX files exist in a model directory.
+
+    Args:
+        model_dir: path to the model directory
+        files: list of filenames that must be present
+
+    Returns:
+        True if the directory exists and contains at least the ONNX files
+    """
+    if not os.path.isdir(model_dir):
+        return False
+    # At minimum, check that the .onnx files exist
+    onnx_files = [f for f in files if f.endswith(".onnx")]
+    return all(
+        os.path.isfile(os.path.join(model_dir, f))
+        for f in onnx_files
+    )
+
+
 def get_models():
     """Return list of all models (known + custom) with download status."""
     config = _load_config()
@@ -80,25 +137,42 @@ def get_models():
 
     result = []
     for km in KNOWN_MODELS:
-        entry = {**km, "downloaded": False, "weights_path": None,
-                 "model_type": km.get("model_type", "bioclip")}
-        if km["id"] in registered:
+        model_dir = os.path.join(DEFAULT_MODELS_DIR, km["id"])
+        downloaded = _check_onnx_downloaded(model_dir, km.get("files", []))
+
+        entry = {
+            **km,
+            "downloaded": downloaded,
+            "weights_path": model_dir if downloaded else None,
+            "model_type": km.get("model_type", "bioclip"),
+        }
+
+        # Also check registered path if different
+        if not downloaded and km["id"] in registered:
             reg = registered[km["id"]]
-            path = reg.get("weights_path", "")
-            entry["weights_path"] = path
-            entry["downloaded"] = bool(path and os.path.exists(path))
-        # Also check legacy path
-        if not entry["downloaded"] and km["id"] == "bioclip-vit-b-16":
-            legacy = "/tmp/bioclip_model/open_clip_pytorch_model.bin"
-            if os.path.exists(legacy):
-                entry["weights_path"] = legacy
-                entry["downloaded"] = True
+            reg_path = reg.get("weights_path", "")
+            if reg_path and os.path.isdir(reg_path):
+                # Check if ONNX files exist at the registered path
+                onnx_files = [f for f in km.get("files", []) if f.endswith(".onnx")]
+                if all(os.path.isfile(os.path.join(reg_path, f)) for f in onnx_files):
+                    entry["downloaded"] = True
+                    entry["weights_path"] = reg_path
+
         result.append(entry)
 
     # Add custom models
     for mid, m in registered.items():
         if not any(km["id"] == mid for km in KNOWN_MODELS):
             path = m.get("weights_path", "")
+            # Custom models: check for any .onnx file in the directory
+            downloaded = False
+            if path and os.path.isdir(path):
+                downloaded = any(
+                    f.endswith(".onnx")
+                    for f in os.listdir(path)
+                )
+            elif path and os.path.isfile(path) and path.endswith(".onnx"):
+                downloaded = True
             result.append(
                 {
                     "id": mid,
@@ -107,7 +181,7 @@ def get_models():
                     "source": "custom",
                     "description": m.get("description", "Custom model"),
                     "weights_path": path,
-                    "downloaded": bool(path and os.path.exists(path)),
+                    "downloaded": downloaded,
                 }
             )
 
@@ -143,8 +217,8 @@ def set_active_model(model_id):
 def remove_model(model_id):
     """Remove a model's weights from disk and unregister it.
 
-    Deletes local weights (both our managed copy and the HF cache entry),
-    and removes it from models.json. Returns True if found.
+    Deletes local ONNX model files and removes it from models.json.
+    Returns True if found.
     """
     config = _load_config()
     models = config.get("models", [])
@@ -156,23 +230,21 @@ def remove_model(model_id):
             break
 
     if not found:
-        # Check if it's a known model with a legacy path
+        # Check if it's a known model with a default path
         known = {km["id"]: km for km in KNOWN_MODELS}
         if model_id in known:
-            # Known model, not registered — check default paths
             path = os.path.join(DEFAULT_MODELS_DIR, model_id)
             if os.path.isdir(path):
                 shutil.rmtree(path)
                 return True
         return False
 
-    # Delete local weights
+    # Delete local model directory
     weights_path = found.get("weights_path", "")
     if weights_path and os.path.exists(weights_path):
         if os.path.isdir(weights_path):
             shutil.rmtree(weights_path)
         else:
-            # Delete the file and its parent dir if it's inside our models dir
             os.unlink(weights_path)
             parent = os.path.dirname(weights_path)
             if parent.startswith(DEFAULT_MODELS_DIR) and os.path.isdir(parent):
@@ -220,34 +292,21 @@ def register_model(model_id, name, model_str, weights_path, description=""):
     _save_config(config)
 
 
-def _get_cache_file_size(repo_id, filename):
-    """Check how much of a file has been downloaded in the HF cache."""
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
-    # HF cache uses a specific directory structure
-    repo_dir = os.path.join(cache_dir, "models--" + repo_id.replace("/", "--"))
-    if not os.path.isdir(repo_dir):
-        return 0
-    # Look for incomplete download files
-    blobs_dir = os.path.join(repo_dir, "blobs")
-    if not os.path.isdir(blobs_dir):
-        return 0
-    # Find the largest file (likely the partial download)
-    max_size = 0
-    for f in os.listdir(blobs_dir):
-        fp = os.path.join(blobs_dir, f)
-        if os.path.isfile(fp):
-            max_size = max(max_size, os.path.getsize(fp))
-    return max_size
+def _hf_download_with_retry(repo_id, filename, local_dir,
+                            subfolder=None, progress_callback=None):
+    """Download a file from HuggingFace with retry on connection failures.
 
-
-def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None):
-    """Download from HuggingFace with retry on connection failures.
-
-    Uses the HF cache for reliable resume. Keeps retrying as long as
+    Uses hf_hub_download for reliable resume. Keeps retrying as long as
     progress is being made. Stops after 3 consecutive failures with
     no progress.
+
+    Args:
+        repo_id: HuggingFace repo ID
+        filename: filename within the repo (or subfolder)
+        local_dir: destination directory for the file
+        subfolder: optional subfolder within the repo
+        progress_callback: optional callable(message)
     """
-    import shutil
     import time as _time
 
     from huggingface_hub import hf_hub_download
@@ -256,24 +315,33 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
 
     attempt = 0
     stalled_count = 0
-    last_progress = 0
-    max_stalled = 3  # give up after 3 consecutive failures with no progress
+    max_stalled = 3
 
     while True:
         attempt += 1
         try:
             if progress_callback:
                 if attempt == 1:
-                    progress_callback(f"Downloading {filename} from {repo_id}...")
+                    progress_callback(f"Downloading {filename}...")
                 else:
                     progress_callback(f"Resuming download (attempt {attempt})...")
 
-            log.info("Downloading %s from %s (attempt %d)", filename, repo_id, attempt)
-
-            cached_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=filename,
+            log.info(
+                "Downloading %s/%s%s (attempt %d)",
+                repo_id,
+                f"{subfolder}/" if subfolder else "",
+                filename,
+                attempt,
             )
+
+            kwargs = {
+                "repo_id": repo_id,
+                "filename": filename,
+            }
+            if subfolder:
+                kwargs["subfolder"] = subfolder
+
+            cached_path = hf_hub_download(**kwargs)
 
             # Copy from cache to our models directory
             os.makedirs(local_dir, exist_ok=True)
@@ -285,172 +353,39 @@ def _hf_download_with_retry(repo_id, filename, local_dir, progress_callback=None
             return dest_path
 
         except Exception as e:
-            err_str = str(e)
-            is_metadata_error = (
-                "cannot find the requested files in the local cache" in err_str
+            stalled_count += 1
+            log.warning(
+                "Download attempt %d failed (%d/%d stalled): %s",
+                attempt, stalled_count, max_stalled, e,
             )
-
-            # Check if we made progress since last attempt
-            current_size = _get_cache_file_size(repo_id, filename)
-            if current_size > last_progress:
-                log.info(
-                    "Download progress: %d MB downloaded so far",
-                    current_size // (1024 * 1024),
-                )
-                stalled_count = 0
-                last_progress = current_size
-            elif is_metadata_error:
-                # Metadata check failures are transient — don't count as stalls
-                log.info(
-                    "Attempt %d: HF metadata check failed (transient), retrying...",
-                    attempt,
-                )
-            else:
-                stalled_count += 1
-                log.warning(
-                    "Download attempt %d: no progress (%d/%d stalled): %s",
-                    attempt,
-                    stalled_count,
-                    max_stalled,
-                    e,
-                )
 
             if stalled_count >= max_stalled:
                 raise RuntimeError(
-                    f"Download stalled after {attempt} attempts with no new data. "
-                    f"Downloaded {last_progress // (1024 * 1024)} MB so far. "
+                    f"Download of {filename} failed after {attempt} attempts. "
                     f"Try again — the download will resume from where it left off."
                 ) from e
 
             wait = 3
             if progress_callback:
-                mb = current_size // (1024 * 1024)
-                progress_callback(f"Connection lost at {mb} MB, retrying in {wait}s...")
+                progress_callback(f"Connection error, retrying in {wait}s...")
             _time.sleep(wait)
 
 
-class _DownloadStalled(TimeoutError):
-    """Raised when a download stalls.  Carries how many bytes tqdm reported."""
-
-    def __init__(self, message, bytes_downloaded=0):
-        super().__init__(message)
-        self.bytes_downloaded = bytes_downloaded
-
-
-def _download_with_byte_progress(repo_id, filename, file_size,
-                                  progress_callback=None,
-                                  stall_timeout=300):
-    """Download a file into the HF cache with byte-level progress.
-
-    Disables XET (which stalls on large files and doesn't support resume)
-    so HuggingFace falls back to plain HTTP with .incomplete-file resume.
-    Intercepts progress via ``tqdm_class`` and runs the download in a
-    daemon thread for stall detection.
-
-    Args:
-        repo_id: HuggingFace repo (e.g. "timm/eva02_large...")
-        filename: File within the repo
-        file_size: Expected file size in bytes (from repo metadata)
-        progress_callback: callable(bytes_downloaded, file_size, rate_bytes_per_sec)
-        stall_timeout: Seconds with no progress before raising _DownloadStalled.
-    """
-    import threading
-    import time as _time
-
-    # Disable XET: it downloads via a content-addressed chunk-cache that
-    # doesn't support resume across retries and doesn't reliably report
-    # progress.  Plain HTTP writes to .incomplete files and resumes.
-    # Patch the name where _download_to_tmp_and_move actually calls it.
-    import huggingface_hub.file_download as _hf_fd
-    from huggingface_hub import hf_hub_download
-    from tqdm.auto import tqdm as base_tqdm
-    _hf_fd.is_xet_available = lambda: False
-    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
-
-    lock = threading.Lock()
-    state = {
-        "bytes": 0,
-        "last_update": _time.monotonic(),
-        "start": _time.monotonic(),
-    }
-
-    class _ProgressTqdm(base_tqdm):
-        """Intercepts tqdm updates from http_get."""
-
-        _last_cb = 0.0
-
-        def __init__(self, *args, **kwargs):
-            # HF's _get_progress_bar_context passes name= which
-            # tqdm.std.tqdm rejects; strip it before calling super.
-            kwargs.pop("name", None)
-            super().__init__(*args, **kwargs)
-            _ProgressTqdm._last_cb = 0.0
-            # If resuming, initial is already set by http_get
-            if self.initial:
-                with lock:
-                    state["bytes"] = int(self.initial)
-
-        def update(self, n=1):
-            super().update(n)
-            now = _time.monotonic()
-            with lock:
-                state["bytes"] = int(self.n)
-                state["last_update"] = now
-            if progress_callback and (now - _ProgressTqdm._last_cb) >= 0.5:
-                _ProgressTqdm._last_cb = now
-                elapsed = now - state["start"]
-                rate = self.n / elapsed if elapsed > 0 else 0
-                progress_callback(min(int(self.n), file_size), file_size, rate)
-
-    result = [None]
-    error = [None]
-    done = threading.Event()
-
-    def do_download():
-        try:
-            result[0] = hf_hub_download(
-                repo_id=repo_id, filename=filename,
-                tqdm_class=_ProgressTqdm,
-            )
-        except Exception as e:
-            error[0] = e
-        finally:
-            done.set()
-
-    dl_thread = threading.Thread(target=do_download, daemon=True)
-    dl_thread.start()
-
-    while not done.is_set():
-        now = _time.monotonic()
-        with lock:
-            stall_duration = now - state["last_update"]
-            current_bytes = state["bytes"]
-        if stall_timeout and stall_duration > stall_timeout:
-            mb_done = current_bytes // (1024 * 1024)
-            mb_total = file_size // (1024 * 1024)
-            raise _DownloadStalled(
-                f"Download stalled: no new data for {stall_timeout}s "
-                f"({mb_done}/{mb_total} MB)",
-                bytes_downloaded=current_bytes,
-            )
-        done.wait(2.0)
-
-    if error[0]:
-        if not hasattr(error[0], "bytes_downloaded"):
-            with lock:
-                error[0].bytes_downloaded = state["bytes"]
-        raise error[0]
-    return result[0]
-
-
 def download_model(model_id, progress_callback=None):
-    """Download a known model. Returns the weights path."""
+    """Download a known model from jss367/vireo-onnx-models.
+
+    Downloads all required ONNX files for the model into
+    ~/.vireo/models/{model-id}/.
+
+    Returns the model directory path.
+    """
     known = {m["id"]: m for m in KNOWN_MODELS}
     if model_id not in known:
         raise ValueError(f"Unknown model: {model_id}")
 
     km = known[model_id]
-    os.makedirs(DEFAULT_MODELS_DIR, exist_ok=True)
+    model_dir = os.path.join(DEFAULT_MODELS_DIR, model_id)
+    os.makedirs(model_dir, exist_ok=True)
 
     try:
         from huggingface_hub import hf_hub_download  # noqa: F401
@@ -459,209 +394,49 @@ def download_model(model_id, progress_callback=None):
             "huggingface_hub not installed. Run: pip install huggingface_hub"
         )
 
-    source = km.get("source", "")
+    files = km.get("files", [])
+    hf_subdir = km.get("hf_subdir", model_id)
+    total_files = len(files)
 
-    if source.startswith("hf-hub:"):
-        # For hf-hub models, open_clip manages its own cache. We download
-        # each file individually so we can report progress.
-        repo_id = source.replace("hf-hub:", "")
-        log.info("Pre-warming HF cache for %s (%s)", km["name"], repo_id)
-
-        from huggingface_hub import hf_hub_download, list_repo_files
-
-        files = list_repo_files(repo_id)
-        total_files = len(files)
-        cache_dir = None
-
-        for fi, filename in enumerate(files):
-            if progress_callback:
-                size_hint = ""
-                if filename.endswith((".safetensors", ".bin")):
-                    size_hint = f' ({km.get("size_mb", "?")} MB)'
-                progress_callback(
-                    f"Downloading {fi + 1}/{total_files}: {filename}{size_hint}",
-                    current=fi,
-                    total=total_files,
-                )
-
-            log.info(
-                "Downloading %s/%s (%d/%d)", repo_id, filename, fi + 1, total_files
-            )
-            path = hf_hub_download(repo_id, filename)
-
-            # The first file's parent directory is the cache dir
-            if cache_dir is None:
-                cache_dir = os.path.dirname(path)
-
+    for fi, filename in enumerate(files):
         if progress_callback:
+            size_hint = ""
+            if filename.endswith(".onnx"):
+                size_hint = f' ({km.get("size_mb", "?")} MB)'
             progress_callback(
-                f'{km["name"]} download complete!',
-                current=total_files,
+                f"Downloading {fi + 1}/{total_files}: {filename}{size_hint}",
+                current=fi,
                 total=total_files,
             )
-        log.info("Model cached at: %s", cache_dir)
 
-        register_model(model_id, km["name"], source, cache_dir, km["description"])
-        return cache_dir
-
-    elif model_id == "bioclip-vit-b-16":
-        # BioCLIP v1 uses a direct weights file, not hf-hub scheme
-        path = _hf_download_with_retry(
-            "imageomics/bioclip",
-            "open_clip_pytorch_model.bin",
-            os.path.join(DEFAULT_MODELS_DIR, "bioclip"),
+        _hf_download_with_retry(
+            ONNX_REPO,
+            filename,
+            model_dir,
+            subfolder=hf_subdir,
             progress_callback=progress_callback,
         )
-        register_model(model_id, km["name"], km["model_str"], path, km["description"])
-        return path
 
-    elif km.get("model_type") == "timm":
-        # Pre-download files from HF with byte-level progress, then let
-        # timm load from cache.
-        try:
-            import timm
-        except ImportError:
-            raise RuntimeError("timm not installed. Run: pip install timm")
-
-        model_name = km["model_str"]
-        hf_repo = model_name.replace("hf-hub:", "")
-
-        from huggingface_hub import HfApi
-
-        log.info("Fetching file list for %s", hf_repo)
-        if progress_callback:
-            progress_callback(
-                f"Fetching file list for {km['name']}...",
-                current=0,
-                total=0,
-            )
-
-        # Get file metadata (names + sizes)
-        api = HfApi()
-        repo_info = api.model_info(hf_repo, files_metadata=True)
-        files_meta = {
-            s.rfilename: s.size or 0
-            for s in (repo_info.siblings or [])
-        }
-        total_bytes = sum(files_meta.values())
-        downloaded_bytes = [0]
-        total_files = len(files_meta)
-
-        import time as _time
-
-        for fi, (filename, file_size) in enumerate(files_meta.items()):
-            def file_progress(current_bytes, _total, rate,
-                              _fn=filename, _fs=file_size):
-                overall = downloaded_bytes[0] + current_bytes
-                size_mb = current_bytes // (1024 * 1024)
-                total_mb = _fs // (1024 * 1024) if _fs else 0
-                if progress_callback:
-                    progress_callback(
-                        f"{_fn} ({size_mb}/{total_mb} MB)",
-                        current=overall,
-                        total=total_bytes,
-                        rate=rate,
-                    )
-
-            log.info(
-                "Downloading %s/%s (%d/%d, %d MB)",
-                hf_repo, filename, fi + 1, total_files,
-                file_size // (1024 * 1024),
-            )
-
-            if progress_callback:
-                progress_callback(
-                    f"Downloading {fi + 1}/{total_files}: {filename}",
-                    current=downloaded_bytes[0],
-                    total=total_bytes,
-                    rate=0,
-                )
-
-            # Retry loop — stalls and connection errors are common for
-            # multi-GB files on HF's XET storage backend.
-            max_stalled = 5
-            stalled_count = 0
-
-            for attempt in range(1, max_stalled + 1):
-                try:
-                    _download_with_byte_progress(
-                        hf_repo, filename, file_size,
-                        progress_callback=file_progress,
-                    )
-                    break  # success
-                except Exception as e:
-                    peak = getattr(e, "bytes_downloaded", 0)
-
-                    if peak > 0:
-                        stalled_count = 0
-                        log.info(
-                            "Download interrupted at %d MB, "
-                            "retrying (attempt %d): %s",
-                            peak // (1024 * 1024), attempt, e,
-                        )
-                    else:
-                        stalled_count += 1
-                        log.warning(
-                            "Download stalled with no progress "
-                            "(attempt %d, %d/%d stalls): %s",
-                            attempt, stalled_count, max_stalled, e,
-                        )
-
-                    if stalled_count >= max_stalled:
-                        raise RuntimeError(
-                            f"Download of {filename} stalled after "
-                            f"{attempt} attempts with no progress. "
-                            f"Try again — the download will resume "
-                            f"from where it left off."
-                        ) from e
-
-                    wait = min(3 * attempt, 15)
-                    if progress_callback:
-                        progress_callback(
-                            f"Retrying {filename} in {wait}s "
-                            f"(attempt {attempt + 1})...",
-                            current=downloaded_bytes[0],
-                            total=total_bytes,
-                            rate=0,
-                        )
-                    _time.sleep(wait)
-
-            downloaded_bytes[0] += file_size
-
-        if progress_callback:
-            progress_callback(
-                f"Loading {km['name']} into timm...",
-                current=total_bytes,
-                total=total_bytes,
-            )
-
-        # All files are cached — timm.create_model finds them instantly
-        log.info("All files cached, loading timm model: %s", model_name)
-        timm.create_model(model_name, pretrained=True)
-
-        cache_dir_root = os.path.expanduser("~/.cache/huggingface/hub")
-        repo_dir = os.path.join(
-            cache_dir_root, "models--" + hf_repo.replace("/", "--")
+    if progress_callback:
+        progress_callback(
+            f'{km["name"]} download complete!',
+            current=total_files,
+            total=total_files,
         )
-        if not os.path.isdir(repo_dir):
-            repo_dir = model_name
 
-        if progress_callback:
-            progress_callback(
-                f"{km['name']} download complete!",
-                current=total_bytes,
-                total=total_bytes,
-            )
-
-        register_model(model_id, km["name"], model_name, repo_dir, km["description"])
-        log.info("timm model cached at: %s", repo_dir)
-        return repo_dir
-
-    raise ValueError(f"No download handler for {model_id}")
+    log.info("Model downloaded to: %s", model_dir)
+    register_model(
+        model_id, km["name"], km.get("model_str", model_id),
+        model_dir, km["description"],
+    )
+    return model_dir
 
 
 def download_hf_model(repo_id, progress_callback=None):
     """Download a model from any HuggingFace repo.
+
+    Looks for ONNX model files in the repo. Downloads them into
+    ~/.vireo/models/{slug}/.
 
     Args:
         repo_id: HuggingFace repo ID (e.g., 'imageomics/bioclip-2.5-vith14')
@@ -671,7 +446,7 @@ def download_hf_model(repo_id, progress_callback=None):
         dict with model_id, weights_path, name
     """
     try:
-        from huggingface_hub import hf_hub_download, list_repo_files
+        from huggingface_hub import list_repo_files
     except ImportError:
         raise RuntimeError(
             "huggingface_hub not installed. Run: pip install huggingface_hub"
@@ -684,9 +459,9 @@ def download_hf_model(repo_id, progress_callback=None):
     slug = repo_id.split("/")[-1]
     local_dir = os.path.join(DEFAULT_MODELS_DIR, slug)
 
-    # Find the weights file in the repo
+    # Find ONNX files in the repo
     if progress_callback:
-        progress_callback(f"Scanning {repo_id} for model files...")
+        progress_callback(f"Scanning {repo_id} for ONNX model files...")
 
     log.info("Listing files in HuggingFace repo: %s", repo_id)
     try:
@@ -694,52 +469,43 @@ def download_hf_model(repo_id, progress_callback=None):
     except Exception as e:
         raise RuntimeError(f"Could not access HuggingFace repo '{repo_id}': {e}")
 
-    # Look for common weight file names
-    weight_candidates = [
-        "open_clip_pytorch_model.bin",
-        "pytorch_model.bin",
-        "model.safetensors",
-        "open_clip_model.safetensors",
-    ]
-    weight_file = None
-    for candidate in weight_candidates:
-        if candidate in files:
-            weight_file = candidate
-            break
+    # Look for ONNX files
+    onnx_files = [f for f in files if f.endswith(".onnx")]
 
-    if not weight_file:
-        # Try any .bin or .safetensors file
-        for f in files:
-            if f.endswith(".bin") or f.endswith(".safetensors"):
-                weight_file = f
-                break
-
-    if not weight_file:
+    if not onnx_files:
         raise RuntimeError(
-            f"No model weights found in {repo_id}. " f"Files: {', '.join(files[:10])}"
+            f"No ONNX model files found in {repo_id}. "
+            f"Files: {', '.join(files[:10])}"
         )
 
-    log.info("Found weights file: %s in %s", weight_file, repo_id)
+    log.info("Found ONNX files: %s in %s", onnx_files, repo_id)
 
-    # Download the weights
-    path = _hf_download_with_retry(
-        repo_id,
-        weight_file,
-        local_dir,
-        progress_callback=progress_callback,
-    )
+    # Download all ONNX files and common config files
+    config_files = [f for f in files if f.endswith((".json", ".npy"))]
+    to_download = onnx_files + config_files
 
-    # Determine model_str — use hf-hub: prefix for open_clip compatibility
+    for fi, filename in enumerate(to_download):
+        if progress_callback:
+            progress_callback(
+                f"Downloading {fi + 1}/{len(to_download)}: {filename}",
+            )
+        _hf_download_with_retry(
+            repo_id, filename, local_dir,
+            progress_callback=progress_callback,
+        )
+
+    # Determine model_str — use hf-hub: prefix for compatibility
     model_str = f"hf-hub:{repo_id}"
 
     # Register the model
     name = slug.replace("-", " ").title()
     register_model(
-        model_id, name, model_str, path, f"Downloaded from HuggingFace: {repo_id}"
+        model_id, name, model_str, local_dir,
+        f"Downloaded from HuggingFace: {repo_id}",
     )
 
-    log.info("Model registered: %s (%s)", name, path)
-    return {"model_id": model_id, "weights_path": path, "name": name}
+    log.info("Model registered: %s (%s)", name, local_dir)
+    return {"model_id": model_id, "weights_path": local_dir, "name": name}
 
 
 def get_taxonomy_info():
@@ -756,7 +522,6 @@ def get_taxonomy_info():
     try:
         with open(taxonomy_path) as f:
             # Only read the metadata, not the full taxa dicts
-            # Read first few bytes to get last_updated without parsing the whole file
             raw = f.read(200)
         import re
 

@@ -4,29 +4,33 @@ Computes dense visual embeddings using DINOv2 ViT models for:
 - Subject crop embeddings (primary grouping feature for encounters)
 - Global image embeddings (secondary scene-level context)
 
-Models are loaded from the facebookresearch/dinov2 torch hub.
+Models are loaded as ONNX sessions from ~/.vireo/models/dinov2-{variant}/.
 """
 
 import logging
+import os
 
 import numpy as np
+import onnx_runtime
 
 log = logging.getLogger(__name__)
 
-# Variant → (torch hub model name, embedding dimension)
+# Variant -> embedding dimension
 DINOV2_VARIANTS = {
-    "vit-s14": ("dinov2_vits14", 384),
-    "vit-b14": ("dinov2_vitb14", 768),
-    "vit-l14": ("dinov2_vitl14", 1024),
+    "vit-s14": 384,
+    "vit-b14": 768,
+    "vit-l14": 1024,
 }
 
 # DINOv2 native input size
 DINOV2_INPUT_SIZE = 518
 
-_dinov2_model = None
-_dinov2_variant_loaded = None
-_dinov2_transform = None
-_dinov2_device = None
+# ImageNet normalization
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_STD = [0.229, 0.224, 0.225]
+
+_session = None
+_variant_loaded = None
 
 
 def get_embedding_dim(variant="vit-b14"):
@@ -36,29 +40,29 @@ def get_embedding_dim(variant="vit-b14"):
         variant: one of vit-s14, vit-b14, vit-l14
 
     Returns:
-        int — embedding dimension
+        int -- embedding dimension
     """
     if variant not in DINOV2_VARIANTS:
         raise ValueError(
             f"Unknown DINOv2 variant: {variant}. "
             f"Choose from: {list(DINOV2_VARIANTS.keys())}"
         )
-    return DINOV2_VARIANTS[variant][1]
+    return DINOV2_VARIANTS[variant]
 
 
-def _get_dinov2_model(variant="vit-b14"):
-    """Load DINOv2 model (cached singleton). Downloads weights on first use.
+def _get_dinov2_session(variant="vit-b14"):
+    """Load DINOv2 ONNX session (cached singleton).
 
     Args:
         variant: one of vit-s14, vit-b14, vit-l14
 
     Returns:
-        (model, transform, device) tuple
+        ort.InferenceSession
     """
-    global _dinov2_model, _dinov2_variant_loaded, _dinov2_transform, _dinov2_device
+    global _session, _variant_loaded
 
-    if _dinov2_model is not None and _dinov2_variant_loaded == variant:
-        return _dinov2_model, _dinov2_transform, _dinov2_device
+    if _session is not None and _variant_loaded == variant:
+        return _session
 
     if variant not in DINOV2_VARIANTS:
         raise ValueError(
@@ -66,64 +70,53 @@ def _get_dinov2_model(variant="vit-b14"):
             f"Choose from: {list(DINOV2_VARIANTS.keys())}"
         )
 
-    try:
-        import torch
-        from torchvision import transforms
-    except ImportError:
-        raise RuntimeError(
-            "PyTorch and torchvision not installed. Run: pip install torch torchvision\n"
-            "These are required for DINOv2 embeddings."
+    model_dir = os.path.join(
+        os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+    )
+    model_path = os.path.join(model_dir, "model.onnx")
+
+    if not os.path.isfile(model_path):
+        raise FileNotFoundError(
+            f"DINOv2 ONNX model not found at {model_path}. "
+            f"Download it first via the models page."
         )
 
-    hub_name = DINOV2_VARIANTS[variant][0]
+    log.info("Loading DINOv2 ONNX (%s)...", variant)
+    sess = onnx_runtime.create_session(model_path)
 
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-
-    log.info("Loading DINOv2 (%s) on %s...", variant, device)
-    model = torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True)
-    model = model.to(device)
-    model.eval()
-
-    transform = transforms.Compose([
-        transforms.Resize(DINOV2_INPUT_SIZE, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(DINOV2_INPUT_SIZE),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-    _dinov2_model = model
-    _dinov2_variant_loaded = variant
-    _dinov2_transform = transform
-    _dinov2_device = device
-    log.info("DINOv2 loaded (%s, %d-dim)", variant, DINOV2_VARIANTS[variant][1])
-    return model, transform, device
+    _session = sess
+    _variant_loaded = variant
+    log.info(
+        "DINOv2 ONNX loaded (%s, %d-dim)", variant, DINOV2_VARIANTS[variant]
+    )
+    return sess
 
 
 def embed(image, variant="vit-b14"):
     """Compute a DINOv2 CLS token embedding for an image.
 
     Args:
-        image: PIL Image (any size — will be resized to 518x518)
+        image: PIL Image (any size -- will be resized to 518x518)
         variant: DINOv2 model variant
 
     Returns:
         numpy float32 array of shape (embedding_dim,)
     """
-    import torch
+    session = _get_dinov2_session(variant)
 
-    model, transform, device = _get_dinov2_model(variant)
+    input_tensor = onnx_runtime.preprocess_image(
+        image,
+        size=(DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE),
+        mean=_IMAGENET_MEAN,
+        std=_IMAGENET_STD,
+        center_crop=True,
+    )
 
-    img_rgb = image.convert("RGB")
-    tensor = transform(img_rgb).unsqueeze(0).to(device)
+    input_name = session.get_inputs()[0].name
+    outputs = session.run(None, {input_name: input_tensor})
 
-    with torch.inference_mode():
-        embedding = model(tensor)
-
-    return embedding.squeeze(0).cpu().numpy().astype(np.float32)
+    embedding = outputs[0].squeeze(0)
+    return embedding.astype(np.float32)
 
 
 def embed_subject(crop_image, variant="vit-b14"):

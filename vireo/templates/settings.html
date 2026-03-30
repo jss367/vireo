@@ -709,10 +709,10 @@
     </div>
     <div class="setting-row">
       <div class="setting-label">
-        PyTorch
-        <small id="torchDetail"></small>
+        ONNX Runtime
+        <small id="onnxrtProviders"></small>
       </div>
-      <span class="setting-value" id="torchVersion">-</span>
+      <span class="setting-value" id="onnxrtVersion">-</span>
     </div>
     <div class="setting-row">
       <div class="setting-label">
@@ -1269,8 +1269,8 @@ async function loadSystemInfo() {
     document.getElementById('deviceName').textContent = d.device;
     document.getElementById('deviceDetail').textContent = d.device_detail;
     document.getElementById('pythonVersion').textContent = d.python_version;
-    document.getElementById('torchVersion').textContent = d.torch_version || 'Not installed';
-    document.getElementById('torchDetail').textContent = d.torch_detail || '';
+    document.getElementById('onnxrtVersion').textContent = d.onnxruntime_version || 'Not installed';
+    document.getElementById('onnxrtProviders').textContent = (d.onnxruntime_providers || []).join(', ');
     var mdStatus = document.getElementById('megadetectorStatus');
     var mdDetail = document.getElementById('megadetectorDetail');
     if (d.megadetector === 'installed') {
