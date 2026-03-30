@@ -713,6 +713,122 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   }
 })();
 
+/* ---------- Navigation Hotkeys ---------- */
+(function() {
+  // Map from navigation shortcut key → href path
+  var NAV_ROUTES = {
+    import: '/import', pipeline: '/pipeline', pipeline_review: '/pipeline/review',
+    review: '/review', cull: '/cull', browse: '/browse', map: '/map',
+    variants: '/variants', dashboard: '/dashboard', audit: '/audit',
+    compare: '/compare', workspace: '/workspace', settings: '/settings',
+    keywords: '/keywords'
+  };
+
+  var NAV_DEFAULTS = {
+    import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+    cull: 'c', browse: 'b', map: 'm', variants: 'v',
+    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+    settings: ',', keywords: 'k'
+  };
+
+  // Build reverse map: href → shortcut action name
+  var hrefToAction = {};
+  for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
+
+  function applyHotkeyHints(navShortcuts) {
+    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)');
+    for (var i = 0; i < navLinks.length; i++) {
+      var link = navLinks[i];
+      var href = link.getAttribute('href');
+      var action = hrefToAction[href];
+      if (!action) continue;
+      var keyStr = navShortcuts[action];
+      if (!keyStr) continue;
+
+      var label = link.textContent.trim();
+      var sc = parseShortcut(keyStr);
+      // Only do inline highlight for single bare keys (no modifiers)
+      if (!sc.ctrl && !sc.meta && !sc.shift && !sc.alt && sc.key.length === 1) {
+        var idx = label.toLowerCase().indexOf(sc.key.toLowerCase());
+        if (idx !== -1) {
+          // Inline highlight: wrap first occurrence of the letter
+          link.innerHTML = escapeHtml(label.substring(0, idx)) +
+            '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
+            escapeHtml(label.substring(idx + 1));
+          continue;
+        }
+      }
+      // Suffix: append (key) after label
+      link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
+        escapeHtml(formatShortcut(keyStr)) + ')</span>';
+    }
+  }
+
+  function setupNavKeydown(navShortcuts) {
+    var keyToHref = {};
+    for (var action in navShortcuts) {
+      if (NAV_ROUTES[action]) keyToHref[navShortcuts[action]] = NAV_ROUTES[action];
+    }
+
+    var path = location.pathname;
+    var pageCtx = null;
+    if (path === '/browse') pageCtx = 'browse';
+    else if (path === '/review') pageCtx = 'review';
+
+    document.addEventListener('keydown', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      var lightbox = document.getElementById('lightboxOverlay');
+      if (lightbox && lightbox.classList.contains('active')) return;
+      var pipeline = document.getElementById('pipelineOverlay');
+      if (pipeline && pipeline.classList.contains('active')) return;
+      var similar = document.getElementById('similarOverlay');
+      if (similar && similar.classList.contains('active')) return;
+      var inat = document.getElementById('inatModal');
+      if (inat && inat.classList.contains('open')) return;
+      var createWs = document.getElementById('createWsModal');
+      if (createWs && createWs.classList.contains('open')) return;
+
+      for (var shortcutStr in keyToHref) {
+        if (matchesShortcut(e, shortcutStr)) {
+          if (window.__TAURI_INTERNALS__) return;
+          // Live check: does the current page claim this key?
+          if (pageCtx && window._vireoShortcuts && window._vireoShortcuts[pageCtx]) {
+            var pageShortcuts = window._vireoShortcuts[pageCtx];
+            for (var a in pageShortcuts) {
+              if (pageShortcuts[a] === shortcutStr) return; // page wins
+            }
+          }
+          if (keyToHref[shortcutStr] === path) return;
+          e.preventDefault();
+          window.location.href = keyToHref[shortcutStr];
+          return;
+        }
+      }
+    });
+  }
+
+  // Fetch config and apply
+  fetch('/api/config')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(cfg) {
+      if (!cfg) return;
+      var shortcuts = cfg.keyboard_shortcuts || {};
+      var navShortcuts = {};
+      // Merge defaults with user overrides
+      for (var key in NAV_DEFAULTS) navShortcuts[key] = NAV_DEFAULTS[key];
+      if (shortcuts.navigation) {
+        for (var key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
+      }
+      // Store for other scripts to access
+      if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
+      window._vireoShortcuts.navigation = navShortcuts;
+
+      applyHotkeyHints(navShortcuts);
+      setupNavKeydown(navShortcuts);
+    })
+    .catch(function() {});
+})();
+
 /* ---------- Load active workspace name ---------- */
 (function() {
   fetch('/api/workspaces/active')
