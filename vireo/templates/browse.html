@@ -908,8 +908,10 @@ async function bootstrapBrowse() {
 function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
+    var count = c.photo_count != null ? c.photo_count : '';
     html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
-      '<span>' + escapeHtml(c.name) + '</span></div>';
+      '<span>' + escapeHtml(c.name) + '</span>' +
+      '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }

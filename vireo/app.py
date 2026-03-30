@@ -343,6 +343,11 @@ def create_app(db_path, thumb_cache_dir=None):
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
+        coll_list = []
+        for c in collections:
+            d = dict(c)
+            d["photo_count"] = db.count_collection_photos(c["id"])
+            coll_list.append(d)
 
         return jsonify(
             {
@@ -352,7 +357,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "per_page": per_page,
                 "folders": [dict(f) for f in folders],
                 "keywords": [dict(k) for k in keywords],
-                "collections": [dict(c) for c in collections],
+                "collections": coll_list,
             }
         )
 
@@ -1028,7 +1033,12 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_collections():
         db = _get_db()
         collections = db.get_collections()
-        return jsonify([dict(c) for c in collections])
+        result = []
+        for c in collections:
+            d = dict(c)
+            d["photo_count"] = db.count_collection_photos(c["id"])
+            result.append(d)
+        return jsonify(result)
 
     @app.route("/api/collections", methods=["POST"])
     def api_create_collection():
