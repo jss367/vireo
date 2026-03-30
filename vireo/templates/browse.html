@@ -2223,6 +2223,9 @@ async function developSelected() {
       document.getElementById('loadingState').style.display = 'none';
     }
 
+    // Release lock so loadPhotos() can paginate inside the loop below
+    loading = false;
+
     // Keep loading pages until we find the photo or run out
     var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
     while (!el && !allLoaded) {
