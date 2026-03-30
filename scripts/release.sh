@@ -112,35 +112,6 @@ git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.to
 git commit -m "release: v$NEW_VERSION" || true
 echo ""
 
-# --- Check CI health before publishing ---
-if $PUBLISH && command -v gh &> /dev/null; then
-    echo "==> Checking recent Build & Release CI runs..."
-    RECENT_RUNS=$(gh run list --workflow="Build & Release" --limit 3 --json conclusion --jq '.[].conclusion' 2>/dev/null || true)
-    if [[ -n "$RECENT_RUNS" ]]; then
-        ALL_FAILED=true
-        for conclusion in $RECENT_RUNS; do
-            if [[ "$conclusion" == "success" ]]; then
-                ALL_FAILED=false
-                break
-            fi
-        done
-        if $ALL_FAILED; then
-            echo ""
-            echo "WARNING: The last 3 Build & Release runs all failed/cancelled."
-            echo "         Pushing a tag will trigger another build that will likely fail."
-            echo ""
-            echo "  Recent runs:"
-            gh run list --workflow="Build & Release" --limit 3 --json conclusion,createdAt --jq '.[] | "    \(.createdAt)  \(.conclusion)"' 2>/dev/null || true
-            echo ""
-            read -r -p "Publish anyway? [y/N] " CONFIRM
-            if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-                echo "Aborted. Version bump commit is still on your local branch."
-                exit 1
-            fi
-        fi
-    fi
-fi
-
 # --- Tag and publish ---
 if $PUBLISH; then
     echo "==> Tagging v$NEW_VERSION..."
