@@ -87,6 +87,7 @@ DEFAULTS = {
             "audit": "a",
             "compare": "o",
             "workspace": "w",
+            "shortcuts": "/",
             "settings": ",",
             "keywords": "k",
         },

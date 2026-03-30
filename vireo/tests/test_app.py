@@ -255,7 +255,7 @@ def test_pages_link_base_css(app_and_db):
     client = app.test_client()
     pages = ['/browse', '/import', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
-             '/review', '/cull', '/pipeline/review', '/map']
+             '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
@@ -1019,3 +1019,38 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
         (p_ws2, ws2),
     ).fetchall()
     assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedDelete" for c in ws2_changes)
+
+
+def test_shortcuts_page(app_and_db):
+    """GET /shortcuts returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert resp.status_code == 200
+
+
+def test_shortcuts_link_in_navbar(app_and_db):
+    """The navbar includes a link to /shortcuts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert b'/shortcuts' in resp.data
+    assert b'Shortcuts' in resp.data
+
+
+def test_settings_no_shortcuts_editor(app_and_db):
+    """Settings page no longer contains the shortcuts editor."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    html = resp.data.decode()
+    assert 'shortcutsEditor' not in html
+
+
+def test_shortcuts_cheat_sheet_in_navbar(app_and_db):
+    """Every page includes the shortcuts cheat sheet overlay."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    html = resp.data.decode()
+    assert 'shortcutsCheatSheet' in html

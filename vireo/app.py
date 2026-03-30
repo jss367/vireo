@@ -347,6 +347,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def settings():
         return render_template("settings.html")
 
+    @app.route("/shortcuts")
+    def shortcuts_page():
+        return render_template("shortcuts.html")
+
     @app.route("/keywords")
     def keywords_page():
         return render_template("keywords.html")
