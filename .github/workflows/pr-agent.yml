@@ -290,7 +290,25 @@ jobs:
       && !contains(github.event.pull_request.labels.*.name, 'claude-agent')
     runs-on: ubuntu-latest
     steps:
+      - name: Skip fork PRs
+        id: fork-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_repo=$(gh pr view ${{ github.event.pull_request.number }} \
+            --repo "${{ github.repository }}" \
+            --json headRepositoryOwner,headRepository \
+            --jq '.headRepositoryOwner.login + "/" + .headRepository.name')
+
+          if [[ "$pr_repo" != "${{ github.repository }}" ]]; then
+            echo "PR is from fork ${pr_repo} — skipping."
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Add claude-agent label
+        if: steps.fork-check.outputs.is_fork == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -299,18 +317,22 @@ jobs:
             --add-label claude-agent
 
       - uses: actions/checkout@v4
+        if: steps.fork-check.outputs.is_fork == 'false'
         with:
           fetch-depth: 0
 
       - name: Set up Python
+        if: steps.fork-check.outputs.is_fork == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: "3.14"
 
       - name: Install test dependencies
+        if: steps.fork-check.outputs.is_fork == 'false'
         run: pip install flask Pillow pytest imagehash
 
       - name: Address codex review
+        if: steps.fork-check.outputs.is_fork == 'false'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
