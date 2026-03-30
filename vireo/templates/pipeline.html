@@ -580,6 +580,7 @@ function updateStartButton() {
 // -- Pipeline orchestration --
 var _pipelineRunning = false;
 var _pipelineAbort = false;
+var _pipelineEventSource = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
@@ -647,8 +648,9 @@ async function startPipeline() {
     document.getElementById('card-source').classList.add('expanded');
 
     await new Promise(function(resolve) {
-      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      _pipelineEventSource = safeEventSource('/api/jobs/' + data.job_id + '/stream', {
         onProgress: function(p) {
+          if (_pipelineAbort) return;
           _updatePipelineStageUI(p);
         },
         onComplete: function(result) {
@@ -831,6 +833,10 @@ function _onPipelineComplete(result) {
 
 function stopPipeline() {
   _pipelineAbort = true;
+  if (_pipelineEventSource) {
+    _pipelineEventSource.close();
+    _pipelineEventSource = null;
+  }
   var btn = document.getElementById('btnStartPipeline');
   btn.disabled = true;
   btn.textContent = 'Stopping...';
