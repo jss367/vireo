@@ -366,6 +366,18 @@ def create_app(db_path, thumb_cache_dir=None):
         from pipeline import load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
+        if results and results.get("photos"):
+            photo_ids = [p["id"] for p in results["photos"]]
+            placeholders = ",".join("?" for _ in photo_ids)
+            rows = db.conn.execute(
+                f"SELECT id, flag, rating FROM photos WHERE id IN ({placeholders})",
+                photo_ids,
+            ).fetchall()
+            flag_map = {r["id"]: (r["flag"], r["rating"]) for r in rows}
+            for p in results["photos"]:
+                f, r = flag_map.get(p["id"], ("none", 0))
+                p["flag"] = f
+                p["rating"] = r
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
