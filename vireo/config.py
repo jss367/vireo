@@ -74,6 +74,22 @@ DEFAULTS = {
         "file_types": "both",
     },
     "keyboard_shortcuts": {
+        "navigation": {
+            "import": "i",
+            "pipeline": "p",
+            "pipeline_review": "e",
+            "review": "r",
+            "cull": "c",
+            "browse": "b",
+            "map": "m",
+            "variants": "v",
+            "dashboard": "d",
+            "audit": "a",
+            "compare": "o",
+            "workspace": "w",
+            "settings": ",",
+            "keywords": "k",
+        },
         "review": {
             "accept": "a",
             "skip": "s",
