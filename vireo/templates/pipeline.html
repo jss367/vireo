@@ -343,6 +343,10 @@ body { padding-bottom: 36px; }
         </div>
         <div class="setting-item">
           <div class="setting-label">Proxy res.</div>
+          <div style="font-size:11px;color:var(--text-faint,#5A8890);margin-bottom:4px;line-height:1.4;">
+            Working resolution for masking and embeddings. Higher values improve detail
+            but use more memory and run slower. 1536 is a good default for most photos.
+          </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <input type="range" min="1024" max="2048" value="1536" step="64"
                    id="cfgProxy" oninput="onModelConfigChange()"
