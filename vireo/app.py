@@ -3422,7 +3422,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     """SELECT p.id FROM photos p
                        JOIN folders f ON p.folder_id = f.id
                        WHERE f.path = ? OR f.path LIKE ?""",
-                    (scan_target, scan_target + "/%"),
+                    (scan_target, scan_target.rstrip("/") + "/%"),
                 ).fetchall()
                 photo_ids = [r["id"] for r in rows]
 
