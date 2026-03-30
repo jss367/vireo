@@ -803,24 +803,11 @@
     </div>
   </div>
 
-  <!-- About -->
-  <div class="section">
-    <div class="section-title">About</div>
-    <div class="setting-row">
-      <div class="setting-label">Vireo</div>
-      <span class="setting-value" id="appVersion">-</span>
-    </div>
-    <div style="font-size:12px;color:var(--text-faint);margin-top:8px;">
-      AI-powered wildlife photo organizer.
-      <a href="https://github.com/jss367/vireo" style="color:var(--accent);text-decoration:none;">GitHub</a>
-    </div>
-  </div>
-
   <!-- About & Updates -->
   <div class="section" id="updateSection" style="display:none;">
     <div class="section-title">About & Updates</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <span style="font-size:13px;color:var(--text-secondary);">Vireo v<span id="currentVersion">0.1.0</span></span>
+      <span style="font-size:13px;color:var(--text-secondary);">Vireo v<span id="currentVersion">-</span></span>
       <button class="btn-sm" id="checkUpdateBtn" onclick="doCheckForUpdate()">Check for Updates</button>
       <span id="updateStatus" style="font-size:12px;color:var(--text-dim);"></span>
     </div>
@@ -2007,8 +1994,6 @@ async function cleanKeywords() {
 async function loadVersion() {
   try {
     var d = await safeFetch('/api/version', {}, { toast: false });
-    var ver = 'v' + d.version;
-    document.getElementById('appVersion').textContent = ver;
     var cv = document.getElementById('currentVersion');
     if (cv) cv.textContent = d.version;
   } catch(e) {}

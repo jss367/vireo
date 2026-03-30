@@ -1977,7 +1977,12 @@ def create_app(db_path, thumb_cache_dir=None):
             from importlib.metadata import version as pkg_version
             ver = pkg_version("vireo")
         except Exception:
-            ver = "0.1.0"
+            import tomllib
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                    ver = tomllib.load(f)["project"]["version"]
+            except Exception:
+                ver = "0.0.0"
         return jsonify({"version": ver})
 
     @app.route("/api/volumes", methods=["GET"])
