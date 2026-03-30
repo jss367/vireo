@@ -2305,20 +2305,6 @@ async function developSelected() {
   }
 }
 
-async function openInEditor(photoIds) {
-  if (!photoIds || !photoIds.length) return;
-  try {
-    var data = await safeFetch('/api/photos/open-external', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: photoIds}),
-    });
-    showToast('Opened ' + data.opened + ' photo(s) in editor');
-  } catch(e) {
-    showToast(e.message || 'Failed to open in editor');
-  }
-}
-
 function openInEditorBatch() {
   var ids = Array.from(selectedPhotos);
   if (!ids.length) return;
