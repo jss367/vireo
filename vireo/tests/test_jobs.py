@@ -188,3 +188,43 @@ def test_job_history_stores_tree_and_summary(tmp_path):
     cols = [row[1] for row in db.conn.execute("PRAGMA table_info(job_history)").fetchall()]
     assert "tree" in cols
     assert "summary" in cols
+
+
+def test_job_steps_tracking(tmp_path):
+    """Jobs can define and update execution steps."""
+    import time
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        runner.set_steps(job["id"], [
+            {"id": "scan", "label": "Scan folders"},
+            {"id": "index", "label": "Index photos"},
+            {"id": "thumbs", "label": "Generate thumbnails"},
+        ])
+        runner.update_step(job["id"], "scan", status="running")
+        runner.update_step(job["id"], "scan", status="completed", summary="142 folders")
+        runner.update_step(job["id"], "index", status="running",
+                           progress={"current": 50, "total": 100})
+        return {"photos_indexed": 100}
+
+    job_id = runner.start("scan", work, workspace_id=1)
+
+    for _ in range(50):
+        j = runner.get(job_id)
+        if j and j["status"] != "running":
+            break
+        time.sleep(0.1)
+
+    j = runner.get(job_id)
+    assert j["status"] == "completed"
+    assert "steps" in j
+    assert len(j["steps"]) == 3
+    assert j["steps"][0]["status"] == "completed"
+    assert j["steps"][0]["summary"] == "142 folders"
+    assert j["steps"][1]["progress"]["current"] == 50
+    assert j["steps"][2]["status"] == "pending"

@@ -93,6 +93,7 @@ class JobRunner:
             "errors": [],
             "config": config or {},
             "workspace_id": workspace_id,
+            "steps": [],
         }
 
         with self._lock:
@@ -242,6 +243,53 @@ class JobRunner:
             subs = self._subscribers.get(job_id, [])
             if q in subs:
                 subs.remove(q)
+
+    def set_steps(self, job_id, steps):
+        """Define the execution plan for a job.
+
+        Args:
+            job_id: job identifier
+            steps: list of dicts with at least 'id' and 'label' keys
+        """
+        full_steps = []
+        for s in steps:
+            full_steps.append({
+                "id": s["id"],
+                "label": s["label"],
+                "status": "pending",
+                "progress": {"current": 0, "total": 0},
+                "started_at": None,
+                "finished_at": None,
+                "duration": None,
+                "summary": None,
+                "error": None,
+            })
+        job = self._jobs.get(job_id)
+        if job:
+            job["steps"] = full_steps
+
+    def update_step(self, job_id, step_id, **kwargs):
+        """Update a step's fields (status, progress, summary, error).
+
+        Automatically sets started_at/finished_at/duration timestamps.
+        """
+        job = self._jobs.get(job_id)
+        if not job or "steps" not in job:
+            return
+        for step in job["steps"]:
+            if step["id"] == step_id:
+                new_status = kwargs.get("status")
+                if new_status == "running" and step["status"] == "pending":
+                    step["started_at"] = datetime.now().isoformat()
+                if new_status in ("completed", "failed") and step["started_at"]:
+                    step["finished_at"] = datetime.now().isoformat()
+                    start = datetime.fromisoformat(step["started_at"])
+                    end = datetime.fromisoformat(step["finished_at"])
+                    step["duration"] = round((end - start).total_seconds(), 1)
+                for key in ("status", "summary", "error", "progress"):
+                    if key in kwargs:
+                        step[key] = kwargs[key]
+                break
 
 
 class LogBroadcaster(logging.Handler):
