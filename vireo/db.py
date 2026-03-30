@@ -225,10 +225,6 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
-            CREATE INDEX IF NOT EXISTS idx_detections_photo ON detections(photo_id);
-            CREATE INDEX IF NOT EXISTS idx_detections_workspace ON detections(workspace_id);
-            CREATE INDEX IF NOT EXISTS idx_predictions_detection ON predictions(detection_id);
-            CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
         """
         )
         # Migrations for existing databases
