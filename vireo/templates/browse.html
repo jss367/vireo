@@ -823,6 +823,31 @@ body {
   </div>
 </div>
 
+<!-- Batch Keyword Modal -->
+<div class="modal-overlay" id="batchKeywordModal">
+  <div class="modal">
+    <h3 id="batchKeywordTitle">Add Keyword</h3>
+    <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" onkeydown="if(event.key==='Enter')confirmBatchKeyword()">
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmBatchKeyword()">Add</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideBatchKeywordModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Batch Add-to-Collection Modal -->
+<div class="modal-overlay" id="batchCollectionModal">
+  <div class="modal">
+    <h3 id="batchCollectionTitle">Add to Collection</h3>
+    <div id="batchCollectionList" style="margin-bottom:12px;max-height:200px;overflow-y:auto;"></div>
+    <input class="modal-input" id="batchCollectionNewName" placeholder="Or type a name to create new collection" onkeydown="if(event.key==='Enter')confirmBatchCollection()">
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 
 <script>
 /* ---------- State ---------- */
@@ -1674,14 +1699,26 @@ async function batchSetFlag(flag) {
   showUndoToast();
 }
 
-async function batchAddKeyword() {
-  var name = prompt('Keyword to add to ' + selectedPhotos.size + ' photos:');
+function batchAddKeyword() {
+  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + selectedPhotos.size + ' photos';
+  document.getElementById('batchKeywordInput').value = '';
+  document.getElementById('batchKeywordModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
+}
+
+function hideBatchKeywordModal() {
+  document.getElementById('batchKeywordModal').classList.remove('open');
+}
+
+async function confirmBatchKeyword() {
+  var name = document.getElementById('batchKeywordInput').value.trim();
   if (!name) return;
+  hideBatchKeywordModal();
   var ids = Array.from(selectedPhotos);
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids, name: name.trim()}),
+      body: JSON.stringify({photo_ids: ids, name: name}),
     });
   } catch(e) { return; }
   showUndoToast();
@@ -1712,37 +1749,55 @@ function batchDelete() {
   });
 }
 
+var _batchCollections = [];
+var _batchCollectionSelectedId = null;
+
 async function addToCollection() {
   if (selectedPhotos.size === 0) return;
 
-  // Build a picker: existing collections + option to create new
   var collections;
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
   } catch(e) { return; }
 
-  var options = collections.map(function(c) { return c.name + ' (id:' + c.id + ')'; });
-  var choiceStr = 'Add ' + selectedPhotos.size + ' photo(s) to which collection?\n\n';
-  options.forEach(function(o, i) { choiceStr += (i + 1) + '. ' + o + '\n'; });
-  choiceStr += '\nEnter a number to add to existing, or type a new name to create one:';
+  _batchCollections = collections;
+  _batchCollectionSelectedId = null;
+  document.getElementById('batchCollectionTitle').textContent = 'Add ' + selectedPhotos.size + ' photo(s) to collection';
 
-  var choice = prompt(choiceStr);
-  if (!choice) return;
-  choice = choice.trim();
-  if (!choice) return;
+  var listHtml = '';
+  collections.forEach(function(c) {
+    listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
+  });
+  if (collections.length === 0) {
+    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No collections yet</div>';
+  }
+  document.getElementById('batchCollectionList').innerHTML = listHtml;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.getElementById('batchCollectionModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchCollectionNewName').focus(); }, 50);
+}
 
+function pickBatchCollection(id) {
+  _batchCollectionSelectedId = id;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.querySelectorAll('.batch-coll-item').forEach(function(el) {
+    el.style.background = parseInt(el.dataset.id) === id ? 'var(--bg-tertiary)' : '';
+  });
+}
+
+function hideBatchCollectionModal() {
+  document.getElementById('batchCollectionModal').classList.remove('open');
+}
+
+async function confirmBatchCollection() {
+  var newName = document.getElementById('batchCollectionNewName').value.trim();
   var ids = Array.from(selectedPhotos);
-  var collectionId = null;
+  var collectionId = _batchCollectionSelectedId;
   var collectionName = '';
 
-  // Check if user entered a number
-  var num = parseInt(choice);
-  if (!isNaN(num) && num >= 1 && num <= collections.length) {
-    collectionId = collections[num - 1].id;
-    collectionName = collections[num - 1].name;
-  } else {
+  if (newName) {
     // Create a new static collection
-    collectionName = choice;
+    collectionName = newName;
     try {
       var createData = await safeFetch('/api/collections', {
         method: 'POST',
@@ -1754,7 +1809,14 @@ async function addToCollection() {
       });
       collectionId = createData.id;
     } catch(e) { return; }
+  } else if (collectionId != null) {
+    var match = _batchCollections.find(function(c) { return c.id === collectionId; });
+    collectionName = match ? match.name : '';
+  } else {
+    return; // nothing selected
   }
+
+  hideBatchCollectionModal();
 
   // Add photos to the collection
   try {
@@ -2131,6 +2193,13 @@ document.addEventListener('click', function(e) {
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {
+  // Suppress browse shortcuts while any modal is open
+  var openModal = document.querySelector('.modal-overlay.open');
+  if (openModal) {
+    if (e.key === 'Escape') { openModal.classList.remove('open'); }
+    return;
+  }
+
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   if (e.key === 'Escape') {
