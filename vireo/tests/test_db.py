@@ -1559,3 +1559,67 @@ def test_clear_detections(tmp_path):
     db.clear_detections(pid)
     assert db.conn.execute("SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,)).fetchone()[0] == 0
     assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_add_prediction_with_detection(tmp_path):
+    """add_prediction should accept detection_id and store prediction."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
+    preds = db.get_predictions()
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Elk"
+    assert preds[0]["confidence"] == 0.92
+
+
+def test_get_predictions_includes_photo_and_box(tmp_path):
+    """get_predictions should include photo filename and bounding box from detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    preds = db.get_predictions()
+    assert preds[0]["filename"] == "elk.jpg"
+    assert preds[0]["box_x"] == 0.1
+    assert preds[0]["photo_id"] == pid
+
+
+def test_accept_prediction_tags_photo(tmp_path):
+    """accept_prediction should add species keyword to the photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    preds = db.get_predictions()
+    result = db.accept_prediction(preds[0]["id"])
+    assert result["species"] == "Elk"
+    kws = db.get_photo_keywords(pid)
+    assert any(k["name"] == "Elk" for k in kws)
+
+
+def test_get_existing_detection_photo_ids(tmp_path):
+    """get_existing_detection_photo_ids returns photo IDs that have detections."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid1 = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    db.save_detections(pid1, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    result = db.get_existing_detection_photo_ids()
+    assert pid1 in result
+    assert pid2 not in result

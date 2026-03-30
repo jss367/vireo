@@ -1762,7 +1762,7 @@ class Database:
 
     def add_prediction(
         self,
-        photo_id,
+        detection_id,
         species,
         confidence,
         model,
@@ -1773,27 +1773,27 @@ class Database:
         individual=None,
         taxonomy=None,
     ):
-        """Store a classification prediction for a photo.
+        """Store a classification prediction for a detection.
 
         Uses INSERT OR IGNORE so re-running classification doesn't destroy
         existing predictions that the user may have already reviewed.
         Use clear_predictions() first if you want a fresh start.
 
         Args:
+            detection_id: the detection ID (from detections table)
             taxonomy: optional dict with keys kingdom, phylum, class, order,
                       family, genus, scientific_name from taxonomy lookup
         """
         tax = taxonomy or {}
         self.conn.execute(
             """INSERT OR IGNORE INTO predictions
-               (photo_id, species, confidence, model, category, status,
+               (detection_id, species, confidence, model, category, status,
                 group_id, vote_count, total_votes, individual,
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name,
-                workspace_id)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
+               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                photo_id,
+                detection_id,
                 species,
                 confidence,
                 model,
@@ -1809,33 +1809,57 @@ class Database:
                 tax.get("family"),
                 tax.get("genus"),
                 tax.get("scientific_name"),
-                self._ws_id(),
             ),
         )
         self.conn.commit()
 
     def clear_predictions(self, model=None, collection_photo_ids=None):
         """Clear predictions, optionally filtered by model and/or photo set."""
-        conditions = ["workspace_id = ?"]
-        params = [self._ws_id()]
-        if model:
-            conditions.append("model = ?")
-            params.append(model)
         if collection_photo_ids is not None:
             placeholders = ",".join("?" for _ in collection_photo_ids)
-            conditions.append(f"photo_id IN ({placeholders})")
-            params.extend(collection_photo_ids)
-        where = "WHERE " + " AND ".join(conditions)
-        self.conn.execute(f"DELETE FROM predictions {where}", params)
+            if model:
+                self.conn.execute(
+                    f"""DELETE FROM predictions WHERE id IN (
+                        SELECT pr.id FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        WHERE d.workspace_id = ? AND pr.model = ?
+                        AND d.photo_id IN ({placeholders})
+                    )""",
+                    [self._ws_id(), model, *collection_photo_ids],
+                )
+            else:
+                self.conn.execute(
+                    f"""DELETE FROM predictions WHERE id IN (
+                        SELECT pr.id FROM predictions pr
+                        JOIN detections d ON d.id = pr.detection_id
+                        WHERE d.workspace_id = ? AND d.photo_id IN ({placeholders})
+                    )""",
+                    [self._ws_id(), *collection_photo_ids],
+                )
+        else:
+            conditions = ["d.workspace_id = ?"]
+            params = [self._ws_id()]
+            if model:
+                conditions.append("pr.model = ?")
+                params.append(model)
+            where = " AND ".join(conditions)
+            self.conn.execute(
+                f"""DELETE FROM predictions WHERE id IN (
+                    SELECT pr.id FROM predictions pr
+                    JOIN detections d ON d.id = pr.detection_id
+                    WHERE {where}
+                )""",
+                params,
+            )
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):
-        """Get predictions with photo filename, optionally filtered."""
-        conditions = ["pr.workspace_id = ?"]
+        """Get predictions with photo and detection info, optionally filtered."""
+        conditions = ["d.workspace_id = ?"]
         params = [self._ws_id()]
         if photo_ids is not None:
             placeholders = ",".join("?" for _ in photo_ids)
-            conditions.append(f"pr.photo_id IN ({placeholders})")
+            conditions.append(f"d.photo_id IN ({placeholders})")
             params.extend(photo_ids)
         if model:
             conditions.append("pr.model = ?")
@@ -1845,8 +1869,12 @@ class Database:
             params.append(status)
         where = "WHERE " + " AND ".join(conditions)
         return self.conn.execute(
-            f"""SELECT pr.*, p.filename, p.timestamp FROM predictions pr
-                JOIN photos p ON p.id = pr.photo_id
+            f"""SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+                       d.detector_confidence, d.detector_model,
+                       p.filename, p.timestamp
+                FROM predictions pr
+                JOIN detections d ON d.id = pr.detection_id
+                JOIN photos p ON p.id = d.photo_id
                 {where} ORDER BY pr.confidence DESC""",
             params,
         ).fetchall()
@@ -1859,14 +1887,16 @@ class Database:
         self.conn.commit()
 
     def get_group_predictions(self, group_id):
-        """Get all predictions and photo data for a burst group, ordered by quality."""
+        """Get all predictions and photo data for a burst group."""
         return self.conn.execute(
-            """SELECT pr.*, p.filename, p.timestamp, p.sharpness,
+            """SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.detector_confidence, p.filename, p.timestamp, p.sharpness,
                       p.quality_score, p.subject_sharpness, p.subject_size,
-                      p.detection_conf, p.rating, p.flag
+                      p.rating, p.flag
                FROM predictions pr
-               JOIN photos p ON p.id = pr.photo_id
-               WHERE pr.group_id = ? AND pr.workspace_id = ?
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               WHERE pr.group_id = ? AND d.workspace_id = ?
                ORDER BY p.quality_score DESC""",
             (group_id, self._ws_id()),
         ).fetchall()
@@ -1874,7 +1904,11 @@ class Database:
     def update_predictions_status_by_photo(self, photo_id, status):
         """Update status for all predictions of a photo in the active workspace."""
         self.conn.execute(
-            "UPDATE predictions SET status = ? WHERE photo_id = ? AND workspace_id = ?",
+            """UPDATE predictions SET status = ?
+               WHERE detection_id IN (
+                   SELECT id FROM detections
+                   WHERE photo_id = ? AND workspace_id = ?
+               )""",
             (status, photo_id, self._ws_id()),
         )
         self.conn.commit()
@@ -1882,7 +1916,10 @@ class Database:
     def ungroup_prediction(self, prediction_id):
         """Remove a prediction from its group."""
         self.conn.execute(
-            "UPDATE predictions SET group_id = NULL WHERE id = ? AND workspace_id = ?",
+            """UPDATE predictions SET group_id = NULL
+               WHERE id = ? AND detection_id IN (
+                   SELECT id FROM detections WHERE workspace_id = ?
+               )""",
             (prediction_id, self._ws_id()),
         )
         self.conn.commit()
@@ -1890,7 +1927,9 @@ class Database:
     def get_existing_prediction_photo_ids(self, model):
         """Return set of photo_ids that have predictions for a model."""
         rows = self.conn.execute(
-            "SELECT DISTINCT photo_id FROM predictions WHERE model = ? AND workspace_id = ?",
+            """SELECT DISTINCT d.photo_id FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.model = ? AND d.workspace_id = ?""",
             (model, self._ws_id()),
         ).fetchall()
         return {r["photo_id"] for r in rows}
@@ -1898,7 +1937,9 @@ class Database:
     def get_prediction_for_photo(self, photo_id, model):
         """Return species and confidence for a photo's prediction by model, or None."""
         return self.conn.execute(
-            "SELECT species, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
+            """SELECT pr.species, pr.confidence FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND pr.model = ? AND d.workspace_id = ?""",
             (photo_id, model, self._ws_id()),
         ).fetchone()
 
@@ -1932,13 +1973,13 @@ class Database:
         ).fetchall()
         return [(row["id"], row["embedding"]) for row in rows]
 
-    def update_prediction_group_info(self, photo_id, model, group_id, vote_count, total_votes, individual):
+    def update_prediction_group_info(self, detection_id, model, group_id, vote_count, total_votes, individual):
         """Update group info on an existing prediction."""
         self.conn.execute(
             """UPDATE predictions
                SET group_id=?, vote_count=?, total_votes=?, individual=?
-               WHERE photo_id=? AND model=? AND workspace_id=?""",
-            (group_id, vote_count, total_votes, individual, photo_id, model, self._ws_id()),
+               WHERE detection_id=? AND model=?""",
+            (group_id, vote_count, total_votes, individual, detection_id, model),
         )
         self.conn.commit()
 
@@ -1956,7 +1997,11 @@ class Database:
         from the individual votes and applies that to all photos.
         """
         pred = self.conn.execute(
-            "SELECT * FROM predictions WHERE id = ?", (prediction_id,)
+            """SELECT pr.*, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.id = ?""",
+            (prediction_id,),
         ).fetchone()
         if not pred:
             return None
@@ -1979,7 +2024,10 @@ class Database:
         # If grouped, accept all predictions in the group
         if pred["group_id"]:
             group_preds = self.conn.execute(
-                "SELECT * FROM predictions WHERE group_id = ? AND model = ? AND workspace_id = ?",
+                """SELECT pr.*, d.photo_id
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
                 (pred["group_id"], pred["model"], self._ws_id()),
             ).fetchall()
             for gp in group_preds:
@@ -2041,6 +2089,14 @@ class Database:
             (photo_id, self._ws_id()),
         )
         self.conn.commit()
+
+    def get_existing_detection_photo_ids(self):
+        """Return set of photo_ids that already have detections in this workspace."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT photo_id FROM detections WHERE workspace_id = ?",
+            (self._ws_id(),),
+        ).fetchall()
+        return {r["photo_id"] for r in rows}
 
     # -- Pending Changes --
 
