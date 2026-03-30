@@ -47,11 +47,12 @@ def _setup_db(tmp_path):
         )
         db.update_photo_quality(
             pid,
-            detection_box={"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4},
-            detection_conf=0.9,
             subject_size=0.1,
         )
-        db.add_prediction(pid, "robin", 0.9, "bioclip", category="match")
+        det_ids = db.save_detections(pid, [
+            {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+        ], detector_model="megadetector")
+        db.add_prediction(det_ids[0], "robin", 0.9, "bioclip", category="match")
 
     return db
 

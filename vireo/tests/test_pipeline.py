@@ -76,15 +76,18 @@ def _setup_db_with_photos(tmp_path, n_encounters=2, photos_per_encounter=3):
             # Update subject_size via the existing quality method
             db.update_photo_quality(
                 pid,
-                detection_box={"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4},
-                detection_conf=0.9,
                 subject_size=0.08 + i * 0.02,
             )
 
-            # Add a species prediction
+            # Add a detection in the detections table
+            det_ids = db.save_detections(pid, [
+                {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.9},
+            ], detector_model="megadetector")
+
+            # Add a species prediction (references detection, not photo)
             species = "robin" if enc_idx == 0 else "eagle"
             db.add_prediction(
-                pid, species, 0.9 - i * 0.05, "bioclip",
+                det_ids[0], species, 0.9 - i * 0.05, "bioclip",
                 category="match",
             )
 

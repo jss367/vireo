@@ -467,64 +467,48 @@ class Database:
                 "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
             )
 
-        # Multi-animal migration: add detections table, restructure predictions
-        needs_multi_animal_migration = False
-        try:
-            self.conn.execute("SELECT id FROM detections LIMIT 0")
-        except Exception:
-            needs_multi_animal_migration = True
+        # Multi-animal migration: restructure predictions to use detection_id.
+        # Check the predictions schema directly — the detections table is always
+        # created by the executescript above, so checking for its existence
+        # doesn't tell us whether predictions needs migration.
+        pred_schema_row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
+        ).fetchone()
+        needs_pred_migration = (
+            pred_schema_row
+            and "photo_id" in pred_schema_row[0].lower()
+            and "detection_id" not in pred_schema_row[0].lower()
+        )
 
-        if needs_multi_animal_migration:
-            # Create detections table if missing
+        if needs_pred_migration:
+            # Drop old predictions — accepted keywords are in photo_keywords
+            # and survive. Pending/rejected predictions are lost.
+            self.conn.execute("DROP TABLE IF EXISTS predictions")
             self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS detections (
-                    id                INTEGER PRIMARY KEY,
-                    photo_id          INTEGER REFERENCES photos(id),
-                    workspace_id      INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                    box_x             REAL,
-                    box_y             REAL,
-                    box_w             REAL,
-                    box_h             REAL,
-                    detector_confidence REAL,
-                    category          TEXT DEFAULT 'animal',
-                    detector_model    TEXT,
-                    created_at        TEXT DEFAULT (datetime('now'))
+                CREATE TABLE predictions (
+                    id              INTEGER PRIMARY KEY,
+                    detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+                    species         TEXT,
+                    confidence      REAL,
+                    model           TEXT,
+                    category        TEXT,
+                    status          TEXT DEFAULT 'pending',
+                    group_id        TEXT,
+                    vote_count      INTEGER,
+                    total_votes     INTEGER,
+                    individual      TEXT,
+                    taxonomy_kingdom TEXT,
+                    taxonomy_phylum TEXT,
+                    taxonomy_class  TEXT,
+                    taxonomy_order  TEXT,
+                    taxonomy_family TEXT,
+                    taxonomy_genus  TEXT,
+                    scientific_name TEXT,
+                    created_at      TEXT DEFAULT (datetime('now')),
+                    reviewed_at     TEXT,
+                    UNIQUE(detection_id, model)
                 )
             """)
-
-            # Check if predictions still uses old schema (has photo_id column)
-            old_pred_schema = self.conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
-            ).fetchone()
-            if old_pred_schema and "photo_id" in old_pred_schema[0].lower() and "detection_id" not in old_pred_schema[0].lower():
-                # Drop old predictions — accepted keywords are in photo_keywords
-                # and survive. Pending/rejected predictions are lost.
-                self.conn.execute("DROP TABLE IF EXISTS predictions")
-                self.conn.execute("""
-                    CREATE TABLE predictions (
-                        id              INTEGER PRIMARY KEY,
-                        detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
-                        species         TEXT,
-                        confidence      REAL,
-                        model           TEXT,
-                        category        TEXT,
-                        status          TEXT DEFAULT 'pending',
-                        group_id        TEXT,
-                        vote_count      INTEGER,
-                        total_votes     INTEGER,
-                        individual      TEXT,
-                        taxonomy_kingdom TEXT,
-                        taxonomy_phylum TEXT,
-                        taxonomy_class  TEXT,
-                        taxonomy_order  TEXT,
-                        taxonomy_family TEXT,
-                        taxonomy_genus  TEXT,
-                        scientific_name TEXT,
-                        created_at      TEXT DEFAULT (datetime('now')),
-                        reviewed_at     TEXT,
-                        UNIQUE(detection_id, model)
-                    )
-                """)
             self.conn.commit()
 
         # Ensure indexes exist (for fresh DBs that skip migration, and for
@@ -1463,34 +1447,65 @@ class Database:
         self.conn.commit()
 
     def get_photos_missing_masks(self, folder_ids=None):
-        """Get photos that don't have masks yet, optionally filtered by folders.
+        """Get photos that have detections but no masks yet.
+
+        Returns photos that have at least one detection in the current workspace
+        but no mask_path set. Each row includes the primary (highest-confidence)
+        detection box.
 
         Args:
             folder_ids: optional list of folder IDs to filter by.
                         If None, returns all workspace photos without masks.
         Returns:
-            list of photo rows (id, folder_id, filename, detection_box, detection_conf)
+            list of dicts with id, folder_id, filename, detection_box, detection_conf
         """
+        ws_id = self._ws_id()
         if folder_ids:
             placeholders = ",".join("?" * len(folder_ids))
-            return self.conn.execute(
-                f"""SELECT id, folder_id, filename, detection_box, detection_conf
-                    FROM photos
-                    WHERE folder_id IN ({placeholders})
-                      AND mask_path IS NULL
-                      AND detection_box IS NOT NULL""",
-                folder_ids,
+            rows = self.conn.execute(
+                f"""SELECT p.id, p.folder_id, p.filename,
+                           d.box_x, d.box_y, d.box_w, d.box_h,
+                           d.detector_confidence
+                    FROM photos p
+                    JOIN detections d ON d.photo_id = p.id AND d.workspace_id = ?
+                    WHERE p.folder_id IN ({placeholders})
+                      AND p.mask_path IS NULL
+                    ORDER BY p.id, d.detector_confidence DESC""",
+                [ws_id, *folder_ids],
             ).fetchall()
-        # All workspace photos
-        return self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.detection_box, p.detection_conf
-               FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
-                 AND p.mask_path IS NULL
-                 AND p.detection_box IS NOT NULL""",
-            (self._ws_id(),),
-        ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT p.id, p.folder_id, p.filename,
+                          d.box_x, d.box_y, d.box_w, d.box_h,
+                          d.detector_confidence
+                   FROM photos p
+                   JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                   JOIN detections d ON d.photo_id = p.id AND d.workspace_id = ?
+                   WHERE wf.workspace_id = ?
+                     AND p.mask_path IS NULL
+                   ORDER BY p.id, d.detector_confidence DESC""",
+                (ws_id, ws_id),
+            ).fetchall()
+
+        # Deduplicate to one row per photo (primary detection = highest confidence)
+        import json as _json
+        seen = set()
+        result = []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            result.append({
+                "id": r["id"],
+                "folder_id": r["folder_id"],
+                "filename": r["filename"],
+                "detection_box": _json.dumps({
+                    "x": r["box_x"], "y": r["box_y"],
+                    "w": r["box_w"], "h": r["box_h"],
+                }),
+                "detection_conf": r["detector_confidence"],
+            })
+        return result
 
     def update_photo_embeddings(
         self, photo_id, dino_subject_embedding=None, dino_global_embedding=None
