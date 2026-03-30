@@ -146,12 +146,13 @@ def test_delete_photos_resolves_companions(app_and_db):
     """When include_companions=True, companion photos are also deleted."""
     app, db = app_and_db
     photos = db.get_photos()
-    pid1, pid2 = photos[0]["id"], photos[1]["id"]
+    # Use photos[0] and photos[2] which are in the same folder (fid)
+    pid1, pid2 = photos[0]["id"], photos[2]["id"]
 
     # Set pid2 as companion of pid1
     db.conn.execute(
         "UPDATE photos SET companion_path = ? WHERE id = ?",
-        (photos[1]["filename"], pid1),
+        (photos[2]["filename"], pid1),
     )
     db.conn.commit()
 
