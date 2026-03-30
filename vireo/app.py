@@ -861,13 +861,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
         trashed = 0
         trash_failed = []
-        if mode == "disk":
+        if mode in ("disk", "disk_permanent"):
             for f in result["files"]:
                 # Collect all files to delete: primary + companion
                 file_paths = []
                 primary = os.path.join(f["folder_path"], f["filename"])
                 file_paths.append(primary)
-                if f.get("companion_path"):
+                if include_companions and f.get("companion_path"):
                     companion = os.path.join(f["folder_path"], f["companion_path"])
                     file_paths.append(companion)
 
@@ -875,13 +875,21 @@ def create_app(db_path, thumb_cache_dir=None):
                     if not os.path.isfile(filepath):
                         log.warning("File already missing: %s", filepath)
                         continue
-                    try:
-                        from send2trash import send2trash as _trash
-                        _trash(filepath)
-                        trashed += 1
-                    except Exception:
-                        log.warning("Trash failed for %s", filepath, exc_info=True)
-                        trash_failed.append({"path": filepath})
+                    if mode == "disk":
+                        try:
+                            from send2trash import send2trash as _trash
+                            _trash(filepath)
+                            trashed += 1
+                        except Exception:
+                            log.warning("Trash failed for %s", filepath, exc_info=True)
+                            trash_failed.append({"path": filepath})
+                    else:  # disk_permanent
+                        try:
+                            os.remove(filepath)
+                            trashed += 1
+                        except OSError:
+                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                            trash_failed.append({"path": filepath})
 
         return jsonify({
             "ok": True,
