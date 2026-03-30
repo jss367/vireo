@@ -2191,74 +2191,37 @@ function formatDuration(seconds) {
   function renderJobs() {
     var container = document.getElementById('bpJobsList');
     var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-    var recent = activeJobs.filter(function(j) { return j.status !== 'running'; }).slice(0, 5);
-    var all = running.concat(recent);
 
     document.getElementById('jobsBadge').textContent = running.length;
 
-    if (all.length === 0) {
-      container.innerHTML = '<div class="bp-jobs-empty">No jobs running</div>';
+    if (running.length === 0) {
+      var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
+      if (lastDone) {
+        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
+          bpEscape(lastDone.type) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+          ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
+      } else {
+        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
+          '<a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
+      }
       return;
     }
 
     var html = '';
-    all.forEach(function(j) {
+    running.forEach(function(j) {
       var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
-      var statusClass = j.status;
-      var elapsed = '';
-      if (j.started_at) {
-        var secs = (Date.now() - new Date(j.started_at).getTime()) / 1000;
-        if (j.finished_at) secs = (new Date(j.finished_at).getTime() - new Date(j.started_at).getTime()) / 1000;
-        elapsed = formatElapsed(secs);
+      var phase = j.progress && j.progress.phase ? j.progress.phase : '';
+      var detail = '';
+      if (j.progress && j.progress.total > 0) {
+        detail = j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString();
+        if (pct > 0) detail += ' (' + pct + '%)';
       }
-
-      html += '<div class="bp-job">';
-      html += '<div class="bp-job-header">';
-      html += '<span class="bp-job-type">' + bpEscape(j.type) + '</span>';
-      html += '<span class="bp-job-status ' + statusClass + '">' + j.status + '</span>';
-      html += '<span class="bp-job-elapsed">' + elapsed + '</span>';
-      html += '</div>';
-
-      if (j.status === 'running') {
-        if (j.progress && j.progress.phase) {
-          html += '<div class="bp-job-detail" style="color:var(--accent);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
-        }
-        html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
-        var detail = '';
-        var isBytes = j.type && j.type.indexOf('download') !== -1 && j.progress && j.progress.total > 1000000;
-        if (j.progress && j.progress.current > 0) {
-          if (isBytes) {
-            detail = (j.progress.current / (1024*1024)).toFixed(0) + ' MB';
-            if (j.progress.total > 0) detail += ' / ' + (j.progress.total / (1024*1024)).toFixed(0) + ' MB';
-          } else {
-            detail = j.progress.current.toLocaleString();
-            if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
-          }
-        }
-        if (j.progress && j.progress.rate > 0) {
-          detail += ' \u2014 ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';
-        }
-        if (j.progress && j.progress.current_file) {
-          detail += (detail ? ' ' : '') + bpEscape(j.progress.current_file);
-        }
-        html += '<div class="bp-job-detail">' + detail + '</div>';
-      } else if (j.status === 'completed' && j.result) {
-        var parts = [];
-        for (var k in j.result) {
-          var v = j.result[k];
-          if (v && typeof v === 'object') {
-            var sub = [];
-            for (var sk in v) sub.push(sk + ': ' + v[sk]);
-            parts.push(k + ' (' + sub.join(', ') + ')');
-          } else {
-            parts.push(k + ': ' + v);
-          }
-        }
-        html += '<div class="bp-job-detail">' + bpEscape(parts.join(', ')) + '</div>';
-      } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
-        html += '<div class="bp-job-detail" style="color:var(--danger);">' + bpEscape(j.errors[0]) + '</div>';
-      }
-
+      html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
+      html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
+      html += '<span style="font-weight:600;text-transform:capitalize;">' + bpEscape(j.type) + '</span>';
+      if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
+      if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
+      html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
       html += '</div>';
     });
     container.innerHTML = html;
