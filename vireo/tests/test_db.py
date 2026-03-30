@@ -1504,3 +1504,58 @@ def test_predictions_references_detection_id(tmp_path):
     # photo_id should NOT be a direct column anymore
     # (it's accessed via JOIN through detections)
     assert "photo_id" not in schema
+
+
+def test_save_detections(tmp_path):
+    """save_detections should insert rows and return detection IDs."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    detections = [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
+    ]
+    ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
+    assert len(ids) == 2
+    rows = db.conn.execute("SELECT * FROM detections WHERE photo_id = ?", (pid,)).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["box_x"] == 0.1
+    assert rows[1]["box_x"] == 0.5
+
+
+def test_get_detections_for_photo(tmp_path):
+    """get_detections should return all detections for a photo in current workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    detections = [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+    ]
+    db.save_detections(pid, detections, detector_model="MDV6")
+    result = db.get_detections(pid)
+    assert len(result) == 1
+    assert result[0]["box_x"] == 0.1
+    assert result[0]["detector_model"] == "MDV6"
+
+
+def test_clear_detections(tmp_path):
+    """clear_detections should remove detections and cascade to predictions."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    # Insert prediction via raw SQL since add_prediction is not yet refactored
+    # for the detection-based schema (Task 3)
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, species, confidence, model, status) VALUES (?, ?, ?, ?, ?)",
+        (det_ids[0], "Elk", 0.9, "bioclip", "pending"),
+    )
+    db.conn.commit()
+    db.clear_detections(pid)
+    assert db.conn.execute("SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,)).fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0

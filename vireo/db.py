@@ -1995,6 +1995,53 @@ class Database:
 
         return {"species": species, "keyword_id": kid, "affected": affected}
 
+    # -- Detections --
+
+    def save_detections(self, photo_id, detections, detector_model=None):
+        """Store detection bounding boxes for a photo.
+
+        Args:
+            photo_id: the photo ID
+            detections: list of dicts with keys: box (dict with x,y,w,h),
+                        confidence (float), category (str)
+            detector_model: name of the detector model
+
+        Returns:
+            list of detection IDs
+        """
+        ws_id = self._ws_id()
+        ids = []
+        for det in detections:
+            box = det["box"]
+            cur = self.conn.execute(
+                """INSERT INTO detections
+                   (photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                    detector_confidence, category, detector_model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (photo_id, ws_id, box["x"], box["y"], box["w"], box["h"],
+                 det["confidence"], det.get("category", "animal"), detector_model),
+            )
+            ids.append(cur.lastrowid)
+        self.conn.commit()
+        return ids
+
+    def get_detections(self, photo_id):
+        """Get all detections for a photo in the active workspace."""
+        return self.conn.execute(
+            """SELECT * FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC""",
+            (photo_id, self._ws_id()),
+        ).fetchall()
+
+    def clear_detections(self, photo_id):
+        """Remove all detections (and cascaded predictions) for a photo."""
+        self.conn.execute(
+            "DELETE FROM detections WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, self._ws_id()),
+        )
+        self.conn.commit()
+
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value, workspace_id=None):
