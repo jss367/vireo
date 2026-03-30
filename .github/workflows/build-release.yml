@@ -17,6 +17,8 @@ permissions:
 env:
   PYTHON_VERSION: "3.14"
   NODE_VERSION: "20"
+  # Limit parallel Rust compilation to avoid OOM on 7GB GitHub runners
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   build:
@@ -27,7 +29,7 @@ jobs:
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             label: macos-arm64
-          - os: macos-13
+          - os: macos-15-intel
             rust-target: x86_64-apple-darwin
             label: macos-x86_64
           - os: windows-latest
@@ -57,25 +59,20 @@ jobs:
           python scripts/sync_version.py "$TAG"
 
       # ── Python & sidecar ──────────────────────────────────
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          # Python 3.14 + PyInstaller --onefile fails on Windows (DLL loading bug)
+          python-version: ${{ runner.os == 'Windows' && '3.13' || env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install PyTorch (CPU only)
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install Python dependencies
-        shell: bash
         run: |
           python -m pip install --upgrade pip
-          # Use PyInstaller dev branch for Python 3.14 support on Windows
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            pip install https://github.com/pyinstaller/pyinstaller/archive/develop.tar.gz
-          else
-            pip install pyinstaller
-          fi
+          pip install pyinstaller
           pip install -e ".[dev]"
 
       - name: Build sidecar binary
