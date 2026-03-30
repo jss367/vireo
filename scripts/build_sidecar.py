@@ -124,8 +124,11 @@ def main():
             "--exclude-module", "notebook",
             "--exclude-module", "jupyter",
             "--exclude-module", "IPython",
-            "--strip",
         ]
+        # --strip corrupts Windows system DLLs (api-ms-win-core-*.dll),
+        # causing "Invalid access to memory location" at runtime
+        if platform.system() != "Windows":
+            pyinstaller_args.append("--strip")
 
     pyinstaller_args.append(os.path.join(repo_root, "vireo", "app.py"))
 
