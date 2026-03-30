@@ -291,7 +291,7 @@ def test_api_batch_delete_disk_permanent_retry_with_paths(app_and_db, tmp_path):
 
 
 def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
-    """Disk mode deletes companion files alongside the primary file."""
+    """Disk mode deletes companion files when include_companions is true."""
     app, db = app_and_db
     client = app.test_client()
     photos = db.get_photos()
@@ -319,6 +319,7 @@ def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
     resp = client.post("/api/batch/delete", json={
         "photo_ids": [pid],
         "mode": "disk",
+        "include_companions": True,
     })
 
     assert resp.status_code == 200
@@ -328,3 +329,72 @@ def test_api_batch_delete_disk_deletes_companion_file(app_and_db, tmp_path):
     assert data["trashed"] == 2
     assert not os.path.exists(primary_file)
     assert not os.path.exists(companion_file)
+
+
+def test_api_batch_delete_disk_skips_companion_when_unchecked(app_and_db, tmp_path):
+    """Disk mode leaves companion files when include_companions is false."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    db.conn.execute(
+        "UPDATE photos SET companion_path = 'companion.jpg' WHERE id = ?",
+        (pid,),
+    )
+    folder_path = str(tmp_path / "disk_photos")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (folder_path, photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+
+    os.makedirs(folder_path, exist_ok=True)
+    primary_file = os.path.join(folder_path, photos[0]["filename"])
+    companion_file = os.path.join(folder_path, "companion.jpg")
+    Image.new("RGB", (10, 10)).save(primary_file)
+    Image.new("RGB", (10, 10)).save(companion_file)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "disk",
+        "include_companions": False,
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["trashed"] == 1
+    assert not os.path.exists(primary_file)
+    assert os.path.exists(companion_file)
+
+
+def test_api_batch_delete_disk_permanent_with_photo_ids(app_and_db, tmp_path):
+    """disk_permanent mode with photo_ids permanently deletes files."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    folder_path = str(tmp_path / "disk_photos")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (folder_path, photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+
+    os.makedirs(folder_path, exist_ok=True)
+    real_file = os.path.join(folder_path, photos[0]["filename"])
+    Image.new("RGB", (10, 10)).save(real_file)
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "disk_permanent",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["deleted"] == 1
+    assert data["trashed"] == 1
+    assert not os.path.exists(real_file)
+    assert db.get_photo(pid) is None
