@@ -777,7 +777,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 
       for (var shortcutStr in keyToHref) {
         if (matchesShortcut(e, shortcutStr)) {
-          if (window.__TAURI_INTERNALS__) return;
           // Live check: does the current page claim this key?
           if (pageCtx && window._vireoShortcuts && window._vireoShortcuts[pageCtx]) {
             var pageShortcuts = window._vireoShortcuts[pageCtx];
