@@ -525,6 +525,12 @@ def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
         "Expected 'previews' stage in progress events"
 
 
+def test_pipeline_params_sources_used_over_source():
+    """When sources is provided, it should take precedence over source."""
+    params = PipelineParams(source="/single", sources=["/a", "/b"])
+    assert params.sources == ["/a", "/b"]
+
+
 def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
     """When skip_classify=True, model_loader and classify should be skipped."""
     import config as cfg

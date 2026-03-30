@@ -160,9 +160,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
-            root = params.source
+            # Determine source folder(s)
+            sources = params.sources or ([params.source] if params.source else [])
+
             if params.destination:
-                # Import mode: ingest first, then scan destination
                 from ingest import ingest as do_ingest
 
                 def ingest_cb(current, total, filename):
@@ -174,24 +175,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
 
-                do_ingest(
-                    source_dir=params.source,
-                    destination_dir=params.destination,
-                    db=thread_db,
-                    file_types=params.file_types,
-                    folder_template=params.folder_template,
-                    skip_duplicates=params.skip_duplicates,
-                    progress_callback=ingest_cb,
-                )
-                root = params.destination
+            for src_folder in sources:
+                root = src_folder
+                if params.destination:
+                    do_ingest(
+                        source_dir=src_folder,
+                        destination_dir=params.destination,
+                        db=thread_db,
+                        file_types=params.file_types,
+                        folder_template=params.folder_template,
+                        skip_duplicates=params.skip_duplicates,
+                        progress_callback=ingest_cb,
+                    )
+                    root = params.destination
 
-            do_scan(
-                root, thread_db,
-                progress_callback=progress_cb,
-                incremental=True,
-                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                photo_callback=photo_cb,
-            )
+                do_scan(
+                    root, thread_db,
+                    progress_callback=progress_cb,
+                    incremental=True,
+                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                    photo_callback=photo_cb,
+                )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{stages['scan']['count']} photos")
