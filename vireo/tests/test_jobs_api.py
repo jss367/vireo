@@ -170,6 +170,23 @@ def test_jobs_page_returns_200(app_and_db):
     assert b'Jobs' in resp.data
 
 
+def test_navbar_has_jobs_link(app_and_db):
+    """Navbar on any page includes a link to /jobs."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    assert b'href="/jobs"' in resp.data
+
+
+def test_bottom_panel_has_compact_jobs(app_and_db):
+    """Bottom panel Jobs tab has compact layout with View link."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    html = resp.data.decode()
+    assert 'bp-compact-job' in html or 'View history' in html or 'No active jobs' in html
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
