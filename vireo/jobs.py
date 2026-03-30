@@ -55,6 +55,16 @@ class JobRunner:
         db.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)"
         )
+        # Migration: add tree column
+        try:
+            db.conn.execute("SELECT tree FROM job_history LIMIT 0")
+        except Exception:
+            db.conn.execute("ALTER TABLE job_history ADD COLUMN tree TEXT")
+        # Migration: add summary column
+        try:
+            db.conn.execute("SELECT summary FROM job_history LIMIT 0")
+        except Exception:
+            db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
 
     def start(self, job_type, work_fn, config=None, workspace_id=None):
         """Start a background job.

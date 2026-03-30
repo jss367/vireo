@@ -175,3 +175,16 @@ def test_job_history_persistence(tmp_path):
     assert len(rows) == 1
     assert rows[0]['type'] == 'scan'
     assert rows[0]['status'] == 'completed'
+
+
+def test_job_history_stores_tree_and_summary(tmp_path):
+    """Job history persists tree JSON and summary string."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    cols = [row[1] for row in db.conn.execute("PRAGMA table_info(job_history)").fetchall()]
+    assert "tree" in cols
+    assert "summary" in cols
