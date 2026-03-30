@@ -66,6 +66,23 @@ def test_open_external_uses_configured_editor(app_and_db, monkeypatch):
     assert launched[0][0] == '/usr/bin/gimp'
 
 
+def test_open_external_returns_500_on_launch_failure(app_and_db, monkeypatch):
+    """POST /api/photos/open-external returns 500 when editor fails to launch."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    import subprocess
+    def failing_popen(cmd, **kwargs):
+        raise FileNotFoundError("No such file: /bad/editor")
+    monkeypatch.setattr(subprocess, 'Popen', failing_popen)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 500
+    assert "error" in resp.get_json()
+
+
 def test_config_saves_external_editor(app_and_db):
     """POST /api/config saves external_editor setting."""
     app, _ = app_and_db
