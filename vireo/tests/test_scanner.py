@@ -586,3 +586,82 @@ def test_scan_stores_file_hash(tmp_path):
     photo = db.conn.execute("SELECT file_hash FROM photos LIMIT 1").fetchone()
     assert photo["file_hash"] is not None
     assert len(photo["file_hash"]) == 64  # SHA-256 hex digest length
+
+
+def test_extract_dimensions_raw_skips_exif_thumbnail_size():
+    """For RAW files, ExifImageWidth/Height is the embedded JPEG thumbnail (e.g. 160x120),
+    not the actual image. _extract_dimensions should return the real dimensions from
+    File:ImageWidth/Height instead."""
+    from scanner import _extract_dimensions
+
+    # Simulate ExifTool output for a Nikon NEF file:
+    # EXIF:ExifImageWidth/Height = 160x120 (embedded thumbnail)
+    # File:ImageWidth/Height = 8256x5504 (actual RAW image)
+    exif_group = {
+        "ExifImageWidth": 160,
+        "ExifImageHeight": 120,
+        "ImageWidth": 160,
+        "ImageHeight": 120,
+    }
+    file_group = {
+        "ImageWidth": 8256,
+        "ImageHeight": 5504,
+    }
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".nef")
+
+    assert width == 8256, f"Expected actual RAW width 8256, got {width} (embedded thumbnail)"
+    assert height == 5504, f"Expected actual RAW height 5504, got {height} (embedded thumbnail)"
+
+
+def test_extract_dimensions_jpeg_still_uses_exif():
+    """For JPEG files, ExifImageWidth/Height should still be the first priority."""
+    from scanner import _extract_dimensions
+
+    exif_group = {
+        "ExifImageWidth": 6000,
+        "ExifImageHeight": 4000,
+    }
+    file_group = {
+        "ImageWidth": 6000,
+        "ImageHeight": 4000,
+    }
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".jpg")
+
+    assert width == 6000
+    assert height == 4000
+
+
+def test_extract_dimensions_raw_falls_back_to_exif_imagewidth():
+    """For RAW files without File dimensions, EXIF:ImageWidth (non-ExifImageWidth) is used."""
+    from scanner import _extract_dimensions
+
+    exif_group = {
+        "ExifImageWidth": 160,
+        "ExifImageHeight": 120,
+        "ImageWidth": 8256,
+        "ImageHeight": 5504,
+    }
+    file_group = {}
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".nef")
+
+    # Should skip ExifImageWidth (thumbnail) but still find ImageWidth
+    assert width == 8256
+    assert height == 5504
+
+
+def test_extract_dimensions_all_raw_extensions():
+    """All supported RAW extensions should skip ExifImageWidth/Height."""
+    from scanner import _extract_dimensions
+
+    raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
+
+    for ext in raw_exts:
+        exif_group = {"ExifImageWidth": 160, "ExifImageHeight": 120}
+        file_group = {"ImageWidth": 8256, "ImageHeight": 5504}
+
+        width, height = _extract_dimensions(exif_group, file_group, extension=ext)
+        assert width == 8256, f"Failed for {ext}: got width {width}"
+        assert height == 5504, f"Failed for {ext}: got height {height}"
