@@ -1638,6 +1638,54 @@ def create_app(db_path, thumb_cache_dir=None):
             "output_dir": cfg.get("darktable_output_dir"),
         })
 
+    @app.route("/api/photos/open-external", methods=["POST"])
+    def api_photos_open_external():
+        import subprocess
+        import sys
+
+        import config as cfg
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids")
+        if not photo_ids:
+            return jsonify({"error": "photo_ids required"}), 400
+
+        db = _get_db()
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        file_paths = []
+        for pid in photo_ids:
+            photo = db.get_photo(pid)
+            if not photo:
+                continue
+            folder_path = folders.get(photo["folder_id"], "")
+            if folder_path:
+                file_paths.append(os.path.join(folder_path, photo["filename"]))
+
+        if not file_paths:
+            return jsonify({"error": "No photos found"}), 404
+
+        editor = cfg.get("external_editor")
+        try:
+            if editor:
+                if sys.platform == "darwin" and editor.endswith(".app"):
+                    subprocess.Popen(["open", "-a", editor] + file_paths)
+                else:
+                    subprocess.Popen([editor] + file_paths)
+            else:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open"] + file_paths)
+                elif sys.platform == "win32":
+                    for fp in file_paths:
+                        os.startfile(fp)
+                else:
+                    for fp in file_paths:
+                        subprocess.Popen(["xdg-open", fp])
+        except Exception as e:
+            log.warning("Failed to open external editor: %s", e)
+            return jsonify({"error": str(e)}), 500
+
+        return jsonify({"opened": len(file_paths)})
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
