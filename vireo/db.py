@@ -1667,17 +1667,22 @@ class Database:
         self.conn.commit()
 
     def get_all_keywords(self):
-        """Return all keywords with photo counts, type, and taxon info."""
+        """Return keywords used in the active workspace with photo counts, type, and taxon info."""
+        ws = self._ws_id()
         return self.conn.execute(
             """SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
                       k.latitude, k.longitude,
                       t.name AS taxon_name, t.common_name AS taxon_common_name,
                       COUNT(pk.photo_id) AS photo_count
                FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                LEFT JOIN taxa t ON t.id = k.taxon_id
-               LEFT JOIN photo_keywords pk ON pk.keyword_id = k.id
+               WHERE wf.workspace_id = ?
                GROUP BY k.id
-               ORDER BY k.name"""
+               ORDER BY k.name""",
+            (ws,),
         ).fetchall()
 
     # -- Predictions --
