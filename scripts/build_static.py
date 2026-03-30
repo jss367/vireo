@@ -19,7 +19,7 @@ def resolve_includes(content, template_dir):
     def replacer(match):
         include_name = match.group(1)
         include_path = os.path.join(template_dir, include_name)
-        with open(include_path) as f:
+        with open(include_path, encoding="utf-8") as f:
             return f.read()
     return INCLUDE_RE.sub(replacer, content)
 
@@ -33,12 +33,12 @@ def build(outdir):
         if fname.startswith("_") or not fname.endswith(".html"):
             continue
         src = os.path.join(template_dir, fname)
-        with open(src) as f:
+        with open(src, encoding="utf-8") as f:
             content = f.read()
 
         content = resolve_includes(content, template_dir)
         dest = os.path.join(outdir, fname)
-        with open(dest, "w") as f:
+        with open(dest, "w", encoding="utf-8") as f:
             f.write(content)
         count += 1
         print(f"  {fname}")
