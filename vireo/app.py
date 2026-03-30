@@ -858,8 +858,15 @@ def create_app(db_path, thumb_cache_dir=None):
                             "path": filepath,
                         })
                 else:  # disk_permanent
-                    os.remove(filepath)
-                    trashed += 1
+                    try:
+                        os.remove(filepath)
+                        trashed += 1
+                    except OSError:
+                        log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        trash_failed.append({
+                            "photo_id": f["photo_id"],
+                            "path": filepath,
+                        })
 
         return jsonify({
             "ok": True,
