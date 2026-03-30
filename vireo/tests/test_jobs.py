@@ -312,3 +312,43 @@ def test_job_history_prunes_to_100(tmp_path):
         "SELECT COUNT(*) FROM job_history WHERE workspace_id = ?", (ws_id,)
     ).fetchone()[0]
     assert count <= 100
+
+
+def test_progress_events_include_steps(tmp_path):
+    """Progress events include the steps array when steps are defined."""
+    import time
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        runner.set_steps(job["id"], [
+            {"id": "step1", "label": "Step One"},
+            {"id": "step2", "label": "Step Two"},
+        ])
+        runner.update_step(job["id"], "step1", status="running")
+        runner.push_event(job["id"], "progress", {
+            "phase": "Step One",
+            "current": 5,
+            "total": 10,
+        })
+        return {}
+
+    job_id = runner.start("test", work, workspace_id=1)
+
+    for _ in range(50):
+        j = runner.get(job_id)
+        if j and j["status"] != "running":
+            break
+        time.sleep(0.1)
+
+    events = runner.get_events(job_id)
+    progress_events = [e for e in events if e["type"] == "progress"]
+    assert len(progress_events) > 0
+    last_progress = progress_events[-1]
+    assert "steps" in last_progress["data"]
+    assert len(last_progress["data"]["steps"]) == 2
+    assert last_progress["data"]["steps"][0]["status"] == "running"

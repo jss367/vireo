@@ -252,6 +252,11 @@ class JobRunner:
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
+        if event_type == "progress":
+            job = self._jobs.get(job_id)
+            if job and job.get("steps"):
+                data = dict(data)
+                data["steps"] = job["steps"]
         event = {"type": event_type, "data": data, "time": time.time()}
         with self._lock:
             if job_id in self._events:
