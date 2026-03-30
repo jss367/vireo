@@ -168,6 +168,8 @@ def load_photo_features(db, collection_id=None, config=None):
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],
+            "flag": row["flag"],
+            "rating": row["rating"],
         })
 
     log.info("Loaded %d photos with pipeline features", len(photos))
