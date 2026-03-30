@@ -246,7 +246,17 @@ class JobRunner:
                     "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            result = []
+            for r in rows:
+                d = dict(r)
+                for field in ("tree", "result", "config"):
+                    if d.get(field) and isinstance(d[field], str):
+                        try:
+                            d[field] = json.loads(d[field])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                result.append(d)
+            return result
         except Exception:
             return []
 
