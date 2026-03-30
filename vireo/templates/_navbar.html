@@ -875,6 +875,33 @@ async function createWorkspace() {
   </div>
 </div>
 
+<!-- Delete confirmation modal -->
+<div class="modal-overlay" id="deleteModal">
+  <div class="modal" style="max-width:420px;">
+    <h3 id="deleteModalTitle">Delete photo?</h3>
+    <div style="margin:12px 0 16px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">
+        <input type="radio" name="deleteMode" value="vireo" checked>
+        <span>Remove from Vireo<br><small style="color:var(--text-secondary);">Removes from the database. Files on disk are untouched.</small></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">
+        <input type="radio" name="deleteMode" value="disk">
+        <span style="color:var(--danger);">Delete from disk<br><small style="color:var(--text-secondary);">Moves files to Trash. Falls back to permanent deletion if Trash is unavailable.</small></span>
+      </label>
+    </div>
+    <div id="deleteCompanionRow" style="display:none;margin-bottom:12px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="deleteCompanionCheck" checked>
+        <span id="deleteCompanionLabel">Also delete companion files</span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="hideDeleteModal()">Cancel</button>
+      <button class="modal-btn" id="deleteConfirmBtn" onclick="confirmDelete()" style="background:var(--danger);color:white;">Delete</button>
+    </div>
+  </div>
+</div>
+
 <!-- iNat Submission Modal -->
 <div class="modal-overlay" id="inatModal">
   <div class="modal inat-modal">
@@ -1028,6 +1055,78 @@ function closeLightbox(e) {
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
   document.body.style.overflow = '';
+}
+/* ---------- Delete Confirmation ---------- */
+var _deletePhotoIds = [];
+var _deleteCallback = null;
+
+function showDeleteDialog(photoIds, companionCount, callback) {
+  _deletePhotoIds = photoIds;
+  _deleteCallback = callback;
+  var count = photoIds.length;
+  document.getElementById('deleteModalTitle').textContent =
+    count === 1 ? 'Delete photo?' : 'Delete ' + count + ' photos?';
+  var compRow = document.getElementById('deleteCompanionRow');
+  if (companionCount > 0) {
+    compRow.style.display = '';
+    document.getElementById('deleteCompanionLabel').textContent =
+      'Also delete ' + companionCount + ' companion file' + (companionCount === 1 ? '' : 's');
+    document.getElementById('deleteCompanionCheck').checked = true;
+  } else {
+    compRow.style.display = 'none';
+  }
+  document.querySelector('input[name="deleteMode"][value="vireo"]').checked = true;
+  document.getElementById('deleteModal').classList.add('open');
+}
+
+function hideDeleteModal() {
+  document.getElementById('deleteModal').classList.remove('open');
+  _deletePhotoIds = [];
+  _deleteCallback = null;
+}
+
+async function confirmDelete() {
+  var mode = document.querySelector('input[name="deleteMode"]:checked').value;
+  var includeCompanions = document.getElementById('deleteCompanionCheck').checked &&
+    document.getElementById('deleteCompanionRow').style.display !== 'none';
+  var savedIds = _deletePhotoIds.slice();
+  var savedCallback = _deleteCallback;
+  hideDeleteModal();
+  try {
+    var data = await safeFetch('/api/batch/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        photo_ids: savedIds,
+        mode: mode,
+        include_companions: includeCompanions,
+      }),
+    });
+  } catch(e) { return; }
+
+  if (data.trash_failed && data.trash_failed.length > 0) {
+    var paths = data.trash_failed.map(function(f) { return f.path; });
+    if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
+        paths.slice(0, 5).join('\n') +
+        (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
+        '\n\nPermanently delete instead?')) {
+      var failedIds = data.trash_failed.map(function(f) { return f.photo_id; });
+      try {
+        await safeFetch('/api/batch/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: failedIds, mode: 'disk_permanent'}),
+        });
+      } catch(e) { /* already removed from DB */ }
+    }
+  }
+
+  var msg = mode === 'vireo'
+    ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
+    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+  showToast(msg, 'success');
+
+  if (savedCallback) savedCallback(data);
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
