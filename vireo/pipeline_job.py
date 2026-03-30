@@ -40,6 +40,8 @@ class PipelineParams:
     reclassify: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
+    skip_classify: bool = False
+    preview_max_size: int = 1920
 
 
 def _should_abort(abort_event):

@@ -39,6 +39,28 @@ class FakeRunner:
         pass
 
 
+def test_pipeline_params_has_skip_classify():
+    """PipelineParams should support skip_classify flag."""
+    params = PipelineParams(collection_id=1, skip_classify=True)
+    assert params.skip_classify is True
+
+
+def test_pipeline_params_skip_classify_defaults_false():
+    params = PipelineParams(collection_id=1)
+    assert params.skip_classify is False
+
+
+def test_pipeline_params_has_preview_max_size():
+    """PipelineParams should support preview_max_size."""
+    params = PipelineParams(collection_id=1, preview_max_size=2560)
+    assert params.preview_max_size == 2560
+
+
+def test_pipeline_params_preview_max_size_defaults_1920():
+    params = PipelineParams(collection_id=1)
+    assert params.preview_max_size == 1920
+
+
 def test_pipeline_params_defaults():
     """PipelineParams should have sensible defaults."""
     params = PipelineParams(collection_id=42)
@@ -54,6 +76,8 @@ def test_pipeline_params_defaults():
     assert params.reclassify is False
     assert params.skip_extract_masks is False
     assert params.skip_regroup is False
+    assert params.skip_classify is False
+    assert params.preview_max_size == 1920
 
 
 def test_pipeline_params_all_fields():
@@ -71,6 +95,8 @@ def test_pipeline_params_all_fields():
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
+        skip_classify=True,
+        preview_max_size=2560,
     )
     assert params.source == "/src"
     assert params.destination == "/dst"
@@ -78,6 +104,8 @@ def test_pipeline_params_all_fields():
     assert params.reclassify is True
     assert params.skip_extract_masks is True
     assert params.skip_regroup is True
+    assert params.skip_classify is True
+    assert params.preview_max_size == 2560
 
 
 def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
