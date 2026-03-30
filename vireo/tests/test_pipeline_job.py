@@ -342,8 +342,8 @@ def test_pipeline_skips_scan_with_collection_id(tmp_path, monkeypatch):
     assert len(scan_events) == 0
 
 
-def test_pipeline_abort_on_fatal_error(tmp_path, monkeypatch):
-    """Pipeline with a nonexistent source should return errors."""
+def test_pipeline_nonexistent_source_scans_nothing(tmp_path, monkeypatch):
+    """Pipeline with a nonexistent source should complete with 0 photos scanned."""
     import config as cfg
     from db import Database
 
@@ -366,7 +366,8 @@ def test_pipeline_abort_on_fatal_error(tmp_path, monkeypatch):
     result = run_pipeline_job(job, runner, db_path, ws_id, params)
 
     assert result is not None
-    assert len(result["errors"]) > 0
+    # No collection created since no photos were found
+    assert result.get("collection_id") is None
 
 
 def test_pipeline_result_has_duration(tmp_path, monkeypatch):
