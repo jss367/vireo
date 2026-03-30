@@ -1,5 +1,6 @@
 """Tests for the streaming pipeline job orchestrator."""
 
+import json
 import os
 import sys
 import threading
@@ -249,3 +250,191 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     expected_keys = {"scan", "thumbnails", "model_loader", "classify", "extract_masks", "regroup"}
     for _, _, data in stage_events:
         assert expected_keys.issubset(data["stages"].keys())
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — full pipeline end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_scan_and_thumbnail_overlap(tmp_path, monkeypatch):
+    """Scan and thumbnail stages should both process photos from a real dir."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Create 5 test images
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(5):
+        img = Image.new("RGB", (100, 100), "blue")
+        img.save(str(photo_dir / f"photo_{i}.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Result should have stages dict
+    assert result is not None
+    assert isinstance(result["stages"], dict)
+
+    # Scan should have found photos — check via progress events or thumbnail count
+    scan_events = [
+        e for e in runner.events
+        if isinstance(e[2], dict) and e[2].get("phase", "").startswith("Scanning")
+    ]
+    assert (
+        len(scan_events) > 0
+        or result["stages"].get("thumbnails", {}).get("generated", 0) > 0
+    )
+
+    # Thumbnails should have been generated on the filesystem
+    thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+    assert os.path.isdir(thumb_dir)
+    thumb_files = [f for f in os.listdir(thumb_dir) if not f.startswith(".")]
+    assert len(thumb_files) == 5
+
+
+def test_pipeline_skips_scan_with_collection_id(tmp_path, monkeypatch):
+    """When collection_id is given, no scan-phase events should be emitted."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", json.dumps([]))
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert result is not None
+    # No scan-phase events should have been emitted
+    scan_events = [
+        e for e in runner.events
+        if isinstance(e[2], dict) and "Scanning" in e[2].get("phase", "")
+    ]
+    assert len(scan_events) == 0
+
+
+def test_pipeline_abort_on_fatal_error(tmp_path, monkeypatch):
+    """Pipeline with a nonexistent source should return errors."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source="/nonexistent/path/that/does/not/exist",
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert result is not None
+    assert len(result["errors"]) > 0
+
+
+def test_pipeline_result_has_duration(tmp_path, monkeypatch):
+    """Pipeline result dict should always contain a positive duration."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Empty", json.dumps([]))
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert "duration" in result
+    assert isinstance(result["duration"], float)
+    assert result["duration"] >= 0
+
+
+def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
+    """Pipeline should create a collection from scanned photos."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Create test images
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ["bird1.jpg", "bird2.jpg", "bird3.jpg"]:
+        img = Image.new("RGB", (80, 80), "green")
+        img.save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # collection_id should be in the result
+    assert "collection_id" in result
+    assert isinstance(result["collection_id"], int)
+
+    # Verify the collection exists in the DB and has the right photos
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    photos = db2.get_collection_photos(result["collection_id"], per_page=999999)
+    assert len(photos) == 3
