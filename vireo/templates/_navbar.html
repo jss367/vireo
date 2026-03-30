@@ -956,15 +956,16 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open')) return;
-    // Close if overlay is open
-    if (e.key === 'Escape' && document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
-      closeShortcutsSheet();
-      e.stopPropagation();
+    // When overlay is open, consume ALL key events so page handlers don't fire
+    if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
+      if (e.key === 'Escape') {
+        closeShortcutsSheet();
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
       return;
     }
     if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      // Don't open if shortcuts sheet is already open
-      if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) return;
       e.preventDefault();
       openShortcutsSheet();
     }
