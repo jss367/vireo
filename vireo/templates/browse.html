@@ -879,6 +879,8 @@ bootstrapBrowse();
 async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
+  // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
+  loading = true;
   try {
     applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
@@ -899,6 +901,7 @@ async function bootstrapBrowse() {
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
+  loading = false;
 }
 
 function renderCollectionList(collections) {
@@ -2187,10 +2190,12 @@ async function developSelected() {
   photoId = parseInt(photoId, 10);
   if (isNaN(photoId)) return;
 
+  // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
+  loading = true;
   try {
     applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
-    if (!photo || !photo.folder_id) return;
+    if (!photo || !photo.folder_id) { loading = false; return; }
 
     // Navigate to the photo's folder
     activeFolderId = photo.folder_id;
@@ -2241,6 +2246,7 @@ async function developSelected() {
       }, 2000);
     }
   } catch(e) { /* ignore deep-link errors silently */ }
+  loading = false;
 })();
 </script>
 
