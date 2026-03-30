@@ -17,7 +17,7 @@ dependencies = [
     "rawpy>=0.26.1",
     "requests>=2.32.0",
     "scipy>=1.17.1",
-    "tokenizers>=0.25.0",
+    "tokenizers>=0.21.0",
 ]
 
 [project.optional-dependencies]
