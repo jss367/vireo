@@ -1732,7 +1732,7 @@ def create_app(db_path, thumb_cache_dir=None):
         entries = []
         total_size = 0
         for f in sorted(os.listdir(CACHE_DIR)):
-            if f.endswith(".npy"):
+            if f.endswith(".npy") or f.endswith(".pt"):
                 fp = os.path.join(CACHE_DIR, f)
                 size = os.path.getsize(fp)
                 total_size += size
@@ -2555,20 +2555,24 @@ def create_app(db_path, thumb_cache_dir=None):
             info["device_detail"] = "onnxruntime not installed"
 
         # MegaDetector status — just check for the ONNX file
-        from detector import MEGADETECTOR_ONNX_PATH
+        try:
+            from detector import MEGADETECTOR_ONNX_PATH
 
-        info["megadetector"] = "installed"
-        info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
+            info["megadetector"] = "installed"
+            info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
 
-        if os.path.isfile(MEGADETECTOR_ONNX_PATH):
-            size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
-            info["megadetector_weights"] = "downloaded"
-            info["megadetector_weights_path"] = MEGADETECTOR_ONNX_PATH
-            info["megadetector_weights_size"] = f"{size_mb} MB"
-        else:
-            info["megadetector_weights"] = "not downloaded"
-            info["megadetector_weights_path"] = None
-            info["megadetector_weights_size"] = None
+            if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+                size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+                info["megadetector_weights"] = "downloaded"
+                info["megadetector_weights_path"] = MEGADETECTOR_ONNX_PATH
+                info["megadetector_weights_size"] = f"{size_mb} MB"
+            else:
+                info["megadetector_weights"] = "not downloaded"
+                info["megadetector_weights_path"] = None
+                info["megadetector_weights_size"] = None
+        except ImportError:
+            info["megadetector"] = "unavailable"
+            info["megadetector_detail"] = "detector module not available"
 
         return jsonify(info)
 
