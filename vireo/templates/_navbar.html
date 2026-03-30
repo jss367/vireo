@@ -777,16 +777,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-      var lightbox = document.getElementById('lightboxOverlay');
-      if (lightbox && lightbox.classList.contains('active')) return;
-      var pipeline = document.getElementById('pipelineOverlay');
-      if (pipeline && pipeline.classList.contains('active')) return;
-      var similar = document.getElementById('similarOverlay');
-      if (similar && similar.classList.contains('active')) return;
-      var inat = document.getElementById('inatModal');
-      if (inat && inat.classList.contains('open')) return;
-      var createWs = document.getElementById('createWsModal');
-      if (createWs && createWs.classList.contains('open')) return;
+      // Skip if any overlay or modal is open
+      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open')) return;
 
       for (var shortcutStr in keyToHref) {
         if (matchesShortcut(e, shortcutStr)) {
