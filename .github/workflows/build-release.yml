@@ -325,6 +325,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Commit and push
+        id: push-website
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -332,3 +333,10 @@ jobs:
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "website: update download links for v${{ steps.version.outputs.ver }}"
           git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger website deploy
+        if: steps.push-website.outputs.pushed == 'true'
+        run: gh workflow run deploy-website.yml --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
