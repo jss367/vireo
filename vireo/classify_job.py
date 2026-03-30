@@ -159,8 +159,13 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     return labels, use_tol
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db):
-    """Run MegaDetector on photos, storing quality metrics.
+def _detect_batch(photos, folders, runner, job, reclassify, db):
+    """Run MegaDetector on a batch of photos.
+
+    Same interface as _detect_subjects but designed to be called with
+    partial photo lists for interleaved detect+classify in the streaming
+    pipeline.  Does NOT push progress events — that is the caller's
+    responsibility.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -168,48 +173,17 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     """
     detected = 0
     detection_map = {}
-    total = len(photos)
 
     try:
         if detect_animals is None or get_primary_detection is None:
-            raise ImportError(
-                "PytorchWildlife is not installed — cannot run detection"
-            )
-
-        runner.push_event(
-            job["id"],
-            "progress",
-            {
-                "current": 0,
-                "total": total,
-                "current_file": "Loading MegaDetector...",
-                "rate": 0,
-                "phase": "Step 4/5: Detecting subjects",
-            },
-        )
+            return detection_map, detected
 
         import config as cfg
         det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
 
-        start_time = job.get("_start_time", time.time())
-        skipped_det = 0
-        for i, photo in enumerate(photos):
+        for photo in photos:
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
-
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": i + 1,
-                    "total": total,
-                    "current_file": photo["filename"],
-                    "rate": round(
-                        (i + 1) / max(time.time() - start_time, 0.01), 1
-                    ),
-                    "phase": "Step 4/5: Detecting subjects",
-                },
-            )
 
             # Skip if already detected (unless reclassifying)
             if not reclassify and photo["detection_box"]:
@@ -222,7 +196,6 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                     "category": "animal",
                 }
                 detected += 1
-                skipped_det += 1
                 continue
 
             detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
@@ -277,6 +250,78 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                         detection_conf=det_conf,
                     )
 
+    except (ImportError, RuntimeError):
+        pass
+    except Exception:
+        log.warning("Detection failed for batch (non-fatal)", exc_info=True)
+
+    return detection_map, detected
+
+
+def _detect_subjects(photos, folders, runner, job, reclassify, db):
+    """Run MegaDetector on photos, storing quality metrics.
+
+    Wraps _detect_batch with progress reporting for the standalone classify job.
+
+    Returns:
+        (detection_map, detected_count) where detection_map is
+        {photo_id: detection_dict} and detected_count is total detected.
+    """
+    total = len(photos)
+
+    try:
+        if detect_animals is None or get_primary_detection is None:
+            raise ImportError(
+                "PytorchWildlife is not installed — cannot run detection"
+            )
+
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": total,
+                "current_file": "Loading MegaDetector...",
+                "rate": 0,
+                "phase": "Step 4/5: Detecting subjects",
+            },
+        )
+
+        # Process one photo at a time so we can report per-photo progress
+        detection_map = {}
+        detected = 0
+        skipped_det = 0
+        start_time = job.get("_start_time", time.time())
+
+        for i, photo in enumerate(photos):
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": i + 1,
+                    "total": total,
+                    "current_file": photo["filename"],
+                    "rate": round(
+                        (i + 1) / max(time.time() - start_time, 0.01), 1
+                    ),
+                    "phase": "Step 4/5: Detecting subjects",
+                },
+            )
+
+            was_cached = (
+                not reclassify
+                and photo["detection_box"]
+            )
+
+            batch_map, batch_detected = _detect_batch(
+                [photo], folders, runner, job, reclassify, db,
+            )
+            detection_map.update(batch_map)
+            detected += batch_detected
+
+            if was_cached and batch_detected:
+                skipped_det += 1
+
         log.info(
             "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
             detected,
@@ -312,6 +357,8 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 },
             )
             job["errors"].append(f"Detection unavailable: {msg[:200]}")
+        detection_map = {}
+        detected = 0
     except Exception as e:
         log.warning(
             "Detection failed (non-fatal) — classifying full images", exc_info=True
@@ -327,6 +374,8 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
         job["errors"].append(f"Detection failed: {str(e)[:200]}")
+        detection_map = {}
+        detected = 0
 
     return detection_map, detected
 
