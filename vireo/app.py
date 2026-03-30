@@ -2557,7 +2557,7 @@ def create_app(db_path, thumb_cache_dir=None):
         # MegaDetector status — just check for the ONNX file
         from detector import MEGADETECTOR_ONNX_PATH
 
-        info["megadetector"] = "available"
+        info["megadetector"] = "installed"
         info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
 
         if os.path.isfile(MEGADETECTOR_ONNX_PATH):
