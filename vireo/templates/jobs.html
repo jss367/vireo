@@ -343,7 +343,7 @@
     if (j.progress && j.progress.total > 0) {
       pct = Math.round((j.progress.current / j.progress.total) * 100);
     }
-    var html = '<div class="job-list-item' + selected + '" onclick="window._selectJob(\'' + esc(j.id) + '\', \'' + source + '\')">';
+    var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
     html += '<div class="job-list-item-header">';
     html += '<span class="job-list-item-dot ' + dot + '"></span>';
     html += '<span class="job-list-item-type">' + esc(j.type) + '</span>';
@@ -364,7 +364,11 @@
     else { badge.style.display = 'none'; }
   }
 
-  window._selectJob = function(jobId, source) { selectJob(jobId, source); };
+  // Event delegation for job list clicks
+  document.getElementById('jobListContent').addEventListener('click', function(e) {
+    var item = e.target.closest('[data-job-id]');
+    if (item) selectJob(item.getAttribute('data-job-id'), item.getAttribute('data-job-source'));
+  });
 
   function selectJob(jobId, source) {
     selectedJobId = jobId;
@@ -415,7 +419,7 @@
     html += '<span class="job-detail-title">' + esc(job.type) + '</span>';
     html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
     if (job.status === 'running') {
-      html += '<button class="btn-cancel" onclick="window._cancelJob(\'' + esc(job.id) + '\')">Cancel</button>';
+      html += '<button class="btn-cancel" data-cancel-job="' + esc(job.id) + '">Cancel</button>';
     }
     html += '</div>';
     html += '<div class="job-detail-meta">';
@@ -453,7 +457,7 @@
     if (collapsedSteps[step.id] === false) isExpanded = true;
 
     var html = '<div class="tree-step" data-step-id="' + esc(step.id) + '">';
-    html += '<div class="tree-step-header" onclick="window._toggleStep(\'' + esc(step.id) + '\')">';
+    html += '<div class="tree-step-header" data-toggle-step="' + esc(step.id) + '">';
     html += stepIcon(step.status);
     html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + esc(step.label) + '</span>';
 
@@ -504,7 +508,7 @@
     return html;
   }
 
-  window._toggleStep = function(stepId) {
+  function toggleStep(stepId) {
     if (collapsedSteps[stepId] === undefined) collapsedSteps[stepId] = true;
     else collapsedSteps[stepId] = !collapsedSteps[stepId];
     var job = activeJobs.find(function(j) { return j.id === selectedJobId; });
@@ -513,7 +517,26 @@
       job = historyJobs.find(function(j) { return j.id === selectedJobId; });
       if (job) renderHistoryDetail(job);
     }
-  };
+  }
+
+  // Event delegation for detail pane clicks (step toggle, cancel)
+  document.getElementById('jobDetailPane').addEventListener('click', function(e) {
+    var stepHeader = e.target.closest('[data-toggle-step]');
+    if (stepHeader) {
+      toggleStep(stepHeader.getAttribute('data-toggle-step'));
+      return;
+    }
+    var cancelBtn = e.target.closest('[data-cancel-job]');
+    if (cancelBtn) {
+      var jobId = cancelBtn.getAttribute('data-cancel-job');
+      fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+        .then(function(r) {
+          if (r.ok) fetchJobs();
+          else if (typeof showToast === 'function') showToast('Cancel not yet implemented', 'info');
+        })
+        .catch(function() {});
+    }
+  });
 
   function renderHistoryDetail(job) {
     var pane = document.getElementById('jobDetailPane');
@@ -556,7 +579,7 @@
     if (collapsedSteps[step.id] === false) isExpanded = true;
 
     var html = '<div class="tree-step">';
-    html += '<div class="tree-step-header" onclick="window._toggleStep(\'' + esc(step.id) + '\')">';
+    html += '<div class="tree-step-header" data-toggle-step="' + esc(step.id) + '">';
     html += stepIcon(step.status);
     html += '<span class="tree-step-label">' + esc(step.label) + '</span>';
     if (step.summary) html += '<span class="tree-step-summary">(' + esc(step.summary) + ')</span>';
@@ -566,15 +589,6 @@
     html += '</div>';
     return html;
   }
-
-  window._cancelJob = function(jobId) {
-    fetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
-      .then(function(r) {
-        if (r.ok) fetchJobs();
-        else if (typeof showToast === 'function') showToast('Cancel not yet implemented', 'info');
-      })
-      .catch(function() {});
-  };
 
   pollAll();
   pollTimer = setInterval(fetchJobs, 2000);
