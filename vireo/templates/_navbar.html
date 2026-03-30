@@ -660,11 +660,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <label class="modal-label">Name</label>
       <input class="modal-input" id="newWsName" placeholder="e.g. Kenya 2025">
     </div>
-    <div style="margin-bottom:16px;">
-      <label class="modal-label">Folders</label>
-      <div id="newWsFolderList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border-primary); border-radius:4px; padding:4px;"></div>
-      <div class="modal-hint">Select which folders to include. You can change this later.</div>
-    </div>
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="createWorkspace()">Create</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideCreateWsModal()">Cancel</button>
@@ -789,28 +784,9 @@ async function switchWorkspace(wsId, wsName) {
 }
 
 /* ---------- Create Workspace modal ---------- */
-async function showCreateWorkspaceModal() {
+function showCreateWorkspaceModal() {
   document.getElementById('wsMenu').classList.remove('open');
   _wsDropdownOpen = false;
-
-  try {
-    var folders = await safeFetch('/api/folders', {}, { toast: false });
-    var list = document.getElementById('newWsFolderList');
-    list.innerHTML = '';
-    if (folders.length === 0) {
-      list.innerHTML = '<div style="padding:8px; color:var(--text-muted); font-size:13px;">No folders scanned yet</div>';
-    } else {
-      folders.forEach(function(f) {
-        var label = document.createElement('label');
-        label.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; font-size:13px; color:var(--text-secondary); cursor:pointer;';
-        label.innerHTML = '<input type="checkbox" value="' + f.id + '" checked> ' + wsEscapeHtml(f.path);
-        list.appendChild(label);
-      });
-    }
-  } catch(e) {
-    console.error(e);
-  }
-
   document.getElementById('newWsName').value = '';
   document.getElementById('newWsError').style.display = 'none';
   document.getElementById('createWsModal').classList.add('open');
@@ -829,17 +805,21 @@ async function createWorkspace() {
     return;
   }
 
-  var checkboxes = document.querySelectorAll('#newWsFolderList input[type=checkbox]:checked');
-  var folderIds = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value); });
-
   try {
     var data = await safeFetch('/api/workspaces', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: name, folder_ids: folderIds })
+      body: JSON.stringify({ name: name })
     }, { toast: false });
     hideCreateWsModal();
-    await switchWorkspace(data.id, data.name);
+    // Activate the new workspace, then go straight to pipeline
+    await safeFetch('/api/workspaces/' + data.id + '/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ current_path: window.location.pathname })
+    });
+    sessionStorage.setItem('vireo_ws_switched', '1');
+    window.location.href = '/pipeline';
   } catch(e) {
     document.getElementById('newWsError').textContent = e.message || 'Failed to create';
     document.getElementById('newWsError').style.display = 'block';
