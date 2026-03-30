@@ -817,7 +817,7 @@ async function createWorkspace() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ current_path: window.location.pathname })
-    }, { toast: false });
+    });
     sessionStorage.setItem('vireo_ws_switched', '1');
     window.location.href = '/pipeline';
   } catch(e) {
