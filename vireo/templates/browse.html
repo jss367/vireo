@@ -619,6 +619,22 @@ body {
   font-size: 9px; padding: 1px 5px; border-radius: 3px;
   pointer-events: none; z-index: 2;
 }
+.species-badges {
+  position: absolute; bottom: 4px; left: 4px; right: 4px;
+  display: flex; flex-wrap: wrap; gap: 2px;
+  pointer-events: none; z-index: 2;
+}
+.species-badge {
+  background: rgba(0,0,0,0.7); color: #24E5CA;
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.species-badge-overflow {
+  background: rgba(0,0,0,0.7); color: var(--text-muted);
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -1590,12 +1606,28 @@ function renderGrid() {
     }
     var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
 
+    // Species badges from accepted predictions (via photo_keywords)
+    var speciesBadgeHtml = '';
+    if (p.species && p.species.length > 0) {
+      var maxShow = 3;
+      var shown = p.species.slice(0, maxShow);
+      speciesBadgeHtml = '<div class="species-badges">';
+      shown.forEach(function(s) {
+        speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+      });
+      if (p.species.length > maxShow) {
+        speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+      }
+      speciesBadgeHtml += '</div>';
+    }
+
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
         clipBadge +
         boxHtml +
         inatBadge +
+        speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
         '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +

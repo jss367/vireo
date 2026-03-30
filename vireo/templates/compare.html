@@ -148,13 +148,13 @@ function renderTable(data) {
   html += '</tr></thead><tbody>';
 
   data.photos.forEach(function(photo) {
-    // Determine if models disagree
-    var species = new Set();
+    // Determine if models disagree — collect top species per model
+    var topSpecies = new Set();
     data.models.forEach(function(m) {
-      var pred = photo.predictions[m];
-      if (pred) species.add(pred.species);
+      var preds = photo.predictions[m];
+      if (preds && preds.length > 0) topSpecies.add(preds[0].species);
     });
-    var disagree = species.size > 1;
+    var disagree = topSpecies.size > 1;
 
     html += '<tr class="' + (disagree ? 'disagree' : '') + '">';
     html += '<td><div class="thumb-cell">';
@@ -163,10 +163,14 @@ function renderTable(data) {
     html += '</div></td>';
 
     data.models.forEach(function(m) {
-      var pred = photo.predictions[m];
-      if (pred) {
-        html += '<td>' + escapeHtml(pred.species);
-        html += ' <span class="conf">' + Math.round(pred.confidence * 100) + '%</span></td>';
+      var preds = photo.predictions[m];
+      if (preds && preds.length > 0) {
+        var parts = [];
+        preds.forEach(function(pred) {
+          parts.push(escapeHtml(pred.species) +
+            ' <span class="conf">' + Math.round(pred.confidence * 100) + '%</span>');
+        });
+        html += '<td>' + parts.join('<br>') + '</td>';
       } else {
         html += '<td class="empty-cell">&mdash;</td>';
       }

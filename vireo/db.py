@@ -1760,6 +1760,28 @@ class Database:
             (photo_id,),
         ).fetchall()
 
+    def get_species_keywords_for_photos(self, photo_ids):
+        """Return species (taxonomy) keyword names for a batch of photos.
+
+        Returns a dict mapping photo_id -> list of species name strings.
+        """
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT pk.photo_id, k.name
+                FROM photo_keywords pk
+                JOIN keywords k ON k.id = pk.keyword_id
+                WHERE pk.photo_id IN ({placeholders})
+                  AND k.is_species = 1
+                ORDER BY k.name""",
+            list(photo_ids),
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["photo_id"], []).append(r["name"])
+        return result
+
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
 
     def update_keyword(self, keyword_id, **kwargs):

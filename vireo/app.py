@@ -328,6 +328,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
     # -- API routes --
 
+    def _attach_species(db, photo_dicts):
+        """Attach species keyword names to a list of photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts]
+        species_map = db.get_species_keywords_for_photos(ids)
+        for p in photo_dicts:
+            p["species"] = species_map.get(p["id"], [])
+        return photo_dicts
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -344,9 +354,12 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -447,9 +460,12 @@ def create_app(db_path, thumb_cache_dir=None):
                 keyword=keyword,
             )
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
