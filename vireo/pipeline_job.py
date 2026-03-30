@@ -93,6 +93,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         "regroup": {"status": "pending", "label": "Grouping encounters"},
     }
 
+    # Define step tracking for the jobs page
+    step_defs = [
+        {"id": "scan", "label": "Scan photos"},
+        {"id": "thumbnails", "label": "Generate thumbnails"},
+        {"id": "model_loader", "label": "Load models"},
+        {"id": "classify", "label": "Classify species"},
+    ]
+    if not params.skip_extract_masks:
+        step_defs.append({"id": "extract_masks", "label": "Extract features"})
+    if not params.skip_regroup:
+        step_defs.append({"id": "regroup", "label": "Group encounters"})
+    runner.set_steps(job["id"], step_defs)
+
     result = {"stages": {}}
     collection_id = params.collection_id
     scan_to_thumb = queue.Queue(maxsize=200)
@@ -109,9 +122,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         nonlocal collection_id
 
         if skip_scan:
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary="Skipped (using collection)")
             scan_to_thumb.put(_SENTINEL)
             return
         stages["scan"]["status"] = "running"
+        runner.update_step(job["id"], "scan", status="running")
         _update_stages(runner, job["id"], stages)
         try:
             import config as cfg
@@ -171,11 +187,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 photo_callback=photo_cb,
             )
             stages["scan"]["status"] = "completed"
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{stages['scan']['count']} photos")
         except Exception as e:
             errors.append(f"[scan] Fatal: {e}")
             log.exception("Pipeline scan stage failed")
             abort.set()
             stages["scan"]["status"] = "failed"
+            runner.update_step(job["id"], "scan", status="failed", error=str(e))
         finally:
             scan_to_thumb.put(_SENTINEL)
             _update_stages(runner, job["id"], stages)
@@ -219,6 +238,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
     def thumbnail_stage():
         stages["thumbnails"]["status"] = "running"
+        runner.update_step(job["id"], "thumbnails", status="running")
         _update_stages(runner, job["id"], stages)
         try:
             from thumbnails import generate_thumbnail
@@ -256,15 +276,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     log.debug("Thumbnail failed for photo %s", photo_id)
 
             stages["thumbnails"]["status"] = "completed"
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=f"{count} thumbnails")
             result["stages"]["thumbnails"] = {"generated": count}
         except Exception as e:
             errors.append(f"[thumbnails] Fatal: {e}")
             log.exception("Pipeline thumbnail stage failed")
             stages["thumbnails"]["status"] = "failed"
+            runner.update_step(job["id"], "thumbnails", status="failed", error=str(e))
         _update_stages(runner, job["id"], stages)
 
     def model_loader_stage():
         stages["model_loader"]["status"] = "running"
+        runner.update_step(job["id"], "model_loader", status="running")
         _update_stages(runner, job["id"], stages)
         try:
             from classify_job import _load_labels, _load_taxonomy
@@ -333,11 +357,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             loaded_models["active_model"] = active_model
 
             stages["model_loader"]["status"] = "completed"
+            runner.update_step(job["id"], "model_loader", status="completed",
+                               summary=model_name)
         except Exception as e:
             errors.append(f"[model_loader] Fatal: {e}")
             log.exception("Pipeline model loader stage failed")
             abort.set()
             stages["model_loader"]["status"] = "failed"
+            runner.update_step(job["id"], "model_loader", status="failed", error=str(e))
         finally:
             models_ready.set()
             _update_stages(runner, job["id"], stages)
@@ -349,9 +376,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         if abort.is_set() or not collection_id or "clf" not in loaded_models:
             stages["classify"]["status"] = "skipped"
+            runner.update_step(job["id"], "classify", status="completed",
+                               summary="Skipped")
             return
 
         stages["classify"]["status"] = "running"
+        runner.update_step(job["id"], "classify", status="running")
         _update_stages(runner, job["id"], stages)
 
         try:
@@ -410,6 +440,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
                 stages["classify"]["count"] = batch_idx
+                runner.update_step(job["id"], "classify",
+                                   progress={"current": batch_idx, "total": total})
 
                 # Detect this batch
                 det_map, det_count = _detect_batch(
@@ -469,6 +501,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             )
 
             stages["classify"]["status"] = "completed"
+            runner.update_step(job["id"], "classify", status="completed",
+                               summary=f"{group_result['predictions_stored']} predictions")
             result["stages"]["classify"] = {
                 "total": total,
                 "predictions_stored": group_result["predictions_stored"],
@@ -482,6 +516,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             log.exception("Pipeline classify stage failed")
             abort.set()
             stages["classify"]["status"] = "failed"
+            runner.update_step(job["id"], "classify", status="failed", error=str(e))
 
         _update_stages(runner, job["id"], stages)
 
@@ -489,9 +524,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         """Run SAM2 mask extraction + DINOv2 embeddings after classify."""
         if params.skip_extract_masks or abort.is_set() or not collection_id:
             stages["extract_masks"]["status"] = "skipped"
+            runner.update_step(job["id"], "extract_masks", status="completed",
+                               summary="Skipped")
             return
 
         stages["extract_masks"]["status"] = "running"
+        runner.update_step(job["id"], "extract_masks", status="running")
         _update_stages(runner, job["id"], stages)
 
         try:
@@ -585,6 +623,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     errors.append(f"Photo {photo_id}: mask extraction failed")
 
                 stages["extract_masks"]["count"] = i + 1
+                runner.update_step(job["id"], "extract_masks",
+                                   progress={"current": i + 1, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Extracting features (SAM2 + DINOv2)",
                     "current": i + 1,
@@ -594,6 +634,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 })
 
             stages["extract_masks"]["status"] = "completed"
+            runner.update_step(job["id"], "extract_masks", status="completed",
+                               summary=f"{masked} masked, {skipped} skipped")
             result["stages"]["extract_masks"] = {
                 "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
             }
@@ -601,6 +643,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             errors.append(f"[extract_masks] Fatal: {e}")
             log.exception("Pipeline extract-masks stage failed")
             stages["extract_masks"]["status"] = "failed"
+            runner.update_step(job["id"], "extract_masks", status="failed", error=str(e))
 
         _update_stages(runner, job["id"], stages)
 
@@ -608,9 +651,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         """Run pipeline grouping + scoring + triage from cached features."""
         if params.skip_regroup or abort.is_set() or not collection_id:
             stages["regroup"]["status"] = "skipped"
+            runner.update_step(job["id"], "regroup", status="completed",
+                               summary="Skipped")
             return
 
         stages["regroup"]["status"] = "running"
+        runner.update_step(job["id"], "regroup", status="running")
         _update_stages(runner, job["id"], stages)
 
         try:
@@ -627,6 +673,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if not photos:
                 result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
                 stages["regroup"]["status"] = "completed"
+                runner.update_step(job["id"], "regroup", status="completed",
+                                   summary="No photos to group")
                 return
 
             results = run_full_pipeline(photos, config=pipeline_cfg)
@@ -634,11 +682,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             save_results(results, cache_dir, workspace_id)
 
             stages["regroup"]["status"] = "completed"
-            result["stages"]["regroup"] = results.get("summary", {})
+            summary_info = results.get("summary", {})
+            groups = summary_info.get("groups", "")
+            runner.update_step(job["id"], "regroup", status="completed",
+                               summary=f"{groups} groups" if groups else "Done")
+            result["stages"]["regroup"] = summary_info
         except Exception as e:
             errors.append(f"[regroup] Fatal: {e}")
             log.exception("Pipeline regroup stage failed")
             stages["regroup"]["status"] = "failed"
+            runner.update_step(job["id"], "regroup", status="failed", error=str(e))
 
         _update_stages(runner, job["id"], stages)
 
