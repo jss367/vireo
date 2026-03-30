@@ -650,8 +650,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/audit">Audit</a>
   <a href="/compare">Compare</a>
   <a href="/workspace">Workspace</a>
-  <a href="/settings">Settings</a>
   <a href="/keywords">Keywords</a>
+  <a href="/shortcuts">Shortcuts</a>
+  <a href="/settings">Settings</a>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
@@ -715,15 +716,15 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     import: '/import', pipeline: '/pipeline', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', audit: '/audit',
-    compare: '/compare', workspace: '/workspace', settings: '/settings',
-    keywords: '/keywords'
+    compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
+    settings: '/settings', keywords: '/keywords'
   };
 
   var NAV_DEFAULTS = {
     import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
     cull: 'c', browse: 'b', map: 'm', variants: 'v',
     dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
-    settings: ',', keywords: 'k'
+    shortcuts: '/', settings: ',', keywords: 'k'
   };
 
   // Build reverse map: href → shortcut action name
