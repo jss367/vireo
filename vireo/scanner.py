@@ -241,7 +241,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -250,6 +250,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
+        photo_callback: optional callable(photo_id, path_str) called after each photo is committed
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -323,6 +324,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
                 if file_unchanged and xmp_unchanged:
                     processed_count += 1
+                    if photo_callback:
+                        photo_callback(existing["id"], full_path_str)
                     if progress_callback:
                         progress_callback(processed_count, total)
                     continue
@@ -338,6 +341,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
                 if file_unchanged:
                     processed_count += 1
+                    if photo_callback:
+                        photo_callback(existing["id"], full_path_str)
                     if progress_callback:
                         progress_callback(processed_count, total)
                     continue
@@ -469,6 +474,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # Import XMP keywords if sidecar exists
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
+
+        if photo_callback:
+            photo_callback(photo_id, str(image_path))
 
         processed_count += 1
         if progress_callback:

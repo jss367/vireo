@@ -4408,6 +4408,61 @@ def create_app(db_path, thumb_cache_dir=None):
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/pipeline", methods=["POST"])
+    def api_job_pipeline():
+        """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
+
+        Overlaps I/O stages and interleaves detection with classification.
+        Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
+        """
+        from pipeline_job import PipelineParams, run_pipeline_job
+
+        body = request.get_json(silent=True) or {}
+        source = body.get("source")
+        collection_id = body.get("collection_id")
+
+        if not source and not collection_id:
+            return json_error("source or collection_id required")
+        if source and not os.path.isdir(source):
+            return json_error(f"source directory not found: {source}")
+
+        destination = body.get("destination")
+        if destination and not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        params = PipelineParams(
+            collection_id=collection_id,
+            source=source,
+            destination=destination,
+            file_types=body.get("file_types", "both"),
+            folder_template=body.get("folder_template", "%Y/%m-%d"),
+            skip_duplicates=body.get("skip_duplicates", True),
+            labels_file=body.get("labels_file"),
+            labels_files=body.get("labels_files"),
+            model_id=body.get("model_id"),
+            reclassify=body.get("reclassify", False),
+            skip_extract_masks=body.get("skip_extract_masks", False),
+            skip_regroup=body.get("skip_regroup", False),
+        )
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            return run_pipeline_job(job, runner, db_path, active_ws, params)
+
+        job_id = runner.start(
+            "pipeline", work,
+            config={
+                "source": source,
+                "collection_id": collection_id,
+                "skip_extract_masks": params.skip_extract_masks,
+                "skip_regroup": params.skip_regroup,
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/encounters/species", methods=["POST"])
     def api_encounter_species():
         """Confirm species for all photos in an encounter.

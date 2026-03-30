@@ -137,3 +137,49 @@ def test_ingest_relative_destination(app_and_db, tmp_path):
             "destination": "relative/path",
         })
         assert resp.status_code == 400
+
+
+def test_pipeline_job_requires_source_or_collection(app_and_db):
+    """Pipeline endpoint should require either source or collection_id."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={})
+        assert resp.status_code == 400
+
+
+def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
+    """Pipeline endpoint should reject relative destination paths."""
+    app, _ = app_and_db
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "source": str(src),
+            "destination": "relative/path",
+        })
+        assert resp.status_code == 400
+        assert "absolute" in resp.get_json()["error"]
+
+
+def test_pipeline_job_with_collection_returns_job_id(app_and_db):
+    """Pipeline with collection_id should start and return job_id."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+    col_id = db.add_collection("Test", json.dumps([]))
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "job_id" in data
+        assert data["job_id"].startswith("pipeline-")

@@ -580,6 +580,8 @@ function updateStartButton() {
 // -- Pipeline orchestration --
 var _pipelineRunning = false;
 var _pipelineAbort = false;
+var _pipelineEventSource = null;
+var _pipelineResolve = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
@@ -591,33 +593,83 @@ async function startPipeline() {
   btn.onclick = stopPipeline;
   btn.disabled = false;
 
+  // Gather config from the UI
+  var body = {};
+
+  if (_sourceMode === 'import') {
+    var folder = document.getElementById('cfgSourceCustom').value.trim();
+    body.source = _copyMode
+      ? (folder || document.getElementById('cfgSource').value)
+      : folder;
+    body.file_types = getIngestFileTypes();
+    if (_copyMode) {
+      body.destination = document.getElementById('cfgDestination').value.trim();
+      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+    }
+  } else {
+    body.collection_id = parseInt(document.getElementById('collectionPicker').value);
+  }
+
+  // Classification options
+  var selectedModels = [];
+  document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+    selectedModels.push({id: cb.value, name: cb.dataset.name});
+  });
+  if (selectedModels.length > 0) {
+    body.model_id = selectedModels[0].id;
+  }
+
+  var labelsFiles = [];
+  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+    labelsFiles.push(cb.value);
+  });
+  if (labelsFiles.length > 0) body.labels_files = labelsFiles;
+
+  body.reclassify = !!document.getElementById('chkReclassify').checked;
+
+  // Reset all stage cards to pending state
+  ['Source', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+    var numEl = document.getElementById('num' + name);
+    if (numEl) numEl.className = 'stage-num';
+  });
+
   try {
-    // Step 1: Source -- get or create collection
-    var collectionId;
-    if (_sourceMode === 'import') {
-      collectionId = await runImportStep();
-      if (!collectionId || _pipelineAbort) return;
-    } else {
-      collectionId = parseInt(document.getElementById('collectionPicker').value);
-      if (!collectionId) return;
-      // Mark source as complete
-      document.getElementById('numSource').className = 'stage-num complete';
-      document.getElementById('txtSource').textContent = 'Collection selected';
+    var data = await safeFetch('/api/jobs/pipeline', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    }, { toast: false });
+
+    if (!data || !data.job_id) {
+      document.getElementById('statusSource').textContent = (data && data.error) || 'Failed to start pipeline';
+      return;
     }
 
-    if (_pipelineAbort) return;
+    // Show progress on all cards
+    document.getElementById('card-source').classList.add('expanded');
 
-    // Step 2: Classify
-    var classifyOk = await runClassifyStep(collectionId);
-    if (!classifyOk || _pipelineAbort) return;
-
-    // Step 3: Extract
-    var extractOk = await runExtractStep(collectionId);
-    if (!extractOk || _pipelineAbort) return;
-
-    // Step 4: Group & Score
-    await runGroupStep(collectionId);
-
+    await new Promise(function(resolve) {
+      _pipelineResolve = resolve;
+      _pipelineEventSource = safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (_pipelineAbort) return;
+          _updatePipelineStageUI(p);
+        },
+        onComplete: function(result) {
+          _pipelineResolve = null;
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
+          _onPipelineComplete(result);
+          resolve();
+        },
+        onError: function() {
+          _pipelineResolve = null;
+          document.getElementById('statusSource').textContent = 'Connection lost';
+          resolve();
+        }
+      });
+    });
+  } catch(e) {
+    document.getElementById('statusSource').textContent = 'Error: ' + e.message;
   } finally {
     _pipelineRunning = false;
     btn.textContent = 'Start Pipeline';
@@ -626,8 +678,174 @@ async function startPipeline() {
   }
 }
 
+// Map pipeline stage names to UI card element suffixes
+var _stageToCard = {
+  scan: 'Source',
+  thumbnails: 'Source',
+  model_loader: 'Classify',
+  classify: 'Classify',
+  extract_masks: 'Extract',
+  regroup: 'Group',
+};
+
+// Map pipeline stage names to the progress bar element suffixes
+var _stageToProgress = {
+  scan: 'Source',
+  classify: 'Classify',
+  extract_masks: 'Extract',
+  regroup: 'Group',
+};
+
+function _updatePipelineStageUI(p) {
+  var stages = p.stages || {};
+
+  // Update stage number badges based on stage status
+  for (var stageName in stages) {
+    var info = stages[stageName];
+    var cardSuffix = _stageToCard[stageName];
+    if (!cardSuffix) continue;
+
+    var numEl = document.getElementById('num' + cardSuffix);
+    if (!numEl) continue;
+
+    if (info.status === 'running') {
+      numEl.className = 'stage-num running';
+      // Auto-expand the card
+      var card = document.getElementById('card-' + cardSuffix.toLowerCase());
+      if (card) card.classList.add('expanded');
+    } else if (info.status === 'completed') {
+      numEl.className = 'stage-num complete';
+    }
+  }
+
+  // Update the progress bar for the currently-active stage
+  var progressSuffix = null;
+  // Find the running stage that has a progress bar
+  for (var sName in _stageToProgress) {
+    if (stages[sName] && stages[sName].status === 'running') {
+      progressSuffix = _stageToProgress[sName];
+      break;
+    }
+  }
+
+  if (progressSuffix && p.total > 0) {
+    var progressWrap = document.getElementById('progress' + progressSuffix);
+    var fill = document.getElementById('fill' + progressSuffix);
+    var text = document.getElementById('text' + progressSuffix);
+    var status = document.getElementById('status' + progressSuffix);
+
+    if (progressWrap) progressWrap.style.display = '';
+    var pct = Math.round(p.current / p.total * 100);
+    if (fill) fill.style.width = pct + '%';
+
+    var parts = [];
+    if (p.phase) parts.push(p.phase);
+    if (p.current > 0) parts.push(p.current + '/' + p.total);
+    if (p.rate) parts.push(p.rate + '/s');
+    if (p.current_file) parts.push(p.current_file);
+    var label = parts.join(' \u2014 ');
+    if (text) text.textContent = label;
+    if (status) status.textContent = label;
+  }
+}
+
+function _onPipelineComplete(result) {
+  var succeeded = (result.status === 'completed');
+  var r = result.result || {};
+  var stageResults = r.stages || {};
+
+  // Source card
+  var numSource = document.getElementById('numSource');
+  if (stageResults.scan || stageResults.thumbnails) {
+    numSource.className = 'stage-num complete';
+    var scanInfo = stageResults.scan || {};
+    var summary = [];
+    if (scanInfo.photos_indexed) summary.push(scanInfo.photos_indexed + ' indexed');
+    if (scanInfo.copied) summary.push(scanInfo.copied + ' imported');
+    document.getElementById('txtSource').textContent = summary.join(', ') || 'Done';
+  } else if (_sourceMode === 'collection') {
+    numSource.className = 'stage-num complete';
+    document.getElementById('txtSource').textContent = 'Collection selected';
+  }
+  var statusSource = document.getElementById('statusSource');
+  var fillSource = document.getElementById('fillSource');
+  if (fillSource) fillSource.style.width = '100%';
+  if (statusSource) { statusSource.textContent = 'Done!'; statusSource.className = 'status-msg ok'; }
+
+  // Classify card
+  if (stageResults.classify) {
+    document.getElementById('numClassify').className = 'stage-num complete';
+    var cls = stageResults.classify;
+    var predCount = cls.predictions_stored || cls.total || 0;
+    document.getElementById('txtDetections').textContent = predCount + ' detections';
+    _pipelineState.hasDetections = true;
+    var statusCls = document.getElementById('statusClassify');
+    var fillCls = document.getElementById('fillClassify');
+    if (fillCls) fillCls.style.width = '100%';
+    if (statusCls) { statusCls.textContent = 'Done!'; statusCls.className = 'status-msg ok'; }
+  }
+
+  // Extract card
+  if (stageResults.extract_masks) {
+    document.getElementById('numExtract').className = 'stage-num complete';
+    var ext = stageResults.extract_masks;
+    var extSummary = [];
+    if (ext.masks_created) extSummary.push(ext.masks_created + ' masks');
+    if (ext.scored_count) extSummary.push(ext.scored_count + ' sharpness');
+    document.getElementById('txtMasks').textContent = extSummary.join(', ');
+    _pipelineState.hasMasks = true;
+    var statusExt = document.getElementById('statusExtract');
+    var fillExt = document.getElementById('fillExtract');
+    if (fillExt) fillExt.style.width = '100%';
+    if (statusExt) { statusExt.textContent = 'Done!'; statusExt.className = 'status-msg ok'; }
+  }
+
+  // Group card
+  if (stageResults.regroup) {
+    document.getElementById('numGroup').className = 'stage-num complete';
+    var grp = stageResults.regroup;
+    var grpSummary = [];
+    if (grp.encounter_count != null) grpSummary.push(grp.encounter_count + ' encounters');
+    if (grp.keep_count != null) grpSummary.push(grp.keep_count + 'K / ' + (grp.review_count||0) + 'R / ' + (grp.reject_count||0) + 'X');
+    document.getElementById('txtResults').textContent = grpSummary.join(' \u2014 ');
+    var resultsLink = document.getElementById('viewResultsLink');
+    if (resultsLink) resultsLink.style.display = '';
+    _pipelineState.hasResults = true;
+    var statusGrp = document.getElementById('statusGroup');
+    var fillGrp = document.getElementById('fillGroup');
+    if (fillGrp) fillGrp.style.width = '100%';
+    if (statusGrp) { statusGrp.textContent = 'Done!'; statusGrp.className = 'status-msg ok'; }
+  }
+
+  // Show errors if any
+  if (r.errors && r.errors.length > 0) {
+    var errorStages = {};
+    r.errors.forEach(function(err) {
+      var match = err.match(/^\[(\w+)\]/);
+      var stage = match ? match[1] : 'unknown';
+      errorStages[stage] = err;
+    });
+    for (var stage in errorStages) {
+      var cardSuffix = _stageToCard[stage];
+      if (cardSuffix) {
+        var statusEl = document.getElementById('status' + cardSuffix);
+        if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
+      }
+    }
+  }
+}
+
 function stopPipeline() {
   _pipelineAbort = true;
+  if (_pipelineEventSource) {
+    _pipelineEventSource.close();
+    _pipelineEventSource = null;
+  }
+  // Resolve the pending stream promise so the finally block runs
+  if (_pipelineResolve) {
+    _pipelineResolve();
+    _pipelineResolve = null;
+  }
   var btn = document.getElementById('btnStartPipeline');
   btn.disabled = true;
   btn.textContent = 'Stopping...';
