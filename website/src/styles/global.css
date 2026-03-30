@@ -4,29 +4,24 @@
    ============================================ */
 
 :root {
-  /* Brand colors */
-  --color-gold-bright: #E5C233;
-  --color-gold: #D4A800;
-  --color-gold-hover: #B89200;
-  --color-espresso: #2C2618;
-  --color-dark-warm: #171410;
-  --color-cream: #FAF5E6;
-
-  /* Aliases for component references */
-  --color-warm-white: var(--color-cream);
-  --color-navy-deep: var(--color-dark-warm);
-  --color-teal-mid: var(--color-gold-hover);
-
-  /* Semantic colors */
-  --color-bg-dark: var(--color-dark-warm);
-  --color-bg-navy: var(--color-espresso);
+  /* Semantic colors — Gold theme (default) */
+  --color-bg-dark: #171410;
+  --color-bg-navy: #2C2618;
   --color-bg-light: #FDFAF0;
   --color-bg-white: #FFFFFF;
-  --color-text-on-dark: var(--color-cream);
+  --color-text-on-dark: #FAF5E6;
   --color-text-on-light: #3A3520;
   --color-text-muted: #8B7E6A;
-  --color-accent: var(--color-gold);
-  --color-accent-hover: var(--color-gold-hover);
+  --color-accent: #D4A800;
+  --color-accent-hover: #B89200;
+  --color-nav-bg: rgba(23, 20, 16, 0.95);
+  --color-nav-bg-mobile: rgba(23, 20, 16, 0.98);
+  --color-border-accent: rgba(212, 168, 0, 0.15);
+  --color-highlight-bg: rgba(212, 168, 0, 0.1);
+
+  /* Aliases for component references */
+  --color-warm-white: var(--color-text-on-dark);
+  --color-navy-deep: var(--color-bg-dark);
 
   /* Typography */
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
@@ -207,4 +202,23 @@ a:hover {
   .container {
     padding: 0 var(--space-md);
   }
+}
+
+/* ============================================
+   Teal Theme
+   ============================================ */
+
+[data-theme="teal"] {
+  --color-bg-dark: #001B29;
+  --color-bg-navy: #0A2F4D;
+  --color-bg-light: #F8FAFA;
+  --color-text-on-dark: #E0F0F0;
+  --color-text-on-light: #1A2A3A;
+  --color-text-muted: #6B7B8D;
+  --color-accent: #24E5CA;
+  --color-accent-hover: #12C3B5;
+  --color-nav-bg: rgba(0, 27, 41, 0.95);
+  --color-nav-bg-mobile: rgba(0, 27, 41, 0.98);
+  --color-border-accent: rgba(36, 229, 202, 0.15);
+  --color-highlight-bg: rgba(36, 229, 202, 0.1);
 }
