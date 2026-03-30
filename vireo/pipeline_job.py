@@ -30,6 +30,7 @@ class PipelineParams:
 
     collection_id: int | None = None
     source: str | None = None
+    sources: list | None = None
     destination: str | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%m-%d"

@@ -61,6 +61,17 @@ def test_pipeline_params_preview_max_size_defaults_1920():
     assert params.preview_max_size == 1920
 
 
+def test_pipeline_params_sources_list():
+    """PipelineParams should accept a list of source folders."""
+    params = PipelineParams(sources=["/photos/card1", "/photos/card2"])
+    assert params.sources == ["/photos/card1", "/photos/card2"]
+
+
+def test_pipeline_params_sources_defaults_none():
+    params = PipelineParams(collection_id=1)
+    assert params.sources is None
+
+
 def test_pipeline_params_defaults():
     """PipelineParams should have sensible defaults."""
     params = PipelineParams(collection_id=42)
@@ -76,6 +87,7 @@ def test_pipeline_params_defaults():
     assert params.reclassify is False
     assert params.skip_extract_masks is False
     assert params.skip_regroup is False
+    assert params.sources is None
     assert params.skip_classify is False
     assert params.preview_max_size == 1920
 
@@ -85,6 +97,7 @@ def test_pipeline_params_all_fields():
     params = PipelineParams(
         collection_id=1,
         source="/src",
+        sources=["/src1", "/src2"],
         destination="/dst",
         file_types="raw",
         folder_template="%Y",
@@ -99,6 +112,7 @@ def test_pipeline_params_all_fields():
         preview_max_size=2560,
     )
     assert params.source == "/src"
+    assert params.sources == ["/src1", "/src2"]
     assert params.destination == "/dst"
     assert params.file_types == "raw"
     assert params.reclassify is True
