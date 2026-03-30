@@ -634,6 +634,23 @@
     <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
   </div>
 
+  <!-- External Editor -->
+  <div class="section">
+    <div class="section-title">External Editor</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Application used when clicking "Open in Editor" in the browse tab. Leave empty to use your OS default.
+    </p>
+    <div class="setting-row">
+      <div class="setting-label">
+        Editor path
+        <small>Full path to the editor executable (e.g. /usr/bin/darktable, /Applications/RawTherapee.app). Leave empty to open with your OS default application.</small>
+      </div>
+      <input type="text" id="cfgExternalEditor" placeholder="OS default"
+             style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+             onchange="saveConfig()">
+    </div>
+  </div>
+
   <!-- darktable Development -->
   <div class="section">
     <div class="section-title">RAW Development (darktable)</div>
@@ -871,6 +888,7 @@ async function loadConfig() {
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
     // Load darktable settings
+    document.getElementById('cfgExternalEditor').value = cfg.external_editor || '';
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
@@ -996,6 +1014,7 @@ function saveConfig() {
           max_edit_history: maxEditHistory,
           hf_token: hfToken,
           inat_token: document.getElementById('cfgInatToken').value.trim(),
+          external_editor: document.getElementById('cfgExternalEditor').value.trim(),
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
