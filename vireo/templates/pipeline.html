@@ -392,16 +392,6 @@ function initPipelinePage() {
         document.getElementById('txtMasks').textContent = txt;
       }
 
-      // Stage 4: Group
-      if (data.results) {
-        document.getElementById('numGroup').classList.add('complete');
-        var s = data.results.summary;
-        document.getElementById('txtResults').textContent =
-          s.encounter_count + ' encounters \u2014 ' +
-          s.keep_count + 'K / ' + s.review_count + 'R / ' + s.reject_count + 'X';
-        document.getElementById('viewResultsLink').style.display = '';
-      }
-
       // Config selects and range
       document.getElementById('cfgSam2').value = cfg.sam2_variant;
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
@@ -416,7 +406,6 @@ function initPipelinePage() {
       // Update pipeline state
       _pipelineState.hasDetections = !!data.has_detections;
       _pipelineState.hasMasks = !!data.has_masks;
-      _pipelineState.hasResults = !!data.results;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -1337,7 +1326,6 @@ function toggleCard(name) {
 var _pipelineState = {
   hasDetections: false,
   hasMasks: false,
-  hasResults: false,
 };
 
 function updateCardStates() {
@@ -1345,9 +1333,6 @@ function updateCardStates() {
   // Just auto-expand cards based on state.
   if (_pipelineState.hasDetections && !_pipelineState.hasMasks) {
     document.getElementById('card-extract').classList.add('expanded');
-  }
-  if (_pipelineState.hasMasks && !_pipelineState.hasResults) {
-    document.getElementById('card-group').classList.add('expanded');
   }
   updateStartButton();
 }
