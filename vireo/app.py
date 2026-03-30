@@ -1028,7 +1028,12 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_collections():
         db = _get_db()
         collections = db.get_collections()
-        return jsonify([dict(c) for c in collections])
+        result = []
+        for c in collections:
+            d = dict(c)
+            d["photo_count"] = db.count_collection_photos(c["id"])
+            result.append(d)
+        return jsonify(result)
 
     @app.route("/api/collections", methods=["POST"])
     def api_create_collection():
