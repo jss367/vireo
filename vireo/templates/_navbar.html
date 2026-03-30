@@ -553,6 +553,62 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
+/* ---------- Shortcuts Cheat Sheet ---------- */
+.shortcuts-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 500;
+  justify-content: center;
+  align-items: center;
+}
+.shortcuts-overlay.open { display: flex; }
+.shortcuts-sheet {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 24px;
+  width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.shortcuts-sheet h3 {
+  font-size: 16px; margin: 0 0 16px 0; color: var(--text-primary);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.shortcuts-sheet-close {
+  background: none; border: none; color: var(--text-ghost);
+  font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.shortcuts-sheet-close:hover { color: var(--text-primary); }
+.sc-group-title {
+  font-size: 12px; font-weight: 600; color: var(--text-dim);
+  margin: 14px 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.sc-group-title:first-child { margin-top: 0; }
+.sc-row {
+  display: flex; align-items: center; padding: 4px 0;
+}
+.sc-key {
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 2px 8px; font-size: 12px;
+  font-family: monospace; color: var(--accent); min-width: 50px;
+  text-align: center; display: inline-block;
+}
+.sc-label {
+  font-size: 13px; color: var(--text-secondary); margin-left: 12px;
+}
+.sc-footer {
+  margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--border-primary);
+  text-align: center;
+}
+.sc-footer a {
+  font-size: 12px; color: var(--accent); text-decoration: none;
+}
+.sc-footer a:hover { text-decoration: underline; }
+
 /* ---------- iNat Submission Modal ---------- */
 .inat-modal { width: 560px; }
 .inat-card {
@@ -679,6 +735,15 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </div>
 </div>
 
+<!-- Shortcuts Cheat Sheet Overlay -->
+<div class="shortcuts-overlay" id="shortcutsCheatSheet" onclick="if(event.target===this)closeShortcutsSheet()">
+  <div class="shortcuts-sheet">
+    <h3>Keyboard Shortcuts <button class="shortcuts-sheet-close" onclick="closeShortcutsSheet()">&times;</button></h3>
+    <div id="shortcutsSheetContent"></div>
+    <div class="sc-footer"><a href="/shortcuts">Edit shortcuts &rarr;</a></div>
+  </div>
+</div>
+
 <script>
 /* ---------- Active page highlighting ---------- */
 (function() {
@@ -774,7 +839,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
       // Skip if any overlay or modal is open
-      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open')) return;
+      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open')) return;
 
       for (var shortcutStr in keyToHref) {
         if (matchesShortcut(e, shortcutStr)) {
@@ -814,6 +879,96 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       setupNavKeydown(navShortcuts);
     })
     .catch(function() {});
+})();
+
+/* ---------- Shortcuts Cheat Sheet (?) ---------- */
+(function() {
+  var SC_LABELS = {
+    navigation: {
+      _title: 'Navigation',
+      import: 'Import', pipeline: 'Pipeline', pipeline_review: 'Pipeline Review',
+      review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
+      variants: 'Variants', dashboard: 'Dashboard', audit: 'Audit',
+      compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
+      shortcuts: 'Shortcuts', settings: 'Settings',
+    },
+    review: {
+      _title: 'Review',
+      accept: 'Accept prediction', skip: 'Skip / reject',
+    },
+    browse: {
+      _title: 'Browse',
+      rate_0: 'Clear rating', rate_1: 'Rate 1', rate_2: 'Rate 2',
+      rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
+      flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
+      undo: 'Undo', select_all: 'Select all', zoom: 'Toggle zoom',
+    },
+  };
+
+  var SC_DEFAULTS = {
+    navigation: {
+      import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+      cull: 'c', browse: 'b', map: 'm', variants: 'v',
+      dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+      shortcuts: '/', settings: ',', keywords: 'k',
+    },
+    review: { accept: 'a', skip: 's' },
+    browse: {
+      rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
+      rate_4: '4', rate_5: '5',
+      flag: 'p', reject: 'x', unflag: 'u',
+      undo: 'ctrl+z', select_all: 'ctrl+a', zoom: 'z',
+    },
+  };
+
+  function renderSheet() {
+    var shortcuts = window._vireoShortcuts || {};
+    var html = '';
+    for (var ctx in SC_LABELS) {
+      var labels = SC_LABELS[ctx];
+      var values = shortcuts[ctx] || SC_DEFAULTS[ctx] || {};
+      var defaults = SC_DEFAULTS[ctx] || {};
+      html += '<div class="sc-group-title">' + labels._title + '</div>';
+      for (var action in labels) {
+        if (action === '_title') continue;
+        var key = values[action] || defaults[action] || '';
+        html += '<div class="sc-row">' +
+          '<span class="sc-key">' + formatShortcut(key) + '</span>' +
+          '<span class="sc-label">' + labels[action] + '</span>' +
+          '</div>';
+      }
+    }
+    document.getElementById('shortcutsSheetContent').innerHTML = html;
+  }
+
+  window.openShortcutsSheet = function() {
+    renderSheet();
+    document.getElementById('shortcutsCheatSheet').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  };
+
+  window.closeShortcutsSheet = function() {
+    document.getElementById('shortcutsCheatSheet').classList.remove('open');
+    document.body.style.overflow = '';
+  };
+
+  // Listen for ? key
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open')) return;
+    // Close if overlay is open
+    if (e.key === 'Escape' && document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
+      closeShortcutsSheet();
+      e.stopPropagation();
+      return;
+    }
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Don't open if shortcuts sheet is already open
+      if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) return;
+      e.preventDefault();
+      openShortcutsSheet();
+    }
+  });
 })();
 
 /* ---------- Load active workspace name ---------- */
