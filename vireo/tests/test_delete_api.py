@@ -199,10 +199,13 @@ def test_api_batch_delete_disk_mode(app_and_db, tmp_path):
     pid = photos[0]["id"]
     photo = db.get_photo(pid)
 
-    # Create a real file at the expected path
-    folder_path = db.conn.execute(
-        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-    ).fetchone()["path"]
+    # Point folder to a writable tmp_path location and create a real file
+    folder_path = str(tmp_path / "disk_photos")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (folder_path, photo["folder_id"]),
+    )
+    db.conn.commit()
     os.makedirs(folder_path, exist_ok=True)
     real_file = os.path.join(folder_path, photo["filename"])
     Image.new("RGB", (10, 10)).save(real_file)
