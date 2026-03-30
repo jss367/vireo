@@ -159,13 +159,17 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     return labels, use_tol
 
 
-def _detect_batch(photos, folders, runner, job, reclassify, db):
+def _detect_batch(photos, folders, runner, job, reclassify, db, det_conf_threshold=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
     partial photo lists for interleaved detect+classify in the streaming
     pipeline.  Does NOT push progress events — that is the caller's
     responsibility.
+
+    Args:
+        det_conf_threshold: Detection confidence threshold. If None,
+            loaded from config (fallback for callers that don't pre-load).
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -178,8 +182,9 @@ def _detect_batch(photos, folders, runner, job, reclassify, db):
         if detect_animals is None or get_primary_detection is None:
             return detection_map, detected
 
-        import config as cfg
-        det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
+        if det_conf_threshold is None:
+            import config as cfg
+            det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
 
         for photo in photos:
             folder_path = folders.get(photo["folder_id"], "")
@@ -287,6 +292,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
 
+        # Load config once for the entire detection loop
+        import config as cfg
+        det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
+
         # Process one photo at a time so we can report per-photo progress
         detection_map = {}
         detected = 0
@@ -315,6 +324,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
 
             batch_map, batch_detected = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
+                det_conf_threshold=det_conf_threshold,
             )
             detection_map.update(batch_map)
             detected += batch_detected
