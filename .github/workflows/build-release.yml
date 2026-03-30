@@ -268,7 +268,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Vireo ${{ steps.tag.outputs.tag }}
-          draft: true
+          draft: false
           prerelease: false
           generate_release_notes: true
           files: release-files/*
