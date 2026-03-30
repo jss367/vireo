@@ -568,7 +568,12 @@
   }
 
   window._cancelJob = function(jobId) {
-    fetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' }).then(function() { fetchJobs(); }).catch(function() {});
+    fetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
+      .then(function(r) {
+        if (r.ok) fetchJobs();
+        else if (typeof showToast === 'function') showToast('Cancel not yet implemented', 'info');
+      })
+      .catch(function() {});
   };
 
   pollAll();
