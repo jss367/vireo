@@ -1113,14 +1113,25 @@ class Database:
         ).fetchone()[0]
 
         # Top species (within filter)
+        # Use a CTE to select the single best prediction per photo (highest confidence,
+        # non-rejected) to avoid inflating species counts when multiple models have
+        # predicted different species for the same photo.
         top_species = self.conn.execute(
-            f"""SELECT pred.species, COUNT(DISTINCT p.id) as count
+            f"""WITH best_pred AS (
+                    SELECT pred.photo_id, pred.species,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY pred.photo_id
+                               ORDER BY pred.confidence DESC
+                           ) AS rn
+                    FROM predictions pred
+                    WHERE pred.workspace_id = ? AND pred.status != 'rejected'
+                )
+                SELECT bp.species, COUNT(DISTINCT p.id) as count
                 FROM photos p
                 {join_clause}
-                JOIN predictions pred ON pred.photo_id = p.id
-                    AND pred.workspace_id = ? AND pred.status != 'rejected'
+                JOIN best_pred bp ON bp.photo_id = p.id AND bp.rn = 1
                 {where}
-                GROUP BY pred.species
+                GROUP BY bp.species
                 ORDER BY count DESC
                 LIMIT 5""",
             [ws] + params,
