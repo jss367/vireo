@@ -511,6 +511,7 @@ def create_app(db_path, thumb_cache_dir=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        collection_id = request.args.get("collection_id", None, type=int)
         return jsonify(
             db.get_browse_summary(
                 folder_id=folder_id,
@@ -518,6 +519,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                collection_id=collection_id,
             )
         )
 

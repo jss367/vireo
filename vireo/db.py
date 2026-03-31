@@ -1057,6 +1057,7 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        collection_id=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
@@ -1076,6 +1077,23 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             params.append(date_to)
+
+        # When browsing a collection, restrict photos to those matching the
+        # collection's rules by using a subquery from _build_collection_query.
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is not None:
+                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+                # Build a subquery that returns the photo IDs in this collection.
+                # Use alias "p" to match the alias expected by _build_collection_query;
+                # the subquery is wrapped in parentheses so "p" is scoped to it and
+                # does not conflict with the outer query's "p" alias.
+                coll_subquery = (
+                    f"SELECT DISTINCT p.id FROM photos p "
+                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
+                )
+                conditions.append(f"p.id IN ({coll_subquery})")
+                params.extend(coll_params)
 
         join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
         if keyword is not None:
@@ -1113,14 +1131,25 @@ class Database:
         ).fetchone()[0]
 
         # Top species (within filter)
+        # Use a CTE to select the single best prediction per photo (highest confidence,
+        # non-rejected) to avoid inflating species counts when multiple models have
+        # predicted different species for the same photo.
         top_species = self.conn.execute(
-            f"""SELECT pred.species, COUNT(DISTINCT p.id) as count
+            f"""WITH best_pred AS (
+                    SELECT pred.photo_id, pred.species,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY pred.photo_id
+                               ORDER BY pred.confidence DESC
+                           ) AS rn
+                    FROM predictions pred
+                    WHERE pred.workspace_id = ? AND pred.status != 'rejected'
+                )
+                SELECT bp.species, COUNT(DISTINCT p.id) as count
                 FROM photos p
                 {join_clause}
-                JOIN predictions pred ON pred.photo_id = p.id
-                    AND pred.workspace_id = ? AND pred.status != 'rejected'
+                JOIN best_pred bp ON bp.photo_id = p.id AND bp.rn = 1
                 {where}
-                GROUP BY pred.species
+                GROUP BY bp.species
                 ORDER BY count DESC
                 LIMIT 5""",
             [ws] + params,

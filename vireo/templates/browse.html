@@ -909,6 +909,7 @@ var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
+var activeCollectionId = null;
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
@@ -1045,6 +1046,7 @@ function filterByFolder(folderId) {
     activeFolderId = folderId;
   }
   activeKeyword = null;
+  activeCollectionId = null;
   if (timelineMode) loadCalendarData();
   resetAndLoad();
   // Update active state
@@ -1102,6 +1104,7 @@ function filterByKeyword(name) {
     activeKeyword = name;
   }
   activeFolderId = null;
+  activeCollectionId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
   resetAndLoad();
@@ -1137,6 +1140,7 @@ async function loadCollectionCounts() {
 async function filterByCollection(id) {
   activeFolderId = null;
   activeKeyword = null;
+  activeCollectionId = id;
   photos = [];
   currentPage = 1;
   allLoaded = true;  // collections handle their own pagination
@@ -1240,6 +1244,9 @@ function resetAndLoad() {
   allLoaded = false;
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Leaving collection mode when applying non-collection filters (sort, rating,
+  // date, keyword, folder) so the summary stays in sync with the visible grid.
+  activeCollectionId = null;
   closeDetail();
   document.getElementById('grid').innerHTML = '';
   loadPhotos();
@@ -2158,6 +2165,7 @@ async function loadSummary() {
   var search = document.getElementById('searchInput').value.trim();
   if (search) params.set('keyword', search);
   if (activeKeyword) params.set('keyword', activeKeyword);
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {
     var data = await safeFetch('/api/browse/summary?' + params.toString(), {}, { toast: false });
@@ -2435,6 +2443,7 @@ function openInEditorBatch() {
     // Navigate to the photo's folder
     activeFolderId = photo.folder_id;
     activeKeyword = null;
+    activeCollectionId = null;
     photos = [];
     currentPage = 1;
     allLoaded = false;
