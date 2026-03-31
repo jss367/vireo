@@ -42,6 +42,7 @@ class PipelineParams:
     skip_extract_masks: bool = False
     skip_regroup: bool = False
     skip_classify: bool = False
+    download_taxonomy: bool = True
     preview_max_size: int = 1920
 
 
@@ -437,8 +438,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             model_type = active_model.get("model_type", "bioclip")
             model_name = active_model["name"]
 
-            # Load taxonomy
+            # Download taxonomy if missing and requested
             taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+            if params.download_taxonomy and not os.path.exists(taxonomy_path):
+                try:
+                    from taxonomy import download_taxonomy
+                    runner.push_event(job["id"], "progress", {
+                        "phase": "Downloading taxonomy...",
+                        "current": 0, "total": 0,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+                    download_taxonomy(taxonomy_path, progress_callback=lambda msg:
+                        runner.push_event(job["id"], "progress", {
+                            "phase": msg,
+                            "current": 0, "total": 0,
+                            "stages": {k: dict(v) for k, v in stages.items()},
+                        })
+                    )
+                except Exception as e:
+                    log.warning("Taxonomy download failed, continuing without: %s", e)
+
+            # Load taxonomy
             tax = _load_taxonomy(taxonomy_path)
 
             # Load labels
