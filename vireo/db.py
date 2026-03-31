@@ -1084,9 +1084,12 @@ class Database:
             parts = self._build_collection_query(collection_id)
             if parts is not None:
                 coll_folder_join, coll_join_clause, coll_where, coll_params = parts
-                # Build a subquery that returns the photo IDs in this collection
+                # Build a subquery that returns the photo IDs in this collection.
+                # Use alias "p" to match the alias expected by _build_collection_query;
+                # the subquery is wrapped in parentheses so "p" is scoped to it and
+                # does not conflict with the outer query's "p" alias.
                 coll_subquery = (
-                    f"SELECT DISTINCT p2.id FROM photos p2 "
+                    f"SELECT DISTINCT p.id FROM photos p "
                     f"{coll_folder_join} {coll_join_clause} {coll_where}"
                 )
                 conditions.append(f"p.id IN ({coll_subquery})")
