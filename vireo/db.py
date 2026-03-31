@@ -123,7 +123,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS detections (
                 id                INTEGER PRIMARY KEY,
-                photo_id          INTEGER REFERENCES photos(id),
+                photo_id          INTEGER REFERENCES photos(id) ON DELETE CASCADE,
                 workspace_id      INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
                 box_x             REAL,
                 box_y             REAL,
