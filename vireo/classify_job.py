@@ -651,7 +651,11 @@ def _classify_photos(
                     failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
                     batch = []
         else:
-            # No detections — classify full image
+            # No detections — create a full-image detection and classify it
+            full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                               "confidence": 0, "category": "animal"}]
+            full_det_ids = db.save_detections(photo["id"], full_image_det,
+                                              detector_model="full-image")
             img, folder_path, image_path = _prepare_image(photo, folders, None)
             if img is None:
                 failed += 1
@@ -659,7 +663,7 @@ def _classify_photos(
 
             batch.append({
                 "photo": photo,
-                "detection_id": None,
+                "detection_id": full_det_ids[0],
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "img": img,
