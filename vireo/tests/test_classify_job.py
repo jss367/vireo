@@ -518,6 +518,82 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_clf.classify_with_embedding.assert_not_called()
 
 
+# ── Top-N predictions tests ────────────────────────────────────────────────
+
+
+def test_flush_batch_stores_top_n_predictions(tmp_path):
+    """_flush_batch keeps top_k predictions per image, not just top-1."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    # Classifier returns 5 ranked predictions
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+        {"species": "Finch", "score": 0.10, "taxonomy": None},
+        {"species": "Wren", "score": 0.03, "taxonomy": None},
+        {"species": "Jay", "score": 0.02, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results, top_k=3)
+    assert failed == 0
+    assert len(raw_results) == 1
+
+    item = raw_results[0]
+    # Should have top prediction as before
+    assert item["prediction"] == "Robin"
+    assert item["confidence"] == 0.70
+    # Should also have alternatives list
+    assert "alternatives" in item
+    assert len(item["alternatives"]) == 2
+    assert item["alternatives"][0]["species"] == "Sparrow"
+    assert item["alternatives"][1]["species"] == "Finch"
+
+
+def test_flush_batch_top_k_1_has_empty_alternatives():
+    """_flush_batch with top_k=1 (default) produces empty alternatives list."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert failed == 0
+    assert len(raw_results) == 1
+    assert raw_results[0]["alternatives"] == []
+
+
 # ── Task 5: _store_grouped_predictions tests ─────────────────────────────────
 
 
