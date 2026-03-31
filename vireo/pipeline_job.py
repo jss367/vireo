@@ -310,8 +310,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 try:
                     thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
                     already_exists = os.path.exists(thumb_path)
-                    generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
-                    if already_exists:
+                    result_path = generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
+                    if result_path is None:
+                        failed += 1
+                    elif already_exists:
                         skipped += 1
                     else:
                         generated += 1
