@@ -545,12 +545,19 @@ def test_get_pipeline_feature_counts_empty(tmp_path):
 
 def test_get_pipeline_feature_counts_with_data(tmp_path):
     """Returns correct counts for each pipeline feature."""
-    db, _ = _make_workspace_with_photos(tmp_path, [
-        {'mask_path': '/mask/1.png', 'detection_box': '0,0,100,100', 'subject_tenengrad': 42.0},
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'mask_path': '/mask/1.png', 'subject_tenengrad': 42.0},
         {'mask_path': '/mask/2.png'},
-        {'detection_box': '10,10,50,50'},
+        {},
         {},
     ])
+    # Create detections for first two photos (replaces old detection_box column)
+    db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 100, "h": 100}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.save_detections(pids[2], [
+        {"box": {"x": 10, "y": 10, "w": 50, "h": 50}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
     counts = db.get_pipeline_feature_counts()
     assert counts['masks'] == 2
     assert counts['detections'] == 2
@@ -614,8 +621,11 @@ def test_get_dashboard_stats_with_data(tmp_path):
     db.tag_photo(pids[0], kid)
     db.tag_photo(pids[1], kid)
 
-    # Add a prediction
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+    # Add a detection and prediction
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Robin', 0.95, 'test')
 
     stats = db.get_dashboard_stats()
 
@@ -637,7 +647,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     # classified_count
     assert stats['classified_count'] == 1
 
-    # detected_count (detection_conf > 0)
+    # detected_count (photos with detections)
     assert stats['detected_count'] == 1
 
     # photos_by_hour
@@ -654,9 +664,15 @@ def test_get_group_predictions(tmp_path):
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'quality_score': 0.9}, {'quality_score': 0.5},
     ])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+    det_ids0 = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids1 = db.save_detections(pids[1], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids0[0], species='Robin', confidence=0.95,
                       model='test', group_id='g1')
-    db.add_prediction(photo_id=pids[1], species='Robin', confidence=0.80,
+    db.add_prediction(det_ids1[0], species='Robin', confidence=0.80,
                       model='test', group_id='g1')
 
     results = db.get_group_predictions('g1')
@@ -671,7 +687,10 @@ def test_get_group_predictions(tmp_path):
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='test')
 
     db.update_predictions_status_by_photo(pids[0], 'accepted')
 
@@ -682,7 +701,10 @@ def test_update_predictions_status_by_photo(tmp_path):
 def test_ungroup_prediction(tmp_path):
     """Removes a prediction from its group."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95,
                       model='test', group_id='g1')
     pred = db.get_predictions(photo_ids=[pids[0]])[0]
 
@@ -695,7 +717,10 @@ def test_ungroup_prediction(tmp_path):
 def test_get_existing_prediction_photo_ids(tmp_path):
     """Returns set of photo_ids that have predictions for a model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.9, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
 
     result = db.get_existing_prediction_photo_ids('bioclip')
     assert result == {pids[0]}
@@ -707,7 +732,10 @@ def test_get_existing_prediction_photo_ids(tmp_path):
 def test_get_prediction_for_photo(tmp_path):
     """Returns species and confidence for a photo's prediction by model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
 
     row = db.get_prediction_for_photo(pids[0], 'bioclip')
     assert row['species'] == 'Robin'
@@ -731,10 +759,13 @@ def test_get_and_store_photo_embedding(tmp_path):
 def test_update_prediction_group_info(tmp_path):
     """Updates group info on an existing prediction."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
 
     db.update_prediction_group_info(
-        photo_id=pids[0], model='bioclip',
+        detection_id=det_ids[0], model='bioclip',
         group_id='g1', vote_count=3, total_votes=5, individual='[{"species":"Robin"}]',
     )
 
@@ -877,11 +908,15 @@ def test_get_geolocated_photos_with_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     # Accept the prediction
     pred = db.get_predictions(photo_ids=[p1])
     db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pred[0]['id'],))
@@ -912,14 +947,21 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p2, 'Great Blue Heron', 0.90, 'bioclip')
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p2, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -939,6 +981,7 @@ def test_get_accepted_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
@@ -946,8 +989,14 @@ def test_get_accepted_species(tmp_path):
     # Both photos need GPS to appear in species list
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p2, 'Great Blue Heron', 0.90, 'bioclip')
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p2, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -964,10 +1013,14 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # p1 has no GPS coordinates
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
     db.conn.commit()
@@ -981,11 +1034,15 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
 
     species = db.get_accepted_species()
     assert species == []
@@ -996,12 +1053,20 @@ def test_get_accepted_species_uses_top_confidence(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p1, 'Cooper\'s Hawk', 0.60, 'bioclip')
+    # Two detections for the same photo, each with different species
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p1, [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))

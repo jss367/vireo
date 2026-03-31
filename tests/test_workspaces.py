@@ -20,8 +20,8 @@ def test_workspace_tables_exist(db):
     assert "workspace_folders" in tables
 
 
-def test_predictions_has_workspace_id(db):
-    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(predictions)").fetchall()]
+def test_detections_has_workspace_id(db):
+    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()]
     assert "workspace_id" in cols
 
 
@@ -120,21 +120,30 @@ def db_with_workspace(db):
 
 def test_add_prediction_uses_workspace(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
     row = db.conn.execute(
-        "SELECT workspace_id FROM predictions WHERE photo_id = ?", (photo_id,)
+        "SELECT workspace_id FROM detections WHERE id = ?", (det_ids[0],)
     ).fetchone()
     assert row["workspace_id"] == ws_id
 
 
 def test_get_predictions_scoped_to_workspace(db_with_workspace):
     db, ws_id, folder_id, photo_id = db_with_workspace
-    db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
+    det_ids1 = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], "Robin", 0.95, "bioclip")
     # Create second workspace with same photo, different prediction
     ws2 = db.create_workspace("Other")
     db.add_workspace_folder(ws2, folder_id)
     db.set_active_workspace(ws2)
-    db.add_prediction(photo_id, "Sparrow", 0.8, "bioclip")
+    det_ids2 = db.save_detections(photo_id, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids2[0], "Sparrow", 0.8, "bioclip")
     # Each workspace sees only its own predictions
     preds_ws2 = db.get_predictions()
     assert len(preds_ws2) == 1
@@ -147,11 +156,17 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
 
 def test_clear_predictions_scoped_to_workspace(db_with_workspace):
     db, ws_id, folder_id, photo_id = db_with_workspace
-    db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
+    det_ids1 = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], "Robin", 0.95, "bioclip")
     ws2 = db.create_workspace("Other")
     db.add_workspace_folder(ws2, folder_id)
     db.set_active_workspace(ws2)
-    db.add_prediction(photo_id, "Sparrow", 0.8, "bioclip")
+    det_ids2 = db.save_detections(photo_id, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids2[0], "Sparrow", 0.8, "bioclip")
     # Clear ws2 predictions only
     db.clear_predictions()
     assert len(db.get_predictions()) == 0
@@ -162,18 +177,26 @@ def test_clear_predictions_scoped_to_workspace(db_with_workspace):
 
 def test_cascade_delete_removes_predictions(db_with_workspace):
     db, ws_id, _, photo_id = db_with_workspace
-    db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
     db.delete_workspace(ws_id)
+    # Cascade: workspace -> detections -> predictions
     count = db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
     assert count == 0
+    det_count = db.conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0]
+    assert det_count == 0
 
 
-def test_add_prediction_without_active_workspace_raises(db):
+def test_save_detections_without_active_workspace_raises(db):
     folder_id = db.add_folder("/photos", name="photos")
     photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 1000, 1.0)
     db._active_workspace_id = None  # Clear auto-set workspace
     with pytest.raises(RuntimeError):
-        db.add_prediction(photo_id, "Robin", 0.95, "bioclip")
+        db.save_detections(photo_id, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+        ], detector_model="MDV6")
 
 
 # -- Task 5: Workspace-scoped collections --
@@ -227,7 +250,10 @@ def test_cascade_delete_removes_collections(db_with_workspace):
 def test_get_collection_photos_prediction_join_scoped(db_with_workspace):
     """Taxonomy rules in collection filter should use workspace-scoped predictions."""
     db, ws_id, folder_id, photo_id = db_with_workspace
-    db.add_prediction(photo_id, "Robin", 0.95, "bioclip",
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip",
                       taxonomy={"order": "Passeriformes"})
     rules = json.dumps([{"field": "taxonomy_order", "op": "equals", "value": "Passeriformes"}])
     cid = db.add_collection("Passerines", rules)
@@ -441,9 +467,22 @@ def test_migration_from_legacy_db(tmp_path):
     ).fetchall()
     assert len(wf) == 1
 
-    # Existing data backfilled with workspace_id
-    pred = db.conn.execute("SELECT workspace_id FROM predictions").fetchone()
-    assert pred[0] == default_id
+    # Predictions table was dropped and recreated with detection_id schema.
+    # Legacy predictions are lost (accepted keywords survive in photo_keywords).
+    pred_count = db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+    assert pred_count == 0
+
+    # Detections table exists with workspace_id
+    det_cols = [r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()]
+    assert "workspace_id" in det_cols
+    assert "photo_id" in det_cols
+
+    # predictions table now uses detection_id
+    pred_cols = [r[1] for r in db.conn.execute("PRAGMA table_info(predictions)").fetchall()]
+    assert "detection_id" in pred_cols
+    assert "photo_id" not in pred_cols
+
+    # Collections and pending_changes backfilled with workspace_id
     coll = db.conn.execute("SELECT workspace_id FROM collections").fetchone()
     assert coll[0] == default_id
     pc = db.conn.execute("SELECT workspace_id FROM pending_changes").fetchone()
