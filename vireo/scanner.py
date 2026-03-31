@@ -264,6 +264,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
+    exif_extracted = set()  # photo IDs where ExifTool has already run
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
@@ -276,6 +277,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             folder_path = folders.get(p["folder_id"], "")
             full_path = os.path.join(folder_path, p["filename"])
             existing_by_path[full_path] = p
+        # Track which photos have had ExifTool metadata extracted (exif_data
+        # is non-NULL). Photos with NULL exif_data need re-extraction.
+        for row in db.conn.execute("SELECT id FROM photos WHERE exif_data IS NOT NULL"):
+            exif_extracted.add(row["id"])
 
     # Build folder cache: path -> folder_id
     folder_cache = {}
@@ -314,8 +319,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if existing:
                 file_unchanged = existing["file_mtime"] == file_mtime
                 xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+                # Re-process if ExifTool never ran for this photo (both
+                # timestamp and exif_data are NULL). Photos with genuinely
+                # missing timestamps (screenshots, exports) will have
+                # exif_data set after one extraction attempt.
+                metadata_missing = (
+                    existing["timestamp"] is None
+                    and existing["id"] not in exif_extracted
+                )
 
-                if file_unchanged and xmp_unchanged:
+                if file_unchanged and xmp_unchanged and not metadata_missing:
                     processed_count += 1
                     if photo_callback:
                         photo_callback(existing["id"], full_path_str)
@@ -332,7 +345,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     )
                     db.conn.commit()
 
-                if file_unchanged:
+                if file_unchanged and not metadata_missing:
                     processed_count += 1
                     if photo_callback:
                         photo_callback(existing["id"], full_path_str)
@@ -435,9 +448,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             height=height,
         )
 
-        # Store GPS, pHash, focal length, burst ID, and exif_data
+        # Update metadata columns (also fixes existing photos that were
+        # inserted before ExifTool metadata was available)
         updates = []
         update_params = []
+        if timestamp is not None:
+            updates.append("timestamp=?")
+            update_params.append(timestamp)
+        if width is not None:
+            updates.append("width=?")
+            update_params.append(width)
+        if height is not None:
+            updates.append("height=?")
+            update_params.append(height)
         if latitude is not None:
             updates.extend(["latitude=?", "longitude=?"])
             update_params.extend([latitude, longitude])
@@ -456,6 +479,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if file_meta and extract_full_metadata:
             updates.append("exif_data=?")
             update_params.append(json.dumps(file_meta))
+        elif file_meta:
+            # Store minimal marker so we know ExifTool ran (even when
+            # extract_full_metadata is off) — prevents perpetual retry
+            updates.append("exif_data=COALESCE(exif_data, ?)")
+            update_params.append("{}")
         if updates:
             update_params.append(photo_id)
             db.conn.execute(
