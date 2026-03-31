@@ -312,8 +312,7 @@ async function importAllUntracked() {
 function sendToPipeline() {
   var folders = [];
   untrackedData.forEach(function(u) {
-    var dir = u.path.substring(0, u.path.lastIndexOf('/'));
-    if (dir && folders.indexOf(dir) === -1) folders.push(dir);
+    if (u.folder && folders.indexOf(u.folder) === -1) folders.push(u.folder);
   });
   var params = folders.map(function(f) { return 'folder=' + encodeURIComponent(f); }).join('&');
   window.location.href = '/pipeline?' + params;
