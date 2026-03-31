@@ -445,7 +445,7 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
 
 def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
-    """When both raw and JPEG have predictions for the same model, keep higher confidence."""
+    """When both raw and JPEG have predictions, both detections transfer to primary."""
     from db import Database
 
     img_dir = tmp_path / "photos"
@@ -492,10 +492,11 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
            WHERE d.photo_id = ?""",
         (photos[0]["id"],),
     ).fetchall()
-    # Should keep the higher-confidence prediction
-    assert len(preds) >= 1
-    best = max(p["confidence"] for p in preds)
-    assert best == 0.95
+    # Both detections (and their predictions) transfer to the primary photo.
+    # UNIQUE(detection_id, model) doesn't conflict since detection IDs differ.
+    assert len(preds) == 2
+    confidences = sorted(p["confidence"] for p in preds)
+    assert confidences == [0.70, 0.95]
 
 
 def test_pairing_transfers_inat_submissions(tmp_path):
