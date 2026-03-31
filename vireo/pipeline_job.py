@@ -175,9 +175,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
 
-            for src_folder in sources:
-                root = src_folder
-                if params.destination:
+            if params.destination:
+                # Ingest all sources into destination first, then scan once
+                for src_folder in sources:
                     do_ingest(
                         source_dir=src_folder,
                         destination_dir=params.destination,
@@ -187,15 +187,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         skip_duplicates=params.skip_duplicates,
                         progress_callback=ingest_cb,
                     )
-                    root = params.destination
-
                 do_scan(
-                    root, thread_db,
+                    params.destination, thread_db,
                     progress_callback=progress_cb,
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
                 )
+            else:
+                # Scan each source folder directly
+                for src_folder in sources:
+                    do_scan(
+                        src_folder, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=True,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        photo_callback=photo_cb,
+                    )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{stages['scan']['count']} photos")
@@ -317,10 +325,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             preview_dir = os.path.join(base_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
-            if collection_id:
-                photos = thread_db.get_collection_photos(collection_id, per_page=999999)
-            else:
-                photos = thread_db.get_photos(per_page=999999)
+            if not collection_id:
+                stages["previews"]["status"] = "skipped"
+                runner.update_step(job["id"], "previews", status="completed",
+                                   summary="Skipped (no collection)")
+                _update_stages(runner, job["id"], stages)
+                return
+
+            photos = thread_db.get_collection_photos(collection_id, per_page=999999)
 
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
