@@ -255,7 +255,7 @@ def test_pages_link_base_css(app_and_db):
     client = app.test_client()
     pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
-             '/review', '/cull', '/pipeline/review', '/map']
+             '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
@@ -678,6 +678,44 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "sparrow" not in dupe_names
 
 
+def test_all_keywords_scoped_by_workspace(app_and_db):
+    """GET /api/keywords/all only returns keywords used in the active workspace, plus ancestors."""
+    app, db = app_and_db
+    ws_a = db._active_workspace_id
+
+    # Create parent keyword "Birds" and child "Hawk" under it
+    k_birds = db.add_keyword("Birds")
+    k_hawk = db.add_keyword("Hawk", parent_id=k_birds)
+    # Tag a photo in workspace A with the child only
+    photos_a = db.get_photos()
+    db.tag_photo(photos_a[0]["id"], k_hawk)
+
+    # Create workspace B with its own folder, photo, and keyword "Penguin"
+    ws_b = db.create_workspace("B")
+    db.set_active_workspace(ws_b)
+    fid_b = db.add_folder("/photos/b", name="b")
+    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    k_penguin = db.add_keyword("Penguin")
+    db.tag_photo(pid_b, k_penguin)
+
+    # Switch back to workspace A
+    db.set_active_workspace(ws_a)
+
+    with app.test_client() as c:
+        resp = c.get("/api/keywords/all")
+        data = resp.get_json()
+        names = [k["name"] for k in data]
+        # Child keyword tagged in workspace A — present
+        assert "Hawk" in names
+        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        assert "Birds" in names
+        birds = next(k for k in data if k["name"] == "Birds")
+        assert birds["photo_count"] == 0
+        # Keyword only in workspace B — absent
+        assert "Penguin" not in names
+
+
 def test_set_active_labels_scoped_to_workspace(app_and_db, tmp_path):
     """Setting active labels stores them in workspace config_overrides, not global file."""
     app, db = app_and_db
@@ -785,23 +823,23 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
 
 
 def test_get_all_keywords(app_and_db):
-    """GET /api/keywords/all returns all keywords with photo counts."""
+    """GET /api/keywords/all returns only keywords used in the active workspace."""
     app, db = app_and_db
     client = app.test_client()
     # conftest already created 'Cardinal' (tagged to p1) and 'Sparrow' (tagged to p2)
-    # Add an untagged keyword to verify photo_count=0
+    # Add an untagged keyword — should NOT appear since it has no photos in workspace
     db.add_keyword("favorite")
 
     resp = client.get("/api/keywords/all")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data) >= 3
+    names = [k["name"] for k in data]
+    assert "Cardinal" in names
+    assert "Sparrow" in names
+    assert "favorite" not in names
     cardinal = next(k for k in data if k["name"] == "Cardinal")
     assert cardinal["photo_count"] >= 1
     assert "type" in cardinal
-    favorite = next(k for k in data if k["name"] == "favorite")
-    assert favorite["photo_count"] == 0
-    assert favorite["type"] == "general"
 
 
 def test_update_keyword_type(app_and_db):
@@ -981,3 +1019,38 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
         (p_ws2, ws2),
     ).fetchall()
     assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedDelete" for c in ws2_changes)
+
+
+def test_shortcuts_page(app_and_db):
+    """GET /shortcuts returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert resp.status_code == 200
+
+
+def test_shortcuts_link_in_navbar(app_and_db):
+    """The navbar includes a link to /shortcuts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert b'/shortcuts' in resp.data
+    assert b'Shortcuts' in resp.data
+
+
+def test_settings_no_shortcuts_editor(app_and_db):
+    """Settings page no longer contains the shortcuts editor."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    html = resp.data.decode()
+    assert 'shortcutsEditor' not in html
+
+
+def test_shortcuts_cheat_sheet_in_navbar(app_and_db):
+    """Every page includes the shortcuts cheat sheet overlay."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    html = resp.data.decode()
+    assert 'shortcutsCheatSheet' in html

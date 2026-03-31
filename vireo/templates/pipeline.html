@@ -500,16 +500,6 @@ function initPipelinePage() {
         document.getElementById('txtMasks').textContent = txt;
       }
 
-      // Stage 4: Group
-      if (data.results) {
-        document.getElementById('numGroup').classList.add('complete');
-        var s = data.results.summary;
-        document.getElementById('txtResults').textContent =
-          s.encounter_count + ' encounters \u2014 ' +
-          s.keep_count + 'K / ' + s.review_count + 'R / ' + s.reject_count + 'X';
-        document.getElementById('viewResultsLink').style.display = '';
-      }
-
       // Config selects and range
       document.getElementById('cfgSam2').value = cfg.sam2_variant;
       document.getElementById('cfgDinov2').value = cfg.dinov2_variant;
@@ -524,7 +514,6 @@ function initPipelinePage() {
       // Update pipeline state
       _pipelineState.hasDetections = !!data.has_detections;
       _pipelineState.hasMasks = !!data.has_masks;
-      _pipelineState.hasResults = !!data.results;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -982,23 +971,6 @@ function _onPipelineComplete(result) {
     if (statusExt) { statusExt.textContent = 'Done!'; statusExt.className = 'status-msg ok'; }
   }
 
-  // Group card
-  if (stageResults.regroup) {
-    document.getElementById('numGroup').className = 'stage-num complete';
-    var grp = stageResults.regroup;
-    var grpSummary = [];
-    if (grp.encounter_count != null) grpSummary.push(grp.encounter_count + ' encounters');
-    if (grp.keep_count != null) grpSummary.push(grp.keep_count + 'K / ' + (grp.review_count||0) + 'R / ' + (grp.reject_count||0) + 'X');
-    document.getElementById('txtResults').textContent = grpSummary.join(' \u2014 ');
-    var resultsLink = document.getElementById('viewResultsLink');
-    if (resultsLink) resultsLink.style.display = '';
-    _pipelineState.hasResults = true;
-    var statusGrp = document.getElementById('statusGroup');
-    var fillGrp = document.getElementById('fillGroup');
-    if (fillGrp) fillGrp.style.width = '100%';
-    if (statusGrp) { statusGrp.textContent = 'Done!'; statusGrp.className = 'status-msg ok'; }
-  }
-
   // Show errors if any
   if (r.errors && r.errors.length > 0) {
     var errorStages = {};
@@ -1014,6 +986,11 @@ function _onPipelineComplete(result) {
         if (statusEl) statusEl.textContent = 'Failed: ' + errorStages[stage];
       }
     }
+  }
+
+  // Auto-redirect to review page on success
+  if (succeeded && (!r.errors || r.errors.length === 0)) {
+    window.location.href = '/pipeline/review';
   }
 }
 
@@ -1435,85 +1412,6 @@ async function runExtractStep(collectionId) {
   }
 }
 
-// -- Card 4: Group & Score --
-
-async function runGroupStep(collectionId) {
-  var num = document.getElementById('numGroup');
-  var status = document.getElementById('statusGroup');
-  var progressWrap = document.getElementById('progressGroup');
-  var fill = document.getElementById('fillGroup');
-  var text = document.getElementById('textGroup');
-
-  num.className = 'stage-num running';
-  status.textContent = 'Running grouping & scoring...';
-  progressWrap.style.display = '';
-  fill.style.width = '0%';
-  document.getElementById('card-group').classList.add('expanded');
-
-  try {
-    var data = await safeFetch('/api/jobs/regroup', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({collection_id: collectionId}),
-    }, { toast: false });
-
-    if (!data.job_id) {
-      status.textContent = data.error || 'Failed to start';
-      num.className = 'stage-num';
-      return false;
-    }
-
-    return await new Promise(function(resolve) {
-      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-        onProgress: function(p) {
-          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-          fill.style.width = pct + '%';
-          var parts = [];
-          if (p.phase) parts.push(p.phase);
-          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-          text.textContent = parts.join(' \u2014 ');
-          status.textContent = parts.join(' \u2014 ');
-        },
-        onComplete: function(result) {
-          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-          if (result.status === 'completed') {
-            fill.style.width = '100%';
-            text.textContent = 'Complete';
-            status.textContent = 'Done!';
-            status.className = 'status-msg ok';
-            num.className = 'stage-num complete';
-            if (result.result) {
-              var r = result.result;
-              var summary = [];
-              if (r.encounter_count != null) summary.push(r.encounter_count + ' encounters');
-              if (r.keep_count != null) summary.push(r.keep_count + 'K / ' + (r.review_count||0) + 'R / ' + (r.reject_count||0) + 'X');
-              document.getElementById('txtResults').textContent = summary.join(' \u2014 ');
-            }
-            var resultsLink = document.getElementById('viewResultsLink');
-            if (resultsLink) resultsLink.style.display = '';
-            _pipelineState.hasResults = true;
-            resolve(true);
-          } else {
-            status.textContent = 'Failed';
-            num.className = 'stage-num';
-            resolve(false);
-          }
-        },
-        onError: function() {
-          status.textContent = 'Connection lost';
-          num.className = 'stage-num';
-          resolve(false);
-        }
-      });
-    });
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    num.className = 'stage-num';
-    progressWrap.style.display = 'none';
-    return false;
-  }
-}
-
 // -- Shared --
 
 function toggleCard(name) {
@@ -1525,7 +1423,6 @@ function toggleCard(name) {
 var _pipelineState = {
   hasDetections: false,
   hasMasks: false,
-  hasResults: false,
 };
 
 function updateCardStates() {
@@ -1533,9 +1430,6 @@ function updateCardStates() {
   // Just auto-expand cards based on state.
   if (_pipelineState.hasDetections && !_pipelineState.hasMasks) {
     document.getElementById('card-extract').classList.add('expanded');
-  }
-  if (_pipelineState.hasMasks && !_pipelineState.hasResults) {
-    document.getElementById('card-group').classList.add('expanded');
   }
   updateStartButton();
 }

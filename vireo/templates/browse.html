@@ -728,6 +728,7 @@ body {
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
+      <button onclick="openInEditorBatch()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
@@ -802,6 +803,9 @@ body {
       </button>
       <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
         Inspect Pipeline
+      </button>
+      <button onclick="openInEditor([window._detailPhotoId])" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+        Open in Editor
       </button>
     </div>
 
@@ -2299,6 +2303,15 @@ async function developSelected() {
   } catch(e) {
     showToast(e.message || 'Error starting develop job');
   }
+}
+
+function openInEditorBatch() {
+  var ids = Array.from(selectedPhotos);
+  if (!ids.length) return;
+  if (ids.length > 20) {
+    if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
+  }
+  openInEditor(ids);
 }
 
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
