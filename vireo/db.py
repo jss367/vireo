@@ -757,7 +757,7 @@ class Database:
             (path, name, parent_id),
         )
         self.conn.commit()
-        if cur.lastrowid:
+        if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
             row = self.conn.execute(
