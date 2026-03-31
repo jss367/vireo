@@ -959,7 +959,7 @@ function applyBrowseConfig(cfg) {
       slider.dispatchEvent(new Event('input'));
     }
   }
-  if (cfg.browse_card_fields) cardFields = cfg.browse_card_fields;
+  if (Array.isArray(cfg.browse_card_fields)) cardFields = cfg.browse_card_fields;
 }
 
 function formatFileSize(bytes) {
