@@ -985,7 +985,7 @@ def create_app(db_path, thumb_cache_dir=None):
         placeholders = ",".join("?" for _ in non_undoable)
         latest = db.conn.execute(
             f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
             (db._ws_id(), *non_undoable),
         ).fetchone()
         if not latest:

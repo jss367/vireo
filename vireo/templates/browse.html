@@ -872,17 +872,17 @@ var calendarData = null;
 var clipSearchActive = false;
 
 var _shortcuts = null;
+var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
+  flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
 var _cfgPromise = (async function() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
-    _shortcuts = (cfg.keyboard_shortcuts || {}).browse || {
-      rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
+    var saved = (cfg.keyboard_shortcuts || {}).browse || {};
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS, saved);
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
     return cfg;
   } catch(e) {
-    _shortcuts = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS);
     return null;
   }
 })();

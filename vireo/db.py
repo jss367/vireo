@@ -2091,11 +2091,14 @@ class Database:
         return entry
 
     def redo_last_undo(self):
-        """Redo the most recently undone edit. Returns the entry dict, or None."""
+        """Redo the most recently undone edit. Returns the entry dict, or None.
+
+        Replays in chronological order (ASC) so sequential undos are redone correctly.
+        """
         placeholders = ",".join("?" for _ in self._NON_UNDOABLE)
         entry = self.conn.execute(
             f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
             (self._ws_id(), *self._NON_UNDOABLE),
         ).fetchone()
         if not entry:
