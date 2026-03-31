@@ -53,6 +53,18 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .navbar a:hover { color: var(--text-primary); }
 .navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.navbar a[data-nav-id].dragging {
+  opacity: 0.4;
+}
+.navbar .nav-drop-indicator {
+  width: 2px;
+  height: 24px;
+  background: var(--accent);
+  align-self: center;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin: 0 -1px;
+}
 .navbar a .hk {
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -799,6 +811,92 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       }
     })
     .catch(function() {}); // silently ignore — default order is fine
+
+  // Drag-and-drop reordering
+  (function initNavDragDrop() {
+    var navbar = document.querySelector('.navbar');
+    var draggedEl = null;
+    var indicator = null;
+
+    function getNavLinks() {
+      return Array.from(navbar.querySelectorAll('a[data-nav-id]'));
+    }
+
+    function createIndicator() {
+      var el = document.createElement('span');
+      el.className = 'nav-drop-indicator';
+      return el;
+    }
+
+    function removeIndicator() {
+      if (indicator && indicator.parentNode) {
+        indicator.parentNode.removeChild(indicator);
+      }
+      indicator = null;
+    }
+
+    function saveOrder() {
+      var order = getNavLinks().map(function(a) { return a.dataset.navId; });
+      fetch('/api/workspaces/active/nav-order', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({nav_order: order})
+      });
+    }
+
+    getNavLinks().forEach(function(link) {
+      link.draggable = true;
+
+      link.addEventListener('dragstart', function(e) {
+        draggedEl = this;
+        this.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', this.dataset.navId);
+      });
+
+      link.addEventListener('dragend', function() {
+        this.classList.remove('dragging');
+        removeIndicator();
+        draggedEl = null;
+      });
+
+      link.addEventListener('dragover', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        removeIndicator();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        indicator = createIndicator();
+        if (e.clientX < midX) {
+          navbar.insertBefore(indicator, this);
+        } else {
+          navbar.insertBefore(indicator, this.nextSibling);
+        }
+      });
+
+      link.addEventListener('drop', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        if (e.clientX < midX) {
+          navbar.insertBefore(draggedEl, this);
+        } else {
+          navbar.insertBefore(draggedEl, this.nextSibling);
+        }
+        removeIndicator();
+        saveOrder();
+      });
+    });
+
+    // Remove indicator when dragging leaves the navbar
+    navbar.addEventListener('dragleave', function(e) {
+      if (!navbar.contains(e.relatedTarget)) {
+        removeIndicator();
+      }
+    });
+  })();
 
   // Active page highlighting
   var path = location.pathname;
