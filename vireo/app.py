@@ -4094,7 +4094,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         active = runner.list_jobs()
         history = runner.get_history(db, limit=10)
-        return jsonify({"active": active, "history": history})
+        return jsonify({"active": active, "history": history, "active_workspace_id": db._active_workspace_id})
 
     @app.route("/api/jobs/<job_id>")
     def api_job_status(job_id):

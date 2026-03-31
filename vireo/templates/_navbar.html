@@ -2221,6 +2221,7 @@ function formatDuration(seconds) {
   var lpSource = null;
   var lpMaxLines = 200;
   var activeJobs = [];
+  var _activeWsId = null;
   var currentBpTab = 'jobs';
   var _jobPollTimer = null;
   var _navJobPollTimer = null;
@@ -2608,6 +2609,7 @@ function formatDuration(seconds) {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
+        _activeWsId = data.active_workspace_id || null;
         renderJobs();
         updateSummary();
         updateActivityDot();
@@ -2617,13 +2619,16 @@ function formatDuration(seconds) {
 
   function renderJobs() {
     var container = document.getElementById('bpJobsList');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var allRunning = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
+    var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    document.getElementById('jobsBadge').textContent = running.length;
+    // Badge counts only current workspace
+    document.getElementById('jobsBadge').textContent = thisWs.length;
     var navBadge = document.getElementById('navJobBadge');
-    navBadge.textContent = running.length > 0 ? ' (' + running.length + ')' : '';
+    navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
 
-    if (running.length === 0) {
+    if (allRunning.length === 0) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
       if (lastDone) {
         container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
@@ -2637,7 +2642,29 @@ function formatDuration(seconds) {
     }
 
     var html = '';
-    running.forEach(function(j) {
+
+    // Current workspace jobs
+    if (thisWs.length > 0) {
+      html += renderJobList(thisWs);
+    } else if (otherWs.length > 0) {
+      html += '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No jobs in this workspace.</div>';
+    }
+
+    // Other workspace jobs
+    if (otherWs.length > 0) {
+      html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-color);">';
+      html += '<div style="font-size:11px;color:var(--text-invisible);margin-bottom:4px;">Other Workspaces</div>';
+      html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Jobs can be long-running, so Vireo lets you change workspaces while your jobs run. You can still view them here.</div>';
+      html += renderJobList(otherWs);
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
+  }
+
+  function renderJobList(jobs) {
+    var html = '';
+    jobs.forEach(function(j) {
       var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
       var phase = j.progress && j.progress.phase ? j.progress.phase : '';
       var detail = '';
@@ -2653,12 +2680,12 @@ function formatDuration(seconds) {
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
       html += '</div>';
     });
-    container.innerHTML = html;
+    return html;
   }
 
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
 
     if (running.length === 0) {
       summary.textContent = 'No active jobs';
@@ -2694,7 +2721,7 @@ function formatDuration(seconds) {
   }
 
   function updateActivityDot() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }
