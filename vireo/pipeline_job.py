@@ -179,8 +179,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # Copy mode: ingest all sources first, then scan destination once.
                 # Scanning inside the loop would rescan the entire destination on
                 # each iteration, re-queuing unchanged files and inflating counts.
+                #
+                # Preserve cross-source duplicate detection: files copied from
+                # earlier sources are not yet in the DB (the scan hasn't run),
+                # so we accumulate their hashes in a shared set and pass it to
+                # each subsequent ingest() call via extra_known_hashes.
+                accumulated_hashes: set = set()
                 for src_folder in sources:
-                    do_ingest(
+                    result_info = do_ingest(
                         source_dir=src_folder,
                         destination_dir=params.destination,
                         db=thread_db,
@@ -188,7 +194,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         folder_template=params.folder_template,
                         skip_duplicates=params.skip_duplicates,
                         progress_callback=ingest_cb,
+                        extra_known_hashes=accumulated_hashes,
                     )
+                    # Collect hashes of files just copied so the next source
+                    # iteration treats them as known even before the DB scan.
+                    if params.skip_duplicates:
+                        from scanner import compute_file_hash
+                        for path in result_info.get("copied_paths", []):
+                            try:
+                                accumulated_hashes.add(compute_file_hash(path))
+                            except Exception:
+                                pass
                 do_scan(
                     params.destination, thread_db,
                     progress_callback=progress_cb,
