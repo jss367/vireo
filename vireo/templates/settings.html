@@ -1845,12 +1845,7 @@ async function browseForOutputDir() {
 }
 
 /* ---------- Auto-Update (Tauri only) ---------- */
-(function() {
-  if (typeof isTauri === 'function' && isTauri()) {
-    var section = document.getElementById('updateSection');
-    if (section) section.style.display = '';
-  }
-})();
+/* Updater disabled — no update commands registered. Section stays hidden. */
 
 async function doCheckForUpdate() {
   var btn = document.getElementById('checkUpdateBtn');
