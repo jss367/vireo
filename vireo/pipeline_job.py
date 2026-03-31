@@ -175,9 +175,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
 
-            for src_folder in sources:
-                root = src_folder
-                if params.destination:
+            if params.destination:
+                # Copy mode: ingest all sources first, then scan destination once.
+                # Scanning inside the loop would rescan the entire destination on
+                # each iteration, re-queuing unchanged files and inflating counts.
+                for src_folder in sources:
                     do_ingest(
                         source_dir=src_folder,
                         destination_dir=params.destination,
@@ -187,15 +189,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         skip_duplicates=params.skip_duplicates,
                         progress_callback=ingest_cb,
                     )
-                    root = params.destination
-
                 do_scan(
-                    root, thread_db,
+                    params.destination, thread_db,
                     progress_callback=progress_cb,
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
                 )
+            else:
+                # Scan-in-place: scan each source folder independently.
+                for src_folder in sources:
+                    do_scan(
+                        src_folder, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=True,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        photo_callback=photo_cb,
+                    )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{stages['scan']['count']} photos")
@@ -319,6 +329,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             if collection_id:
                 photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            elif not skip_scan:
+                # Scan ran but produced no photos — skip previews to avoid
+                # unexpectedly processing the entire workspace.
+                runner.update_step(job["id"], "previews", status="completed",
+                                   summary="Skipped (no photos scanned)")
+                stages["previews"]["status"] = "completed"
+                return
             else:
                 photos = thread_db.get_photos(per_page=999999)
 
