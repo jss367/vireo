@@ -1559,6 +1559,10 @@ function openFolderBrowser() {
   var overlay = document.getElementById('folderBrowserOverlay');
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
+  // Close on clicking the backdrop
+  overlay.onclick = function(e) {
+    if (e.target === overlay) closeFolderBrowser();
+  };
   // Start at home directory
   browseTo(null);
   // Close on Escape
@@ -1590,7 +1594,7 @@ function browseTo(path) {
   if (path === '__pictures__') {
     url = '/api/browse?path=' + encodeURIComponent(_fbHomePath + '/Pictures');
   } else if (path === '__volumes__') {
-    var volDir = navigator.platform.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
+    var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
     url = '/api/browse?path=' + encodeURIComponent(volDir);
   } else if (path) {
     url = '/api/browse?path=' + encodeURIComponent(path);
@@ -1601,6 +1605,7 @@ function browseTo(path) {
     return r.json();
   }).then(function(data) {
     _fbCurrentPath = data.path;
+    if (!path) _fbHomePath = data.path;
     _fbSelectedDir = data.path;
     document.getElementById('fbSelectedPath').textContent = data.path;
     renderBreadcrumb(data.path);
@@ -1620,7 +1625,7 @@ function renderBreadcrumb(path) {
     if (i === parts.length - 1) {
       html += ' <span class="current">' + escapeHtml(parts[i]) + '</span>';
     } else {
-      html += ' <span onclick="browseTo(\'' + escapeHtml(accum).replace(/'/g, "\\'") + '\')">' + escapeHtml(parts[i]) + '</span> /';
+      html += ' <span onclick="browseTo(\'' + escapeAttr(accum) + '\')">' + escapeHtml(parts[i]) + '</span> /';
     }
   }
   el.innerHTML = html;
@@ -1634,8 +1639,8 @@ function renderFolderList(dirs) {
   }
   var html = '';
   for (var i = 0; i < dirs.length; i++) {
-    html += '<div class="folder-browser-item" data-path="' + escapeHtml(dirs[i].path) + '" ' +
-            'onclick="selectFolderItem(this)" ondblclick="browseTo(\'' + escapeHtml(dirs[i].path).replace(/'/g, "\\'") + '\')">' +
+    html += '<div class="folder-browser-item" data-path="' + escapeAttr(dirs[i].path) + '" ' +
+            'onclick="selectFolderItem(this)" ondblclick="browseTo(\'' + escapeAttr(dirs[i].path) + '\')">' +
             '\uD83D\uDCC1 ' + escapeHtml(dirs[i].name) + '</div>';
   }
   listEl.innerHTML = html;
@@ -1686,9 +1691,7 @@ function createNewFolder() {
   });
 }
 
-// Cache home path on page load for quick-access buttons
 var _fbHomePath = '';
-fetch('/api/browse').then(function(r) { return r.json(); }).then(function(d) { _fbHomePath = d.path; });
 
 </script>
 
