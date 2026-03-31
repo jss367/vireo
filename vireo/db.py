@@ -2023,6 +2023,7 @@ class Database:
         confidence,
         model,
         category="new",
+        status="pending",
         group_id=None,
         vote_count=None,
         total_votes=None,
@@ -2047,13 +2048,14 @@ class Database:
                 group_id, vote_count, total_votes, individual,
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
                 taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id,
                 species,
                 confidence,
                 model,
                 category,
+                status,
                 group_id,
                 vote_count,
                 total_votes,
