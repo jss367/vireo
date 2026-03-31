@@ -172,6 +172,23 @@ body { padding-bottom: 36px; }
   text-decoration: none;
 }
 .view-results-btn:hover { background: var(--accent-hover, #5AF0DA); }
+
+/* Folder tags (multi-folder input) */
+.folder-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 4px 8px; margin: 2px; font-size: 12px;
+  font-family: monospace; color: var(--text-secondary);
+}
+.folder-tag-remove {
+  cursor: pointer; color: var(--text-ghost); font-size: 14px;
+}
+.folder-tag-remove:hover { color: var(--warning); }
+
+/* Stage enable/disable checkboxes */
+.stage-enable {
+  accent-color: var(--accent); margin-right: 4px;
+}
 </style>
 </head>
 <body>
@@ -207,24 +224,19 @@ body { padding-bottom: 36px; }
             </div>
             <div class="setting-row">
               <div class="setting-item" id="folderLabelItem">
-                <div class="setting-label" id="lblFolder">Folder</div>
+                <div class="setting-label" id="lblFolder">Folders</div>
                 <div style="display:flex;gap:6px;">
-                  <input type="text" class="setting-select" id="cfgSourceCustom"
+                  <input type="text" class="setting-select" id="cfgSourceInput" list="volumeDatalist"
                          placeholder="/path/to/photos" style="font-family:inherit;flex:1;"
-                         oninput="updateStartButton()">
+                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
+                  <datalist id="volumeDatalist"></datalist>
                   <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+                  <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
+                <div id="sourceFolderList" style="margin-top:6px;"></div>
               </div>
             </div>
             <div id="copyOnlyFields" style="display:none;">
-              <div class="setting-row">
-                <div class="setting-item">
-                  <div class="setting-label">Source Volume</div>
-                  <select class="setting-select" id="cfgSource" onchange="onSourceChange()">
-                    <option value="">Select a volume...</option>
-                  </select>
-                </div>
-              </div>
               <div class="setting-row">
                 <div class="setting-item">
                   <div class="setting-label">Destination</div>
@@ -285,10 +297,64 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Classify -->
+  <!-- Card 2: Scan & Import -->
+  <div class="stage-card" id="card-scan">
+    <div class="stage-header" onclick="toggleCard('scan')">
+      <span class="stage-num" id="numScan">2</span>
+      <span class="stage-name">Scan &amp; Import</span>
+      <span class="stage-summary" id="summaryScan"></span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+        Indexes photos, reads EXIF metadata and existing XMP keywords.
+      </p>
+      <div class="progress-wrap" id="progressScan" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillScan"></div></div>
+        <div class="progress-text" id="textScan"></div>
+      </div>
+      <span class="status-msg" id="statusScan"></span>
+    </div>
+  </div>
+
+  <!-- Card 3: Thumbnails & Previews -->
+  <div class="stage-card" id="card-previews">
+    <div class="stage-header" onclick="toggleCard('previews')">
+      <span class="stage-num" id="numPreviews">3</span>
+      <span class="stage-name">Thumbnails &amp; Previews</span>
+      <span class="stage-summary" id="summaryPreviews"></span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+        Generates cached images for fast browsing.
+      </p>
+      <div class="setting-row">
+        <div class="setting-item">
+          <div class="setting-label">Preview quality</div>
+          <select class="setting-select" id="cfgPreviewSize">
+            <option value="1280">1280px</option>
+            <option value="1920" selected>1920px</option>
+            <option value="2560">2560px</option>
+            <option value="3840">3840px</option>
+            <option value="0">Full resolution</option>
+          </select>
+        </div>
+      </div>
+      <div class="progress-wrap" id="progressPreviews" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillPreviews"></div></div>
+        <div class="progress-text" id="textPreviews"></div>
+      </div>
+      <span class="status-msg" id="statusPreviews"></span>
+    </div>
+  </div>
+
+  <!-- Card 4: Classify -->
   <div class="stage-card" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">2</span>
+      <span class="stage-num" id="numClassify">4</span>
+      <input type="checkbox" class="stage-enable" id="enableClassify" checked
+             onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
       <span class="stage-summary" id="summaryClassify">
         <span id="txtDetections"></span>
@@ -318,10 +384,12 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 3: Extract Features -->
+  <!-- Card 5: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">3</span>
+      <span class="stage-num" id="numExtract">5</span>
+      <input type="checkbox" class="stage-enable" id="enableExtract" checked
+             onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
       <span class="stage-summary" id="summaryExtract">
         <span id="txtMasks"></span>
@@ -369,10 +437,12 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 4: Group & Score -->
+  <!-- Card 6: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">4</span>
+      <span class="stage-num" id="numGroup">6</span>
+      <input type="checkbox" class="stage-enable" id="enableGroup" checked
+             onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
       <span class="stage-summary" id="summaryGroup">
         <span id="txtResults"></span>
@@ -468,6 +538,16 @@ function initPipelinePage() {
   loadModels();
   loadLabels();
   loadVolumes();
+
+  // Pre-fill folders from query params (e.g., from audit panel)
+  var urlParams = new URLSearchParams(window.location.search);
+  var prefillFolders = urlParams.getAll('folder');
+  if (prefillFolders.length > 0) {
+    _sourceFolders = prefillFolders;
+    renderSourceFolders();
+    selectSourceMode('import');
+    updateStartButton();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);
@@ -487,24 +567,47 @@ async function loadCollections() {
 var _sourceMode = 'import'; // 'import' or 'collection'
 var _copyMode = false;
 var _sourceWasReady = false;
+var _sourceFolders = [];
+
+function addSourceFolder() {
+  var input = document.getElementById('cfgSourceInput');
+  var val = input.value.trim();
+  if (!val || _sourceFolders.indexOf(val) !== -1) return;
+  _sourceFolders.push(val);
+  input.value = '';
+  renderSourceFolders();
+  updateStartButton();
+}
+
+function removeSourceFolder(idx) {
+  _sourceFolders.splice(idx, 1);
+  renderSourceFolders();
+  updateStartButton();
+}
+
+function renderSourceFolders() {
+  var el = document.getElementById('sourceFolderList');
+  if (!_sourceFolders.length) { el.innerHTML = ''; return; }
+  el.innerHTML = _sourceFolders.map(function(f, i) {
+    return '<div class="folder-tag"><span>' + escapeHtml(f) +
+      '</span> <span class="folder-tag-remove" onclick="removeSourceFolder(' + i + ')">&times;</span></div>';
+  }).join('');
+}
 
 function onCopyModeChange() {
   _copyMode = document.getElementById('chkCopyPhotos').checked;
   var copyFields = document.getElementById('copyOnlyFields');
   var skipDup = document.getElementById('skipDuplicatesItem');
   var lbl = document.getElementById('lblFolder');
-  var customInput = document.getElementById('cfgSourceCustom');
 
   if (_copyMode) {
     copyFields.style.display = '';
     skipDup.style.display = '';
-    lbl.textContent = 'Source';
-    customInput.placeholder = '/path/to/source';
+    lbl.textContent = 'Source Folders';
   } else {
     copyFields.style.display = 'none';
     skipDup.style.display = 'none';
-    lbl.textContent = 'Folder';
-    customInput.placeholder = '/path/to/photos';
+    lbl.textContent = 'Folders';
   }
   updateStartButton();
 }
@@ -546,18 +649,13 @@ function onCollectionChange() {
 async function loadVolumes() {
   try {
     var volumes = await safeFetch('/api/volumes', {}, { toast: false });
-    var sel = document.getElementById('cfgSource');
-    volumes.forEach(function(v) {
-      sel.innerHTML += '<option value="' + escapeHtml(v.path) + '">' + escapeHtml(v.name) + ' (' + escapeHtml(v.path) + ')</option>';
-    });
+    var dl = document.getElementById('volumeDatalist');
+    if (dl) {
+      volumes.forEach(function(v) {
+        dl.innerHTML += '<option value="' + escapeHtml(v.path) + '">' + escapeHtml(v.name) + '</option>';
+      });
+    }
   } catch(e) {}
-}
-
-function onSourceChange() {
-  var sel = document.getElementById('cfgSource');
-  var custom = document.getElementById('cfgSourceCustom');
-  if (sel.value) custom.value = '';
-  updateStartButton();
 }
 
 function getIngestFileTypes() {
@@ -574,18 +672,14 @@ function updateStartButton() {
   if (_pipelineRunning) { btn.disabled = true; return; }
 
   if (_sourceMode === 'import') {
+    var hasFolders = _sourceFolders.length > 0;
+    var jpeg = document.getElementById('chkJpeg').checked;
+    var raw = document.getElementById('chkRaw').checked;
     if (_copyMode) {
-      var source = (document.getElementById('cfgSourceCustom').value.trim() ||
-                    document.getElementById('cfgSource').value);
       var dest = document.getElementById('cfgDestination').value.trim();
-      var jpeg = document.getElementById('chkJpeg').checked;
-      var raw = document.getElementById('chkRaw').checked;
-      btn.disabled = !source || !dest || (!jpeg && !raw);
+      btn.disabled = !hasFolders || !dest || (!jpeg && !raw);
     } else {
-      var folder = document.getElementById('cfgSourceCustom').value.trim();
-      var jpeg = document.getElementById('chkJpeg').checked;
-      var raw = document.getElementById('chkRaw').checked;
-      btn.disabled = !folder || (!jpeg && !raw);
+      btn.disabled = !hasFolders || (!jpeg && !raw);
     }
   } else {
     var collId = document.getElementById('collectionPicker').value;
@@ -598,12 +692,37 @@ function updateStartButton() {
   if (sourceReady) {
     numSource.classList.add('complete');
     if (!_sourceWasReady) {
-      document.getElementById('card-classify').classList.add('expanded');
+      document.getElementById('card-scan').classList.add('expanded');
     }
   } else {
     numSource.className = 'stage-num';
   }
   _sourceWasReady = sourceReady;
+}
+
+// -- Stage enable/disable dependency chain --
+function onStageToggle(stage) {
+  var chain = ['classify', 'extract', 'group'];
+  var idx = chain.indexOf(stage);
+  var cbId = 'enable' + stage.charAt(0).toUpperCase() + stage.slice(1);
+  var checked = document.getElementById(cbId).checked;
+
+  if (!checked) {
+    // Uncheck and disable all downstream
+    for (var i = idx + 1; i < chain.length; i++) {
+      var downId = 'enable' + chain[i].charAt(0).toUpperCase() + chain[i].slice(1);
+      var cb = document.getElementById(downId);
+      cb.checked = false;
+      cb.disabled = true;
+    }
+  } else {
+    // Re-enable the immediate downstream checkbox
+    if (idx + 1 < chain.length) {
+      var nextId = 'enable' + chain[idx + 1].charAt(0).toUpperCase() + chain[idx + 1].slice(1);
+      document.getElementById(nextId).disabled = false;
+    }
+  }
+  updateStartButton();
 }
 
 // -- Pipeline orchestration --
@@ -626,10 +745,9 @@ async function startPipeline() {
   var body = {};
 
   if (_sourceMode === 'import') {
-    var folder = document.getElementById('cfgSourceCustom').value.trim();
-    body.source = _copyMode
-      ? (folder || document.getElementById('cfgSource').value)
-      : folder;
+    if (_sourceFolders.length > 0) {
+      body.sources = _sourceFolders;
+    }
     body.file_types = getIngestFileTypes();
     if (_copyMode) {
       body.destination = document.getElementById('cfgDestination').value.trim();
@@ -639,25 +757,39 @@ async function startPipeline() {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
   }
 
-  // Classification options
-  var selectedModels = [];
-  document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
-    selectedModels.push({id: cb.value, name: cb.dataset.name});
-  });
-  if (selectedModels.length > 0) {
-    body.model_id = selectedModels[0].id;
+  // Preview quality
+  body.preview_max_size = parseInt(document.getElementById('cfgPreviewSize').value);
+
+  // Optional stages
+  var classifyEnabled = document.getElementById('enableClassify').checked;
+  var extractEnabled = document.getElementById('enableExtract').checked;
+  var groupEnabled = document.getElementById('enableGroup').checked;
+
+  body.skip_classify = !classifyEnabled;
+  body.skip_extract_masks = !extractEnabled;
+  body.skip_regroup = !groupEnabled;
+
+  // Classification options (only if enabled)
+  if (classifyEnabled) {
+    var selectedModels = [];
+    document.querySelectorAll('.model-checkbox:checked').forEach(function(cb) {
+      selectedModels.push({id: cb.value, name: cb.dataset.name});
+    });
+    if (selectedModels.length > 0) {
+      body.model_id = selectedModels[0].id;
+    }
+
+    var labelsFiles = [];
+    document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
+      labelsFiles.push(cb.value);
+    });
+    if (labelsFiles.length > 0) body.labels_files = labelsFiles;
+
+    body.reclassify = !!document.getElementById('chkReclassify').checked;
   }
 
-  var labelsFiles = [];
-  document.querySelectorAll('.labels-run-cb:checked').forEach(function(cb) {
-    labelsFiles.push(cb.value);
-  });
-  if (labelsFiles.length > 0) body.labels_files = labelsFiles;
-
-  body.reclassify = !!document.getElementById('chkReclassify').checked;
-
   // Reset all stage cards to pending state
-  ['Source', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
@@ -709,8 +841,9 @@ async function startPipeline() {
 
 // Map pipeline stage names to UI card element suffixes
 var _stageToCard = {
-  scan: 'Source',
-  thumbnails: 'Source',
+  scan: 'Scan',
+  thumbnails: 'Previews',
+  previews: 'Previews',
   model_loader: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
@@ -719,7 +852,9 @@ var _stageToCard = {
 
 // Map pipeline stage names to the progress bar element suffixes
 var _stageToProgress = {
-  scan: 'Source',
+  scan: 'Scan',
+  thumbnails: 'Previews',
+  previews: 'Previews',
   classify: 'Classify',
   extract_masks: 'Extract',
   regroup: 'Group',
@@ -783,23 +918,41 @@ function _onPipelineComplete(result) {
   var r = result.result || {};
   var stageResults = r.stages || {};
 
-  // Source card
+  // Source card — always mark complete
   var numSource = document.getElementById('numSource');
-  if (stageResults.scan || stageResults.thumbnails) {
-    numSource.className = 'stage-num complete';
-    var scanInfo = stageResults.scan || {};
-    var summary = [];
-    if (scanInfo.photos_indexed) summary.push(scanInfo.photos_indexed + ' indexed');
-    if (scanInfo.copied) summary.push(scanInfo.copied + ' imported');
-    document.getElementById('txtSource').textContent = summary.join(', ') || 'Done';
-  } else if (_sourceMode === 'collection') {
-    numSource.className = 'stage-num complete';
+  numSource.className = 'stage-num complete';
+  if (_sourceMode === 'collection') {
     document.getElementById('txtSource').textContent = 'Collection selected';
+  } else {
+    document.getElementById('txtSource').textContent = _sourceFolders.length + ' folder(s)';
   }
-  var statusSource = document.getElementById('statusSource');
-  var fillSource = document.getElementById('fillSource');
-  if (fillSource) fillSource.style.width = '100%';
-  if (statusSource) { statusSource.textContent = 'Done!'; statusSource.className = 'status-msg ok'; }
+
+  // Scan card
+  if (stageResults.scan) {
+    document.getElementById('numScan').className = 'stage-num complete';
+    var scanInfo = stageResults.scan;
+    var scanSummary = [];
+    if (scanInfo.photos_indexed) scanSummary.push(scanInfo.photos_indexed + ' indexed');
+    if (scanInfo.copied) scanSummary.push(scanInfo.copied + ' imported');
+    document.getElementById('summaryScan').textContent = scanSummary.join(', ') || 'Done';
+    var statusScan = document.getElementById('statusScan');
+    var fillScan = document.getElementById('fillScan');
+    if (fillScan) fillScan.style.width = '100%';
+    if (statusScan) { statusScan.textContent = 'Done!'; statusScan.className = 'status-msg ok'; }
+  }
+
+  // Previews card
+  if (stageResults.thumbnails || stageResults.previews) {
+    document.getElementById('numPreviews').className = 'stage-num complete';
+    var prevSummary = [];
+    if (stageResults.thumbnails && stageResults.thumbnails.generated) prevSummary.push(stageResults.thumbnails.generated + ' thumbs');
+    if (stageResults.previews && stageResults.previews.generated) prevSummary.push(stageResults.previews.generated + ' previews');
+    document.getElementById('summaryPreviews').textContent = prevSummary.join(', ') || 'Done';
+    var statusPrev = document.getElementById('statusPreviews');
+    var fillPrev = document.getElementById('fillPreviews');
+    if (fillPrev) fillPrev.style.width = '100%';
+    if (statusPrev) { statusPrev.textContent = 'Done!'; statusPrev.className = 'status-msg ok'; }
+  }
 
   // Classify card
   if (stageResults.classify) {
@@ -881,10 +1034,7 @@ function stopPipeline() {
 }
 
 async function runImportStep() {
-  var folder = document.getElementById('cfgSourceCustom').value.trim();
-  var source = _copyMode
-    ? (folder || document.getElementById('cfgSource').value)
-    : folder;
+  var source = _sourceFolders.length > 0 ? _sourceFolders[0] : '';
   var destination = _copyMode
     ? document.getElementById('cfgDestination').value.trim()
     : '';
@@ -1401,8 +1551,9 @@ function updateCardStates() {
 
 async function browseForFolder() {
   var path = await pickDirectory('Select photo folder');
-  if (path) {
-    document.getElementById('cfgSourceCustom').value = path;
+  if (path && _sourceFolders.indexOf(path) === -1) {
+    _sourceFolders.push(path);
+    renderSourceFolders();
     updateStartButton();
   }
 }
