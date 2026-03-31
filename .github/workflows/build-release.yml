@@ -211,7 +211,8 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           APP="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Vireo.app"
-          DMG=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
 
           echo "::group::Build artifacts"
           echo "--- .app bundle ---"
@@ -256,9 +257,10 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
           if [ -z "$DMG" ]; then
-            echo "::error::No DMG found after build"
+            echo "::error::No DMG found in $DMG_DIR"
             exit 1
           fi
           echo "Submitting for notarization: $DMG"
@@ -282,7 +284,8 @@ jobs:
       - name: Verify macOS code signing
         if: runner.os == 'macOS'
         run: |
-          DMG=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
           APP="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Vireo.app"
 
           echo "::group::Final .app verification"
@@ -300,9 +303,13 @@ jobs:
           echo ""
           echo "=== All verifications passed ==="
 
-      # Windows/Linux: no signing needed
+      # Windows/Linux: no signing needed.
+      # continue-on-error because Tauri can exit non-zero after producing
+      # valid installers (e.g. post-bundle steps fail). The upload step
+      # must still run to capture .msi/.AppImage/.deb artifacts.
       - name: Build Tauri app (Windows/Linux)
         if: runner.os != 'macOS'
+        continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
