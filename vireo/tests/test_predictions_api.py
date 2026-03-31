@@ -1,13 +1,22 @@
 """Tests for prediction API routes (/api/predictions/*)."""
 import json
 
+_DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+
+
+def _make_detection(db, photo_id):
+    """Create a detection for a photo and return its ID."""
+    return db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+
 
 def _seed_predictions(db):
     """Add two predictions in the same group for the first two photos."""
     photos = db.get_photos()
-    db.add_prediction(photos[0]['id'], 'Northern Cardinal', 0.95, 'test-model',
+    det0 = _make_detection(db, photos[0]['id'])
+    det1 = _make_detection(db, photos[1]['id'])
+    db.add_prediction(det0, 'Northern Cardinal', 0.95, 'test-model',
                       category='new', group_id=1)
-    db.add_prediction(photos[1]['id'], 'House Sparrow', 0.80, 'test-model',
+    db.add_prediction(det1, 'House Sparrow', 0.80, 'test-model',
                       category='new', group_id=1)
     return photos
 
@@ -63,7 +72,8 @@ def test_accept_prediction(app_and_db):
 
     # Get the Northern Cardinal prediction (not in a group for this test —
     # add a standalone prediction to avoid group-accept behavior)
-    db.add_prediction(photos[2]['id'], 'Blue Jay', 0.90, 'test-model',
+    det2 = _make_detection(db, photos[2]['id'])
+    db.add_prediction(det2, 'Blue Jay', 0.90, 'test-model',
                       category='new', group_id=None)
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
@@ -162,13 +172,17 @@ def test_prediction_group_apply(app_and_db):
 
     # Predictions for the pick should be accepted
     pick_preds = db.conn.execute(
-        "SELECT status FROM predictions WHERE photo_id = ?", (pick_id,)
+        """SELECT pr.status FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""", (pick_id,)
     ).fetchall()
     assert all(p['status'] == 'accepted' for p in pick_preds)
 
     # Predictions for the reject should be rejected
     reject_preds = db.conn.execute(
-        "SELECT status FROM predictions WHERE photo_id = ?", (reject_id,)
+        """SELECT pr.status FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""", (reject_id,)
     ).fetchall()
     assert all(p['status'] == 'rejected' for p in reject_preds)
 

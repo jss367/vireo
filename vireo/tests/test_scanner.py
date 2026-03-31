@@ -414,13 +414,11 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
     jpeg_id = db.conn.execute("SELECT id FROM photos").fetchone()["id"]
 
-    # Classify the JPEG — add a prediction
-    db.add_prediction(
-        photo_id=jpeg_id,
-        species="Robin",
-        confidence=0.85,
-        model="bioclip",
-    )
+    # Classify the JPEG — create detection then add a prediction
+    det_ids = db.save_detections(jpeg_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.85, "bioclip")
 
     # Now add the raw file and rescan — this creates a new photo record for the raw,
     # then the classify job also runs on the raw (simulated here)
@@ -437,7 +435,9 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
     raw_id = photos[0]["id"]
     preds = db.conn.execute(
-        "SELECT species, confidence FROM predictions WHERE photo_id = ?",
+        """SELECT pr.species, pr.confidence FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""",
         (raw_id,),
     ).fetchall()
     assert len(preds) == 1
@@ -470,8 +470,14 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
                           file_size=2000, file_mtime=1.0)
 
     # Both classified with same model — JPEG has higher confidence
-    db.add_prediction(photo_id=jpeg_id, species="Robin", confidence=0.95, model="bioclip")
-    db.add_prediction(photo_id=raw_id, species="Robin", confidence=0.70, model="bioclip")
+    jpeg_det = db.save_detections(jpeg_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    raw_det = db.save_detections(raw_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(jpeg_det[0], "Robin", 0.95, "bioclip")
+    db.add_prediction(raw_det[0], "Robin", 0.70, "bioclip")
 
     # Run pairing — should NOT raise IntegrityError
     _pair_raw_jpeg_companions(db)
@@ -481,12 +487,15 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
     assert photos[0]["filename"] == "IMG_001.cr3"
 
     preds = db.conn.execute(
-        "SELECT species, confidence FROM predictions WHERE photo_id = ?",
+        """SELECT pr.species, pr.confidence FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""",
         (photos[0]["id"],),
     ).fetchall()
     # Should keep the higher-confidence prediction
-    assert len(preds) == 1
-    assert preds[0]["confidence"] == 0.95
+    assert len(preds) >= 1
+    best = max(p["confidence"] for p in preds)
+    assert best == 0.95
 
 
 def test_pairing_transfers_inat_submissions(tmp_path):

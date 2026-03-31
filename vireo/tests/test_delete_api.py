@@ -38,17 +38,17 @@ def test_delete_photos_removes_predictions(app_and_db):
     app, db = app_and_db
     photos = db.get_photos()
     pid = photos[0]["id"]
-    db.conn.execute(
-        "INSERT INTO predictions (photo_id, species, confidence, model, workspace_id) "
-        "VALUES (?, 'Cardinal', 0.95, 'test-model', ?)",
-        (pid, db._ws_id()),
-    )
-    db.conn.commit()
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Cardinal', 0.95, 'test-model')
 
     db.delete_photos([pid])
 
     rows = db.conn.execute(
-        "SELECT * FROM predictions WHERE photo_id = ?", (pid,)
+        """SELECT pr.* FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""", (pid,)
     ).fetchall()
     assert len(rows) == 0
 
