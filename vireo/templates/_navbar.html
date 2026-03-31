@@ -2246,13 +2246,15 @@ function formatDuration(seconds) {
         });
     }
 
-    // Always poll once for navbar badge; slow background poll keeps it current
+    // Always poll once for navbar badge
     pollJobs();
-    _navJobPollTimer = setInterval(pollJobs, 15000);
 
-    // Fast poll when panel is open
     if (panelOpen) {
+      // Fast poll when panel is open; no slow poll needed
       _jobPollTimer = setInterval(pollJobs, 2000);
+    } else {
+      // Slow background poll keeps navbar badge current
+      _navJobPollTimer = setInterval(pollJobs, 15000);
     }
   }
 
