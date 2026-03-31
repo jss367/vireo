@@ -88,6 +88,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   animation: pulse 1.5s ease-in-out infinite;
 }
 .activity-dot.active { display: block; }
+.nav-job-badge {
+  margin-left: 2px; font-size: 11px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -714,7 +718,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </div>
   <a href="/pipeline">Pipeline</a>
   <a href="/lightroom">Lightroom</a>
-  <a href="/jobs">Jobs</a>
+  <a href="/jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
   <a href="/pipeline/review">Pipeline Review</a>
   <a href="/review">Review</a>
   <a href="/cull">Cull</a>
@@ -2092,6 +2096,7 @@ function formatDuration(seconds) {
   var activeJobs = [];
   var currentBpTab = 'jobs';
   var _jobPollTimer = null;
+  var _navJobPollTimer = null;
 
   // Theme system
   var THEMES = [
@@ -2194,6 +2199,7 @@ function formatDuration(seconds) {
         // Kill SSE and polling NOW so threads are freed for the next page
         if (lpSource) { lpSource.close(); lpSource = null; }
         if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+        if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
       }
     });
 
@@ -2240,9 +2246,12 @@ function formatDuration(seconds) {
         });
     }
 
-    // Poll jobs — only when panel is open
+    // Always poll once for navbar badge; slow background poll keeps it current
+    pollJobs();
+    _navJobPollTimer = setInterval(pollJobs, 15000);
+
+    // Fast poll when panel is open
     if (panelOpen) {
-      pollJobs();
       _jobPollTimer = setInterval(pollJobs, 2000);
     }
   }
@@ -2396,10 +2405,14 @@ function formatDuration(seconds) {
     // Start/stop SSE and polling based on panel visibility
     if (isOpen) {
       startLogStream();
+      // Fast poll while panel open; pause slow nav poll to avoid double-polling
+      if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
       if (!_jobPollTimer) { pollJobs(); _jobPollTimer = setInterval(pollJobs, 2000); }
     } else {
       stopLogStream();
       if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+      // Resume slow poll for navbar badge
+      if (!_navJobPollTimer) { _navJobPollTimer = setInterval(pollJobs, 15000); }
     }
     setTimeout(function() { panel.classList.remove('animating'); }, 200);
   };
@@ -2478,6 +2491,8 @@ function formatDuration(seconds) {
     var running = activeJobs.filter(function(j) { return j.status === 'running'; });
 
     document.getElementById('jobsBadge').textContent = running.length;
+    var navBadge = document.getElementById('navJobBadge');
+    navBadge.textContent = running.length > 0 ? ' (' + running.length + ')' : '';
 
     if (running.length === 0) {
       var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
