@@ -199,12 +199,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
                     if params.skip_duplicates:
+                        import contextlib
+
                         from scanner import compute_file_hash
                         for path in result_info.get("copied_paths", []):
-                            try:
+                            with contextlib.suppress(Exception):
                                 accumulated_hashes.add(compute_file_hash(path))
-                            except Exception:
-                                pass
                 do_scan(
                     params.destination, thread_db,
                     progress_callback=progress_cb,
