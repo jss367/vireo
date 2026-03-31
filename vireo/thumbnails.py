@@ -80,7 +80,9 @@ def generate_all(db, cache_dir, progress_callback=None, config=None):
 
     if total == 0:
         log.info("All %d thumbnails up to date", skipped)
-        return {"generated": 0, "skipped": skipped, "failed": 0}
+        result = {"generated": 0, "skipped": skipped, "failed": 0}
+        result["summary"] = format_summary(result)
+        return result
 
     log.info("Generating %d thumbnails (%d already cached)", total, skipped)
 
@@ -99,4 +101,24 @@ def generate_all(db, cache_dir, progress_callback=None, config=None):
 
     if failed:
         log.warning("Thumbnail generation: %d of %d failed", failed, total)
-    return {"generated": generated, "skipped": skipped, "failed": failed}
+    result = {"generated": generated, "skipped": skipped, "failed": failed}
+    result["summary"] = format_summary(result)
+    return result
+
+
+def format_summary(result):
+    """Build a human-friendly one-line summary from a thumbnail result dict."""
+    generated = result.get("generated", 0)
+    skipped = result.get("skipped", 0)
+    failed = result.get("failed", 0)
+
+    parts = []
+    if generated:
+        parts.append(f"{generated} new")
+    if skipped:
+        parts.append(f"{skipped} already cached")
+    if failed:
+        parts.append(f"{failed} failed")
+    if not parts:
+        return "0 thumbnails"
+    return ", ".join(parts)

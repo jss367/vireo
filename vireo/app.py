@@ -3524,8 +3524,9 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
             )
+            from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=f"{thumb_result.get('generated', 0)} generated")
+                               summary=thumb_summary(thumb_result))
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
@@ -3816,8 +3817,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
             )
+            from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=f"{thumb_result.get('generated', 0)} generated")
+                               summary=thumb_summary(thumb_result))
 
             # Phase 4: Create collection
             runner.update_step(job["id"], "collection", status="running")
