@@ -594,7 +594,71 @@ def test_flush_batch_top_k_1_has_empty_alternatives():
     assert raw_results[0]["alternatives"] == []
 
 
-# ── Task 5: _store_grouped_predictions tests ─────────────────────────────────
+# ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
+
+
+def test_store_grouped_predictions_saves_alternatives(tmp_path):
+    """_store_grouped_predictions stores alternatives with status='alternative'."""
+    from unittest.mock import patch
+
+    from classify_job import _store_grouped_predictions
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+
+    raw_results = [{
+        "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},
+        "detection_id": det_ids[0],
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "prediction": "Robin",
+        "confidence": 0.85,
+        "timestamp": None,
+        "filename": "bird.jpg",
+        "embedding": None,
+        "taxonomy": None,
+        "alternatives": [
+            {"species": "Sparrow", "confidence": 0.10, "taxonomy": None},
+            {"species": "Finch", "confidence": 0.05, "taxonomy": None},
+        ],
+    }]
+
+    with patch("xmp.read_keywords", return_value=[]), \
+         patch("compare.categorize", return_value="new"):
+        result = _store_grouped_predictions(
+            raw_results=raw_results,
+            job_id="test-job-123456",
+            model_name="test-model",
+            grouping_window=10,
+            similarity_threshold=0.85,
+            tax=None,
+            db=db,
+        )
+
+    assert result["predictions_stored"] == 1
+
+    all_preds = db.get_predictions()
+    assert len(all_preds) == 3  # 1 pending + 2 alternatives
+
+    pending = db.get_predictions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["species"] == "Robin"
+
+    alts = db.get_predictions(status="alternative")
+    assert len(alts) == 2
+    alt_species = {p["species"] for p in alts}
+    assert alt_species == {"Sparrow", "Finch"}
+
+
+# ── _store_grouped_predictions tests ─────────────────────────────────────────
 
 
 def test_store_grouped_predictions_single_photo():

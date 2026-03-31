@@ -753,6 +753,20 @@ def _store_grouped_predictions(
                 category=category,
                 taxonomy=tax_hierarchy,
             )
+            # Store alternative predictions
+            for alt in item.get("alternatives", []):
+                alt_tax = alt.get("taxonomy") or (
+                    tax.get_hierarchy(alt["species"]) if tax else {}
+                )
+                db.add_prediction(
+                    detection_id=item["detection_id"],
+                    species=alt["species"],
+                    confidence=round(alt["confidence"], 4),
+                    model=model_name,
+                    category=category,
+                    status="alternative",
+                    taxonomy=alt_tax,
+                )
             predictions_stored += 1
         else:
             group_count += 1
@@ -811,6 +825,20 @@ def _store_grouped_predictions(
                         individual=individual_json,
                         taxonomy=item.get("taxonomy") or cons_hierarchy,
                     )
+                    # Store alternative predictions for this group member
+                    for alt in item.get("alternatives", []):
+                        alt_tax = alt.get("taxonomy") or (
+                            tax.get_hierarchy(alt["species"]) if tax else {}
+                        )
+                        db.add_prediction(
+                            detection_id=item["detection_id"],
+                            species=alt["species"],
+                            confidence=round(alt["confidence"], 4),
+                            model=model_name,
+                            category=category,
+                            status="alternative",
+                            taxonomy=alt_tax,
+                        )
             predictions_stored += len(group)
 
     singles = len([g for g in groups if len(g) == 1])
