@@ -20,7 +20,6 @@
     "shell:allow-spawn",
     "shell:allow-kill",
     "dialog:allow-open",
-    "updater:default",
     "process:allow-restart",
     "core:tray:default",
     "core:tray:allow-set-icon",
