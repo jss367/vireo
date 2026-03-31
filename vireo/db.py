@@ -1057,6 +1057,7 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        collection_id=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
@@ -1076,6 +1077,20 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             params.append(date_to)
+
+        # When browsing a collection, restrict photos to those matching the
+        # collection's rules by using a subquery from _build_collection_query.
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is not None:
+                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+                # Build a subquery that returns the photo IDs in this collection
+                coll_subquery = (
+                    f"SELECT DISTINCT p2.id FROM photos p2 "
+                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
+                )
+                conditions.append(f"p.id IN ({coll_subquery})")
+                params.extend(coll_params)
 
         join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
         if keyword is not None:
