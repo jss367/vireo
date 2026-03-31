@@ -665,3 +665,66 @@ def test_extract_dimensions_all_raw_extensions():
         width, height = _extract_dimensions(exif_group, file_group, extension=ext)
         assert width == 8256, f"Failed for {ext}: got width {width}"
         assert height == 5504, f"Failed for {ext}: got height {height}"
+
+
+def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
+    """Pairing raw+JPEG transfers GPS, exif_data, and focal_length from companion."""
+    import json
+
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # JPEG has GPS and metadata, RAW does not
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+                          file_size=25000000, file_mtime=1.0)
+
+    exif_json = json.dumps({"EXIF": {"Make": "Nikon", "Model": "Z9", "ISO": 400}})
+    db.conn.execute(
+        "UPDATE photos SET latitude=32.88, longitude=-117.25, exif_data=?, focal_length=400.0 WHERE id=?",
+        (exif_json, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT filename, latitude, longitude, exif_data, focal_length FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG.nef"
+    assert photo["latitude"] == 32.88
+    assert photo["longitude"] == -117.25
+    assert photo["focal_length"] == 400.0
+    meta = json.loads(photo["exif_data"])
+    assert meta["EXIF"]["Make"] == "Nikon"
+
+
+def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
+    """If RAW already has GPS, companion GPS is not overwritten."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    # Both have GPS but different coords — primary should keep its own
+    db.conn.execute(
+        "UPDATE photos SET latitude=40.0, longitude=-74.0 WHERE id=?", (jpeg_id,))
+    db.conn.execute(
+        "UPDATE photos SET latitude=32.0, longitude=-117.0 WHERE id=?", (raw_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
+    assert photo["latitude"] == 32.0
+    assert photo["longitude"] == -117.0

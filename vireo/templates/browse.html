@@ -1974,7 +1974,10 @@ function renderDetail(photo) {
   // Date, dimensions, file size (always from photo fields)
   if (photo.timestamp) summary += 'Date: ' + photo.timestamp + '<br>';
   if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
-  if (photo.file_size) summary += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
+  if (photo.file_size) {
+    var sz = photo.file_size;
+    summary += 'File: ' + (sz >= 1048576 ? (sz / 1048576).toFixed(1) + ' MB' : Math.round(sz / 1024) + ' KB') + '<br>';
+  }
   document.getElementById('detailSummary').innerHTML = summary;
 
   // Path
