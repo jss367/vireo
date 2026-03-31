@@ -518,7 +518,177 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_clf.classify_with_embedding.assert_not_called()
 
 
-# ── Task 5: _store_grouped_predictions tests ─────────────────────────────────
+# ── Top-N predictions tests ────────────────────────────────────────────────
+
+
+def test_flush_batch_stores_top_n_predictions(tmp_path):
+    """_flush_batch keeps top_k predictions per image, not just top-1."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    # Classifier returns 5 ranked predictions
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+        {"species": "Finch", "score": 0.10, "taxonomy": None},
+        {"species": "Wren", "score": 0.03, "taxonomy": None},
+        {"species": "Jay", "score": 0.02, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results, top_k=3)
+    assert failed == 0
+    assert len(raw_results) == 1
+
+    item = raw_results[0]
+    # Should have top prediction as before
+    assert item["prediction"] == "Robin"
+    assert item["confidence"] == 0.70
+    # Should also have alternatives list
+    assert "alternatives" in item
+    assert len(item["alternatives"]) == 2
+    assert item["alternatives"][0]["species"] == "Sparrow"
+    assert item["alternatives"][1]["species"] == "Finch"
+
+
+def test_flush_batch_top_k_1_has_empty_alternatives():
+    """_flush_batch with top_k=1 (default) produces empty alternatives list."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert failed == 0
+    assert len(raw_results) == 1
+    assert raw_results[0]["alternatives"] == []
+
+
+def test_flush_batch_default_top_k_is_one():
+    """Default top_k=1 preserves backward-compatible behavior (no alternatives)."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Robin"
+    assert raw_results[0]["alternatives"] == []
+
+
+# ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
+
+
+def test_store_grouped_predictions_saves_alternatives(tmp_path):
+    """_store_grouped_predictions stores alternatives with status='alternative'."""
+    from unittest.mock import patch
+
+    from classify_job import _store_grouped_predictions
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+
+    raw_results = [{
+        "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},
+        "detection_id": det_ids[0],
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "prediction": "Robin",
+        "confidence": 0.85,
+        "timestamp": None,
+        "filename": "bird.jpg",
+        "embedding": None,
+        "taxonomy": None,
+        "alternatives": [
+            {"species": "Sparrow", "confidence": 0.10, "taxonomy": None},
+            {"species": "Finch", "confidence": 0.05, "taxonomy": None},
+        ],
+    }]
+
+    with patch("xmp.read_keywords", return_value=[]), \
+         patch("compare.categorize", return_value="new"):
+        result = _store_grouped_predictions(
+            raw_results=raw_results,
+            job_id="test-job-123456",
+            model_name="test-model",
+            grouping_window=10,
+            similarity_threshold=0.85,
+            tax=None,
+            db=db,
+        )
+
+    assert result["predictions_stored"] == 1
+
+    all_preds = db.get_predictions()
+    assert len(all_preds) == 3  # 1 pending + 2 alternatives
+
+    pending = db.get_predictions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["species"] == "Robin"
+
+    alts = db.get_predictions(status="alternative")
+    assert len(alts) == 2
+    alt_species = {p["species"] for p in alts}
+    assert alt_species == {"Sparrow", "Finch"}
+
+
+# ── _store_grouped_predictions tests ─────────────────────────────────────────
 
 
 def test_store_grouped_predictions_single_photo():

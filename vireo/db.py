@@ -1,9 +1,12 @@
 """SQLite database for Vireo photo browser metadata cache."""
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
+
+log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
@@ -156,7 +159,7 @@ class Database:
                 scientific_name TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 reviewed_at     TEXT,
-                UNIQUE(detection_id, model)
+                UNIQUE(detection_id, model, species)
             );
 
             CREATE TABLE IF NOT EXISTS inat_submissions (
@@ -514,8 +517,55 @@ class Database:
                     scientific_name TEXT,
                     created_at      TEXT DEFAULT (datetime('now')),
                     reviewed_at     TEXT,
-                    UNIQUE(detection_id, model)
+                    UNIQUE(detection_id, model, species)
                 )
+            """)
+            self.conn.commit()
+
+        # Migrate: UNIQUE(detection_id, model) → UNIQUE(detection_id, model, species)
+        # Check if the unique index on predictions includes 'species'.
+        needs_topn_migration = False
+        for idx in self.conn.execute("PRAGMA index_list(predictions)").fetchall():
+            if idx["unique"]:
+                cols = [
+                    r["name"]
+                    for r in self.conn.execute(
+                        f"PRAGMA index_info({idx['name']})"
+                    ).fetchall()
+                ]
+                if "detection_id" in cols and "model" in cols and "species" not in cols:
+                    needs_topn_migration = True
+                    break
+
+        if needs_topn_migration:
+            log.info("Migrating predictions table: UNIQUE(detection_id, model) -> UNIQUE(detection_id, model, species)")
+            self.conn.executescript("""
+                CREATE TABLE predictions_topn (
+                    id              INTEGER PRIMARY KEY,
+                    detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+                    species         TEXT,
+                    confidence      REAL,
+                    model           TEXT,
+                    category        TEXT,
+                    status          TEXT DEFAULT 'pending',
+                    group_id        TEXT,
+                    vote_count      INTEGER,
+                    total_votes     INTEGER,
+                    individual      TEXT,
+                    taxonomy_kingdom TEXT,
+                    taxonomy_phylum TEXT,
+                    taxonomy_class  TEXT,
+                    taxonomy_order  TEXT,
+                    taxonomy_family TEXT,
+                    taxonomy_genus  TEXT,
+                    scientific_name TEXT,
+                    created_at      TEXT DEFAULT (datetime('now')),
+                    reviewed_at     TEXT,
+                    UNIQUE(detection_id, model, species)
+                );
+                INSERT INTO predictions_topn SELECT * FROM predictions;
+                DROP TABLE predictions;
+                ALTER TABLE predictions_topn RENAME TO predictions;
             """)
             self.conn.commit()
 
@@ -1973,6 +2023,7 @@ class Database:
         confidence,
         model,
         category="new",
+        status="pending",
         group_id=None,
         vote_count=None,
         total_votes=None,
@@ -1997,13 +2048,14 @@ class Database:
                 group_id, vote_count, total_votes, individual,
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
                 taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
-               VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id,
                 species,
                 confidence,
                 model,
                 category,
+                status,
                 group_id,
                 vote_count,
                 total_votes,
@@ -2180,11 +2232,16 @@ class Database:
         return [(row["id"], row["embedding"]) for row in rows]
 
     def update_prediction_group_info(self, detection_id, model, group_id, vote_count, total_votes, individual):
-        """Update group info on an existing prediction."""
+        """Update group info on an existing prediction.
+
+        Only updates the primary (non-alternative) prediction row so that
+        alternative rows for the same detection+model are not assigned group
+        metadata they do not belong to.
+        """
         self.conn.execute(
             """UPDATE predictions
                SET group_id=?, vote_count=?, total_votes=?, individual=?
-               WHERE detection_id=? AND model=?""",
+               WHERE detection_id=? AND model=? AND status != 'alternative'""",
             (group_id, vote_count, total_votes, individual, detection_id, model),
         )
         self.conn.commit()
@@ -2211,6 +2268,15 @@ class Database:
         ).fetchone()
         if not pred:
             return None
+
+        # Reject sibling predictions for same detection+model
+        # (covers both accepting an alternative and accepting the top-1)
+        self.conn.execute(
+            """UPDATE predictions SET status = 'rejected'
+               WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
+            (pred["detection_id"], pred["model"], prediction_id),
+        )
+        self.conn.commit()
 
         # For grouped predictions, derive consensus from individual votes
         species = pred["species"]
@@ -2488,7 +2554,33 @@ class Database:
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and old_val:
-                    self.update_prediction_status(int(old_val), 'pending')
+                    pred_id = int(old_val)
+                    # Restore all predictions for this detection to pre-accept state
+                    pred_row = self.conn.execute(
+                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        (pred_id,),
+                    ).fetchone()
+                    if pred_row:
+                        # Set all to 'alternative' first
+                        self.conn.execute(
+                            """UPDATE predictions SET status = 'alternative'
+                               WHERE detection_id = ? AND model = ?
+                               AND status IN ('accepted', 'rejected')""",
+                            (pred_row["detection_id"], pred_row["model"]),
+                        )
+                        # Promote highest-confidence to 'pending'
+                        top = self.conn.execute(
+                            """SELECT id FROM predictions
+                               WHERE detection_id = ? AND model = ?
+                               ORDER BY confidence DESC LIMIT 1""",
+                            (pred_row["detection_id"], pred_row["model"]),
+                        ).fetchone()
+                        if top:
+                            self.conn.execute(
+                                "UPDATE predictions SET status = 'pending' WHERE id = ?",
+                                (top["id"],),
+                            )
+                        self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
@@ -2516,7 +2608,21 @@ class Database:
                 if kw:
                     self.queue_change(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
-                    self.update_prediction_status(int(item['old_value']), 'accepted')
+                    pred_id = int(item['old_value'])
+                    self.update_prediction_status(pred_id, 'accepted')
+                    # Re-reject siblings (mirrors accept_prediction behavior)
+                    pred_row = self.conn.execute(
+                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        (pred_id,),
+                    ).fetchone()
+                    if pred_row:
+                        self.conn.execute(
+                            """UPDATE predictions SET status = 'rejected'
+                               WHERE detection_id = ? AND model = ? AND id != ?
+                               AND status IN ('pending', 'alternative')""",
+                            (pred_row["detection_id"], pred_row["model"], pred_id),
+                        )
+                        self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.untag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",

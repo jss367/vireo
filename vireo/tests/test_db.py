@@ -1688,3 +1688,65 @@ def test_get_existing_detection_photo_ids(tmp_path):
     result = db.get_existing_detection_photo_ids()
     assert pid1 in result
     assert pid2 not in result
+
+
+def test_multiple_predictions_per_detection(tmp_path):
+    """Multiple species predictions can be stored for the same detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+
+    db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
+                      model="test-model", category="new")
+    db.add_prediction(detection_id=det_id, species="Sparrow", confidence=0.10,
+                      model="test-model", category="new")
+    db.add_prediction(detection_id=det_id, species="Finch", confidence=0.05,
+                      model="test-model", category="new")
+
+    preds = db.get_predictions()
+    assert len(preds) == 3
+    species = {p["species"] for p in preds}
+    assert species == {"Robin", "Sparrow", "Finch"}
+
+
+def test_alternative_predictions_filtered_from_pending(tmp_path):
+    """get_predictions with status='pending' excludes alternatives."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+
+    db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
+                      model="test-model", status="pending")
+    db.add_prediction(detection_id=det_id, species="Sparrow", confidence=0.10,
+                      model="test-model", status="alternative")
+    db.add_prediction(detection_id=det_id, species="Finch", confidence=0.05,
+                      model="test-model", status="alternative")
+
+    # All predictions
+    all_preds = db.get_predictions()
+    assert len(all_preds) == 3
+
+    # Pending only — should return just the top-1
+    pending = db.get_predictions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["species"] == "Robin"
+
+    # Alternatives only
+    alts = db.get_predictions(status="alternative")
+    assert len(alts) == 2

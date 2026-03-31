@@ -467,7 +467,7 @@ def _prepare_image(photo, folders, detection):
     return img, folder_path, image_path
 
 
-def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
+def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     """Classify a batch of prepared images and append results.
 
     Returns the number of failures within this batch.
@@ -527,6 +527,15 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
             except Exception:
                 pass
 
+        # Build alternatives list (predictions 2..top_k)
+        alternatives = []
+        for alt_pred in all_preds[1:top_k]:
+            alternatives.append({
+                "species": alt_pred["species"],
+                "confidence": alt_pred["score"],
+                "taxonomy": alt_pred.get("taxonomy"),
+            })
+
         raw_results.append(
             {
                 "photo": entry["photo"],
@@ -539,6 +548,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
                 "filename": entry["photo"]["filename"],
                 "embedding": embedding,
                 "taxonomy": top.get("taxonomy"),
+                "alternatives": alternatives,
             }
         )
 
@@ -547,7 +557,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
 
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
-    model_name, runner, job, db,
+    model_name, runner, job, db, top_k=1,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -599,7 +609,7 @@ def _classify_photos(
         if photo["id"] in existing_preds:
             # Flush pending batch to preserve photo ordering in raw_results
             if batch:
-                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
                 batch = []
             skipped_existing += 1
             pred_row = db.get_prediction_for_photo(photo["id"], model_name)
@@ -629,6 +639,7 @@ def _classify_photos(
                         "filename": photo["filename"],
                         "embedding": embedding,
                         "taxonomy": None,
+                        "alternatives": [],
                         "_existing": True,
                     }
                 )
@@ -656,7 +667,7 @@ def _classify_photos(
                 })
 
                 if len(batch) >= _BATCH_SIZE:
-                    failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                    failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
                     batch = []
         else:
             # No detections — create a full-image detection and classify it
@@ -678,12 +689,12 @@ def _classify_photos(
             })
 
             if len(batch) >= _BATCH_SIZE:
-                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
                 batch = []
 
     # Flush remaining images
     if batch:
-        failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+        failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
 
     return raw_results, failed, skipped_existing
 
@@ -742,6 +753,20 @@ def _store_grouped_predictions(
                 category=category,
                 taxonomy=tax_hierarchy,
             )
+            # Store alternative predictions
+            for alt in item.get("alternatives", []):
+                alt_tax = alt.get("taxonomy") or (
+                    tax.get_hierarchy(alt["species"]) if tax else {}
+                )
+                db.add_prediction(
+                    detection_id=item["detection_id"],
+                    species=alt["species"],
+                    confidence=round(alt["confidence"], 4),
+                    model=model_name,
+                    category=category,
+                    status="alternative",
+                    taxonomy=alt_tax,
+                )
             predictions_stored += 1
         else:
             group_count += 1
@@ -800,6 +825,20 @@ def _store_grouped_predictions(
                         individual=individual_json,
                         taxonomy=item.get("taxonomy") or cons_hierarchy,
                     )
+                    # Store alternative predictions for this group member
+                    for alt in item.get("alternatives", []):
+                        alt_tax = alt.get("taxonomy") or (
+                            tax.get_hierarchy(alt["species"]) if tax else {}
+                        )
+                        db.add_prediction(
+                            detection_id=item["detection_id"],
+                            species=alt["species"],
+                            confidence=round(alt["confidence"], 4),
+                            model=model_name,
+                            category=category,
+                            status="alternative",
+                            taxonomy=alt_tax,
+                        )
             predictions_stored += len(group)
 
     singles = len([g for g in groups if len(g) == 1])
@@ -1015,6 +1054,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
 
     job["_start_time"] = time.time()  # reset rate timer for classification phase
 
+    import config as cfg
+    effective_cfg = thread_db.get_effective_config(cfg.load())
+    top_k = effective_cfg.get("top_k_predictions", 5)
+
     runner.update_step(job["id"], "classify", status="running")
     raw_results, failed, skipped_existing = _classify_photos(
         photos=photos,
@@ -1027,6 +1070,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         runner=runner,
         job=job,
         db=thread_db,
+        top_k=top_k,
     )
     classified_count = len(raw_results) - skipped_existing
     parts = [f"{classified_count} classified"]

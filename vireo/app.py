@@ -1389,10 +1389,39 @@ def create_app(db_path, thumb_cache_dir=None):
         else:
             preds = db.get_predictions(status=status)
 
-        # Enrich disagreement/refinement predictions with existing species keywords
+        # Fetch alternatives to attach to their parent predictions
+        alt_preds = []
+        if not status or status == "pending":
+            if collection_id:
+                if photo_ids:
+                    alt_preds = db.get_predictions(photo_ids=photo_ids, status="alternative")
+            else:
+                alt_preds = db.get_predictions(status="alternative")
+
+        # Index alternatives by (detection_id, model)
+        alts_by_key = {}
+        for a in alt_preds:
+            ad = dict(a)
+            key = (ad["detection_id"], ad["model"])
+            alts_by_key.setdefault(key, []).append({
+                "id": ad["id"],
+                "species": ad["species"],
+                "confidence": ad["confidence"],
+                "taxonomy_kingdom": ad.get("taxonomy_kingdom"),
+                "taxonomy_phylum": ad.get("taxonomy_phylum"),
+                "taxonomy_class": ad.get("taxonomy_class"),
+                "taxonomy_order": ad.get("taxonomy_order"),
+                "taxonomy_family": ad.get("taxonomy_family"),
+                "taxonomy_genus": ad.get("taxonomy_genus"),
+                "scientific_name": ad.get("scientific_name"),
+            })
+
+        # Enrich predictions and attach alternatives
         results = []
         for p in preds:
             d = dict(p)
+            if d.get("status") == "alternative":
+                continue  # alternatives are nested, not top-level
             if d.get("category") in ("disagreement", "refinement"):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
@@ -1400,6 +1429,9 @@ def create_app(db_path, thumb_cache_dir=None):
                     if db.is_keyword_species(k["id"])
                 ]
                 d["existing_species"] = existing_species
+            # Attach alternatives
+            key = (d.get("detection_id"), d.get("model"))
+            d["alternatives"] = alts_by_key.get(key, [])
             results.append(d)
         return jsonify(results)
 
@@ -1465,7 +1497,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_reject_prediction(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, d.photo_id
+            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE pr.id = ?""",
@@ -1473,6 +1505,13 @@ def create_app(db_path, thumb_cache_dir=None):
         ).fetchone()
         db.update_prediction_status(pred_id, "rejected")
         if pred:
+            # Also reject sibling alternative predictions
+            db.conn.execute(
+                """UPDATE predictions SET status = 'rejected'
+                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
+                (pred["detection_id"], pred["model"], pred_id),
+            )
+            db.conn.commit()
             db.record_edit('prediction_reject',
                            f'Rejected prediction "{pred["species"]}"',
                            'rejected',
