@@ -1618,17 +1618,21 @@ function browseTo(path) {
 function renderBreadcrumb(path) {
   var el = document.getElementById('fbBreadcrumb');
   var parts = path.split('/').filter(Boolean);
-  var html = '<span onclick="browseTo(\'/\')">/</span>';
+  var html = '<span data-browse="/">/</span>';
   var accum = '';
   for (var i = 0; i < parts.length; i++) {
     accum += '/' + parts[i];
     if (i === parts.length - 1) {
       html += ' <span class="current">' + escapeHtml(parts[i]) + '</span>';
     } else {
-      html += ' <span onclick="browseTo(\'' + escapeAttr(accum) + '\')">' + escapeHtml(parts[i]) + '</span> /';
+      html += ' <span data-browse="' + escapeAttr(accum) + '">' + escapeHtml(parts[i]) + '</span> /';
     }
   }
   el.innerHTML = html;
+  el.onclick = function(e) {
+    var target = e.target.closest('[data-browse]');
+    if (target) browseTo(target.getAttribute('data-browse'));
+  };
 }
 
 function renderFolderList(dirs) {
@@ -1639,19 +1643,24 @@ function renderFolderList(dirs) {
   }
   var html = '';
   for (var i = 0; i < dirs.length; i++) {
-    html += '<div class="folder-browser-item" data-path="' + escapeAttr(dirs[i].path) + '" ' +
-            'onclick="selectFolderItem(this)" ondblclick="browseTo(\'' + escapeAttr(dirs[i].path) + '\')">' +
+    html += '<div class="folder-browser-item" data-path="' + escapeAttr(dirs[i].path) + '">' +
             '\uD83D\uDCC1 ' + escapeHtml(dirs[i].name) + '</div>';
   }
   listEl.innerHTML = html;
-}
-
-function selectFolderItem(el) {
-  var items = document.querySelectorAll('.folder-browser-item');
-  for (var i = 0; i < items.length; i++) items[i].classList.remove('selected');
-  el.classList.add('selected');
-  _fbSelectedDir = el.getAttribute('data-path');
-  document.getElementById('fbSelectedPath').textContent = _fbSelectedDir;
+  // Event delegation: click to select, double-click to drill in
+  listEl.onclick = function(e) {
+    var item = e.target.closest('.folder-browser-item');
+    if (!item) return;
+    var items = listEl.querySelectorAll('.folder-browser-item');
+    for (var i = 0; i < items.length; i++) items[i].classList.remove('selected');
+    item.classList.add('selected');
+    _fbSelectedDir = item.getAttribute('data-path');
+    document.getElementById('fbSelectedPath').textContent = _fbSelectedDir;
+  };
+  listEl.ondblclick = function(e) {
+    var item = e.target.closest('.folder-browser-item');
+    if (item) browseTo(item.getAttribute('data-path'));
+  };
 }
 
 function selectFolder() {
