@@ -226,10 +226,25 @@ body {
   border-left: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 16px;
-  display: none;
+  display: block;
   flex-shrink: 0;
 }
-.detail-panel.open { display: block; }
+.summary-panel { display: block; }
+.summary-panel.hidden { display: none; }
+.detail-content { display: none; }
+.detail-content.visible { display: block; }
+.summary-stat { margin-bottom: 16px; }
+.summary-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.summary-stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+.summary-stat-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.summary-section { margin-bottom: 16px; }
+.summary-section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.summary-species-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+.summary-species-name { color: var(--text-primary); }
+.summary-species-count { color: var(--text-muted); font-size: 12px; }
+.summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+.summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
+.summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
 .detail-close {
   float: right;
   background: none;
@@ -753,60 +768,85 @@ body {
 
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
-    <button class="detail-close" onclick="closeDetail()">&times;</button>
-    <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
-    <div class="detail-filename" id="detailFilename"></div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Rating</div>
-      <div class="detail-rating" id="detailRating"></div>
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Flag</div>
-      <div class="detail-flags" id="detailFlags">
-        <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
-        <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
-        <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+    <!-- Summary Dashboard (shown when no photo selected) -->
+    <div class="summary-panel" id="summaryPanel">
+      <div class="summary-stat">
+        <div class="summary-stat-label">Photos</div>
+        <div class="summary-stat-value" id="summaryPhotoCount">—</div>
+        <div class="summary-stat-sub" id="summaryFilterNote"></div>
+      </div>
+      <div class="summary-stat">
+        <div class="summary-stat-label">Classification</div>
+        <div class="summary-stat-value" id="summaryClassified">—</div>
+        <div class="summary-stat-sub" id="summaryUnclassified"></div>
+      </div>
+      <div class="summary-section" id="summarySpeciesSection" style="display:none;">
+        <div class="summary-section-title">Top Species</div>
+        <div id="summarySpeciesList"></div>
+      </div>
+      <div class="summary-section" id="summaryFoldersSection" style="display:none;">
+        <div class="summary-section-title">Folders</div>
+        <div id="summaryFolderList"></div>
       </div>
     </div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">Keywords</div>
-      <div id="detailKeywords"></div>
-      <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
-    </div>
+    <!-- Photo Detail (shown when a photo is selected) -->
+    <div class="detail-content" id="detailContent">
+      <button class="detail-close" onclick="closeDetail()">&times;</button>
+      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
+      <div class="detail-filename" id="detailFilename"></div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">XMP Sidecar</div>
-      <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Rating</div>
+        <div class="detail-rating" id="detailRating"></div>
+      </div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">Info</div>
-      <div class="detail-summary" id="detailSummary"></div>
-      <div class="detail-path" id="detailPath"></div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Flag</div>
+        <div class="detail-flags" id="detailFlags">
+          <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
+          <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
+          <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+        </div>
+      </div>
 
-    <div class="detail-section" id="detailMetadataSection" style="display:none;">
-      <div class="detail-section-title">All Metadata</div>
-      <input type="text" id="metadataSearch" class="add-kw-input"
-             placeholder="Search metadata..."
-             oninput="filterMetadata(this.value)"
-             style="margin-bottom:8px;">
-      <div id="metadataGroups"></div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Keywords</div>
+        <div id="detailKeywords"></div>
+        <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
+      </div>
 
-    <div class="detail-section" style="display:flex;gap:8px;">
-      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-        Find Similar
-      </button>
-      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-        Inspect Pipeline
-      </button>
-      <button onclick="openInEditor([window._detailPhotoId])" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-        Open in Editor
-      </button>
+      <div class="detail-section">
+        <div class="detail-section-title">XMP Sidecar</div>
+        <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
+      </div>
+
+      <div class="detail-section">
+        <div class="detail-section-title">Info</div>
+        <div class="detail-summary" id="detailSummary"></div>
+        <div class="detail-path" id="detailPath"></div>
+      </div>
+
+      <div class="detail-section" id="detailMetadataSection" style="display:none;">
+        <div class="detail-section-title">All Metadata</div>
+        <input type="text" id="metadataSearch" class="add-kw-input"
+               placeholder="Search metadata..."
+               oninput="filterMetadata(this.value)"
+               style="margin-bottom:8px;">
+        <div id="metadataGroups"></div>
+      </div>
+
+      <div class="detail-section" style="display:flex;gap:8px;">
+        <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Find Similar
+        </button>
+        <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Inspect Pipeline
+        </button>
+        <button onclick="openInEditor([window._detailPhotoId])" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Open in Editor
+        </button>
+      </div>
     </div>
 
   </div>
@@ -869,6 +909,7 @@ var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
+var activeCollectionId = null;
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
@@ -927,6 +968,7 @@ async function bootstrapBrowse() {
     loadCollectionCounts();
     renderGrid();
     updateFilterSummary();
+    loadSummary();
 
     document.getElementById('loadingState').style.display = 'none';
     // Lazy-load collection photo counts to avoid N+1 on init
@@ -1004,6 +1046,7 @@ function filterByFolder(folderId) {
     activeFolderId = folderId;
   }
   activeKeyword = null;
+  activeCollectionId = null;
   if (timelineMode) loadCalendarData();
   resetAndLoad();
   // Update active state
@@ -1061,6 +1104,7 @@ function filterByKeyword(name) {
     activeKeyword = name;
   }
   activeFolderId = null;
+  activeCollectionId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
   resetAndLoad();
@@ -1096,10 +1140,12 @@ async function loadCollectionCounts() {
 async function filterByCollection(id) {
   activeFolderId = null;
   activeKeyword = null;
+  activeCollectionId = id;
   photos = [];
   currentPage = 1;
   allLoaded = true;  // collections handle their own pagination
   document.getElementById('grid').innerHTML = '';
+  closeDetail();
 
   try {
     var data = await safeFetch('/api/collections/' + id + '/photos?per_page=200', {}, { toast: false });
@@ -1198,6 +1244,9 @@ function resetAndLoad() {
   allLoaded = false;
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Leaving collection mode when applying non-collection filters (sort, rating,
+  // date, keyword, folder) so the summary stays in sync with the visible grid.
+  activeCollectionId = null;
   closeDetail();
   document.getElementById('grid').innerHTML = '';
   loadPhotos();
@@ -1864,8 +1913,8 @@ async function showUndoToast() {
 /* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
-  var panel = document.getElementById('detailPanel');
-  panel.classList.add('open');
+  document.getElementById('summaryPanel').classList.add('hidden');
+  document.getElementById('detailContent').classList.add('visible');
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -2095,12 +2144,74 @@ function filterMetadata(query) {
 }
 
 function closeDetail() {
-  document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('detailContent').classList.remove('visible');
+  document.getElementById('summaryPanel').classList.remove('hidden');
   selectedPhotoId = null;
   selectedIndex = -1;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
+  loadSummary();
+}
+
+async function loadSummary() {
+  var params = new URLSearchParams();
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
+
+  try {
+    var data = await safeFetch('/api/browse/summary?' + params.toString(), {}, { toast: false });
+    renderSummary(data);
+  } catch(e) {}
+}
+
+function renderSummary(data) {
+  var isFiltered = data.filtered_total !== data.total;
+
+  document.getElementById('summaryPhotoCount').textContent = data.filtered_total.toLocaleString();
+  document.getElementById('summaryFilterNote').textContent =
+    isFiltered ? 'of ' + data.total.toLocaleString() + ' total' : '';
+
+  document.getElementById('summaryClassified').textContent = data.classified.toLocaleString() + ' classified';
+  document.getElementById('summaryUnclassified').textContent = data.unclassified.toLocaleString() + ' unclassified';
+
+  // Top species
+  var speciesSection = document.getElementById('summarySpeciesSection');
+  var speciesHtml = '';
+  if (data.top_species && data.top_species.length > 0) {
+    data.top_species.forEach(function(s) {
+      speciesHtml += '<div class="summary-species-row">' +
+        '<span class="summary-species-name">' + escapeHtml(s.species) + '</span>' +
+        '<span class="summary-species-count">' + s.count + '</span></div>';
+    });
+    speciesSection.style.display = '';
+  } else {
+    speciesSection.style.display = 'none';
+  }
+  document.getElementById('summarySpeciesList').innerHTML = speciesHtml;
+
+  // Folder breakdown
+  var foldersSection = document.getElementById('summaryFoldersSection');
+  var folderHtml = '';
+  if (data.folder_counts && data.folder_counts.length > 0) {
+    data.folder_counts.forEach(function(f) {
+      folderHtml += '<div class="summary-folder-row">' +
+        '<span class="summary-folder-name">' + escapeHtml(f.name) + '</span>' +
+        '<span class="summary-folder-count">' + f.count + '</span></div>';
+    });
+    foldersSection.style.display = '';
+  } else {
+    foldersSection.style.display = 'none';
+  }
+  document.getElementById('summaryFolderList').innerHTML = folderHtml;
 }
 
 /* ---------- Edit Actions ---------- */
@@ -2332,6 +2443,7 @@ function openInEditorBatch() {
     // Navigate to the photo's folder
     activeFolderId = photo.folder_id;
     activeKeyword = null;
+    activeCollectionId = null;
     photos = [];
     currentPage = 1;
     allLoaded = false;

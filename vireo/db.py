@@ -1050,6 +1050,132 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
+    def get_browse_summary(
+        self,
+        folder_id=None,
+        rating_min=None,
+        date_from=None,
+        date_to=None,
+        keyword=None,
+        collection_id=None,
+    ):
+        """Return summary stats for the browse panel, scoped to active workspace and filters."""
+        ws = self._ws_id()
+
+        # Build shared filter conditions
+        conditions = ["wf.workspace_id = ?"]
+        params = [ws]
+        if folder_id is not None:
+            conditions.append("p.folder_id = ?")
+            params.append(folder_id)
+        if rating_min is not None:
+            conditions.append("p.rating >= ?")
+            params.append(rating_min)
+        if date_from is not None:
+            conditions.append("p.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("p.timestamp <= ?")
+            params.append(date_to)
+
+        # When browsing a collection, restrict photos to those matching the
+        # collection's rules by using a subquery from _build_collection_query.
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is not None:
+                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+                # Build a subquery that returns the photo IDs in this collection.
+                # Use alias "p" to match the alias expected by _build_collection_query;
+                # the subquery is wrapped in parentheses so "p" is scoped to it and
+                # does not conflict with the outer query's "p" alias.
+                coll_subquery = (
+                    f"SELECT DISTINCT p.id FROM photos p "
+                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
+                )
+                conditions.append(f"p.id IN ({coll_subquery})")
+                params.extend(coll_params)
+
+        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        if keyword is not None:
+            join_clause += """
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                LEFT JOIN keywords k ON k.id = pk.keyword_id
+            """
+            conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
+            params.append(f"%{keyword}%")
+            params.append(f"%{keyword}%")
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        # Total (unfiltered) count
+        total = self.conn.execute(
+            """SELECT COUNT(*) FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()[0]
+
+        # Filtered count
+        filtered_total = self.conn.execute(
+            f"SELECT COUNT(DISTINCT p.id) FROM photos p {join_clause} {where}",
+            params,
+        ).fetchone()[0]
+
+        # Classified vs unclassified (within filter)
+        classified = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) FROM photos p
+                {join_clause}
+                JOIN predictions pred ON pred.photo_id = p.id AND pred.workspace_id = ?
+                {where}""",
+            [ws] + params,
+        ).fetchone()[0]
+
+        # Top species (within filter)
+        # Use a CTE to select the single best prediction per photo (highest confidence,
+        # non-rejected) to avoid inflating species counts when multiple models have
+        # predicted different species for the same photo.
+        top_species = self.conn.execute(
+            f"""WITH best_pred AS (
+                    SELECT pred.photo_id, pred.species,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY pred.photo_id
+                               ORDER BY pred.confidence DESC
+                           ) AS rn
+                    FROM predictions pred
+                    WHERE pred.workspace_id = ? AND pred.status != 'rejected'
+                )
+                SELECT bp.species, COUNT(DISTINCT p.id) as count
+                FROM photos p
+                {join_clause}
+                JOIN best_pred bp ON bp.photo_id = p.id AND bp.rn = 1
+                {where}
+                GROUP BY bp.species
+                ORDER BY count DESC
+                LIMIT 5""",
+            [ws] + params,
+        ).fetchall()
+
+        # Folder breakdown (within filter)
+        folder_counts = self.conn.execute(
+            f"""SELECT f.id as folder_id, f.name, COUNT(DISTINCT p.id) as count
+                FROM photos p
+                {join_clause}
+                JOIN folders f ON f.id = p.folder_id
+                {where}
+                GROUP BY f.id
+                ORDER BY count DESC""",
+            params,
+        ).fetchall()
+
+        return {
+            "total": total,
+            "filtered_total": filtered_total,
+            "classified": classified,
+            "unclassified": filtered_total - classified,
+            "top_species": [{"species": r["species"], "count": r["count"]} for r in top_species],
+            "folder_counts": [{"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts],
+        }
+
     def get_geolocated_photos(
         self,
         folder_id=None,
