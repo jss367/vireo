@@ -1458,11 +1458,15 @@ async function fetchLabels() {
 }
 
 /* ---------- Models ---------- */
+var _modelsById = {};
 async function loadModels() {
   try {
     var data = await safeFetch('/api/models', {}, { toast: false });
     var models = data.models || [];
     var activeId = data.active_id;
+
+    _modelsById = {};
+    models.forEach(function(m) { _modelsById[m.id] = m; });
 
     if (models.length === 0) {
       document.getElementById('modelsContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
@@ -1496,7 +1500,7 @@ async function loadModels() {
       if (!m.downloaded && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
-      if (m.downloaded && !isActive) {
+      if (!isActive) {
         html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
       if (m.downloaded) {
@@ -1574,6 +1578,61 @@ async function removeModel(modelId) {
 }
 
 async function setActiveModel(modelId) {
+  var m = _modelsById[modelId];
+  if (m && !m.downloaded) {
+    var sizeStr = m.size_mb ? (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') : '';
+    showToast('Model not downloaded — downloading' + (sizeStr ? ' (~' + sizeStr + ')' : '') + '...', 'success');
+    try {
+      var data = await safeFetch('/api/jobs/download-model', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_id: modelId}),
+      }, { toast: false });
+
+      var progressDiv = document.getElementById('modelProgress-' + modelId);
+      var progressFill = document.getElementById('modelProgressFill-' + modelId);
+      var progressText = document.getElementById('modelProgressText-' + modelId);
+      if (progressDiv) progressDiv.style.display = '';
+
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (progressFill && p.total > 0 && p.current > 0) {
+            var pct = Math.round((p.current / p.total) * 100);
+            progressFill.style.width = pct + '%';
+          }
+          if (progressText && p.current_file) {
+            progressText.textContent = p.current_file;
+          }
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (progressText) progressText.textContent = 'Download complete!';
+            if (progressFill) progressFill.style.width = '100%';
+            // Now set as active
+            safeFetch('/api/models/active', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({model_id: modelId}),
+            }).catch(function(){});
+            setTimeout(loadModels, 1000);
+          } else {
+            if (progressText) {
+              progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+              progressText.style.color = 'var(--danger)';
+            }
+            setTimeout(loadModels, 1000);
+          }
+        },
+        onError: function() {
+          if (progressText) {
+            progressText.textContent = 'Connection lost';
+            progressText.style.color = 'var(--danger)';
+          }
+        }
+      });
+    } catch(e) {}
+    return;
+  }
   try {
     await safeFetch('/api/models/active', {
       method: 'POST',
