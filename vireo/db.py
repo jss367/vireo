@@ -2232,11 +2232,16 @@ class Database:
         return [(row["id"], row["embedding"]) for row in rows]
 
     def update_prediction_group_info(self, detection_id, model, group_id, vote_count, total_votes, individual):
-        """Update group info on an existing prediction."""
+        """Update group info on an existing prediction.
+
+        Only updates the primary (non-alternative) prediction row so that
+        alternative rows for the same detection+model are not assigned group
+        metadata they do not belong to.
+        """
         self.conn.execute(
             """UPDATE predictions
                SET group_id=?, vote_count=?, total_votes=?, individual=?
-               WHERE detection_id=? AND model=?""",
+               WHERE detection_id=? AND model=? AND status != 'alternative'""",
             (group_id, vote_count, total_votes, individual, detection_id, model),
         )
         self.conn.commit()
@@ -2550,6 +2555,19 @@ class Database:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     self.update_prediction_status(int(old_val), 'pending')
+                    # Restore sibling predictions (alternatives auto-rejected on accept)
+                    # back to 'alternative' so the detection is fully reviewable again.
+                    pred_row = self.conn.execute(
+                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        (int(old_val),),
+                    ).fetchone()
+                    if pred_row:
+                        self.conn.execute(
+                            """UPDATE predictions SET status = 'alternative'
+                               WHERE detection_id = ? AND model = ? AND id != ?
+                               AND status = 'rejected'""",
+                            (pred_row["detection_id"], pred_row["model"], int(old_val)),
+                        )
             elif entry['action_type'] == 'keyword_remove':
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
