@@ -314,8 +314,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if existing:
                 file_unchanged = existing["file_mtime"] == file_mtime
                 xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+                # Re-process if critical metadata is missing (e.g. ExifTool
+                # was unavailable during the original scan)
+                metadata_missing = existing["timestamp"] is None
 
-                if file_unchanged and xmp_unchanged:
+                if file_unchanged and xmp_unchanged and not metadata_missing:
                     processed_count += 1
                     if photo_callback:
                         photo_callback(existing["id"], full_path_str)
@@ -332,7 +335,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     )
                     db.conn.commit()
 
-                if file_unchanged:
+                if file_unchanged and not metadata_missing:
                     processed_count += 1
                     if photo_callback:
                         photo_callback(existing["id"], full_path_str)
@@ -435,9 +438,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             height=height,
         )
 
-        # Store GPS, pHash, focal length, burst ID, and exif_data
+        # Update metadata columns (also fixes existing photos that were
+        # inserted before ExifTool metadata was available)
         updates = []
         update_params = []
+        if timestamp is not None:
+            updates.append("timestamp=?")
+            update_params.append(timestamp)
+        if width is not None:
+            updates.append("width=?")
+            update_params.append(width)
+        if height is not None:
+            updates.append("height=?")
+            update_params.append(height)
         if latitude is not None:
             updates.extend(["latitude=?", "longitude=?"])
             update_params.extend([latitude, longitude])

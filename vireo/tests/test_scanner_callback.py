@@ -1,4 +1,4 @@
-"""Tests for scanner photo_callback support."""
+"""Tests for scanner photo_callback and incremental metadata support."""
 
 import os
 import sys
@@ -53,6 +53,11 @@ def test_scan_photo_callback_fires_for_incremental_skip(tmp_path):
     # First scan: no callback, just populate the DB
     scan(tmp_path, db, incremental=False)
 
+    # Set timestamps so incremental scan considers metadata complete
+    # (PIL-generated images lack EXIF timestamps)
+    db.conn.execute("UPDATE photos SET timestamp = '2026-01-01T00:00:00'")
+    db.conn.commit()
+
     # Second scan: incremental with callback — photos already exist, should still fire
     callbacks = []
     scan(tmp_path, db, incremental=True, photo_callback=lambda pid, path: callbacks.append((pid, path)))
@@ -61,3 +66,42 @@ def test_scan_photo_callback_fires_for_incremental_skip(tmp_path):
     for pid, path in callbacks:
         assert isinstance(pid, int)
         assert path.endswith(".jpg")
+
+
+def test_incremental_scan_reprocesses_photos_missing_timestamp(tmp_path):
+    """Photos with NULL timestamp should be re-processed on incremental scan.
+
+    Covers the case where ExifTool was unavailable during the original scan,
+    leaving critical metadata NULL. The scanner should retry extraction rather
+    than skipping these photos forever.
+    """
+    img = Image.new("RGB", (200, 150), "blue")
+    img.save(str(tmp_path / "bird.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db._active_workspace_id)
+
+    # First scan populates the photo
+    scan(tmp_path, db, incremental=False)
+    photos = db.get_photos(per_page=999)
+    assert len(photos) == 1
+    photo_id = photos[0]["id"]
+
+    # Simulate a failed initial scan: NULL out metadata
+    db.conn.execute(
+        "UPDATE photos SET timestamp = NULL, width = NULL, height = NULL WHERE id = ?",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    # Verify it's really NULL
+    row = db.conn.execute("SELECT width, timestamp FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    assert row["width"] is None
+
+    # Incremental re-scan should re-process because timestamp is NULL
+    scan(tmp_path, db, incremental=True)
+
+    # Width should be restored by the re-scan
+    row = db.conn.execute("SELECT width, height FROM photos WHERE id = ?", (photo_id,)).fetchone()
+    assert row["width"] is not None, "Width should be restored after re-scan of metadata-missing photo"
+    assert row["height"] is not None, "Height should be restored after re-scan of metadata-missing photo"
