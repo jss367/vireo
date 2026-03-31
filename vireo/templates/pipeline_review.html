@@ -1245,6 +1245,7 @@ function updateThumbSize(val) {
 function setMinConfidence(val) {
   minConfidence = parseInt(val, 10);
   document.getElementById('confSliderVal').textContent = minConfidence + '%';
+  if (speciesFilter) renderResults();
   clearTimeout(_confTimer);
   _confTimer = setTimeout(function() {
     fetch('/api/workspaces/active/config')
