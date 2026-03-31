@@ -1577,7 +1577,10 @@ function toggleDetectionBoxes() {
 
 async function runClipSearch() {
   var query = document.getElementById('clipSearchInput').value.trim();
-  if (!query) return;
+  if (!query) {
+    if (clipSearchActive) clearClipSearch();
+    return;
+  }
 
   photos = [];
   allLoaded = true;
@@ -1597,6 +1600,16 @@ async function runClipSearch() {
     params.set('limit', 100);
     params.set('threshold', 0.15);
     var data = await safeFetch('/api/photos/search?' + params.toString());
+
+    if (data.reason) {
+      var msg = {
+        'model_no_text_search': 'Text search is not supported by ' + (data.model_used || 'this model') + '. Switch to a BioCLIP model in Settings.',
+        'no_embeddings': 'No search index found for ' + (data.model_used || 'this model') + '. Run classification first to enable text search.',
+        'no_model': 'No model available. Download one in Settings.'
+      }[data.reason] || 'Search returned no results.';
+      document.getElementById('loadingState').textContent = msg;
+      return;
+    }
 
     photos = data.results.map(function(r) {
       var p = r.photo;

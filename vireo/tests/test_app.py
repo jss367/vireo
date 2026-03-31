@@ -610,6 +610,51 @@ def test_text_search_no_active_model(app_and_db):
     assert data["total_matches"] == 0
 
 
+def test_text_search_timm_model_returns_unsupported(app_and_db, monkeypatch):
+    """Text search returns error when active model is timm (no CLIP embeddings)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "iNat21 (EVA-02 Large)",
+            "model_type": "timm",
+            "model_str": "hf-hub:timm/eva02",
+            "downloaded": True,
+        },
+    )
+    resp = client.get("/api/photos/search?q=bird+on+water")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total_matches"] == 0
+    # Should indicate text search is not supported for this model type
+    assert data.get("reason") == "model_no_text_search"
+
+
+def test_text_search_no_embeddings_returns_reason(app_and_db, monkeypatch):
+    """Text search explains when no embeddings exist for the active model."""
+    app, _ = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "weights_path": "/fake/path",
+            "downloaded": True,
+        },
+    )
+    resp = client.get("/api/photos/search?q=bird+on+water")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total_matches"] == 0
+    # Should indicate no embeddings exist for this model
+    assert data.get("reason") == "no_embeddings"
+
+
 def test_settings_has_edit_history_config(app_and_db):
     """Settings page includes the max_edit_history config field."""
     app, _ = app_and_db
