@@ -189,6 +189,93 @@ body { padding-bottom: 36px; }
 .stage-enable {
   accent-color: var(--accent); margin-right: 4px;
 }
+
+/* ---------- Folder Browser Modal ---------- */
+.folder-browser-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.6);
+}
+.folder-browser-overlay.active { display: flex; align-items: center; justify-content: center; }
+.folder-browser-panel {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  width: 540px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.folder-browser-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+.folder-browser-header h3 { margin: 0; font-size: 15px; }
+.folder-browser-close {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.folder-browser-close:hover { color: var(--text-primary); }
+.folder-browser-shortcuts {
+  display: flex; gap: 6px; padding: 10px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+.folder-browser-shortcuts button {
+  font-size: 12px; padding: 4px 10px; border-radius: 4px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-color);
+  color: var(--text-secondary); cursor: pointer;
+}
+.folder-browser-shortcuts button:hover { color: var(--text-primary); border-color: var(--accent); }
+.folder-browser-breadcrumb {
+  padding: 8px 20px; font-size: 12px; color: var(--text-muted);
+  display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
+}
+.folder-browser-breadcrumb span { cursor: pointer; color: var(--accent); }
+.folder-browser-breadcrumb span:hover { text-decoration: underline; }
+.folder-browser-breadcrumb span.current { color: var(--text-primary); cursor: default; }
+.folder-browser-breadcrumb span.current:hover { text-decoration: none; }
+.folder-browser-list {
+  flex: 1; overflow-y: auto; padding: 4px 0; min-height: 200px;
+}
+.folder-browser-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 20px; cursor: pointer; font-size: 13px;
+}
+.folder-browser-item:hover { background: var(--bg-tertiary); }
+.folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.folder-browser-empty {
+  padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
+}
+.folder-browser-error {
+  padding: 12px 20px; color: #e55; font-size: 12px;
+}
+.folder-browser-loading {
+  padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
+}
+.folder-browser-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 20px; border-top: 1px solid var(--border-color);
+}
+.folder-browser-path {
+  font-size: 11px; color: var(--text-muted); flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-right: 12px;
+}
+.folder-browser-footer .btn { margin-left: 6px; }
+.folder-browser-new-folder {
+  display: flex; gap: 6px; padding: 6px 20px; align-items: center;
+}
+.folder-browser-new-folder input {
+  flex: 1; font-size: 13px; padding: 4px 8px; border-radius: 4px;
+  border: 1px solid var(--border-color); background: var(--bg-primary);
+  color: var(--text-primary); font-family: inherit;
+}
 </style>
 </head>
 <body>
@@ -1461,5 +1548,37 @@ async function browseForDestination() {
 }
 
 </script>
+
+<!-- Folder Browser Modal -->
+<div class="folder-browser-overlay" id="folderBrowserOverlay">
+  <div class="folder-browser-panel">
+    <div class="folder-browser-header">
+      <h3>Select Destination Folder</h3>
+      <button class="folder-browser-close" onclick="closeFolderBrowser()">&times;</button>
+    </div>
+    <div class="folder-browser-shortcuts">
+      <button onclick="browseTo(null)">Home</button>
+      <button onclick="browseTo('__pictures__')">Pictures</button>
+      <button onclick="browseTo('__volumes__')">Volumes</button>
+    </div>
+    <div class="folder-browser-breadcrumb" id="fbBreadcrumb"></div>
+    <div id="fbNewFolderRow" class="folder-browser-new-folder" style="display:none;">
+      <input type="text" id="fbNewFolderInput" placeholder="New folder name"
+             onkeydown="if(event.key==='Enter'){createNewFolder();} if(event.key==='Escape'){cancelNewFolder();}">
+      <button class="btn btn-secondary" onclick="createNewFolder()" style="font-size:12px;padding:4px 10px;">Create</button>
+      <button class="btn btn-secondary" onclick="cancelNewFolder()" style="font-size:12px;padding:4px 10px;">Cancel</button>
+    </div>
+    <div class="folder-browser-list" id="fbList"></div>
+    <div class="folder-browser-footer">
+      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;">New Folder</button>
+      <div style="display:flex;align-items:center;">
+        <span class="folder-browser-path" id="fbSelectedPath"></span>
+        <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;">Cancel</button>
+        <button class="btn btn-primary" id="fbSelectBtn" onclick="selectFolder()" style="font-size:12px;">Select</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
