@@ -2264,14 +2264,14 @@ class Database:
         if not pred:
             return None
 
-        # If accepting an alternative, reject sibling predictions for same detection+model
-        if pred["status"] == "alternative":
-            self.conn.execute(
-                """UPDATE predictions SET status = 'rejected'
-                   WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
-                (pred["detection_id"], pred["model"], prediction_id),
-            )
-            self.conn.commit()
+        # Reject sibling predictions for same detection+model
+        # (covers both accepting an alternative and accepting the top-1)
+        self.conn.execute(
+            """UPDATE predictions SET status = 'rejected'
+               WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
+            (pred["detection_id"], pred["model"], prediction_id),
+        )
+        self.conn.commit()
 
         # For grouped predictions, derive consensus from individual votes
         species = pred["species"]

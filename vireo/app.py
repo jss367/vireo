@@ -1497,7 +1497,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_reject_prediction(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, d.photo_id
+            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE pr.id = ?""",
@@ -1505,6 +1505,13 @@ def create_app(db_path, thumb_cache_dir=None):
         ).fetchone()
         db.update_prediction_status(pred_id, "rejected")
         if pred:
+            # Also reject sibling alternative predictions
+            db.conn.execute(
+                """UPDATE predictions SET status = 'rejected'
+                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
+                (pred["detection_id"], pred["model"], pred_id),
+            )
+            db.conn.commit()
             db.record_edit('prediction_reject',
                            f'Rejected prediction "{pred["species"]}"',
                            'rejected',
