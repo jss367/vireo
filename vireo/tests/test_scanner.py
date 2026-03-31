@@ -728,3 +728,56 @@ def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
     photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
     assert photo["latitude"] == 32.0
     assert photo["longitude"] == -117.0
+
+
+def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
+    """A companion with latitude=0.0 (equator) should be transferred to a RAW that has no GPS."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+                          file_size=25000000, file_mtime=1.0)
+
+    # JPEG is on the equator/prime meridian (0.0, 0.0) — falsy but valid
+    db.conn.execute(
+        "UPDATE photos SET latitude=0.0, longitude=0.0 WHERE id=?", (jpeg_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT filename, latitude, longitude FROM photos").fetchone()
+    assert photo["filename"] == "IMG.nef"
+    assert photo["latitude"] == 0.0
+    assert photo["longitude"] == 0.0
+
+
+def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
+    """A RAW with latitude=0.0 (equator) should NOT be overwritten by companion GPS."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    # JPEG has non-zero GPS, RAW sits at equator (0.0, 0.0) — must not be overwritten
+    db.conn.execute(
+        "UPDATE photos SET latitude=51.5, longitude=-0.1 WHERE id=?", (jpeg_id,))
+    db.conn.execute(
+        "UPDATE photos SET latitude=0.0, longitude=0.0 WHERE id=?", (raw_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
+    assert photo["latitude"] == 0.0
+    assert photo["longitude"] == 0.0

@@ -168,13 +168,13 @@ def _pair_raw_jpeg_companions(db):
         if primary_full["flag"] == "none" and companion_full["flag"] != "none":
             updates.append("flag = ?")
             params.append(companion_full["flag"])
-        if not primary_full["latitude"] and companion_full["latitude"]:
+        if primary_full["latitude"] is None and companion_full["latitude"] is not None:
             updates.extend(["latitude = ?", "longitude = ?"])
             params.extend([companion_full["latitude"], companion_full["longitude"]])
         if not primary_full["exif_data"] and companion_full["exif_data"]:
             updates.append("exif_data = ?")
             params.append(companion_full["exif_data"])
-        if not primary_full["focal_length"] and companion_full["focal_length"]:
+        if primary_full["focal_length"] is None and companion_full["focal_length"] is not None:
             updates.append("focal_length = ?")
             params.append(companion_full["focal_length"])
         if not primary_full["width"] and companion_full["width"]:
