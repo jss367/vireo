@@ -66,6 +66,7 @@ def ingest(
     folder_template="%Y/%m-%d",
     skip_duplicates=True,
     progress_callback=None,
+    extra_known_hashes=None,
 ):
     """Copy and organize photos from source to destination.
 
@@ -77,6 +78,11 @@ def ingest(
         folder_template: strftime format for destination subfolder
         skip_duplicates: if True, skip files whose hash matches existing file
         progress_callback: optional callable(current, total, filename)
+        extra_known_hashes: optional set of hashes to treat as known in
+            addition to those already in the DB.  Pass a shared mutable set
+            when calling ingest() in a loop so that files copied by earlier
+            iterations are treated as duplicates by later ones even though
+            they have not been scanned into the DB yet.
 
     Returns:
         dict with counts: copied, skipped_duplicate, failed, total
@@ -84,13 +90,16 @@ def ingest(
     files = discover_source_files(source_dir, file_types)
     total = len(files)
 
-    # Load known hashes from database for duplicate detection
+    # Load known hashes from database for duplicate detection and merge with
+    # any hashes accumulated by previous ingest() calls in the same session.
     known_hashes = set()
     if skip_duplicates:
         rows = db.conn.execute(
             "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
         ).fetchall()
         known_hashes = {r["file_hash"] for r in rows}
+        if extra_known_hashes:
+            known_hashes |= extra_known_hashes
 
     copied = 0
     skipped_duplicate = 0
