@@ -902,7 +902,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       rate_0: 'Clear rating', rate_1: 'Rate 1', rate_2: 'Rate 2',
       rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
       flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
-      undo: 'Undo', select_all: 'Select all', zoom: 'Toggle zoom',
+      undo: 'Undo', redo: 'Redo', select_all: 'Select all', zoom: 'Toggle zoom',
     },
   };
 
@@ -918,7 +918,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
       rate_4: '4', rate_5: '5',
       flag: 'p', reject: 'x', unflag: 'u',
-      undo: 'ctrl+z', select_all: 'ctrl+a', zoom: 'z',
+      undo: 'ctrl+z', redo: 'ctrl+shift+z', select_all: 'ctrl+a', zoom: 'z',
     },
   };
 
@@ -2170,11 +2170,26 @@ function formatDuration(seconds) {
     var list = document.getElementById('bpHistoryList');
     if (!list) return;
     var offset = append ? list.querySelectorAll('.bp-history-row').length : 0;
-    safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false})
-      .then(function(data) {
+    var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
+    var redoPromise = !append ? safeFetch('/api/redo/status', {}, {toast: false}).catch(function() { return null; }) : Promise.resolve(null);
+    Promise.all([historyPromise, redoPromise])
+      .then(function(results) {
+        var data = results[0];
+        var redoStatus = results[1];
         if (!append) list.innerHTML = '';
+        // Show redo banner if there's something to redo
+        if (!append && redoStatus && redoStatus.available) {
+          var redoRow = document.createElement('div');
+          redoRow.className = 'bp-history-redo';
+          redoRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);color:var(--text-muted);font-style:italic;';
+          redoRow.innerHTML = '<span style="opacity:0.5;min-width:70px;">redo</span>'
+            + '<span style="min-width:16px;text-align:center;">\u21B6</span>'
+            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(redoStatus.description) + '</span>'
+            + '<button onclick="doRedo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Redo</button>';
+          list.appendChild(redoRow);
+        }
         if (!data || data.length === 0) {
-          if (!append) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
+          if (!append && !list.querySelector('.bp-history-redo')) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
           return;
         }
         var mostRecentId = null;
@@ -2195,9 +2210,9 @@ function formatDuration(seconds) {
 
           row.innerHTML = '<span style="opacity:0.5;min-width:70px;">' + ago + '</span>'
             + '<span style="min-width:16px;text-align:center;">' + icon + '</span>'
-            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
-            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Undo</button>'
-                       : '<span style="min-width:42px;"></span>');
+            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
+            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Undo</button>'
+                       : '');
           list.appendChild(row);
         });
       })
@@ -2212,17 +2227,31 @@ function formatDuration(seconds) {
   }
 
   window.doUndo = function(btn) {
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
     safeFetch('/api/undo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
-          showToast('Undone: ' + data.undone, 'success');
+          showToast('Undone: ' + data.undone + ' — press Ctrl+Shift+Z to redo', 'success');
           _historySessionCount = Math.max(0, _historySessionCount - 1);
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
           loadEditHistory();
         }
       })
-      .catch(function() { btn.disabled = false; });
+      .catch(function() { if (btn) btn.disabled = false; });
+  };
+
+  window.doRedo = function(btn) {
+    if (btn) btn.disabled = true;
+    safeFetch('/api/redo', {method: 'POST'})
+      .then(function(data) {
+        if (data && data.ok) {
+          showToast('Redone: ' + data.redone, 'success');
+          _historySessionCount++;
+          document.getElementById('historyBadge').textContent = _historySessionCount || '';
+          loadEditHistory();
+        }
+      })
+      .catch(function() { if (btn) btn.disabled = false; });
   };
 
   function _bumpHistoryBadge() {

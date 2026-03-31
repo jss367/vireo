@@ -877,12 +877,12 @@ var _cfgPromise = (async function() {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
     _shortcuts = (cfg.keyboard_shortcuts || {}).browse || {
       rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
+      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
     return cfg;
   } catch(e) {
     _shortcuts = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
+      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
     return null;
   }
 })();
@@ -1840,12 +1840,19 @@ function clearSelection() {
   updateBatchBar();
 }
 
-/* ---------- Undo ---------- */
+/* ---------- Undo / Redo ---------- */
 async function undoLast() {
   try {
     var data = await safeFetch('/api/undo', { method: 'POST' });
-    showToast('Undone: ' + data.undone);
-    // Refresh grid
+    showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
+    resetAndLoad();
+  } catch(e) {}
+}
+
+async function redoLast() {
+  try {
+    var data = await safeFetch('/api/redo', { method: 'POST' });
+    showToast('Redone: ' + data.redone);
     resetAndLoad();
   } catch(e) {}
 }
@@ -2214,6 +2221,13 @@ document.addEventListener('keydown', function(e) {
   if (matchesShortcut(e, _shortcuts.undo)) {
     e.preventDefault();
     undoLast();
+    return;
+  }
+
+  // Redo
+  if (matchesShortcut(e, _shortcuts.redo)) {
+    e.preventDefault();
+    redoLast();
     return;
   }
 

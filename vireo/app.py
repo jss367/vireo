@@ -953,20 +953,46 @@ def create_app(db_path, thumb_cache_dir=None):
         non_undoable = Database._NON_UNDOABLE
         placeholders = ",".join("?" for _ in non_undoable)
         latest = db.conn.execute(
-            f"SELECT * FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders}) "
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (db._ws_id(), *non_undoable),
         ).fetchone()
         if not latest:
             return jsonify({"available": False, "description": "", "count": 0})
         total = db.conn.execute(
-            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders})",
+            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
             (db._ws_id(), *non_undoable),
         ).fetchone()[0]
         return jsonify({
             "available": True,
             "description": latest["description"],
             "count": total,
+        })
+
+    @app.route("/api/redo", methods=["POST"])
+    def api_redo():
+        db = _get_db()
+        result = db.redo_last_undo()
+        if result is None:
+            return json_error("nothing to redo")
+        return jsonify({"ok": True, "redone": result["description"]})
+
+    @app.route("/api/redo/status")
+    def api_redo_status():
+        db = _get_db()
+        from db import Database
+        non_undoable = Database._NON_UNDOABLE
+        placeholders = ",".join("?" for _ in non_undoable)
+        latest = db.conn.execute(
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (db._ws_id(), *non_undoable),
+        ).fetchone()
+        if not latest:
+            return jsonify({"available": False, "description": ""})
+        return jsonify({
+            "available": True,
+            "description": latest["description"],
         })
 
     @app.route("/api/edit-history")
