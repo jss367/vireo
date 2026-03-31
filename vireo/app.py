@@ -436,11 +436,15 @@ def create_app(db_path, thumb_cache_dir=None):
             except Exception:
                 pass
 
+        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+        taxonomy_available = os.path.exists(taxonomy_path)
+
         return jsonify({
             "total_photos": total_photos,
             "has_detections": pipeline_counts["detections"],
             "has_masks": pipeline_counts["masks"],
             "has_sharpness": pipeline_counts["sharpness"],
+            "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
                 "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
@@ -4798,6 +4802,7 @@ def create_app(db_path, thumb_cache_dir=None):
             model_id=body.get("model_id"),
             reclassify=body.get("reclassify", False),
             skip_classify=body.get("skip_classify", False),
+            download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
