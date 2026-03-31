@@ -2170,6 +2170,24 @@ def create_app(db_path, thumb_cache_dir=None):
                     volumes.append({"name": name, "path": path})
         return jsonify(volumes)
 
+    @app.route("/api/browse", methods=["GET"])
+    def api_browse():
+        """List subdirectories at a given path for folder browser."""
+        path = request.args.get("path", os.path.expanduser("~"))
+        if not os.path.isdir(path):
+            return json_error("path is not a valid directory")
+        dirs = []
+        try:
+            for name in sorted(os.listdir(path), key=str.casefold):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(path, name)
+                if os.path.isdir(full):
+                    dirs.append({"name": name, "path": full})
+        except PermissionError:
+            return json_error("permission denied", 403)
+        return jsonify({"path": path, "dirs": dirs})
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
