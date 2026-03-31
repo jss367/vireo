@@ -311,10 +311,6 @@ def create_app(db_path, thumb_cache_dir=None):
     def review():
         return render_template("review.html")
 
-    @app.route("/import")
-    def import_page():
-        return render_template("import.html")
-
     @app.route("/lightroom")
     def lightroom_page():
         return render_template("lightroom.html")
