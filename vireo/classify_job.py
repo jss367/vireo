@@ -639,6 +639,7 @@ def _classify_photos(
                         "filename": photo["filename"],
                         "embedding": embedding,
                         "taxonomy": None,
+                        "alternatives": [],
                         "_existing": True,
                     }
                 )
