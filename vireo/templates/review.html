@@ -958,6 +958,31 @@ function renderPredictionCard(pred) {
     }
   }
 
+  // Alternative predictions
+  var alternativesHtml = '';
+  if (pred.alternatives && pred.alternatives.length > 0 && pred.status === 'pending') {
+    var altItems = '';
+    pred.alternatives.forEach(function(alt) {
+      var altPct = Math.round(alt.confidence * 100);
+      var altColor = altPct >= 70 ? 'var(--accent)' : altPct >= 50 ? 'var(--warning)' : 'var(--danger)';
+      altItems +=
+        '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">' +
+          '<span style="flex:1;font-size:13px;">' + escapeHtml(alt.species) + '</span>' +
+          '<div style="flex:0 0 60px;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;">' +
+            '<div style="width:' + altPct + '%;height:100%;background:' + altColor + ';border-radius:3px;"></div>' +
+          '</div>' +
+          '<span style="flex:0 0 35px;font-size:11px;color:var(--text-secondary);text-align:right;">' + altPct + '%</span>' +
+          '<button onclick="acceptAlternative(' + alt.id + ',' + pred.id + ')" ' +
+            'style="flex:0 0 auto;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;">Accept</button>' +
+        '</div>';
+    });
+    alternativesHtml =
+      '<details style="margin-top:6px;border-top:1px solid var(--border-primary);padding-top:4px;">' +
+        '<summary style="font-size:11px;color:var(--text-secondary);cursor:pointer;user-select:none;">Alternatives (' + pred.alternatives.length + ')</summary>' +
+        '<div style="padding:4px 0;">' + altItems + '</div>' +
+      '</details>';
+  }
+
   // Build image with optional bounding box overlay
   var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
@@ -991,6 +1016,7 @@ function renderPredictionCard(pred) {
       '<div class="confidence-bar"><div class="confidence-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>' +
       '<div class="card-confidence">' + confPct + '% confidence' + (pred.group_id ? ' (consensus)' : '') + '</div>' +
       otherModelsHtml +
+      alternativesHtml +
       actionsHtml +
       groupMembersHtml(pred) +
     '</div>' +
@@ -1026,6 +1052,18 @@ async function rejectPrediction(predId) {
   } catch(e) { return; }
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'rejected';
+  renderAll();
+}
+
+async function acceptAlternative(altId, parentPredId) {
+  try {
+    await safeFetch('/api/predictions/' + altId + '/accept', { method: 'POST' });
+  } catch(e) { return; }
+  // Update local state: mark alternative as accepted, parent as rejected
+  var parent = predictions.find(function(p) { return p.id === parentPredId; });
+  if (parent) parent.status = 'rejected';
+  // Reload predictions to get fresh state
+  await loadPredictions();
   renderAll();
 }
 
