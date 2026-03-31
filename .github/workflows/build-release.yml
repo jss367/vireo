@@ -323,13 +323,15 @@ jobs:
 
       # Linux: build directly so cargo output streams to logs in real time.
       # The tauri-action is a black box — if it hangs we get no diagnostics.
+      # Skip RPM — the Tauri RPM bundler hangs indefinitely on large sidecar
+      # binaries (PyInstaller + PyTorch). deb + AppImage cover Linux users.
       - name: Build Tauri app (Linux direct)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           echo "=== Starting Tauri build at $(date -u) ==="
           cd src-tauri
-          npx tauri build --target ${{ matrix.rust-target }} 2>&1
+          npx tauri build --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
           echo "=== Tauri build finished at $(date -u) ==="
 
       # Windows: no signing needed, use tauri-action.
