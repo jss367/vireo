@@ -39,6 +39,12 @@ class FakeRunner:
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
 
+    def set_steps(self, job_id, steps):
+        pass
+
+    def update_step(self, job_id, step_id, **kwargs):
+        pass
+
 
 def _make_job(job_id="classify-test"):
     return {
