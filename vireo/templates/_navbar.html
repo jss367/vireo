@@ -53,6 +53,18 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .navbar a:hover { color: var(--text-primary); }
 .navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.navbar a[data-nav-id].dragging {
+  opacity: 0.4;
+}
+.navbar .nav-drop-indicator {
+  width: 2px;
+  height: 24px;
+  background: var(--accent);
+  align-self: center;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin: 0 -1px;
+}
 .navbar a .hk {
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -716,22 +728,22 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/pipeline">Pipeline</a>
-  <a href="/lightroom">Lightroom</a>
-  <a href="/jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
-  <a href="/pipeline/review">Pipeline Review</a>
-  <a href="/review">Review</a>
-  <a href="/cull">Cull</a>
-  <a href="/browse">Browse</a>
-  <a href="/map">Map</a>
-  <a href="/variants">Variants</a>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/audit">Audit</a>
-  <a href="/compare">Compare</a>
-  <a href="/workspace">Workspace</a>
-  <a href="/keywords">Keywords</a>
-  <a href="/shortcuts">Shortcuts</a>
-  <a href="/settings">Settings</a>
+  <a href="/pipeline" data-nav-id="pipeline">Pipeline</a>
+  <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
+  <a href="/jobs" data-nav-id="jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
+  <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
+  <a href="/review" data-nav-id="review">Review</a>
+  <a href="/cull" data-nav-id="cull">Cull</a>
+  <a href="/browse" data-nav-id="browse">Browse</a>
+  <a href="/map" data-nav-id="map">Map</a>
+  <a href="/variants" data-nav-id="variants">Variants</a>
+  <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
+  <a href="/audit" data-nav-id="audit">Audit</a>
+  <a href="/compare" data-nav-id="compare">Compare</a>
+  <a href="/workspace" data-nav-id="workspace">Workspace</a>
+  <a href="/keywords" data-nav-id="keywords">Keywords</a>
+  <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
+  <a href="/settings" data-nav-id="settings">Settings</a>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
@@ -768,10 +780,126 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 </div>
 
 <script>
-/* ---------- Active page highlighting ---------- */
+/* ---------- Nav reorder + Active page highlighting ---------- */
 (function() {
+  // Reorder nav links from workspace config
+  function reorderNavLinks(order) {
+    var navbar = document.querySelector('.navbar');
+    var spacer = navbar.querySelector('.nav-spacer');
+    var links = {};
+    navbar.querySelectorAll('a[data-nav-id]').forEach(function(a) {
+      links[a.dataset.navId] = a;
+    });
+    // Move ordered links before the spacer
+    order.forEach(function(id) {
+      if (links[id]) {
+        navbar.insertBefore(links[id], spacer);
+        delete links[id];
+      }
+    });
+    // Append any remaining links not in the saved order (new pages)
+    Object.keys(links).forEach(function(id) {
+      navbar.insertBefore(links[id], spacer);
+    });
+  }
+
+  fetch('/api/workspaces/active/config')
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) {
+      if (cfg.nav_order && Array.isArray(cfg.nav_order)) {
+        reorderNavLinks(cfg.nav_order);
+      }
+    })
+    .catch(function() {}); // silently ignore — default order is fine
+
+  // Drag-and-drop reordering
+  (function initNavDragDrop() {
+    var navbar = document.querySelector('.navbar');
+    var draggedEl = null;
+    var indicator = null;
+
+    function getNavLinks() {
+      return Array.from(navbar.querySelectorAll('a[data-nav-id]'));
+    }
+
+    function createIndicator() {
+      var el = document.createElement('span');
+      el.className = 'nav-drop-indicator';
+      return el;
+    }
+
+    function removeIndicator() {
+      if (indicator && indicator.parentNode) {
+        indicator.parentNode.removeChild(indicator);
+      }
+      indicator = null;
+    }
+
+    function saveOrder() {
+      var order = getNavLinks().map(function(a) { return a.dataset.navId; });
+      fetch('/api/workspaces/active/nav-order', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({nav_order: order})
+      });
+    }
+
+    getNavLinks().forEach(function(link) {
+      link.draggable = true;
+
+      link.addEventListener('dragstart', function(e) {
+        draggedEl = this;
+        this.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', this.dataset.navId);
+      });
+
+      link.addEventListener('dragend', function() {
+        this.classList.remove('dragging');
+        removeIndicator();
+        draggedEl = null;
+      });
+
+      link.addEventListener('dragover', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        removeIndicator();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        indicator = createIndicator();
+        if (e.clientX < midX) {
+          navbar.insertBefore(indicator, this);
+        } else {
+          navbar.insertBefore(indicator, this.nextSibling);
+        }
+      });
+
+      link.addEventListener('drop', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        if (e.clientX < midX) {
+          navbar.insertBefore(draggedEl, this);
+        } else {
+          navbar.insertBefore(draggedEl, this.nextSibling);
+        }
+        removeIndicator();
+        saveOrder();
+      });
+    });
+
+    // Remove indicator when dragging leaves the navbar
+    navbar.addEventListener('dragleave', function(e) {
+      if (!navbar.contains(e.relatedTarget)) {
+        removeIndicator();
+      }
+    });
+  })();
+
+  // Active page highlighting
   var path = location.pathname;
-  // Skip the brand anchor (.brand) — only highlight actual nav items
   var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
   var exactMatch = null;
   for (var i = 0; i < navLinks.length; i++) {
@@ -783,7 +911,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   if (exactMatch) {
     exactMatch.classList.add('active');
   } else {
-    // Fallback: longest prefix match
     var best = null;
     var bestLen = 0;
     for (var i = 0; i < navLinks.length; i++) {
