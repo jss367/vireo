@@ -1382,6 +1382,25 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
+    @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
+    def api_set_nav_order():
+        """Save navbar link order for the active workspace."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_order = body.get("nav_order")
+        if not isinstance(nav_order, list):
+            return jsonify({"error": "nav_order must be a list"}), 400
+        ws = db.get_workspace(db._active_workspace_id)
+        existing = {}
+        if ws and ws["config_overrides"]:
+            try:
+                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
+        existing["nav_order"] = nav_order
+        db.update_workspace(db._active_workspace_id, config_overrides=existing)
+        return jsonify({"ok": True, "nav_order": nav_order})
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
