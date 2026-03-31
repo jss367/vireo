@@ -56,6 +56,7 @@
                style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
         <input type="text" id="customModelPath" placeholder="/path/to/weights.bin"
                style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:2;">
+        <button onclick="browseForWeights()" class="tauri-only" style="display:none;background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;white-space:nowrap;">Browse&hellip;</button>
         <button onclick="addCustomModel()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Add</button>
       </div>
     </div>
@@ -1659,7 +1660,8 @@ async function loadTaxonomy() {
       html += '</div>';
     } else {
       html += '<div style="margin-bottom:8px;">';
-      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded. The taxonomy is used for species classification and keyword categorization.</div>';
+      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded.</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);margin-top:4px;">The taxonomy adds taxonomic hierarchy to predictions (order, family, genus), enables filtering by group (e.g. Raptors, Waterfowl), and categorizes keywords as species. Classification works without it — if you don\'t need these features, you can skip this.</div>';
       html += '</div>';
       html += '<button onclick="downloadTaxonomy()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
     }
@@ -1897,6 +1899,13 @@ async function browseForOutputDir() {
   if (path) {
     document.getElementById('cfgDarktableOutputDir').value = path;
     saveConfig();
+  }
+}
+
+async function browseForWeights() {
+  var path = await pickFile({ title: 'Select model weights file' });
+  if (path) {
+    document.getElementById('customModelPath').value = path;
   }
 }
 
