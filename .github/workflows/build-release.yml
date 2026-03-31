@@ -41,6 +41,7 @@ jobs:
             label: linux-x86_64
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     name: Build (${{ matrix.label }})
 
     steps:
@@ -161,6 +162,23 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev
 
+      # ── Resource monitor (Linux only) ──────────────────────
+      - name: Start resource monitor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "=== System info ==="
+          nproc && free -h && df -h /
+          # Log memory/CPU every 30s in background
+          while true; do
+            echo "--- $(date -u '+%H:%M:%S') ---"
+            free -h | grep Mem
+            ps -eo pid,pcpu,pmem,rss,comm --sort=-rss | head -6
+            echo ""
+            sleep 30
+          done > /tmp/resource-monitor.log 2>&1 &
+          echo $! > /tmp/resource-monitor.pid
+
       # ── Tauri build ───────────────────────────────────────
       # Try with Apple signing on macOS. If it fails, fall back to unsigned.
       - name: Build Tauri app (with signing)
@@ -184,9 +202,21 @@ jobs:
         if: steps.tauri-signed.outcome == 'failure'
         run: echo "::warning::macOS code signing failed — building unsigned. Users will need to right-click > Open on first launch."
 
+      # Linux: build directly so cargo output streams to logs in real time.
+      # macOS/Windows: use tauri-action (handles signing, works fine).
+      - name: Build Tauri app (Linux direct)
+        id: tauri-linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "=== Starting Tauri build at $(date -u) ==="
+          cd src-tauri
+          npx tauri build --target ${{ matrix.rust-target }} 2>&1
+          echo "=== Tauri build finished at $(date -u) ==="
+
       - name: Build Tauri app (unsigned fallback)
         id: tauri-unsigned
-        if: steps.tauri-signed.outcome == 'failure' || steps.tauri-signed.outcome == 'skipped'
+        if: runner.os != 'Linux' && (steps.tauri-signed.outcome == 'failure' || steps.tauri-signed.outcome == 'skipped')
         continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
@@ -209,6 +239,15 @@ jobs:
           fi
           echo "Artifacts found despite build error (updater signing likely failed):"
           echo "$FOUND"
+
+      # ── Dump resource monitor (Linux only) ─────────────────
+      - name: Dump resource monitor log
+        if: runner.os == 'Linux' && always()
+        shell: bash
+        run: |
+          kill "$(cat /tmp/resource-monitor.pid)" 2>/dev/null || true
+          echo "=== Resource usage during build ==="
+          cat /tmp/resource-monitor.log
 
       # ── Upload artifacts ──────────────────────────────────
       - name: Upload build artifacts
