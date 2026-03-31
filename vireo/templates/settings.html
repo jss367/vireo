@@ -243,6 +243,23 @@
     </div>
   </div>
 
+  <!-- Browse Grid -->
+  <div class="section">
+    <div class="section-title collapsible-header" onclick="toggleSection(this)">
+      Browse Grid
+      <span class="toggle-icon">&#9654;</span>
+    </div>
+    <div class="collapsible-body">
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+        <div class="setting-label">
+          Card overlay fields
+          <small>Choose which fields appear below each thumbnail in the browse grid.</small>
+        </div>
+        <div id="cfgCardFieldsContainer" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;width:100%;"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Detection & Classification -->
   <div class="section">
     <div class="section-title collapsible-header" onclick="toggleSection(this)">
@@ -850,6 +867,8 @@ async function loadConfig() {
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
+    // Load browse card fields
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
@@ -930,6 +949,42 @@ async function loadConfig() {
   } catch(e) {}
 }
 
+var CARD_FIELD_OPTIONS = [
+  { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'rating', label: 'Rating', desc: 'Star rating' },
+  { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
+  { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
+  { id: 'species', label: 'Species', desc: 'Species identification badges' },
+  { id: 'dimensions', label: 'Dimensions', desc: 'Image width \u00d7 height' },
+  { id: 'file_size', label: 'File size', desc: 'e.g. "4.2 MB"' },
+  { id: 'capture_date', label: 'Capture date', desc: 'Date photo was taken' },
+  { id: 'extension', label: 'Extension', desc: 'File type (JPG, RAW, etc.)' },
+  { id: 'quality_score', label: 'Quality score', desc: 'Pipeline quality score' },
+];
+
+function loadCardFieldCheckboxes(activeFields) {
+  var container = document.getElementById('cfgCardFieldsContainer');
+  container.innerHTML = '';
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var checked = activeFields.indexOf(opt.id) !== -1 ? ' checked' : '';
+    container.innerHTML += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;">' +
+      '<input type="checkbox" id="cfgCardField_' + opt.id + '" value="' + opt.id + '"' + checked +
+      ' onchange="saveConfig()" style="accent-color:var(--accent);">' +
+      '<span>' + opt.label + '</span>' +
+      '<span style="color:var(--text-dim);font-size:11px;">' + opt.desc + '</span>' +
+    '</label>';
+  });
+}
+
+function getSelectedCardFields() {
+  var fields = [];
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var cb = document.getElementById('cfgCardField_' + opt.id);
+    if (cb && cb.checked) fields.push(opt.id);
+  });
+  return fields;
+}
+
 function saveConfig() {
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(async function() {
@@ -963,6 +1018,7 @@ function saveConfig() {
           thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
           preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
+          browse_card_fields: getSelectedCardFields(),
           detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
           detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,
           top_k_predictions: parseInt(document.getElementById('cfgTopK').value, 10) || 5,
