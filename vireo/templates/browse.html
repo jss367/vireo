@@ -1240,6 +1240,9 @@ function resetAndLoad() {
   allLoaded = false;
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Leaving collection mode when applying non-collection filters (sort, rating,
+  // date, keyword, folder) so the summary stays in sync with the visible grid.
+  activeCollectionId = null;
   closeDetail();
   document.getElementById('grid').innerHTML = '';
   loadPhotos();
