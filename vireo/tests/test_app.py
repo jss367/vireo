@@ -1152,3 +1152,105 @@ def test_shortcuts_cheat_sheet_in_navbar(app_and_db):
     resp = client.get('/browse')
     html = resp.data.decode()
     assert 'shortcutsCheatSheet' in html
+
+
+def test_api_browse_home(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse without path returns home directory listing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sub = tmp_path / "Documents"
+    sub.mkdir()
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/browse')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['path'] == str(tmp_path)
+    names = [d['name'] for d in data['dirs']]
+    assert 'Documents' in names
+
+
+def test_api_browse_with_path(app_and_db, tmp_path):
+    """GET /api/browse?path=... returns subdirectories."""
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    (parent / "2024").mkdir()
+    (parent / "2025").mkdir()
+    (parent / "file.txt").write_text("hi")  # should not appear
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={parent}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['path'] == str(parent)
+    names = [d['name'] for d in data['dirs']]
+    assert '2024' in names
+    assert '2025' in names
+    assert 'file.txt' not in names
+
+
+def test_api_browse_hides_dotfiles(app_and_db, tmp_path):
+    """GET /api/browse hides dot-prefixed directories."""
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "visible").mkdir()
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={tmp_path}')
+    data = resp.get_json()
+    names = [d['name'] for d in data['dirs']]
+    assert 'visible' in names
+    assert '.hidden' not in names
+
+
+def test_api_browse_invalid_path(app_and_db):
+    """GET /api/browse with invalid path returns 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/browse?path=/nonexistent/path/xyz')
+    assert resp.status_code == 400
+
+
+def test_api_browse_mkdir(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates a new directory."""
+    new_dir = str(tmp_path / "new_folder")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['name'] == 'new_folder'
+    assert data['path'] == new_dir
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_nested(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates nested directories."""
+    new_dir = str(tmp_path / "a" / "b" / "c")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_relative_path(app_and_db):
+    """POST /api/browse/mkdir rejects relative paths."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": "relative/path"},
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_api_browse_mkdir_missing_path(app_and_db):
+    """POST /api/browse/mkdir rejects missing path."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={},
+                       content_type='application/json')
+    assert resp.status_code == 400
