@@ -175,6 +175,7 @@ class Database:
                 description  TEXT NOT NULL,
                 new_value    TEXT,
                 is_batch     INTEGER DEFAULT 0,
+                undone       INTEGER DEFAULT 0,
                 created_at   TEXT DEFAULT (datetime('now'))
             );
 
@@ -337,6 +338,7 @@ class Database:
                     description  TEXT NOT NULL,
                     new_value    TEXT,
                     is_batch     INTEGER DEFAULT 0,
+                    undone       INTEGER DEFAULT 0,
                     created_at   TEXT DEFAULT (datetime('now'))
                 );
                 CREATE TABLE IF NOT EXISTS edit_history_items (
@@ -347,6 +349,12 @@ class Database:
                     new_value TEXT
                 );
             """)
+
+        # Add undone column to edit_history if missing (migration for existing databases)
+        try:
+            self.conn.execute("SELECT undone FROM edit_history LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE edit_history ADD COLUMN undone INTEGER DEFAULT 0")
 
         # Workspace migration for existing databases
         # Only triggers for legacy DBs that have predictions with photo_id
@@ -2370,7 +2378,15 @@ class Database:
     # -- Edit History --
 
     def record_edit(self, action_type, description, new_value, items, is_batch=False):
-        """Record an edit action with per-photo before/after values."""
+        """Record an edit action with per-photo before/after values.
+
+        Clears the redo stack (any undone entries) since a new action invalidates them.
+        """
+        # Clear redo stack — new edit invalidates undone entries
+        self.conn.execute(
+            "DELETE FROM edit_history WHERE workspace_id = ? AND undone = 1",
+            (self._ws_id(),),
+        )
         cur = self.conn.execute(
             "INSERT INTO edit_history (workspace_id, action_type, description, new_value, is_batch) VALUES (?, ?, ?, ?, ?)",
             (self._ws_id(), action_type, description, new_value, 1 if is_batch else 0),
@@ -2391,7 +2407,7 @@ class Database:
             """SELECT eh.*, COUNT(ehi.id) as item_count
                FROM edit_history eh
                LEFT JOIN edit_history_items ehi ON ehi.edit_id = eh.id
-               WHERE eh.workspace_id = ?
+               WHERE eh.workspace_id = ? AND eh.undone = 0
                GROUP BY eh.id
                ORDER BY eh.created_at DESC, eh.id DESC
                LIMIT ? OFFSET ?""",
@@ -2406,10 +2422,11 @@ class Database:
         """Undo the most recent undoable edit. Returns the undone entry dict, or None.
 
         Non-undoable entries (prediction_reject, discard) are skipped.
+        The entry is marked as undone (not deleted) so it can be redone.
         """
         placeholders = ",".join("?" for _ in self._NON_UNDOABLE)
         entry = self.conn.execute(
-            f"SELECT * FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders}) "
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (self._ws_id(), *self._NON_UNDOABLE),
         ).fetchone()
@@ -2421,6 +2438,39 @@ class Database:
             (entry['id'],),
         ).fetchall()
 
+        self._apply_undo(entry, items)
+
+        self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry['id'],))
+        self.conn.commit()
+        return entry
+
+    def redo_last_undo(self):
+        """Redo the most recently undone edit. Returns the entry dict, or None.
+
+        Replays in chronological order (ASC) so sequential undos are redone correctly.
+        """
+        placeholders = ",".join("?" for _ in self._NON_UNDOABLE)
+        entry = self.conn.execute(
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
+            (self._ws_id(), *self._NON_UNDOABLE),
+        ).fetchone()
+        if not entry:
+            return None
+        entry = dict(entry)
+        items = self.conn.execute(
+            "SELECT * FROM edit_history_items WHERE edit_id = ?",
+            (entry['id'],),
+        ).fetchall()
+
+        self._apply_redo(entry, items)
+
+        self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry['id'],))
+        self.conn.commit()
+        return entry
+
+    def _apply_undo(self, entry, items):
+        """Reverse the effects of an edit entry."""
         for item in items:
             old_val = item['old_value']
             pid = item['photo_id']
@@ -2437,7 +2487,6 @@ class Database:
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
-                # Restore prediction status if this was a prediction accept
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     self.update_prediction_status(int(old_val), 'pending')
             elif entry['action_type'] == 'keyword_remove':
@@ -2447,17 +2496,41 @@ class Database:
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
 
-        self.conn.execute("DELETE FROM edit_history WHERE id = ?", (entry['id'],))
-        self.conn.commit()
-        return entry
+    def _apply_redo(self, entry, items):
+        """Re-apply the effects of an undone edit entry."""
+        for item in items:
+            new_val = item['new_value']
+            pid = item['photo_id']
+            if entry['action_type'] == 'rating':
+                self.update_photo_rating(pid, int(new_val) if new_val else 0)
+                old_val = item['old_value']
+                if old_val != new_val:
+                    self.remove_pending_changes(pid, 'rating', old_val)
+                    self.queue_change(pid, 'rating', new_val)
+            elif entry['action_type'] == 'flag':
+                self.update_photo_flag(pid, entry['new_value'])
+            elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
+                self.tag_photo(pid, int(entry['new_value']))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
+                                       (int(entry['new_value']),)).fetchone()
+                if kw:
+                    self.queue_change(pid, 'keyword_add', kw['name'])
+                if entry['action_type'] == 'prediction_accept' and item['old_value']:
+                    self.update_prediction_status(int(item['old_value']), 'accepted')
+            elif entry['action_type'] == 'keyword_remove':
+                self.untag_photo(pid, int(entry['new_value']))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
+                                       (int(entry['new_value']),)).fetchone()
+                if kw:
+                    self.queue_change(pid, 'keyword_remove', kw['name'])
 
     def _prune_edit_history(self):
-        """Delete oldest entries beyond the configured max."""
+        """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
         import config as cfg
         max_entries = cfg.get('max_edit_history') or 1000
         self.conn.execute(
-            """DELETE FROM edit_history WHERE workspace_id = ? AND id NOT IN (
-                 SELECT id FROM edit_history WHERE workspace_id = ?
+            """DELETE FROM edit_history WHERE workspace_id = ? AND undone = 0 AND id NOT IN (
+                 SELECT id FROM edit_history WHERE workspace_id = ? AND undone = 0
                  ORDER BY created_at DESC, id DESC LIMIT ?
                )""",
             (self._ws_id(), self._ws_id(), max_entries),
