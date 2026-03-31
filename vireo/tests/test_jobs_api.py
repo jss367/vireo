@@ -249,6 +249,18 @@ def test_job_history_includes_parsed_tree(app_and_db, tmp_path):
     assert 'summary' in entry
 
 
+def test_jobs_list_includes_active_workspace_id(app_and_db):
+    """GET /api/jobs includes active_workspace_id."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.get('/api/jobs')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'active_workspace_id' in data
+    assert data['active_workspace_id'] == db._active_workspace_id
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
