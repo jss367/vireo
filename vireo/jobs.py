@@ -208,6 +208,8 @@ class JobRunner:
 
         result = job.get("result")
         if result and isinstance(result, dict):
+            if result.get("summary"):
+                return result["summary"]
             parts = []
             for k, v in result.items():
                 if isinstance(v, dict):

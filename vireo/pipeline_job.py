@@ -291,7 +291,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             cache_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
             os.makedirs(cache_dir, exist_ok=True)
 
-            count = 0
+            generated = 0
+            skipped = 0
+            failed = 0
 
             while True:
                 try:
@@ -306,16 +308,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     break
                 photo_id, photo_path = item
                 try:
-                    generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
-                    count += 1
-                    stages["thumbnails"]["count"] = count
+                    thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+                    already_exists = os.path.exists(thumb_path)
+                    result_path = generate_thumbnail(photo_id, photo_path, cache_dir, size=thumb_size)
+                    if result_path is None:
+                        failed += 1
+                    elif already_exists:
+                        skipped += 1
+                    else:
+                        generated += 1
+                    stages["thumbnails"]["count"] = generated + skipped
                 except Exception:
+                    failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
 
             stages["thumbnails"]["status"] = "completed"
+            from thumbnails import format_summary as thumb_summary
+            thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
             runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=f"{count} thumbnails")
-            result["stages"]["thumbnails"] = {"generated": count}
+                               summary=thumb_summary(thumb_result))
+            result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
             errors.append(f"[thumbnails] Fatal: {e}")
             log.exception("Pipeline thumbnail stage failed")
