@@ -90,6 +90,7 @@
       <div class="action-bar">
         <button class="btn btn-primary" onclick="runUntrackedCheck()">Check for Untracked</button>
         <button class="btn btn-secondary" onclick="importAllUntracked()">Import All</button>
+        <button class="btn btn-secondary" id="sendToPipelineBtn" onclick="sendToPipeline()" style="display:none;">Send to Pipeline</button>
         <span class="status-msg" id="untrackedStatus"></span>
       </div>
       <div id="untrackedContent"><div class="empty-msg">Click "Check for Untracked" to scan.</div></div>
@@ -260,6 +261,8 @@ async function runUntrackedCheck() {
       ? untrackedData.length + ' untracked file(s) found'
       : 'No untracked files';
     status.style.color = untrackedData.length > 0 ? 'var(--warning)' : 'var(--accent)';
+    document.getElementById('sendToPipelineBtn').style.display =
+      untrackedData.length > 0 ? '' : 'none';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     status.style.color = 'var(--danger)';
@@ -304,6 +307,15 @@ async function importAllUntracked() {
     });
   } catch(e) {}
   runUntrackedCheck();
+}
+
+function sendToPipeline() {
+  var folders = [];
+  untrackedData.forEach(function(u) {
+    if (u.folder && folders.indexOf(u.folder) === -1) folders.push(u.folder);
+  });
+  var params = folders.map(function(f) { return 'folder=' + encodeURIComponent(f); }).join('&');
+  window.location.href = '/pipeline?' + params;
 }
 
 </script>

@@ -253,7 +253,7 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
@@ -449,7 +449,7 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -471,7 +471,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:

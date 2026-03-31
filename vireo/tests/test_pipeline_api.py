@@ -137,3 +137,55 @@ def test_import_full_copy_true_still_requires_destination(setup):
             assert resp.status_code == 400
     finally:
         shutil.rmtree(src, ignore_errors=True)
+
+
+def test_pipeline_accepts_sources_list(setup):
+    """Pipeline endpoint should accept sources as a list of folders."""
+    app, db_path = setup
+    src1 = tempfile.mkdtemp()
+    src2 = tempfile.mkdtemp()
+    try:
+        # Create minimal JPEG in each
+        jpeg_bytes = bytes([
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9
+        ])
+        for src in [src1, src2]:
+            with open(os.path.join(src, "test.jpg"), "wb") as f:
+                f.write(jpeg_bytes)
+
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [src1, src2],
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert "job_id" in data
+    finally:
+        shutil.rmtree(src1, ignore_errors=True)
+        shutil.rmtree(src2, ignore_errors=True)
+
+
+def test_pipeline_accepts_skip_classify(setup):
+    """Pipeline endpoint should accept skip_classify parameter."""
+    app, db_path = setup
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+
+
+def test_pipeline_accepts_preview_max_size(setup):
+    """Pipeline endpoint should accept preview_max_size parameter."""
+    app, db_path = setup
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "collection_id": 1,
+            "preview_max_size": 2560,
+        })
+        assert resp.status_code == 200

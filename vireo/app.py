@@ -311,9 +311,9 @@ def create_app(db_path, thumb_cache_dir=None):
     def review():
         return render_template("review.html")
 
-    @app.route("/import")
-    def import_page():
-        return render_template("import.html")
+    @app.route("/lightroom")
+    def lightroom_page():
+        return render_template("lightroom.html")
 
     @app.route("/audit")
     def audit():
@@ -4695,11 +4695,18 @@ def create_app(db_path, thumb_cache_dir=None):
 
         body = request.get_json(silent=True) or {}
         source = body.get("source")
+        sources = body.get("sources")
         collection_id = body.get("collection_id")
 
-        if not source and not collection_id:
-            return json_error("source or collection_id required")
-        if source and not os.path.isdir(source):
+        if not source and not sources and not collection_id:
+            return json_error("source, sources, or collection_id required")
+
+        # Validate all source directories exist
+        if sources:
+            for s in sources:
+                if not os.path.isdir(s):
+                    return json_error(f"source directory not found: {s}")
+        elif source and not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
@@ -4709,6 +4716,7 @@ def create_app(db_path, thumb_cache_dir=None):
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
+            sources=sources,
             destination=destination,
             file_types=body.get("file_types", "both"),
             folder_template=body.get("folder_template", "%Y/%m-%d"),
@@ -4717,8 +4725,10 @@ def create_app(db_path, thumb_cache_dir=None):
             labels_files=body.get("labels_files"),
             model_id=body.get("model_id"),
             reclassify=body.get("reclassify", False),
+            skip_classify=body.get("skip_classify", False),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_regroup=body.get("skip_regroup", False),
+            preview_max_size=body.get("preview_max_size", 1920),
         )
 
         runner = app._job_runner
@@ -4731,7 +4741,9 @@ def create_app(db_path, thumb_cache_dir=None):
             "pipeline", work,
             config={
                 "source": source,
+                "sources": sources,
                 "collection_id": collection_id,
+                "skip_classify": params.skip_classify,
                 "skip_extract_masks": params.skip_extract_masks,
                 "skip_regroup": params.skip_regroup,
             },

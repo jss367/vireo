@@ -39,6 +39,39 @@ class FakeRunner:
         pass
 
 
+def test_pipeline_params_has_skip_classify():
+    """PipelineParams should support skip_classify flag."""
+    params = PipelineParams(collection_id=1, skip_classify=True)
+    assert params.skip_classify is True
+
+
+def test_pipeline_params_skip_classify_defaults_false():
+    params = PipelineParams(collection_id=1)
+    assert params.skip_classify is False
+
+
+def test_pipeline_params_has_preview_max_size():
+    """PipelineParams should support preview_max_size."""
+    params = PipelineParams(collection_id=1, preview_max_size=2560)
+    assert params.preview_max_size == 2560
+
+
+def test_pipeline_params_preview_max_size_defaults_1920():
+    params = PipelineParams(collection_id=1)
+    assert params.preview_max_size == 1920
+
+
+def test_pipeline_params_sources_list():
+    """PipelineParams should accept a list of source folders."""
+    params = PipelineParams(sources=["/photos/card1", "/photos/card2"])
+    assert params.sources == ["/photos/card1", "/photos/card2"]
+
+
+def test_pipeline_params_sources_defaults_none():
+    params = PipelineParams(collection_id=1)
+    assert params.sources is None
+
+
 def test_pipeline_params_defaults():
     """PipelineParams should have sensible defaults."""
     params = PipelineParams(collection_id=42)
@@ -54,6 +87,9 @@ def test_pipeline_params_defaults():
     assert params.reclassify is False
     assert params.skip_extract_masks is False
     assert params.skip_regroup is False
+    assert params.sources is None
+    assert params.skip_classify is False
+    assert params.preview_max_size == 1920
 
 
 def test_pipeline_params_all_fields():
@@ -61,6 +97,7 @@ def test_pipeline_params_all_fields():
     params = PipelineParams(
         collection_id=1,
         source="/src",
+        sources=["/src1", "/src2"],
         destination="/dst",
         file_types="raw",
         folder_template="%Y",
@@ -71,13 +108,18 @@ def test_pipeline_params_all_fields():
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
+        skip_classify=True,
+        preview_max_size=2560,
     )
     assert params.source == "/src"
+    assert params.sources == ["/src1", "/src2"]
     assert params.destination == "/dst"
     assert params.file_types == "raw"
     assert params.reclassify is True
     assert params.skip_extract_masks is True
     assert params.skip_regroup is True
+    assert params.skip_classify is True
+    assert params.preview_max_size == 2560
 
 
 def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
@@ -253,7 +295,7 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     assert len(stage_events) > 0
 
     # Each stages dict should have all expected stage keys
-    expected_keys = {"scan", "thumbnails", "model_loader", "classify", "extract_masks", "regroup"}
+    expected_keys = {"scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup"}
     for _, _, data in stage_events:
         assert expected_keys.issubset(data["stages"].keys())
 
@@ -445,3 +487,80 @@ def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
     db2.set_active_workspace(ws_id)
     photos = db2.get_collection_photos(result["collection_id"], per_page=999999)
     assert len(photos) == 3
+
+
+def test_pipeline_previews_stage_runs(tmp_path, monkeypatch):
+    """Pipeline should run a previews stage after thumbnails."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Create an empty collection so classify has something to query
+    col_id = db.add_collection("Test", "[]")
+
+    # Patch scanner, thumbnails, etc. to be no-ops — we just need to verify
+    # the previews stage appears in the result
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+        preview_max_size=1920,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The stages dict in progress events should include "previews"
+    stage_events = [e[2]["stages"] for e in runner.events
+                    if e[1] == "progress" and "stages" in e[2]]
+    assert any("previews" in s for s in stage_events), \
+        "Expected 'previews' stage in progress events"
+
+
+def test_pipeline_params_sources_used_over_source():
+    """When sources is provided, it should take precedence over source."""
+    params = PipelineParams(source="/single", sources=["/a", "/b"])
+    assert params.sources == ["/a", "/b"]
+
+
+def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
+    """When skip_classify=True, model_loader and classify should be skipped."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        collection_id=1,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Check that classify was skipped in the last stages event
+    last_stages = None
+    for _, evt_type, data in reversed(runner.events):
+        if evt_type == "progress" and "stages" in data:
+            last_stages = data["stages"]
+            break
+
+    assert last_stages is not None
+    assert last_stages["classify"]["status"] == "skipped"
+    assert last_stages["model_loader"]["status"] == "skipped"

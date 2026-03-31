@@ -712,9 +712,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/import">Import</a>
-  <a href="/jobs">Jobs</a>
   <a href="/pipeline">Pipeline</a>
+  <a href="/lightroom">Lightroom</a>
+  <a href="/jobs">Jobs</a>
   <a href="/pipeline/review">Pipeline Review</a>
   <a href="/review">Review</a>
   <a href="/cull">Cull</a>
@@ -797,7 +797,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 (function() {
   // Map from navigation shortcut key → href path
   var NAV_ROUTES = {
-    import: '/import', pipeline: '/pipeline', pipeline_review: '/pipeline/review',
+    pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', audit: '/audit',
     compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
@@ -805,7 +805,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   };
 
   var NAV_DEFAULTS = {
-    import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+    pipeline: 'i', lightroom: 'l', pipeline_review: 'e', review: 'r',
     cull: 'c', browse: 'b', map: 'm', variants: 'v',
     dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
     shortcuts: '/', settings: ',', keywords: 'k'
