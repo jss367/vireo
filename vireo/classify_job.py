@@ -243,7 +243,6 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 primary = get_primary_detection(detections)
                 if primary:
                     det_box = primary["box"]
-                    det_conf = primary["confidence"]
                     subject_size = det_box["w"] * det_box["h"]
 
                     if compute_sharpness is not None:
@@ -273,8 +272,6 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
                         db.update_photo_quality(
                             photo["id"],
-                            detection_box=det_box,
-                            detection_conf=det_conf,
                             subject_sharpness=subject_sharpness,
                             subject_size=subject_size,
                             quality_score=quality,
@@ -283,8 +280,6 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                     else:
                         db.update_photo_quality(
                             photo["id"],
-                            detection_box=det_box,
-                            detection_conf=det_conf,
                         )
 
     except (ImportError, RuntimeError):

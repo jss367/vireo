@@ -766,7 +766,7 @@ class Database:
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
-                    detection_box, detection_conf, subject_sharpness, subject_size, quality_score,
+                    subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path"""
 
     # Columns for single-photo detail queries (includes exif_data JSON)
@@ -1387,23 +1387,17 @@ class Database:
     def update_photo_quality(
         self,
         photo_id,
-        detection_box=None,
-        detection_conf=None,
         subject_sharpness=None,
         subject_size=None,
         quality_score=None,
         sharpness=None,
     ):
         """Update all quality-related scores for a photo."""
-        import json as _json
-
         self.conn.execute(
-            """UPDATE photos SET detection_box=?, detection_conf=?,
+            """UPDATE photos SET
                subject_sharpness=?, subject_size=?, quality_score=?, sharpness=?
                WHERE id=?""",
             (
-                _json.dumps(detection_box) if detection_box else None,
-                detection_conf,
                 subject_sharpness,
                 subject_size,
                 quality_score,
@@ -1473,7 +1467,7 @@ class Database:
             folder_ids: optional list of folder IDs to filter by.
                         If None, returns all workspace photos without masks.
         Returns:
-            list of dicts with id, folder_id, filename, detection_box, detection_conf
+            list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
         ws_id = self._ws_id()
         if folder_ids:

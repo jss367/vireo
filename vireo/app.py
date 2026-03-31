@@ -4249,7 +4249,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_extract_masks():
         """Run SAM2 mask extraction as a background job.
 
-        Requires MegaDetector detection_box to already be computed (run classify first).
+        Requires MegaDetector detections to already be computed (run classify first).
         For each photo with a detection but no mask, loads a working-resolution proxy,
         runs SAM2 to refine the bounding box into a pixel mask, and saves it.
         """
@@ -4286,16 +4286,33 @@ def create_app(db_path, thumb_cache_dir=None):
 
             # Get photos that have detections but no masks
             if collection_id:
-                photos = thread_db.get_collection_photos(
+                coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                photos = [
-                    p
-                    for p in photos
-                    if p["detection_box"] and not thread_db.conn.execute(
-                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                    ).fetchone()[0]
-                ]
+                # Filter to photos with detections but no masks
+                ws_id = thread_db._active_workspace_id
+                photos = []
+                for p in coll_photos:
+                    if p["mask_path"]:
+                        continue
+                    det = thread_db.conn.execute(
+                        """SELECT box_x, box_y, box_w, box_h, detector_confidence
+                           FROM detections
+                           WHERE photo_id = ? AND workspace_id = ?
+                           ORDER BY detector_confidence DESC LIMIT 1""",
+                        (p["id"], ws_id),
+                    ).fetchone()
+                    if det:
+                        photos.append({
+                            "id": p["id"],
+                            "folder_id": p["folder_id"],
+                            "filename": p["filename"],
+                            "detection_box": json.dumps({
+                                "x": det["box_x"], "y": det["box_y"],
+                                "w": det["box_w"], "h": det["box_h"],
+                            }),
+                            "detection_conf": det["detector_confidence"],
+                        })
             else:
                 photos = thread_db.get_photos_missing_masks()
 
@@ -4675,13 +4692,31 @@ def create_app(db_path, thumb_cache_dir=None):
                       mask_path, subject_tenengrad, bg_tenengrad,
                       crop_complete, bg_separation,
                       subject_clip_high, subject_clip_low, subject_y_median,
-                      phash_crop, subject_size, detection_box, detection_conf
+                      phash_crop, subject_size
                FROM photos WHERE id = ?""",
             (photo_id,),
         ).fetchone()
         if not row:
             return json_error("Photo not found", 404)
-        return jsonify(dict(row))
+        result = dict(row)
+        # Get primary detection from detections table
+        det = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h, detector_confidence
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        if det:
+            result["detection_box"] = {
+                "x": det["box_x"], "y": det["box_y"],
+                "w": det["box_w"], "h": det["box_h"],
+            }
+            result["detection_conf"] = det["detector_confidence"]
+        else:
+            result["detection_box"] = None
+            result["detection_conf"] = None
+        return jsonify(result)
 
     @app.route("/masks/<filename>")
     def serve_mask(filename):
@@ -5158,12 +5193,25 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         result = dict(photo)
-        # Remove binary embedding from response
+        # Remove binary embedding and dead detection columns from response
         result.pop("embedding", None)
+        result.pop("detection_box", None)
+        result.pop("detection_conf", None)
 
-        # Parse detection_box from JSON string (legacy field, may still be on photo)
-        if result.get("detection_box") and isinstance(result["detection_box"], str):
-            result["detection_box"] = json.loads(result["detection_box"])
+        # Get primary detection from detections table
+        det = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h, detector_confidence
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        if det:
+            result["detection_box"] = {
+                "x": det["box_x"], "y": det["box_y"],
+                "w": det["box_w"], "h": det["box_h"],
+            }
+            result["detection_conf"] = det["detector_confidence"]
 
         # Get detections for this photo (from detections table)
         dets = db.get_detections(photo_id)
@@ -5211,7 +5259,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         db = _get_db()
         photo = db.conn.execute(
-            "SELECT p.filename, p.detection_box, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
             (photo_id,),
         ).fetchone()
         if not photo:
@@ -5222,10 +5270,21 @@ def create_app(db_path, thumb_cache_dir=None):
         if img is None:
             return "Could not load image", 500
 
-        det_box = photo["detection_box"]
+        # Get primary detection box from detections table
+        det_row = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        det_box = None
+        if det_row:
+            det_box = {
+                "x": det_row["box_x"], "y": det_row["box_y"],
+                "w": det_row["box_w"], "h": det_row["box_h"],
+            }
         if det_box:
-            if isinstance(det_box, str):
-                det_box = json.loads(det_box)
             iw, ih = img.size
             padding = cfg.load().get("detection_padding", 0.2)
             pad_w = det_box["w"] * padding

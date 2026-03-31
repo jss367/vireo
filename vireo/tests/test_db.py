@@ -610,9 +610,9 @@ def test_get_dashboard_stats_with_data(tmp_path):
     """Returns correct aggregations across all stat types."""
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'timestamp': '2024-06-15T10:30:00', 'rating': 3, 'flag': 'flagged',
-         'quality_score': 0.85, 'detection_conf': 0.9},
+         'quality_score': 0.85},
         {'timestamp': '2024-06-20T14:00:00', 'rating': 5, 'flag': 'none',
-         'quality_score': 0.42, 'detection_conf': 0.0},
+         'quality_score': 0.42},
         {'timestamp': '2024-07-01T08:00:00', 'rating': 3, 'flag': 'none'},
     ])
 
