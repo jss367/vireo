@@ -757,7 +757,7 @@ class Database:
             (path, name, parent_id),
         )
         self.conn.commit()
-        if cur.lastrowid:
+        if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
             row = self.conn.execute(
@@ -813,7 +813,7 @@ class Database:
             ),
         )
         self.conn.commit()
-        if cur.lastrowid:
+        if cur.rowcount > 0:
             return cur.lastrowid
         row = self.conn.execute(
             "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
