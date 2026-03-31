@@ -46,6 +46,8 @@ echo ""
 # --- Sync version across all manifests ---
 echo "==> Syncing version..."
 python scripts/sync_version.py "$NEW_VERSION"
+echo "==> Updating Cargo.lock..."
+(cd src-tauri && cargo generate-lockfile)
 echo ""
 
 # --- Local build (only when NOT publishing — CI handles publish builds) ---
