@@ -72,6 +72,21 @@ def main():
     sep = ";" if platform.system() == "Windows" else ":"
     vireo_dir = os.path.join(repo_root, "vireo")
 
+    # Locate open_clip package directory for bundling its data files
+    open_clip_data_args = []
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("open_clip")
+        if spec and spec.origin:
+            open_clip_dir = os.path.dirname(spec.origin)
+            bpe_file = os.path.join(open_clip_dir, "bpe_simple_vocab_16e6.txt.gz")
+            if os.path.exists(bpe_file):
+                open_clip_data_args = [
+                    "--add-data", f"{bpe_file}{sep}open_clip",
+                ]
+    except ImportError:
+        pass
+
     pyinstaller_args = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
@@ -114,7 +129,7 @@ def main():
         "--hidden-import", "timm_classifier",
         "--hidden-import", "xmp",
         "--hidden-import", "catalog",
-    ]
+    ] + open_clip_data_args
 
     if args.ci:
         # Exclude packages that bloat the binary but aren't needed at runtime

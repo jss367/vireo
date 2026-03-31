@@ -1258,7 +1258,8 @@ class Database:
         classified = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) FROM photos p
                 {join_clause}
-                JOIN predictions pred ON pred.photo_id = p.id AND pred.workspace_id = ?
+                JOIN detections det ON det.photo_id = p.id AND det.workspace_id = ?
+                JOIN predictions pred ON pred.detection_id = det.id
                 {where}""",
             [ws] + params,
         ).fetchone()[0]
@@ -1269,13 +1270,14 @@ class Database:
         # predicted different species for the same photo.
         top_species = self.conn.execute(
             f"""WITH best_pred AS (
-                    SELECT pred.photo_id, pred.species,
+                    SELECT det.photo_id, pred.species,
                            ROW_NUMBER() OVER (
-                               PARTITION BY pred.photo_id
+                               PARTITION BY det.photo_id
                                ORDER BY pred.confidence DESC
                            ) AS rn
                     FROM predictions pred
-                    WHERE pred.workspace_id = ? AND pred.status != 'rejected'
+                    JOIN detections det ON det.id = pred.detection_id
+                    WHERE det.workspace_id = ? AND pred.status != 'rejected'
                 )
                 SELECT bp.species, COUNT(DISTINCT p.id) as count
                 FROM photos p

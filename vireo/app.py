@@ -19,6 +19,7 @@ from db import Database
 from flask import (
     Flask,
     Response,
+    g,
     jsonify,
     make_response,
     redirect,
@@ -178,10 +179,16 @@ def create_app(db_path, thumb_cache_dir=None):
         return jsonify({"error": msg}), status
 
     def _get_db():
-        """Get a Database instance. Creates a new connection per request."""
-        if not hasattr(app, "_db") or app._db is None:
-            app._db = Database(db_path)
-        return app._db
+        """Get a Database instance. One connection per request via Flask g."""
+        if "db" not in g:
+            g.db = Database(db_path)
+        return g.db
+
+    @app.teardown_appcontext
+    def _close_db(exc):
+        db = g.pop("db", None)
+        if db is not None:
+            db.conn.close()
 
     @app.route("/api/health")
     def api_health():
