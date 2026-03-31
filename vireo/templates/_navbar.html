@@ -1806,6 +1806,21 @@ async function safeFetch(url, opts, options) {
   return JSON.parse(text);
 }
 
+/* ---------- Open in External Editor ---------- */
+async function openInEditor(photoIds) {
+  if (!photoIds || !photoIds.length) return;
+  try {
+    var data = await safeFetch('/api/photos/open-external', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds}),
+    });
+    showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
+  } catch(e) {
+    showToast(e.message || 'Failed to open in editor');
+  }
+}
+
 /* ---------- Safe EventSource ---------- */
 function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
