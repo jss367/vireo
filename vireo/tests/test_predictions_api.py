@@ -3,12 +3,19 @@ import json
 
 
 def _seed_predictions(db):
-    """Add two predictions in the same group for the first two photos."""
+    """Add predictions using the detection-based schema."""
     photos = db.get_photos()
-    db.add_prediction(photos[0]['id'], 'Northern Cardinal', 0.95, 'test-model',
-                      category='new', group_id=1)
-    db.add_prediction(photos[1]['id'], 'House Sparrow', 0.80, 'test-model',
-                      category='new', group_id=1)
+    # Create detections for the first two photos
+    det1_ids = db.save_detections(photos[0]['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det2_ids = db.save_detections(photos[1]['id'], [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85}
+    ])
+    db.add_prediction(detection_id=det1_ids[0], species='Northern Cardinal',
+                      confidence=0.95, model='test-model', category='new', group_id='g1')
+    db.add_prediction(detection_id=det2_ids[0], species='House Sparrow',
+                      confidence=0.80, model='test-model', category='new', group_id='g1')
     return photos
 
 
@@ -61,10 +68,13 @@ def test_accept_prediction(app_and_db):
     photos = _seed_predictions(db)
     client = app.test_client()
 
-    # Get the Northern Cardinal prediction (not in a group for this test —
+    # Get the Blue Jay prediction (not in a group for this test —
     # add a standalone prediction to avoid group-accept behavior)
-    db.add_prediction(photos[2]['id'], 'Blue Jay', 0.90, 'test-model',
-                      category='new', group_id=None)
+    det3_ids = db.save_detections(photos[2]['id'], [
+        {"box": {"x": 0.3, "y": 0.3, "w": 0.3, "h": 0.3}, "confidence": 0.88}
+    ])
+    db.add_prediction(detection_id=det3_ids[0], species='Blue Jay', confidence=0.90,
+                      model='test-model', category='new', group_id=None)
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"
     ).fetchone()
@@ -116,7 +126,7 @@ def test_get_prediction_group(app_and_db):
     _seed_predictions(db)
     client = app.test_client()
 
-    resp = client.get('/api/predictions/group/1')
+    resp = client.get('/api/predictions/group/g1')
     assert resp.status_code == 200
     data = resp.get_json()
     assert isinstance(data, list)
@@ -162,13 +172,17 @@ def test_prediction_group_apply(app_and_db):
 
     # Predictions for the pick should be accepted
     pick_preds = db.conn.execute(
-        "SELECT status FROM predictions WHERE photo_id = ?", (pick_id,)
+        """SELECT pr.status FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""", (pick_id,)
     ).fetchall()
     assert all(p['status'] == 'accepted' for p in pick_preds)
 
     # Predictions for the reject should be rejected
     reject_preds = db.conn.execute(
-        "SELECT status FROM predictions WHERE photo_id = ?", (reject_id,)
+        """SELECT pr.status FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""", (reject_id,)
     ).fetchall()
     assert all(p['status'] == 'rejected' for p in reject_preds)
 
@@ -191,3 +205,33 @@ def test_predictions_for_collection(app_and_db):
     assert len(data) == 1
     assert data[0]['species'] == 'Northern Cardinal'
     assert data[0]['photo_id'] == photos[0]['id']
+
+
+def test_predictions_include_alternatives(app_and_db):
+    """GET /api/predictions includes alternatives for each prediction."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    det_ids = db.save_detections(photos[0]['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
+                      model='test-model', status='pending')
+    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+                      model='test-model', status='alternative')
+    db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
+                      model='test-model', status='alternative')
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    data = resp.get_json()
+
+    # Should return only pending predictions at top level
+    pending = [p for p in data if p['status'] == 'pending']
+    assert len(pending) == 1
+    assert pending[0]['species'] == 'Robin'
+
+    # Each pending prediction should have alternatives attached
+    assert 'alternatives' in pending[0]
+    alt_species = [a['species'] for a in pending[0]['alternatives']]
+    assert alt_species == ['Sparrow', 'Finch']
