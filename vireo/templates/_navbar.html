@@ -1065,7 +1065,14 @@ function openLightbox(photoId, filename, photoList) {
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
   var editorBtn = document.getElementById('lightboxOpenEditor');
-  if (editorBtn) editorBtn.onclick = function() { openInEditor([photoId]); };
+  if (editorBtn) {
+    if (typeof openInEditor === 'function') {
+      editorBtn.style.display = '';
+      editorBtn.onclick = function() { openInEditor([photoId]); };
+    } else {
+      editorBtn.style.display = 'none';
+    }
+  }
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
 
