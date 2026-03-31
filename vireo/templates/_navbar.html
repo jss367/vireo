@@ -716,22 +716,22 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/pipeline">Pipeline</a>
-  <a href="/lightroom">Lightroom</a>
-  <a href="/jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
-  <a href="/pipeline/review">Pipeline Review</a>
-  <a href="/review">Review</a>
-  <a href="/cull">Cull</a>
-  <a href="/browse">Browse</a>
-  <a href="/map">Map</a>
-  <a href="/variants">Variants</a>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/audit">Audit</a>
-  <a href="/compare">Compare</a>
-  <a href="/workspace">Workspace</a>
-  <a href="/keywords">Keywords</a>
-  <a href="/shortcuts">Shortcuts</a>
-  <a href="/settings">Settings</a>
+  <a href="/pipeline" data-nav-id="pipeline">Pipeline</a>
+  <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
+  <a href="/jobs" data-nav-id="jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
+  <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
+  <a href="/review" data-nav-id="review">Review</a>
+  <a href="/cull" data-nav-id="cull">Cull</a>
+  <a href="/browse" data-nav-id="browse">Browse</a>
+  <a href="/map" data-nav-id="map">Map</a>
+  <a href="/variants" data-nav-id="variants">Variants</a>
+  <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
+  <a href="/audit" data-nav-id="audit">Audit</a>
+  <a href="/compare" data-nav-id="compare">Compare</a>
+  <a href="/workspace" data-nav-id="workspace">Workspace</a>
+  <a href="/keywords" data-nav-id="keywords">Keywords</a>
+  <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
+  <a href="/settings" data-nav-id="settings">Settings</a>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
@@ -768,10 +768,40 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 </div>
 
 <script>
-/* ---------- Active page highlighting ---------- */
+/* ---------- Nav reorder + Active page highlighting ---------- */
 (function() {
+  // Reorder nav links from workspace config
+  function reorderNavLinks(order) {
+    var navbar = document.querySelector('.navbar');
+    var spacer = navbar.querySelector('.nav-spacer');
+    var links = {};
+    navbar.querySelectorAll('a[data-nav-id]').forEach(function(a) {
+      links[a.dataset.navId] = a;
+    });
+    // Move ordered links before the spacer
+    order.forEach(function(id) {
+      if (links[id]) {
+        navbar.insertBefore(links[id], spacer);
+        delete links[id];
+      }
+    });
+    // Append any remaining links not in the saved order (new pages)
+    Object.keys(links).forEach(function(id) {
+      navbar.insertBefore(links[id], spacer);
+    });
+  }
+
+  fetch('/api/workspaces/active/config')
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) {
+      if (cfg.nav_order && Array.isArray(cfg.nav_order)) {
+        reorderNavLinks(cfg.nav_order);
+      }
+    })
+    .catch(function() {}); // silently ignore — default order is fine
+
+  // Active page highlighting
   var path = location.pathname;
-  // Skip the brand anchor (.brand) — only highlight actual nav items
   var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
   var exactMatch = null;
   for (var i = 0; i < navLinks.length; i++) {
@@ -783,7 +813,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   if (exactMatch) {
     exactMatch.classList.add('active');
   } else {
-    // Fallback: longest prefix match
     var best = null;
     var bestLen = 0;
     for (var i = 0; i < navLinks.length; i++) {
