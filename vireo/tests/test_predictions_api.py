@@ -235,3 +235,43 @@ def test_predictions_include_alternatives(app_and_db):
     assert 'alternatives' in pending[0]
     alt_species = [a['species'] for a in pending[0]['alternatives']]
     assert alt_species == ['Sparrow', 'Finch']
+
+
+def test_accept_alternative_prediction(app_and_db):
+    """Accepting an alternative marks it accepted, rejects the top-1, and adds keyword."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    det_ids = db.save_detections(photos[0]['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
+                      model='test-model', status='pending')
+    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+                      model='test-model', status='alternative')
+
+    # Get the alternative prediction ID
+    alt = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Sparrow'"
+    ).fetchone()
+
+    client = app.test_client()
+    resp = client.post(f'/api/predictions/{alt["id"]}/accept')
+    assert resp.status_code == 200
+
+    # Alternative should be accepted
+    row = db.conn.execute(
+        "SELECT status FROM predictions WHERE species = 'Sparrow'"
+    ).fetchone()
+    assert row['status'] == 'accepted'
+
+    # Original top-1 should be rejected
+    row = db.conn.execute(
+        "SELECT status FROM predictions WHERE species = 'Robin'"
+    ).fetchone()
+    assert row['status'] == 'rejected'
+
+    # Sparrow keyword should be on the photo
+    keywords = db.get_photo_keywords(photos[0]['id'])
+    kw_names = {k['name'] for k in keywords}
+    assert 'Sparrow' in kw_names
