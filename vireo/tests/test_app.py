@@ -1207,3 +1207,50 @@ def test_api_browse_invalid_path(app_and_db):
     client = app.test_client()
     resp = client.get('/api/browse?path=/nonexistent/path/xyz')
     assert resp.status_code == 400
+
+
+def test_api_browse_mkdir(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates a new directory."""
+    new_dir = str(tmp_path / "new_folder")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['name'] == 'new_folder'
+    assert data['path'] == new_dir
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_nested(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates nested directories."""
+    new_dir = str(tmp_path / "a" / "b" / "c")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_relative_path(app_and_db):
+    """POST /api/browse/mkdir rejects relative paths."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": "relative/path"},
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_api_browse_mkdir_missing_path(app_and_db):
+    """POST /api/browse/mkdir rejects missing path."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={},
+                       content_type='application/json')
+    assert resp.status_code == 400

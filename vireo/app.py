@@ -2188,6 +2188,21 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("permission denied", 403)
         return jsonify({"path": path, "dirs": dirs})
 
+    @app.route("/api/browse/mkdir", methods=["POST"])
+    def api_browse_mkdir():
+        """Create a new directory."""
+        body = request.get_json(silent=True) or {}
+        path = body.get("path", "")
+        if not path:
+            return json_error("path is required")
+        if not os.path.isabs(path):
+            return json_error("path must be absolute")
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            return json_error(str(e), 500)
+        return jsonify({"name": os.path.basename(path), "path": path})
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
