@@ -497,12 +497,12 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
         pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0, timestamp=ts)
         photo_ids.append(pid)
 
-    # Add predictions (all same species)
+    # Add detections and predictions (all same species)
     for pid in photo_ids:
-        db.conn.execute(
-            "INSERT INTO predictions (photo_id, workspace_id, species, confidence) VALUES (?, ?, ?, ?)",
-            (pid, ws_id, "Robin", 0.95),
-        )
+        det_ids = db.save_detections(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+        ], detector_model="MDV6")
+        db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
 
     if with_embeddings:
         # Add similar embeddings for first 3 (they should cluster), different for 4th

@@ -921,6 +921,7 @@ var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
 var showDetectionBoxes = false;
+var cardFields = ["filename", "rating", "flag", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
@@ -957,6 +958,70 @@ function applyBrowseConfig(cfg) {
       slider.value = cfg.browse_thumb_default;
       slider.dispatchEvent(new Event('input'));
     }
+  }
+  if (Array.isArray(cfg.browse_card_fields)) cardFields = cfg.browse_card_fields;
+}
+
+function formatFileSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+function renderCardField(field, p) {
+  switch (field) {
+    case 'filename':
+      return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'rating':
+      if (p.rating > 0) {
+        var stars = '';
+        for (var i = 0; i < p.rating; i++) stars += '&#9733;';
+        return '<span class="grid-card-rating">' + stars + '</span>';
+      }
+      return '';
+    case 'flag':
+      if (p.flag === 'flagged') return '<span class="grid-card-flag flag-flagged">P</span>';
+      if (p.flag === 'rejected') return '<span class="grid-card-flag flag-rejected">X</span>';
+      return '';
+    case 'sharpness':
+      if (p.sharpness != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>';
+      return '';
+    case 'species':
+      if (p.species && p.species.length > 0) {
+        var maxShow = 3;
+        var html = '<div class="species-badges" style="position:static;padding:0;">';
+        p.species.slice(0, maxShow).forEach(function(s) {
+          html += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+        });
+        if (p.species.length > maxShow) {
+          html += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+        }
+        html += '</div>';
+        return html;
+      }
+      return '';
+    case 'dimensions':
+      if (p.width && p.height) return '<span style="font-size:10px;color:var(--text-ghost);">' + p.width + ' \u00d7 ' + p.height + '</span>';
+      return '';
+    case 'file_size':
+      if (p.file_size) return '<span style="font-size:10px;color:var(--text-ghost);">' + formatFileSize(p.file_size) + '</span>';
+      return '';
+    case 'capture_date':
+      if (p.timestamp) {
+        var d = p.timestamp.replace('T', ' ').substring(0, 16);
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(p.timestamp) + '">' + d + '</span>';
+      }
+      return '';
+    case 'extension':
+      if (p.extension) return '<span style="font-size:10px;color:var(--text-ghost);">' + escapeHtml(p.extension.toUpperCase()) + '</span>';
+      return '';
+    case 'quality_score':
+      if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    default:
+      return '';
   }
 }
 
@@ -1633,13 +1698,6 @@ function renderGrid() {
   var html = '';
   photos.forEach(function(p, idx) {
     var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
-    var stars = '';
-    if (p.rating > 0) {
-      for (var i = 0; i < p.rating; i++) stars += '&#9733;';
-    }
-    var flagHtml = '';
-    if (p.flag === 'flagged') flagHtml = '<span class="grid-card-flag flag-flagged">P</span>';
-    else if (p.flag === 'rejected') flagHtml = '<span class="grid-card-flag flag-rejected">X</span>';
 
     // Detection box overlay
     var boxHtml = '';
@@ -1659,9 +1717,9 @@ function renderGrid() {
     }
     var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
 
-    // Species badges from accepted predictions (via photo_keywords)
+    // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
     var speciesBadgeHtml = '';
-    if (p.species && p.species.length > 0) {
+    if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
       var maxShow = 3;
       var shown = p.species.slice(0, maxShow);
       speciesBadgeHtml = '<div class="species-badges">';
@@ -1674,6 +1732,12 @@ function renderGrid() {
       speciesBadgeHtml += '</div>';
     }
 
+    // Build info area from configured card fields
+    var infoHtml = '';
+    cardFields.forEach(function(field) {
+      infoHtml += renderCardField(field, p);
+    });
+
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
@@ -1683,12 +1747,7 @@ function renderGrid() {
         speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
-        '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
-        '<div class="grid-card-meta">' +
-          (stars ? '<span class="grid-card-rating">' + stars + '</span>' : '') +
-          flagHtml +
-          (p.sharpness != null ? '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>' : '') +
-        '</div>' +
+        infoHtml +
       '</div>' +
     '</div>';
   });

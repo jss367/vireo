@@ -25,6 +25,7 @@ DEFAULTS = {
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
     # --- Display ---
+    "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,

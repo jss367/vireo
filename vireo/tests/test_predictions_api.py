@@ -1,20 +1,22 @@
 """Tests for prediction API routes (/api/predictions/*)."""
 import json
 
+_DET = {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+
+
+def _make_detection(db, photo_id):
+    """Create a detection for a photo and return its ID."""
+    return db.save_detections(photo_id, [_DET], detector_model="MDV6")[0]
+
 
 def _seed_predictions(db):
     """Add predictions using the detection-based schema."""
     photos = db.get_photos()
-    # Create detections for the first two photos
-    det1_ids = db.save_detections(photos[0]['id'], [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
-    det2_ids = db.save_detections(photos[1]['id'], [
-        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85}
-    ])
-    db.add_prediction(detection_id=det1_ids[0], species='Northern Cardinal',
+    det0 = _make_detection(db, photos[0]['id'])
+    det1 = _make_detection(db, photos[1]['id'])
+    db.add_prediction(detection_id=det0, species='Northern Cardinal',
                       confidence=0.95, model='test-model', category='new', group_id='g1')
-    db.add_prediction(detection_id=det2_ids[0], species='House Sparrow',
+    db.add_prediction(detection_id=det1, species='House Sparrow',
                       confidence=0.80, model='test-model', category='new', group_id='g1')
     return photos
 
@@ -70,10 +72,8 @@ def test_accept_prediction(app_and_db):
 
     # Get the Blue Jay prediction (not in a group for this test —
     # add a standalone prediction to avoid group-accept behavior)
-    det3_ids = db.save_detections(photos[2]['id'], [
-        {"box": {"x": 0.3, "y": 0.3, "w": 0.3, "h": 0.3}, "confidence": 0.88}
-    ])
-    db.add_prediction(detection_id=det3_ids[0], species='Blue Jay', confidence=0.90,
+    det2 = _make_detection(db, photos[2]['id'])
+    db.add_prediction(detection_id=det2, species='Blue Jay', confidence=0.90,
                       model='test-model', category='new', group_id=None)
     pred = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Blue Jay'"

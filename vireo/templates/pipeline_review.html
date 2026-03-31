@@ -86,6 +86,40 @@ body { padding-bottom: 36px; }
 .filter-btn:hover { border-color: var(--text-muted); }
 .filter-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .filter-btn .count { margin-left: 4px; opacity: 0.7; }
+.species-filter-wrap {
+  display: flex;
+  align-items: center;
+  position: relative;
+  margin-left: 8px;
+}
+.species-filter-wrap input {
+  padding: 5px 26px 5px 10px;
+  border-radius: 16px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  width: 160px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.species-filter-wrap input::placeholder { color: var(--text-muted); }
+.species-filter-wrap input:focus { border-color: var(--accent); }
+.species-filter-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+  display: none;
+}
+.species-filter-clear:hover { color: var(--text-primary); }
 .confidence-slider-wrap {
   display: flex;
   align-items: center;
@@ -161,7 +195,7 @@ body { padding-bottom: 36px; }
 /* Photo cards */
 .photo-card {
   flex-shrink: 0;
-  width: 160px;
+  width: var(--photo-card-size, 160px);
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid transparent;
@@ -949,6 +983,15 @@ input[type="range"]::-moz-range-thumb {
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
       <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
+      <div class="species-filter-wrap">
+        <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
+        <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
+      </div>
+      <div class="confidence-slider-wrap" title="Thumbnail size">
+        <span>&#9638;</span>
+        <input type="range" id="thumbSizeSlider" min="100" max="320" step="20" value="160"
+               oninput="updateThumbSize(this.value)">
+      </div>
       <div class="confidence-slider-wrap">
         <label for="confSlider">Min confidence:</label>
         <input type="range" id="confSlider" min="0" max="100" value="40" oninput="setMinConfidence(this.value)">
@@ -1023,6 +1066,33 @@ input[type="range"]::-moz-range-thumb {
 var pipelineResults = null;
 var activeFilter = 'all';
 var minConfidence = 40;
+var speciesFilter = '';
+
+function setSpeciesFilter(val) {
+  speciesFilter = val.toLowerCase();
+  var clearBtn = document.getElementById('speciesFilterClear');
+  if (clearBtn) clearBtn.style.display = val ? 'block' : 'none';
+  renderResults();
+}
+
+function clearSpeciesFilter() {
+  speciesFilter = '';
+  var input = document.getElementById('speciesFilterInput');
+  if (input) input.value = '';
+  var clearBtn = document.getElementById('speciesFilterClear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  renderResults();
+}
+
+function encounterMatchesSpecies(enc) {
+  if (!speciesFilter) return true;
+  if (!enc.species_predictions || enc.species_predictions.length === 0) return false;
+  var threshold = minConfidence / 100;
+  return enc.species_predictions.some(function(sp) {
+    if (sp.species.toLowerCase().indexOf(speciesFilter) === -1) return false;
+    return (sp.models || []).some(function(m) { return m.confidence >= threshold; });
+  });
+}
 
 // -- Rendering --
 
@@ -1035,9 +1105,21 @@ function renderResults() {
   var photoMap = {};
   pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
 
-  // Update filter counts
+  // Build encounter photo set for species-filtered encounters
+  var speciesVisibleIds = null;
+  if (speciesFilter) {
+    speciesVisibleIds = new Set();
+    pipelineResults.encounters.forEach(function(enc) {
+      if (encounterMatchesSpecies(enc)) {
+        (enc.photo_ids || []).forEach(function(pid) { speciesVisibleIds.add(pid); });
+      }
+    });
+  }
+
+  // Update filter counts (respecting species filter)
   var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0};
   pipelineResults.photos.forEach(function(p) {
+    if (speciesVisibleIds && !speciesVisibleIds.has(p.id)) return;
     counts.all++;
     if (p.label) counts[p.label] = (counts[p.label] || 0) + 1;
   });
@@ -1055,7 +1137,10 @@ function renderResults() {
       timeRange = t0.substring(0,8) + (t1 ? ' - ' + t1.substring(0,8) : '');
     }
 
-    // Check if any photo in this encounter passes the filter
+    // Check if encounter passes species filter
+    if (!encounterMatchesSpecies(enc)) return;
+
+    // Check if any photo in this encounter passes the label filter
     var encPhotoIds = enc.photo_ids || [];
     var hasVisible = encPhotoIds.some(function(pid) {
       var p = photoMap[pid];
@@ -1153,9 +1238,14 @@ function setFilter(f) {
 
 var _confTimer = null;
 
+function updateThumbSize(val) {
+  document.getElementById('encountersContainer').style.setProperty('--photo-card-size', val + 'px');
+}
+
 function setMinConfidence(val) {
   minConfidence = parseInt(val, 10);
   document.getElementById('confSliderVal').textContent = minConfidence + '%';
+  if (speciesFilter) renderResults();
   clearTimeout(_confTimer);
   _confTimer = setTimeout(function() {
     fetch('/api/workspaces/active/config')

@@ -155,12 +155,12 @@ def app_and_db(tmp_path):
     pid = d.add_photo(folder_id=fid, filename='bird.jpg', extension='.jpg',
                       file_size=1000, file_mtime=1.0, timestamp='2024-06-01T10:00:00')
 
-    # Add a prediction for the photo
-    d.conn.execute(
-        "INSERT INTO predictions (photo_id, species, scientific_name, confidence, model, workspace_id) VALUES (?, ?, ?, ?, ?, ?)",
-        (pid, "Northern Cardinal", "Cardinalis cardinalis", 0.95, "test-model", ws_id),
-    )
-    d.conn.commit()
+    # Add a detection and prediction for the photo
+    det_ids = d.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    d.add_prediction(det_ids[0], "Northern Cardinal", 0.95, "test-model",
+                     taxonomy={"scientific_name": "Cardinalis cardinalis"})
 
     for p in [pid]:
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{p}.jpg"))
