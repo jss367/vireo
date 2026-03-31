@@ -202,32 +202,12 @@ def _pair_raw_jpeg_companions(db):
             (companion["filename"], primary["id"]),
         )
 
-        # Transfer predictions: keep higher confidence when both have the same
-        # (model, workspace_id) to avoid UNIQUE constraint violation.
-        companion_preds = db.conn.execute(
-            "SELECT id, species, confidence, model, workspace_id FROM predictions WHERE photo_id = ?",
-            (companion["id"],),
-        ).fetchall()
-        for cp in companion_preds:
-            existing = db.conn.execute(
-                "SELECT id, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
-                (primary["id"], cp["model"], cp["workspace_id"]),
-            ).fetchone()
-            if existing:
-                # Keep the higher-confidence prediction
-                if cp["confidence"] > existing["confidence"]:
-                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (existing["id"],))
-                    db.conn.execute(
-                        "UPDATE predictions SET photo_id = ? WHERE id = ?",
-                        (primary["id"], cp["id"]),
-                    )
-                else:
-                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (cp["id"],))
-            else:
-                db.conn.execute(
-                    "UPDATE predictions SET photo_id = ? WHERE id = ?",
-                    (primary["id"], cp["id"]),
-                )
+        # Transfer detections (and their cascaded predictions) from companion to primary.
+        # Detections are linked to photos; predictions cascade through detection_id.
+        db.conn.execute(
+            "UPDATE detections SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
+        )
 
         # Transfer pending_changes from companion to primary
         db.conn.execute(

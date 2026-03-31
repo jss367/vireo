@@ -293,11 +293,17 @@ def test_compare_predictions_api(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
     cid = db.add_collection("Test Collection", rules)
 
-    # Add predictions from two models
-    db.add_prediction(photo_ids[0], "Cardinal", 0.95, "model-a")
-    db.add_prediction(photo_ids[0], "Blue Jay", 0.80, "model-b")
-    db.add_prediction(photo_ids[1], "Sparrow", 0.90, "model-a")
-    db.add_prediction(photo_ids[1], "Sparrow", 0.88, "model-b")
+    # Create detections, then add predictions from two models
+    det_ids_0 = db.save_detections(photo_ids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    det_ids_1 = db.save_detections(photo_ids[1], [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids_0[0], "Cardinal", 0.95, "model-a")
+    db.add_prediction(det_ids_0[0], "Blue Jay", 0.80, "model-b")
+    db.add_prediction(det_ids_1[0], "Sparrow", 0.90, "model-a")
+    db.add_prediction(det_ids_1[0], "Sparrow", 0.88, "model-b")
 
     client = app.test_client()
     resp = client.get(f"/api/predictions/compare?collection_id={cid}")
@@ -315,6 +321,98 @@ def test_compare_predictions_api(app_and_db):
     assert "filename" in photo
     assert "predictions" in photo
     assert isinstance(photo["predictions"], dict)  # keyed by model name
+    # Each model maps to a list of predictions (multi-detection support)
+    for model_preds in photo["predictions"].values():
+        assert isinstance(model_preds, list)
+        assert len(model_preds) >= 1
+        assert "species" in model_preds[0]
+        assert "confidence" in model_preds[0]
+
+
+def test_api_predictions_include_bounding_box(app_and_db):
+    """GET /api/predictions should return bounding box data from detections."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get("/api/predictions")
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["box_x"] == 0.1
+    assert data[0]["box_y"] == 0.2
+    assert data[0]["box_w"] == 0.3
+    assert data[0]["box_h"] == 0.4
+    assert data[0]["photo_id"] == pid
+
+
+def test_api_predictions_multiple_detections(app_and_db):
+    """GET /api/predictions should return one prediction per detection."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
+    db.add_prediction(det_ids[1], species="Magpie", confidence=0.85, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get("/api/predictions")
+    data = resp.get_json()
+    assert len(data) == 2
+    species = {d["species"] for d in data}
+    assert species == {"Elk", "Magpie"}
+
+
+def test_api_detections_endpoint(app_and_db):
+    """GET /api/detections/<photo_id> returns all detections for a photo."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.1}, "confidence": 0.7, "category": "animal"},
+    ], detector_model="MDV6")
+
+    client = app.test_client()
+    resp = client.get(f"/api/detections/{pid}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 2
+    # Sorted by confidence descending
+    assert data[0]["detector_confidence"] >= data[1]["detector_confidence"]
+    assert data[0]["box_x"] == 0.1
+
+
+def test_api_photo_pipeline_detections(app_and_db):
+    """GET /api/photos/<id>/pipeline returns detections and predictions with box data."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Robin", confidence=0.88, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "detections" in data
+    assert len(data["detections"]) == 1
+    assert data["detections"][0]["box_x"] == 0.1
+    assert "predictions" in data
+    assert len(data["predictions"]) == 1
+    assert data["predictions"][0]["species"] == "Robin"
+    assert data["predictions"][0]["box_x"] == 0.1
+    # crop_box should be computed from primary detection
+    assert "crop_box" in data
 
 
 def test_compare_predictions_api_requires_collection(app_and_db):

@@ -557,24 +557,46 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             os.makedirs(masks_dir, exist_ok=True)
 
             photos = thread_db.get_collection_photos(collection_id, per_page=999999)
-            photos = [
-                p for p in photos
-                if p["detection_box"] and not thread_db.conn.execute(
-                    "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                ).fetchone()[0]
+
+            # Build a map of photo_id -> primary detection (highest confidence)
+            # from the detections table. Only photos with detections and without
+            # masks need processing.
+            photo_det_map = {}
+            for p in photos:
+                dets = thread_db.get_detections(p["id"])
+                if dets:
+                    primary = dets[0]  # already ordered by confidence DESC
+                    has_mask = thread_db.conn.execute(
+                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
+                    ).fetchone()[0]
+                    if not has_mask:
+                        photo_det_map[p["id"]] = {
+                            "photo": p,
+                            "det_box": {
+                                "x": primary["box_x"],
+                                "y": primary["box_y"],
+                                "w": primary["box_w"],
+                                "h": primary["box_h"],
+                            },
+                        }
+
+            photos_to_process = [
+                photo_det_map[pid] for pid in photo_det_map
             ]
 
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-            total = len(photos)
+            total = len(photos_to_process)
             masked = 0
             skipped = 0
             em_failed = 0
             start_time = time.time()
 
-            for i, photo in enumerate(photos):
+            for i, entry in enumerate(photos_to_process):
                 if _should_abort(abort):
                     break
 
+                photo = entry["photo"]
+                det_box = entry["det_box"]
                 photo_id = photo["id"]
                 folder_path = folders.get(photo["folder_id"], "")
                 image_path = os.path.join(folder_path, photo["filename"])
@@ -584,10 +606,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     if proxy is None:
                         skipped += 1
                         continue
-
-                    det_box = photo["detection_box"]
-                    if isinstance(det_box, str):
-                        det_box = json.loads(det_box)
 
                     mask = generate_mask(proxy, det_box, variant=sam2_variant)
                     if mask is None:

@@ -314,6 +314,24 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   z-index: 10000;
 }
 .lightbox-close:hover { opacity: 1; }
+.lb-detection-box {
+  position: absolute;
+  border: 2px solid;
+  border-radius: 2px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+.lb-detection-label {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 0 0 3px 0;
+  white-space: nowrap;
+  line-height: 1.4;
+}
 .lightbox-filename {
   position: absolute;
   bottom: 16px;
@@ -1134,6 +1152,7 @@ async function createWorkspace() {
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed') && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <img id="lightboxImg" src="" alt="">
+    <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
@@ -1201,6 +1220,48 @@ async function createWorkspace() {
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lightboxCurrentId = null;
 
+/* Species color palette for lightbox bounding boxes */
+var _lbSpeciesColors = {};
+var _lbColorPalette = [
+  '#24E5CA', '#f0c040', '#e74c3c', '#3498db', '#9b59b6',
+  '#1abc9c', '#e67e22', '#2ecc71', '#e84393', '#00cec9'
+];
+var _lbNextColorIdx = 0;
+
+function _lbGetSpeciesColor(species) {
+  if (!_lbSpeciesColors[species]) {
+    _lbSpeciesColors[species] = _lbColorPalette[_lbNextColorIdx % _lbColorPalette.length];
+    _lbNextColorIdx++;
+  }
+  return _lbSpeciesColors[species];
+}
+
+function _lbLoadDetections(photoId) {
+  var container = document.getElementById('lightboxDetections');
+  if (!container) return;
+  container.innerHTML = '';
+  fetch('/api/detections/' + photoId)
+    .then(function(r) { return r.json(); })
+    .then(function(detections) {
+      if (!detections || detections.length === 0) return;
+      // Only render if still viewing the same photo
+      if (_lightboxCurrentId !== photoId) return;
+      detections.forEach(function(det) {
+        if (det.box_x == null || det.box_y == null) return;
+        var color = _lbGetSpeciesColor(det.category || 'animal');
+        var box = document.createElement('div');
+        box.className = 'lb-detection-box';
+        box.style.cssText = 'left:' + (det.box_x * 100).toFixed(2) + '%;top:' + (det.box_y * 100).toFixed(2) + '%;width:' + (det.box_w * 100).toFixed(2) + '%;height:' + (det.box_h * 100).toFixed(2) + '%;border-color:' + color + ';';
+        var conf = det.detector_confidence ? Math.round(det.detector_confidence * 100) + '%' : '';
+        if (conf) {
+          box.innerHTML = '<span class="lb-detection-label" style="background:' + color + ';color:#0A1F2E;">' + conf + '</span>';
+        }
+        container.appendChild(box);
+      });
+    })
+    .catch(function() {});
+}
+
 function openLightbox(photoId, filename, photoList) {
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -1217,6 +1278,9 @@ function openLightbox(photoId, filename, photoList) {
   wrap.scrollTop = 0;
   wrap.scrollLeft = 0;
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  // Clear previous detection overlays
+  var detContainer = document.getElementById('lightboxDetections');
+  if (detContainer) detContainer.innerHTML = '';
   img.src = '/photos/' + photoId + '/full';
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
@@ -1233,6 +1297,9 @@ function openLightbox(photoId, filename, photoList) {
   }
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
+
+  // Fetch and render detection bounding boxes
+  _lbLoadDetections(photoId);
 
   // Show position indicator if navigating a list
   var counter = document.getElementById('lightboxCounter');
@@ -1261,10 +1328,12 @@ function toggleLightboxZoom(e) {
   var badge = document.getElementById('lightboxZoomBadge');
   var isZoomed = wrap.classList.contains('zoomed');
 
+  var detOverlay = document.getElementById('lightboxDetections');
   if (isZoomed) {
     // Zoom out — switch back to preview image
     wrap.classList.remove('zoomed');
     badge.style.display = 'none';
+    if (detOverlay) detOverlay.style.display = '';
     wrap.scrollTop = 0;
     wrap.scrollLeft = 0;
     if (_lightboxCurrentId) {
@@ -1279,6 +1348,7 @@ function toggleLightboxZoom(e) {
 
     wrap.classList.add('zoomed');
     badge.style.display = '';
+    if (detOverlay) detOverlay.style.display = 'none';
 
     if (_lightboxCurrentId) {
       img.src = '/photos/' + _lightboxCurrentId + '/original';
@@ -1342,6 +1412,8 @@ function closeLightbox(e) {
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  var detContainer = document.getElementById('lightboxDetections');
+  if (detContainer) detContainer.innerHTML = '';
   document.body.style.overflow = '';
 }
 /* ---------- Delete Confirmation ---------- */
