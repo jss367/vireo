@@ -594,6 +594,36 @@ def test_flush_batch_top_k_1_has_empty_alternatives():
     assert raw_results[0]["alternatives"] == []
 
 
+def test_flush_batch_default_top_k_is_one():
+    """Default top_k=1 preserves backward-compatible behavior (no alternatives)."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Robin"
+    assert raw_results[0]["alternatives"] == []
+
+
 # ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
 
 
