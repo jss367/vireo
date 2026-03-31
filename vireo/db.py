@@ -1,9 +1,12 @@
 """SQLite database for Vireo photo browser metadata cache."""
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
+
+log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
@@ -156,7 +159,7 @@ class Database:
                 scientific_name TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 reviewed_at     TEXT,
-                UNIQUE(detection_id, model)
+                UNIQUE(detection_id, model, species)
             );
 
             CREATE TABLE IF NOT EXISTS inat_submissions (
@@ -514,8 +517,55 @@ class Database:
                     scientific_name TEXT,
                     created_at      TEXT DEFAULT (datetime('now')),
                     reviewed_at     TEXT,
-                    UNIQUE(detection_id, model)
+                    UNIQUE(detection_id, model, species)
                 )
+            """)
+            self.conn.commit()
+
+        # Migrate: UNIQUE(detection_id, model) → UNIQUE(detection_id, model, species)
+        # Check if the unique index on predictions includes 'species'.
+        needs_topn_migration = False
+        for idx in self.conn.execute("PRAGMA index_list(predictions)").fetchall():
+            if idx["unique"]:
+                cols = [
+                    r["name"]
+                    for r in self.conn.execute(
+                        f"PRAGMA index_info({idx['name']})"
+                    ).fetchall()
+                ]
+                if "detection_id" in cols and "model" in cols and "species" not in cols:
+                    needs_topn_migration = True
+                    break
+
+        if needs_topn_migration:
+            log.info("Migrating predictions table: UNIQUE(detection_id, model) -> UNIQUE(detection_id, model, species)")
+            self.conn.executescript("""
+                CREATE TABLE predictions_topn (
+                    id              INTEGER PRIMARY KEY,
+                    detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+                    species         TEXT,
+                    confidence      REAL,
+                    model           TEXT,
+                    category        TEXT,
+                    status          TEXT DEFAULT 'pending',
+                    group_id        TEXT,
+                    vote_count      INTEGER,
+                    total_votes     INTEGER,
+                    individual      TEXT,
+                    taxonomy_kingdom TEXT,
+                    taxonomy_phylum TEXT,
+                    taxonomy_class  TEXT,
+                    taxonomy_order  TEXT,
+                    taxonomy_family TEXT,
+                    taxonomy_genus  TEXT,
+                    scientific_name TEXT,
+                    created_at      TEXT DEFAULT (datetime('now')),
+                    reviewed_at     TEXT,
+                    UNIQUE(detection_id, model, species)
+                );
+                INSERT INTO predictions_topn SELECT * FROM predictions;
+                DROP TABLE predictions;
+                ALTER TABLE predictions_topn RENAME TO predictions;
             """)
             self.conn.commit()
 
