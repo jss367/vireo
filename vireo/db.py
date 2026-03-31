@@ -2554,20 +2554,33 @@ class Database:
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and old_val:
-                    self.update_prediction_status(int(old_val), 'pending')
-                    # Restore sibling predictions (alternatives auto-rejected on accept)
-                    # back to 'alternative' so the detection is fully reviewable again.
+                    pred_id = int(old_val)
+                    # Restore all predictions for this detection to pre-accept state
                     pred_row = self.conn.execute(
                         "SELECT detection_id, model FROM predictions WHERE id = ?",
-                        (int(old_val),),
+                        (pred_id,),
                     ).fetchone()
                     if pred_row:
+                        # Set all to 'alternative' first
                         self.conn.execute(
                             """UPDATE predictions SET status = 'alternative'
-                               WHERE detection_id = ? AND model = ? AND id != ?
-                               AND status = 'rejected'""",
-                            (pred_row["detection_id"], pred_row["model"], int(old_val)),
+                               WHERE detection_id = ? AND model = ?
+                               AND status IN ('accepted', 'rejected')""",
+                            (pred_row["detection_id"], pred_row["model"]),
                         )
+                        # Promote highest-confidence to 'pending'
+                        top = self.conn.execute(
+                            """SELECT id FROM predictions
+                               WHERE detection_id = ? AND model = ?
+                               ORDER BY confidence DESC LIMIT 1""",
+                            (pred_row["detection_id"], pred_row["model"]),
+                        ).fetchone()
+                        if top:
+                            self.conn.execute(
+                                "UPDATE predictions SET status = 'pending' WHERE id = ?",
+                                (top["id"],),
+                            )
+                        self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
@@ -2595,7 +2608,21 @@ class Database:
                 if kw:
                     self.queue_change(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
-                    self.update_prediction_status(int(item['old_value']), 'accepted')
+                    pred_id = int(item['old_value'])
+                    self.update_prediction_status(pred_id, 'accepted')
+                    # Re-reject siblings (mirrors accept_prediction behavior)
+                    pred_row = self.conn.execute(
+                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        (pred_id,),
+                    ).fetchone()
+                    if pred_row:
+                        self.conn.execute(
+                            """UPDATE predictions SET status = 'rejected'
+                               WHERE detection_id = ? AND model = ? AND id != ?
+                               AND status IN ('pending', 'alternative')""",
+                            (pred_row["detection_id"], pred_row["model"], pred_id),
+                        )
+                        self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.untag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
