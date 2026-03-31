@@ -176,9 +176,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     })
 
             if params.destination:
-                # Ingest all sources into destination first, then scan once
+                # Copy mode: ingest all sources first, then scan destination once.
+                # Scanning inside the loop would rescan the entire destination on
+                # each iteration, re-queuing unchanged files and inflating counts.
+                #
+                # Preserve cross-source duplicate detection: files copied from
+                # earlier sources are not yet in the DB (the scan hasn't run),
+                # so we accumulate their hashes in a shared set and pass it to
+                # each subsequent ingest() call via extra_known_hashes.
+                accumulated_hashes: set = set()
                 for src_folder in sources:
-                    do_ingest(
+                    result_info = do_ingest(
                         source_dir=src_folder,
                         destination_dir=params.destination,
                         db=thread_db,
@@ -186,7 +194,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         folder_template=params.folder_template,
                         skip_duplicates=params.skip_duplicates,
                         progress_callback=ingest_cb,
+                        extra_known_hashes=accumulated_hashes,
                     )
+                    # Collect hashes of files just copied so the next source
+                    # iteration treats them as known even before the DB scan.
+                    if params.skip_duplicates:
+                        import contextlib
+
+                        from scanner import compute_file_hash
+                        for path in result_info.get("copied_paths", []):
+                            with contextlib.suppress(Exception):
+                                accumulated_hashes.add(compute_file_hash(path))
                 do_scan(
                     params.destination, thread_db,
                     progress_callback=progress_cb,
@@ -195,7 +213,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     photo_callback=photo_cb,
                 )
             else:
-                # Scan each source folder directly
+                # Scan-in-place: scan each source folder independently.
                 for src_folder in sources:
                     do_scan(
                         src_folder, thread_db,
@@ -325,14 +343,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             preview_dir = os.path.join(base_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
-            if not collection_id:
-                stages["previews"]["status"] = "skipped"
+            if collection_id:
+                photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            elif not skip_scan:
+                # Scan ran but produced no photos — skip previews to avoid
+                # unexpectedly processing the entire workspace.
                 runner.update_step(job["id"], "previews", status="completed",
-                                   summary="Skipped (no collection)")
-                _update_stages(runner, job["id"], stages)
+                                   summary="Skipped (no photos scanned)")
+                stages["previews"]["status"] = "completed"
                 return
-
-            photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            else:
+                photos = thread_db.get_photos(per_page=999999)
 
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)

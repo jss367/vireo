@@ -195,7 +195,7 @@ body { padding-bottom: 36px; }
 /* Photo cards */
 .photo-card {
   flex-shrink: 0;
-  width: 160px;
+  width: var(--photo-card-size, 160px);
   border-radius: 6px;
   overflow: hidden;
   border: 2px solid transparent;
@@ -987,6 +987,11 @@ input[type="range"]::-moz-range-thumb {
         <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
         <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
       </div>
+      <div class="confidence-slider-wrap" title="Thumbnail size">
+        <span>&#9638;</span>
+        <input type="range" id="thumbSizeSlider" min="100" max="320" step="20" value="160"
+               oninput="updateThumbSize(this.value)">
+      </div>
       <div class="confidence-slider-wrap">
         <label for="confSlider">Min confidence:</label>
         <input type="range" id="confSlider" min="0" max="100" value="40" oninput="setMinConfidence(this.value)">
@@ -1232,6 +1237,10 @@ function setFilter(f) {
 }
 
 var _confTimer = null;
+
+function updateThumbSize(val) {
+  document.getElementById('encountersContainer').style.setProperty('--photo-card-size', val + 'px');
+}
 
 function setMinConfidence(val) {
   minConfidence = parseInt(val, 10);
