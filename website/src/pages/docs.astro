@@ -4,7 +4,7 @@ import Base from '../layouts/Base.astro';
 const base = import.meta.env.BASE_URL;
 ---
 
-<Base title="Docs — Vireo" description="Getting started with Vireo, FAQ, and keyboard shortcuts.">
+<Base title="Docs — Vireo" description="Getting started with Vireo and FAQ.">
 
   <section class="section section--dark docs-header">
     <div class="container">
@@ -87,34 +87,6 @@ const base = import.meta.env.BASE_URL;
     </div>
   </section>
 
-  <!-- Keyboard Shortcuts -->
-  <section class="section" id="shortcuts">
-    <div class="container docs-section">
-      <h2>Keyboard Shortcuts</h2>
-      <p class="docs-section__intro">These shortcuts work in the cull and review interfaces for rapid triage.</p>
-
-      <table class="shortcuts-table">
-        <thead>
-          <tr>
-            <th>Key</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td><kbd>K</kbd></td><td>Mark as Keep</td></tr>
-          <tr><td><kbd>R</kbd></td><td>Mark as Review</td></tr>
-          <tr><td><kbd>X</kbd></td><td>Mark as Reject</td></tr>
-          <tr><td><kbd>&rarr;</kbd> / <kbd>J</kbd></td><td>Next photo</td></tr>
-          <tr><td><kbd>&larr;</kbd> / <kbd>H</kbd></td><td>Previous photo</td></tr>
-          <tr><td><kbd>1</kbd>-<kbd>5</kbd></td><td>Set star rating</td></tr>
-          <tr><td><kbd>0</kbd></td><td>Clear rating</td></tr>
-          <tr><td><kbd>P</kbd></td><td>Toggle flag (pick)</td></tr>
-          <tr><td><kbd>Z</kbd></td><td>Undo last action</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
   <!-- GitHub Callout -->
   <section class="section section--navy">
     <div class="container github-callout">
@@ -146,11 +118,6 @@ const base = import.meta.env.BASE_URL;
   .docs-section h2 {
     font-size: var(--text-3xl);
     margin-bottom: var(--space-2xl);
-  }
-
-  .docs-section__intro {
-    color: var(--color-text-muted);
-    margin-bottom: var(--space-xl);
   }
 
   /* Getting Started steps */
@@ -197,38 +164,6 @@ const base = import.meta.env.BASE_URL;
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: var(--text-sm);
-  }
-
-  /* Keyboard shortcuts table */
-  .shortcuts-table {
-    width: 100%;
-    max-width: 500px;
-    border-collapse: collapse;
-  }
-
-  .shortcuts-table th {
-    text-align: left;
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    padding: var(--space-sm) var(--space-md);
-    border-bottom: 2px solid rgba(0, 0, 0, 0.1);
-  }
-
-  .shortcuts-table td {
-    padding: var(--space-sm) var(--space-md);
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  }
-
-  .shortcuts-table kbd {
-    display: inline-block;
-    background: var(--color-bg-light);
-    border: 1px solid rgba(0, 0, 0, 0.1);
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    min-width: 28px;
-    text-align: center;
   }
 
   /* GitHub callout */
