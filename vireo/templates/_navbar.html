@@ -1147,6 +1147,9 @@ async function createWorkspace() {
     <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Inspect Pipeline
     </button>
+    <button id="lightboxOpenEditor" onclick="" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Open in Editor
+    </button>
     <button onclick="lightboxDelete()" style="background:var(--danger);color:white;border:none;padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;" title="Delete photo">Delete</button>
   </div>
 </div>
@@ -1219,6 +1222,15 @@ function openLightbox(photoId, filename, photoList) {
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
+  var editorBtn = document.getElementById('lightboxOpenEditor');
+  if (editorBtn) {
+    if (typeof openInEditor === 'function') {
+      editorBtn.style.display = '';
+      editorBtn.onclick = function() { openInEditor([photoId]); };
+    } else {
+      editorBtn.style.display = 'none';
+    }
+  }
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
 
@@ -1950,6 +1962,21 @@ async function safeFetch(url, opts, options) {
   var text = await resp.text();
   if (!text) return null;
   return JSON.parse(text);
+}
+
+/* ---------- Open in External Editor ---------- */
+async function openInEditor(photoIds) {
+  if (!photoIds || !photoIds.length) return;
+  try {
+    var data = await safeFetch('/api/photos/open-external', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds}),
+    });
+    showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
+  } catch(e) {
+    showToast(e.message || 'Failed to open in editor');
+  }
 }
 
 /* ---------- Safe EventSource ---------- */
