@@ -162,53 +162,70 @@ jobs:
             libayatana-appindicator3-dev
 
       # ── Tauri build ───────────────────────────────────────
-      # Try with Apple signing on macOS. If it fails, fall back to unsigned.
-      - name: Build Tauri app (with signing)
-        id: tauri-signed
+      # macOS: Build with signing. No fallback — if signing fails, the
+      # build fails. Shipping unsigned builds causes the "damaged" error.
+      - name: Build Tauri app (macOS, signed)
         if: runner.os == 'macOS'
-        continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Intentionally omitting APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID
+          # so Tauri does NOT attempt notarization. We notarize the DMG
+          # explicitly in the next step (Tauri only notarizes the .app,
+          # which isn't sufficient for Gatekeeper on downloaded DMGs).
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
 
-      - name: Warn if signing failed
-        if: steps.tauri-signed.outcome == 'failure'
-        run: echo "::warning::macOS code signing failed — building unsigned. Users will need to right-click > Open on first launch."
+      # Notarize the DMG itself (not just the .app inside it).
+      # Gatekeeper checks the downloaded DMG — an unnotarized DMG
+      # triggers "damaged and can't be opened" even if the .app is fine.
+      - name: Notarize and staple DMG
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          if [ -z "$DMG" ]; then
+            echo "::error::No DMG found after build"
+            exit 1
+          fi
+          echo "Submitting for notarization: $DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          echo "Stapling notarization ticket to DMG..."
+          xcrun stapler staple "$DMG"
 
-      - name: Build Tauri app (unsigned fallback)
-        id: tauri-unsigned
-        if: steps.tauri-signed.outcome == 'failure' || steps.tauri-signed.outcome == 'skipped'
-        continue-on-error: true
+      - name: Verify macOS code signing
+        if: runner.os == 'macOS'
+        run: |
+          DMG=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          APP="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Vireo.app"
+          echo "=== Verifying .app signature ==="
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo ""
+          echo "=== Verifying DMG notarization ==="
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+          echo ""
+          echo "=== All verifications passed ==="
+
+      # Windows/Linux: no signing needed
+      - name: Build Tauri app (Windows/Linux)
+        if: runner.os != 'macOS'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
-
-      # Verify that the main artifacts were produced even if updater
-      # signing failed (DMG/MSI/AppImage/deb are built before signing).
-      - name: Verify build artifacts exist
-        if: steps.tauri-unsigned.outcome == 'failure'
-        shell: bash
-        run: |
-          echo "::warning::Tauri build exited non-zero (likely updater signing failure). Checking if main artifacts were still produced..."
-          FOUND=$(find src-tauri/target/${{ matrix.rust-target }}/release/bundle -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*.AppImage" -o -name "*.deb" \) 2>/dev/null | head -5)
-          if [ -z "$FOUND" ]; then
-            echo "::error::No build artifacts found — build genuinely failed."
-            exit 1
-          fi
-          echo "Artifacts found despite build error (updater signing likely failed):"
-          echo "$FOUND"
 
       # ── Upload artifacts ──────────────────────────────────
       - name: Upload build artifacts
