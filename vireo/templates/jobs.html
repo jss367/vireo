@@ -471,6 +471,7 @@
         });
         updateList();
         populateTypeFilter();
+        if (currentView === 'history') renderHistoryOverview();
       })
       .catch(function() {});
   }
@@ -489,7 +490,10 @@
     });
     sel.value = current;
   }
-  window.applyFilters = function() { updateList(); };
+  window.applyFilters = function() {
+    updateList();
+    if (currentView === 'history') renderHistoryOverview();
+  };
 
   function updateList() {
     var container = document.getElementById('jobListContent');
@@ -996,8 +1000,33 @@
   }
 
   function renderHistoryOverview() {
-    document.getElementById('jobDetailPane').innerHTML =
-      '<div class="jobs-detail-empty">History overview coming soon</div>';
+    var pane = document.getElementById('jobDetailPane');
+    var typeFilter = document.getElementById('filterType').value;
+    var statusFilter = document.getElementById('filterStatus').value;
+
+    var filtered = historyJobs;
+    if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
+    if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+
+    if (filtered.length === 0) {
+      pane.innerHTML = '<div class="jobs-overview-empty">No job history' +
+        (typeFilter || statusFilter ? ' matching filters' : '') + '.</div>';
+      return;
+    }
+
+    // Date range note
+    var oldest = filtered[filtered.length - 1];
+    var oldestDate = new Date(oldest.started_at).toLocaleDateString();
+    var html = '<div style="padding:16px 24px 0;">';
+    html += '<div style="font-size:12px;color:var(--text-ghost);margin-bottom:12px;">Showing ' +
+      filtered.length + ' jobs back to ' + oldestDate + '</div>';
+
+    filtered.forEach(function(j) {
+      html += renderJobCard(j);
+    });
+
+    html += '</div>';
+    pane.innerHTML = html;
   }
 
   pollAll();
