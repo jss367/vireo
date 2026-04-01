@@ -76,10 +76,10 @@ def _download_with_resume(url, dest_path, progress_callback=None,
 
             with urllib.request.urlopen(req, timeout=120) as resp:
                 # If server returned 200 (not 206), it doesn't support Range —
-                # start from scratch.
+                # start from scratch.  Don't reset downloaded_before: it's the
+                # stall-detection baseline (did we get further than last time?).
                 if resp.status == 200 and downloaded_before > 0:
                     log.info("Server does not support Range; restarting download")
-                    downloaded_before = 0
 
                 # Determine expected size so we can detect truncated responses
                 content_length = resp.headers.get("Content-Length")

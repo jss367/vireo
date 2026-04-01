@@ -741,3 +741,32 @@ def test_download_with_resume_server_ignores_range(tmp_path):
         assert open(dest, "rb").read() == content
     finally:
         server.shutdown()
+
+
+def test_download_with_resume_no_range_stalls_correctly(tmp_path):
+    """Server ignoring Range + repeated partial writes must still trigger stall."""
+    from taxonomy import _download_with_resume
+
+    content = b"D" * 2000
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            # Always return 200 (ignore Range), always deliver only 500 bytes
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content[:500])
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxa.csv.gz")
+        import pytest
+        with pytest.raises(RuntimeError, match="stalled"):
+            _download_with_resume(
+                f"http://127.0.0.1:{port}/taxa.csv.gz", dest, max_stalled=2,
+            )
+    finally:
+        server.shutdown()
