@@ -2937,6 +2937,106 @@ function dismissMissingBanner() {
 // Check on page load and every 10 minutes
 checkMissingFolders();
 setInterval(checkMissingFolders, 600000);
+
+/* ---------- Missing Folders Modal ---------- */
+let _relocatingFolderId = null;
+let _relocateBrowserPath = '';
+let _pendingCascaded = [];
+
+function openMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.add('open');
+  loadMissingFolders();
+}
+
+function closeMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.remove('open');
+  checkMissingFolders();
+}
+
+async function loadMissingFolders() {
+  const resp = await safeFetch('/api/folders/missing');
+  const folders = await resp.json();
+  const container = document.getElementById('missingFoldersList');
+  if (folders.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
+    return;
+  }
+  container.innerHTML = folders.map(f => `
+    <div class="missing-folder-row">
+      <div class="missing-folder-path" title="${f.path}">${f.path}</div>
+      <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
+      <div class="missing-folder-actions">
+        <button onclick="startRelocate(${f.id})">Relocate</button>
+        <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function startRelocate(folderId) {
+  _relocatingFolderId = folderId;
+  _relocateBrowserPath = '';
+  document.getElementById('relocateBrowserModal').classList.add('open');
+  browseRelocate(null);
+}
+
+function closeRelocateBrowser() {
+  document.getElementById('relocateBrowserModal').classList.remove('open');
+  _relocatingFolderId = null;
+}
+
+async function browseRelocate(path) {
+  const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+  const resp = await safeFetch(url);
+  const data = await resp.json();
+  _relocateBrowserPath = data.path;
+
+  document.getElementById('relocateBreadcrumb').textContent = data.path;
+
+  const list = document.getElementById('relocateFolderList');
+  let html = '';
+  const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  if (data.path !== '/') {
+    html += `<div class="relocate-folder-item" ondblclick="browseRelocate('${parent.replace(/'/g, "\\'")}')">\u{1F4C2} ..</div>`;
+  }
+  html += data.dirs.map(d =>
+    `<div class="relocate-folder-item" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
+  ).join('');
+  list.innerHTML = html;
+}
+
+async function confirmRelocate() {
+  if (!_relocatingFolderId || !_relocateBrowserPath) return;
+  const resp = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: _relocateBrowserPath}),
+  });
+  const data = await resp.json();
+  closeRelocateBrowser();
+
+  if (data.cascaded && data.cascaded.length > 0) {
+    _pendingCascaded = data.cascaded;
+    document.getElementById('cascadeMsg').textContent =
+      `${data.cascaded.length} subfolder${data.cascaded.length !== 1 ? 's were' : ' was'} also found at the new location and re-linked.`;
+    document.getElementById('cascadeConfirmModal').classList.add('open');
+  } else {
+    loadMissingFolders();
+  }
+}
+
+function closeCascadeConfirm() {
+  document.getElementById('cascadeConfirmModal').classList.remove('open');
+  _pendingCascaded = [];
+  loadMissingFolders();
+}
+function confirmCascade() { closeCascadeConfirm(); }
+
+async function startRemoveFolder(folderId, path, photoCount) {
+  if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
+  await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
+  loadMissingFolders();
+}
 </script>
 <script src="/static/vireo-utils.js"></script>
 <script src="/static/tauri-bridge.js"></script>
