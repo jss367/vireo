@@ -2,7 +2,7 @@ mod menu;
 mod sidecar;
 mod tray;
 use sidecar::SidecarState;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
@@ -65,14 +65,6 @@ pub fn run() {
                         let _ = window.hide();
                     }
                 }
-                tauri::WindowEvent::Destroyed => {
-                    if window.label() == "main" {
-                        let app = window.app_handle();
-                        if let Some(state) = app.try_state::<SidecarState>() {
-                            sidecar::stop_sidecar(&state);
-                        }
-                    }
-                }
                 _ => {}
             }
         })
@@ -99,6 +91,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_server_port,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<SidecarState>() {
+                    sidecar::stop_sidecar(&state);
+                }
+            }
+        });
 }
