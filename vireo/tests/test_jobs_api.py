@@ -261,6 +261,20 @@ def test_jobs_list_includes_active_workspace_id(app_and_db):
     assert data['active_workspace_id'] == db._active_workspace_id
 
 
+def test_jobs_list_includes_workspace_names(app_and_db):
+    """GET /api/jobs includes workspace_names mapping."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    resp = client.get('/api/jobs')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'workspace_names' in data
+    assert isinstance(data['workspace_names'], dict)
+    # Default workspace should be present
+    assert len(data['workspace_names']) >= 1
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
