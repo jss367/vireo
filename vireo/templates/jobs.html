@@ -287,8 +287,12 @@
     options = options || {};
     var isLive = job.status === 'running';
     var elapsed = '';
-    if (job.started_at) {
+    if (isLive && job.started_at) {
       elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
+    } else if (job.duration != null) {
+      elapsed = formatElapsed(job.duration);
+    } else if (job.started_at && job.finished_at) {
+      elapsed = formatElapsed((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000);
     }
 
     var html = '<div class="job-card">';
@@ -323,7 +327,7 @@
       });
       html += '</div>';
     } else if (isLive && job.progress) {
-      // Fallback for jobs without steps
+      // Fallback for running jobs without steps
       html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
       if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + esc(job.progress.phase) + '</div>';
       if (job.progress.total > 0) {
@@ -332,6 +336,19 @@
         html += '<div>' + job.progress.current.toLocaleString() + ' / ' + job.progress.total.toLocaleString() + '</div>';
       }
       if (job.progress.current_file) html += '<div style="margin-top:4px;">' + esc(job.progress.current_file) + '</div>';
+      html += '</div></div>';
+    } else if (!isLive) {
+      // Fallback for completed/failed jobs without steps — show result/error
+      html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
+      if (job.error) {
+        html += '<div style="color:var(--danger);font-weight:500;">Error: ' + esc(job.error) + '</div>';
+      }
+      if (job.result) {
+        html += '<div>' + esc(typeof job.result === 'string' ? job.result : JSON.stringify(job.result)) + '</div>';
+      }
+      if (!job.error && !job.result) {
+        html += '<div>No details available</div>';
+      }
       html += '</div></div>';
     }
 
