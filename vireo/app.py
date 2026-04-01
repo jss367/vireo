@@ -277,6 +277,22 @@ def create_app(db_path, thumb_cache_dir=None):
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
+    def _folder_health_loop():
+        """Periodically check folder health."""
+        import time as _time
+        _time.sleep(30)  # Initial delay
+        while True:
+            try:
+                health_db = Database(db_path)
+                changed = health_db.check_folder_health()
+                if changed:
+                    log.info("Folder health check: %d folder(s) changed status", changed)
+            except Exception:
+                log.debug("Folder health check failed", exc_info=True)
+            _time.sleep(600)  # 10 minutes
+
+    threading.Thread(target=_folder_health_loop, daemon=True).start()
+
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
