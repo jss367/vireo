@@ -20,6 +20,7 @@ import io
 import json
 import logging
 import os
+import time
 import urllib.request
 import zipfile
 from datetime import date
@@ -27,6 +28,120 @@ from datetime import date
 import requests
 
 log = logging.getLogger(__name__)
+
+
+def _download_with_resume(url, dest_path, progress_callback=None,
+                          max_stalled=3, chunk_size=256 * 1024):
+    """Download a file with retry and resume support.
+
+    Streams to ``dest_path + ".partial"``, resuming from the last byte on
+    failure using HTTP Range headers.  Retries indefinitely as long as each
+    attempt downloads new data; gives up after *max_stalled* consecutive
+    failures with no progress.
+
+    Args:
+        url: URL to download.
+        dest_path: Final file path.  A ``.partial`` sibling is used during
+            download and renamed on success.
+        progress_callback: optional ``callback(message)`` for status updates.
+        max_stalled: Give up after this many consecutive zero-progress retries.
+        chunk_size: Bytes per read chunk (default 256 KB).
+    """
+    partial_path = dest_path + ".partial"
+    attempt = 0
+    stalled_count = 0
+
+    while True:
+        attempt += 1
+        downloaded_before = os.path.getsize(partial_path) if os.path.exists(partial_path) else 0
+
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "vireo-taxonomy/1.0")
+            if downloaded_before > 0:
+                req.add_header("Range", f"bytes={downloaded_before}-")
+                if progress_callback:
+                    mb = downloaded_before // (1024 * 1024)
+                    progress_callback(f"Resuming download at {mb} MB (attempt {attempt})...")
+                log.info("Resuming download at byte %d (attempt %d)", downloaded_before, attempt)
+            else:
+                if attempt == 1:
+                    if progress_callback:
+                        progress_callback(f"Downloading {url.rsplit('/', 1)[-1]}...")
+                    log.info("Downloading %s ...", url)
+                else:
+                    if progress_callback:
+                        progress_callback(f"Retrying download (attempt {attempt})...")
+                    log.info("Retrying download (attempt %d)", attempt)
+
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                # If server returned 200 (not 206), it doesn't support Range —
+                # start from scratch.
+                if resp.status == 200 and downloaded_before > 0:
+                    log.info("Server does not support Range; restarting download")
+                    downloaded_before = 0
+
+                # Determine expected size so we can detect truncated responses
+                content_length = resp.headers.get("Content-Length")
+                expected_bytes = int(content_length) if content_length else None
+
+                mode = "ab" if resp.status == 206 else "wb"
+                received = 0
+                with open(partial_path, mode) as f:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        received += len(chunk)
+
+                # Check for truncated response
+                if expected_bytes is not None and received < expected_bytes:
+                    raise OSError(
+                        f"Incomplete download: got {received} of "
+                        f"{expected_bytes} bytes"
+                    )
+
+        except Exception as e:
+            current_size = os.path.getsize(partial_path) if os.path.exists(partial_path) else 0
+            gained = current_size - downloaded_before
+
+            if gained > 0:
+                stalled_count = 0
+                mb = current_size // (1024 * 1024)
+                log.info("Download interrupted at %d MB, will resume: %s", mb, e)
+                if progress_callback:
+                    progress_callback(f"Connection lost at {mb} MB, retrying in 3s...")
+            else:
+                stalled_count += 1
+                log.warning(
+                    "Download attempt %d: no progress (%d/%d stalled): %s",
+                    attempt, stalled_count, max_stalled, e,
+                )
+                if progress_callback:
+                    progress_callback(f"Download failed (attempt {attempt}), retrying in 3s...")
+
+            if stalled_count >= max_stalled:
+                mb = current_size // (1024 * 1024)
+                raise RuntimeError(
+                    f"Download stalled after {attempt} attempts with no new data. "
+                    f"Downloaded {mb} MB so far. "
+                    f"The partial file is kept at {partial_path} — "
+                    f"try again and the download will resume."
+                ) from e
+
+            time.sleep(3)
+            continue
+
+        # Success — rename partial to final
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        os.rename(partial_path, dest_path)
+        size_mb = os.path.getsize(dest_path) // (1024 * 1024)
+        log.info("Downloaded %s (%d MB)", dest_path, size_mb)
+        if progress_callback:
+            progress_callback(f"Downloaded {size_mb} MB")
+        return dest_path
 
 DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
 
@@ -258,12 +373,13 @@ class Taxonomy:
 # --- AWS open-data taxa.csv.gz loader functions ---
 
 
-def download_taxa(dest_path):
-    """Download the iNat taxa.csv.gz file from AWS open data."""
-    log.info("Downloading iNat taxonomy from %s ...", TAXA_URL)
-    urllib.request.urlretrieve(TAXA_URL, dest_path)
-    log.info("Downloaded to %s", dest_path)
-    return dest_path
+def download_taxa(dest_path, progress_callback=None):
+    """Download the iNat taxa.csv.gz file from AWS open data.
+
+    Uses resumable download — safe on flaky connections.
+    """
+    return _download_with_resume(TAXA_URL, dest_path,
+                                 progress_callback=progress_callback)
 
 
 def load_taxa_from_file(db, gz_path):
@@ -519,174 +635,181 @@ def download_taxonomy(output_path, progress_callback=None):
     Downloads the zip, parses taxa.csv and VernacularNames.csv,
     and writes a JSON file keyed by common name and scientific name.
 
+    Uses resumable download — safe on flaky connections.
+
     Args:
         progress_callback: optional callable(message) for status updates
     """
-    import urllib.request
 
     def _status(msg):
         log.info(msg)
         if progress_callback:
             progress_callback(msg)
 
-    _status("Downloading iNaturalist taxonomy archive...")
-    with urllib.request.urlopen(DWCA_URL) as response:
-        zip_data = response.read()
-    _status(f"Downloaded {len(zip_data) // (1024 * 1024)} MB — parsing...")
+    # Download zip to a file (resumable) instead of holding in memory
+    zip_dir = os.path.dirname(output_path) or "."
+    zip_path = os.path.join(zip_dir, "taxonomy-dwca.zip")
+    try:
+        _download_with_resume(DWCA_URL, zip_path, progress_callback=_status)
+        _status("Download complete — parsing...")
 
-    # Parse the DWCA zip
-    taxa_by_id = {}
-    common_names = {}  # taxon_id -> preferred common_name
-    alt_names = {}  # taxon_id -> [all English vernacular names]
+        # Parse the DWCA zip
+        taxa_by_id = {}
+        common_names = {}  # taxon_id -> preferred common_name
+        alt_names = {}  # taxon_id -> [all English vernacular names]
 
-    with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-        file_list = zf.namelist()
-        log.info("Archive contents: %s", file_list)
+        with zipfile.ZipFile(zip_path) as zf:
+            file_list = zf.namelist()
+            log.info("Archive contents: %s", file_list)
 
-        # Parse taxa.csv — columns: id, parentNameUsageID, scientificName, taxonRank
-        taxa_file = None
-        for name in file_list:
-            if name.lower().endswith("taxa.csv") or name.lower() == "taxa.csv":
-                taxa_file = name
-                break
-        if not taxa_file:
-            raise FileNotFoundError("taxa.csv not found in DWCA archive")
-
-        log.info("Parsing %s ...", taxa_file)
-        with zf.open(taxa_file) as f:
-            reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
-            for row in reader:
-                taxon_id = row.get("id") or row.get("taxonID")
-                if not taxon_id:
-                    continue
-                # parentNameUsageID may be a URL like https://www.inaturalist.org/taxa/48460
-                parent_raw = row.get("parentNameUsageID", "")
-                if parent_raw and "/" in parent_raw:
-                    parent_id = parent_raw.rsplit("/", 1)[-1]
-                else:
-                    parent_id = parent_raw
-
-                taxa_by_id[taxon_id] = {
-                    "taxon_id": int(taxon_id),
-                    "scientific_name": row.get("scientificName", ""),
-                    "rank": (row.get("taxonRank") or "").lower(),
-                    "parent_id": parent_id,
-                }
-        _status(f"Parsed {len(taxa_by_id):,} taxa")
-
-        # Parse VernacularNames (English common names)
-        # Prefer VernacularNames-english.csv, fall back to VernacularNames.csv
-        vn_file = None
-        for name in file_list:
-            if name.lower() == "vernacularnames-english.csv":
-                vn_file = name
-                break
-        if not vn_file:
+            # Parse taxa.csv — columns: id, parentNameUsageID, scientificName, taxonRank
+            taxa_file = None
             for name in file_list:
-                if name.lower() == "vernacularnames.csv":
-                    vn_file = name
+                if name.lower().endswith("taxa.csv") or name.lower() == "taxa.csv":
+                    taxa_file = name
                     break
+            if not taxa_file:
+                raise FileNotFoundError("taxa.csv not found in DWCA archive")
 
-        if vn_file:
-            log.info("Parsing %s ...", vn_file)
-            with zf.open(vn_file) as f:
+            log.info("Parsing %s ...", taxa_file)
+            with zf.open(taxa_file) as f:
                 reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
                 for row in reader:
-                    # Language-specific files may not have a language column
-                    lang = row.get("language", "en")
-                    if lang and lang.lower() != "en":
-                        continue
                     taxon_id = row.get("id") or row.get("taxonID")
-                    vn = row.get("vernacularName", "")
-                    if taxon_id and taxon_id in taxa_by_id and vn:
-                        if taxon_id not in common_names:
-                            common_names[taxon_id] = vn
-                        # Collect all English names per taxon for alternate-name indexing
-                        if taxon_id not in alt_names:
-                            alt_names[taxon_id] = []
-                        alt_names[taxon_id].append(vn)
-            _status(f"Found {len(common_names):,} English common names ({sum(len(v) for v in alt_names.values()):,} total including alternates)")
-        else:
-            log.warning("No VernacularNames file found in archive")
+                    if not taxon_id:
+                        continue
+                    # parentNameUsageID may be a URL like https://www.inaturalist.org/taxa/48460
+                    parent_raw = row.get("parentNameUsageID", "")
+                    if parent_raw and "/" in parent_raw:
+                        parent_id = parent_raw.rsplit("/", 1)[-1]
+                    else:
+                        parent_id = parent_raw
 
-    # Build lineages by walking parent chains
-    def _build_lineage(taxon_id):
-        lineage_names = []
-        lineage_ranks = []
-        current = taxon_id
-        seen = set()
-        while current and current in taxa_by_id and current not in seen:
-            seen.add(current)
-            t = taxa_by_id[current]
-            if t["rank"] in RANK_ORDER:
-                lineage_names.append(t["scientific_name"])
-                lineage_ranks.append(t["rank"])
-            current = t["parent_id"]
-        lineage_names.reverse()
-        lineage_ranks.reverse()
-        return lineage_names, lineage_ranks
+                    taxa_by_id[taxon_id] = {
+                        "taxon_id": int(taxon_id),
+                        "scientific_name": row.get("scientificName", ""),
+                        "rank": (row.get("taxonRank") or "").lower(),
+                        "parent_id": parent_id,
+                    }
+            _status(f"Parsed {len(taxa_by_id):,} taxa")
 
-    # Build the lookup dictionaries
-    _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
-    taxa_by_common = {}
-    taxa_by_scientific = {}
-    entries_by_taxon = {}
+            # Parse VernacularNames (English common names)
+            # Prefer VernacularNames-english.csv, fall back to VernacularNames.csv
+            vn_file = None
+            for name in file_list:
+                if name.lower() == "vernacularnames-english.csv":
+                    vn_file = name
+                    break
+            if not vn_file:
+                for name in file_list:
+                    if name.lower() == "vernacularnames.csv":
+                        vn_file = name
+                        break
 
-    for taxon_id, taxon in taxa_by_id.items():
-        rank = taxon["rank"]
-        if rank not in RANK_ORDER:
-            continue
+            if vn_file:
+                log.info("Parsing %s ...", vn_file)
+                with zf.open(vn_file) as f:
+                    reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+                    for row in reader:
+                        # Language-specific files may not have a language column
+                        lang = row.get("language", "en")
+                        if lang and lang.lower() != "en":
+                            continue
+                        taxon_id = row.get("id") or row.get("taxonID")
+                        vn = row.get("vernacularName", "")
+                        if taxon_id and taxon_id in taxa_by_id and vn:
+                            if taxon_id not in common_names:
+                                common_names[taxon_id] = vn
+                            # Collect all English names per taxon for alternate-name indexing
+                            if taxon_id not in alt_names:
+                                alt_names[taxon_id] = []
+                            alt_names[taxon_id].append(vn)
+                _status(f"Found {len(common_names):,} English common names ({sum(len(v) for v in alt_names.values()):,} total including alternates)")
+            else:
+                log.warning("No VernacularNames file found in archive")
 
-        lineage_names, lineage_ranks = _build_lineage(taxon_id)
+        # Build lineages by walking parent chains
+        def _build_lineage(taxon_id):
+            lineage_names = []
+            lineage_ranks = []
+            current = taxon_id
+            seen = set()
+            while current and current in taxa_by_id and current not in seen:
+                seen.add(current)
+                t = taxa_by_id[current]
+                if t["rank"] in RANK_ORDER:
+                    lineage_names.append(t["scientific_name"])
+                    lineage_ranks.append(t["rank"])
+                current = t["parent_id"]
+            lineage_names.reverse()
+            lineage_ranks.reverse()
+            return lineage_names, lineage_ranks
 
-        entry = {
-            "taxon_id": taxon["taxon_id"],
-            "scientific_name": taxon["scientific_name"],
-            "common_name": common_names.get(taxon_id, ""),
-            "rank": rank,
-            "lineage_names": lineage_names,
-            "lineage_ranks": lineage_ranks,
-        }
-        entries_by_taxon[taxon_id] = entry
+        # Build the lookup dictionaries
+        _status(f"Building lineages for {len(taxa_by_id):,} taxa...")
+        taxa_by_common = {}
+        taxa_by_scientific = {}
+        entries_by_taxon = {}
 
-        # Index by scientific name
-        sci_key = taxon["scientific_name"].lower()
-        taxa_by_scientific[sci_key] = entry
+        for taxon_id, taxon in taxa_by_id.items():
+            rank = taxon["rank"]
+            if rank not in RANK_ORDER:
+                continue
 
-    # Index preferred common names first so they always win.
-    # Keep the first mapping when two taxa share a preferred name.
-    for taxon_id, cn in common_names.items():
-        entry = entries_by_taxon.get(taxon_id)
-        cn_key = cn.lower()
-        if entry and cn_key not in taxa_by_common:
-            taxa_by_common[cn_key] = entry
+            lineage_names, lineage_ranks = _build_lineage(taxon_id)
 
-    # Then index alternate names only for still-unmapped keys
-    for taxon_id, names in alt_names.items():
-        entry = entries_by_taxon.get(taxon_id)
-        if not entry:
-            continue
-        for cn in names:
+            entry = {
+                "taxon_id": taxon["taxon_id"],
+                "scientific_name": taxon["scientific_name"],
+                "common_name": common_names.get(taxon_id, ""),
+                "rank": rank,
+                "lineage_names": lineage_names,
+                "lineage_ranks": lineage_ranks,
+            }
+            entries_by_taxon[taxon_id] = entry
+
+            # Index by scientific name
+            sci_key = taxon["scientific_name"].lower()
+            taxa_by_scientific[sci_key] = entry
+
+        # Index preferred common names first so they always win.
+        # Keep the first mapping when two taxa share a preferred name.
+        for taxon_id, cn in common_names.items():
+            entry = entries_by_taxon.get(taxon_id)
             cn_key = cn.lower()
-            if cn_key not in taxa_by_common:
+            if entry and cn_key not in taxa_by_common:
                 taxa_by_common[cn_key] = entry
 
-    result = {
-        "last_updated": str(date.today()),
-        "source": "iNaturalist DWCA",
-        "taxa_by_common": taxa_by_common,
-        "taxa_by_scientific": taxa_by_scientific,
-    }
+        # Then index alternate names only for still-unmapped keys
+        for taxon_id, names in alt_names.items():
+            entry = entries_by_taxon.get(taxon_id)
+            if not entry:
+                continue
+            for cn in names:
+                cn_key = cn.lower()
+                if cn_key not in taxa_by_common:
+                    taxa_by_common[cn_key] = entry
 
-    _status(
-        f"Writing taxonomy ({len(taxa_by_common):,} common + {len(taxa_by_scientific):,} scientific names)..."
-    )
-    with open(output_path, "w") as f:
-        json.dump(result, f)
-    _status(
-        f"Taxonomy complete: {len(taxa_by_common):,} common names, {len(taxa_by_scientific):,} scientific names"
-    )
-    return result
+        result = {
+            "last_updated": str(date.today()),
+            "source": "iNaturalist DWCA",
+            "taxa_by_common": taxa_by_common,
+            "taxa_by_scientific": taxa_by_scientific,
+        }
+
+        _status(
+            f"Writing taxonomy ({len(taxa_by_common):,} common + {len(taxa_by_scientific):,} scientific names)..."
+        )
+        with open(output_path, "w") as f:
+            json.dump(result, f)
+        _status(
+            f"Taxonomy complete: {len(taxa_by_common):,} common names, {len(taxa_by_scientific):,} scientific names"
+        )
+        return result
+    finally:
+        # Clean up the downloaded zip — the JSON is all we need
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
 
 
 def main():

@@ -498,3 +498,246 @@ def test_seed_informal_groups_idempotent(tmp_path):
     count2 = db.conn.execute("SELECT COUNT(*) FROM informal_groups").fetchone()[0]
 
     assert count1 == count2
+
+
+# ---------------------------------------------------------------------------
+# Tests for _download_with_resume
+# ---------------------------------------------------------------------------
+
+import http.server
+import threading
+
+
+def _start_test_server(handler_class, port=0):
+    """Start an HTTP server on a random port, return (server, port)."""
+    server = http.server.HTTPServer(("127.0.0.1", port), handler_class)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, server.server_address[1]
+
+
+def test_download_with_resume_success(tmp_path):
+    """Successful download writes the file and removes the .partial."""
+    from taxonomy import _download_with_resume
+
+    content = b"hello world taxonomy data " * 100
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxonomy.gz")
+        _download_with_resume(f"http://127.0.0.1:{port}/taxa.csv.gz", dest)
+
+        assert os.path.exists(dest)
+        assert not os.path.exists(dest + ".partial")
+        assert open(dest, "rb").read() == content
+    finally:
+        server.shutdown()
+
+
+def test_download_with_resume_retries_on_failure(tmp_path):
+    """Download retries and resumes after a mid-transfer failure."""
+    from taxonomy import _download_with_resume
+
+    content = b"A" * 2000
+    call_count = [0]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            call_count[0] += 1
+            range_header = self.headers.get("Range")
+
+            if call_count[0] == 1:
+                # First request: serve first 1000 bytes then close
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content[:1000])
+                # Abruptly stop — client gets a partial file
+                return
+
+            if range_header and range_header.startswith("bytes="):
+                start = int(range_header.split("=")[1].split("-")[0])
+                remaining = content[start:]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(remaining)))
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(content)-1}/{len(content)}")
+                self.end_headers()
+                self.wfile.write(remaining)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxa.csv.gz")
+        _download_with_resume(f"http://127.0.0.1:{port}/taxa.csv.gz", dest)
+
+        assert open(dest, "rb").read() == content
+        assert call_count[0] >= 2
+    finally:
+        server.shutdown()
+
+
+def test_download_with_resume_gives_up_after_stalls(tmp_path):
+    """Download raises after max_stalled consecutive failures with no progress."""
+    from taxonomy import _download_with_resume
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            # Always fail immediately
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxa.csv.gz")
+        import pytest
+        with pytest.raises(RuntimeError, match="stalled"):
+            _download_with_resume(
+                f"http://127.0.0.1:{port}/taxa.csv.gz", dest, max_stalled=2,
+            )
+    finally:
+        server.shutdown()
+
+
+def test_download_with_resume_progress_resets_stall(tmp_path):
+    """Making progress resets the stall counter so download continues."""
+    from taxonomy import _download_with_resume
+
+    content = b"B" * 3000
+    call_count = [0]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            call_count[0] += 1
+            range_header = self.headers.get("Range")
+            start = 0
+            if range_header and range_header.startswith("bytes="):
+                start = int(range_header.split("=")[1].split("-")[0])
+
+            if call_count[0] <= 3:
+                # First 3 calls: promise full remaining but only deliver 1000 bytes
+                remaining_all = content[start:]
+                chunk = content[start:start + 1000]
+                if start > 0:
+                    self.send_response(206)
+                    self.send_header("Content-Range",
+                                     f"bytes {start}-{len(content)-1}/{len(content)}")
+                else:
+                    self.send_response(200)
+                # Content-Length = full remaining, but we only send 1000 bytes
+                self.send_header("Content-Length", str(len(remaining_all)))
+                self.end_headers()
+                self.wfile.write(chunk)
+                return
+
+            # Final call: serve everything remaining
+            remaining = content[start:]
+            if start > 0:
+                self.send_response(206)
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(content)-1}/{len(content)}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(remaining)))
+            self.end_headers()
+            self.wfile.write(remaining)
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxa.csv.gz")
+        # max_stalled=2, but each attempt makes progress so it never gives up
+        _download_with_resume(
+            f"http://127.0.0.1:{port}/taxa.csv.gz", dest, max_stalled=2,
+        )
+        assert open(dest, "rb").read() == content
+    finally:
+        server.shutdown()
+
+
+def test_download_with_resume_callback(tmp_path):
+    """Progress callback is called with status messages."""
+    from taxonomy import _download_with_resume
+
+    content = b"data" * 100
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    messages = []
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "out.gz")
+        _download_with_resume(
+            f"http://127.0.0.1:{port}/file.gz", dest,
+            progress_callback=lambda msg: messages.append(msg),
+        )
+        assert len(messages) >= 1
+        assert any("Downloading" in m or "Downloaded" in m for m in messages)
+    finally:
+        server.shutdown()
+
+
+def test_download_with_resume_server_ignores_range(tmp_path):
+    """If server doesn't support Range, download restarts from scratch."""
+    from taxonomy import _download_with_resume
+
+    content = b"C" * 2000
+    call_count = [0]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First request: partial delivery
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content[:500])
+                return
+
+            # Second request: server ignores Range, sends full content
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _start_test_server(Handler)
+    try:
+        dest = str(tmp_path / "taxa.csv.gz")
+        _download_with_resume(f"http://127.0.0.1:{port}/taxa.csv.gz", dest)
+        assert open(dest, "rb").read() == content
+    finally:
+        server.shutdown()
