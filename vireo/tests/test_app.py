@@ -1384,3 +1384,15 @@ def test_api_folder_delete(app_and_db):
     assert data["deleted_photos"] == photo_count_before
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+
+
+def test_folder_health_check_runs_at_startup(app_and_db):
+    """The app marks non-existent folders as missing after startup."""
+    app, db = app_and_db
+    # Folders in test fixture use fake paths that don't exist on disk.
+    # The health check should mark them missing.
+    changed = db.check_folder_health()
+    assert changed >= 1  # /photos/2024 and /photos/2024/January don't exist
+
+    missing = db.get_missing_folders()
+    assert len(missing) >= 1
