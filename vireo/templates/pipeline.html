@@ -317,7 +317,7 @@ body { padding-bottom: 36px; }
                          placeholder="/path/to/photos" style="font-family:inherit;flex:1;"
                          onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
                   <datalist id="volumeDatalist"></datalist>
-                  <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+                  <button onclick="browseForFolder()" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
                   <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
@@ -1596,12 +1596,16 @@ function updateCardStates() {
 })();
 
 async function browseForFolder() {
-  var path = await pickDirectory('Select photo folder');
-  if (path && _sourceFolders.indexOf(path) === -1) {
-    _sourceFolders.push(path);
-    renderSourceFolders();
-    updateStartButton();
+  if (typeof pickDirectory === 'function') {
+    var path = await pickDirectory('Select photo folder');
+    if (path && _sourceFolders.indexOf(path) === -1) {
+      _sourceFolders.push(path);
+      renderSourceFolders();
+      updateStartButton();
+      return;
+    }
   }
+  openFolderBrowser('source');
 }
 
 async function browseForDestination() {
@@ -1613,14 +1617,17 @@ async function browseForDestination() {
       return;
     }
   }
-  openFolderBrowser();
+  openFolderBrowser('destination');
 }
 
 // ---------- Folder Browser ----------
 var _fbCurrentPath = '';
 var _fbSelectedDir = '';
+var _fbMode = 'destination'; // 'source' or 'destination'
 
-function openFolderBrowser() {
+function openFolderBrowser(mode) {
+  _fbMode = mode || 'destination';
+  document.getElementById('fbTitle').textContent = _fbMode === 'source' ? 'Select Source Folder' : 'Select Destination Folder';
   var overlay = document.getElementById('folderBrowserOverlay');
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
@@ -1730,7 +1737,14 @@ function renderFolderList(dirs) {
 
 function selectFolder() {
   if (!_fbSelectedDir) return;
-  document.getElementById('cfgDestination').value = _fbSelectedDir;
+  if (_fbMode === 'source') {
+    if (_sourceFolders.indexOf(_fbSelectedDir) === -1) {
+      _sourceFolders.push(_fbSelectedDir);
+      renderSourceFolders();
+    }
+  } else {
+    document.getElementById('cfgDestination').value = _fbSelectedDir;
+  }
   updateStartButton();
   closeFolderBrowser();
 }
@@ -1773,7 +1787,7 @@ var _fbHomePath = '';
 <div class="folder-browser-overlay" id="folderBrowserOverlay">
   <div class="folder-browser-panel">
     <div class="folder-browser-header">
-      <h3>Select Destination Folder</h3>
+      <h3 id="fbTitle">Select Destination Folder</h3>
       <button class="folder-browser-close" onclick="closeFolderBrowser()">&times;</button>
     </div>
     <div class="folder-browser-shortcuts">
