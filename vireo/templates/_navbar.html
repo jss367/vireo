@@ -712,6 +712,81 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   color: var(--accent);
 }
 .ws-menu-action:hover { background: var(--bg-tertiary); }
+
+/* ---------- Missing Folders ---------- */
+.missing-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.missing-folder-row:last-child { border-bottom: none; }
+.missing-folder-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+.missing-folder-count {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.missing-folder-actions { display: flex; gap: 6px; }
+.missing-folder-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+.missing-folder-actions button.danger {
+  color: var(--danger, #dc3545);
+  border-color: var(--danger, #dc3545);
+}
+.relocate-breadcrumb {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.relocate-folder-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.relocate-folder-item:hover { background: var(--bg-hover); }
+.missing-folders-banner {
+  background: var(--warning-bg, #fff3cd);
+  color: var(--warning-text, #856404);
+  padding: 6px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--warning-border, #ffc107);
+}
+.missing-folders-banner a {
+  color: var(--warning-text, #856404);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.banner-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--warning-text, #856404);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+}
 </style>
 
 <nav class="navbar">
@@ -753,6 +828,52 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
+
+<!-- Missing Folders Banner -->
+<div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
+  <span id="missingFoldersMsg"></span>
+  <a href="#" onclick="openMissingFoldersModal(); return false;">Review</a>
+  <button class="banner-dismiss" onclick="dismissMissingBanner()">&times;</button>
+</div>
+
+<!-- Missing Folders Modal -->
+<div class="modal-overlay" id="missingFoldersModal">
+  <div class="modal" style="max-width:700px;width:90%;">
+    <h3>Missing Folders</h3>
+    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px;">
+      These folders can't be found on disk. Relocate them to a new path or remove them from Vireo.
+    </p>
+    <div id="missingFoldersList"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Relocate Folder Browser Modal -->
+<div class="modal-overlay" id="relocateBrowserModal" style="z-index:1001;">
+  <div class="modal" style="max-width:600px;width:85%;">
+    <h3>Select New Location</h3>
+    <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
+    <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="relocateSelectBtn" onclick="confirmRelocate()">Select This Folder</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeRelocateBrowser()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Subfolder Cascade Confirm Modal -->
+<div class="modal-overlay" id="cascadeConfirmModal" style="z-index:1002;">
+  <div class="modal">
+    <h3>Subfolders Found</h3>
+    <p id="cascadeMsg"></p>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmCascade()">Re-link All</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeCascadeConfirm()">Skip</button>
+    </div>
+  </div>
+</div>
 
 <!-- Create Workspace Modal -->
 <div class="modal-overlay" id="createWsModal">
@@ -2783,6 +2904,139 @@ function formatDuration(seconds) {
     init();
   }
 })();
+</script>
+<script>
+/* ---------- Missing Folders Banner ---------- */
+let _missingBannerDismissedCount = 0;
+
+async function checkMissingFolders() {
+  try {
+    const resp = await fetch('/api/folders/missing');
+    if (!resp.ok) return;
+    const folders = await resp.json();
+    const banner = document.getElementById('missingFoldersBanner');
+    const msg = document.getElementById('missingFoldersMsg');
+    if (folders.length > 0 && folders.length !== _missingBannerDismissedCount) {
+      const s = folders.length === 1 ? '' : 's';
+      msg.textContent = `${folders.length} folder${s} can\u2019t be found on disk.`;
+      banner.style.display = 'flex';
+    } else if (folders.length === 0) {
+      banner.style.display = 'none';
+      _missingBannerDismissedCount = 0;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function dismissMissingBanner() {
+  document.getElementById('missingFoldersBanner').style.display = 'none';
+  const msg = document.getElementById('missingFoldersMsg').textContent;
+  const match = msg.match(/^(\d+)/);
+  if (match) _missingBannerDismissedCount = parseInt(match[1]);
+}
+
+// Check on page load and every 10 minutes
+checkMissingFolders();
+setInterval(checkMissingFolders, 600000);
+
+/* ---------- Missing Folders Modal ---------- */
+let _relocatingFolderId = null;
+let _relocateBrowserPath = '';
+let _pendingCascaded = [];
+
+function openMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.add('open');
+  loadMissingFolders();
+}
+
+function closeMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.remove('open');
+  checkMissingFolders();
+}
+
+async function loadMissingFolders() {
+  const resp = await safeFetch('/api/folders/missing');
+  const folders = await resp.json();
+  const container = document.getElementById('missingFoldersList');
+  if (folders.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
+    return;
+  }
+  container.innerHTML = folders.map(f => `
+    <div class="missing-folder-row">
+      <div class="missing-folder-path" title="${f.path}">${f.path}</div>
+      <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
+      <div class="missing-folder-actions">
+        <button onclick="startRelocate(${f.id})">Relocate</button>
+        <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function startRelocate(folderId) {
+  _relocatingFolderId = folderId;
+  _relocateBrowserPath = '';
+  document.getElementById('relocateBrowserModal').classList.add('open');
+  browseRelocate(null);
+}
+
+function closeRelocateBrowser() {
+  document.getElementById('relocateBrowserModal').classList.remove('open');
+  _relocatingFolderId = null;
+}
+
+async function browseRelocate(path) {
+  const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+  const resp = await safeFetch(url);
+  const data = await resp.json();
+  _relocateBrowserPath = data.path;
+
+  document.getElementById('relocateBreadcrumb').textContent = data.path;
+
+  const list = document.getElementById('relocateFolderList');
+  let html = '';
+  const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  if (data.path !== '/') {
+    html += `<div class="relocate-folder-item" ondblclick="browseRelocate('${parent.replace(/'/g, "\\'")}')">\u{1F4C2} ..</div>`;
+  }
+  html += data.dirs.map(d =>
+    `<div class="relocate-folder-item" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
+  ).join('');
+  list.innerHTML = html;
+}
+
+async function confirmRelocate() {
+  if (!_relocatingFolderId || !_relocateBrowserPath) return;
+  const resp = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: _relocateBrowserPath}),
+  });
+  const data = await resp.json();
+  closeRelocateBrowser();
+
+  if (data.cascaded && data.cascaded.length > 0) {
+    _pendingCascaded = data.cascaded;
+    document.getElementById('cascadeMsg').textContent =
+      `${data.cascaded.length} subfolder${data.cascaded.length !== 1 ? 's were' : ' was'} also found at the new location and re-linked.`;
+    document.getElementById('cascadeConfirmModal').classList.add('open');
+  } else {
+    loadMissingFolders();
+  }
+}
+
+function closeCascadeConfirm() {
+  document.getElementById('cascadeConfirmModal').classList.remove('open');
+  _pendingCascaded = [];
+  loadMissingFolders();
+}
+function confirmCascade() { closeCascadeConfirm(); }
+
+async function startRemoveFolder(folderId, path, photoCount) {
+  if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
+  await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
+  loadMissingFolders();
+}
 </script>
 <script src="/static/vireo-utils.js"></script>
 <script src="/static/tauri-bridge.js"></script>

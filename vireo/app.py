@@ -277,6 +277,22 @@ def create_app(db_path, thumb_cache_dir=None):
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
+    def _folder_health_loop():
+        """Periodically check folder health."""
+        import time as _time
+        _time.sleep(30)  # Initial delay
+        while True:
+            try:
+                health_db = Database(db_path)
+                changed = health_db.check_folder_health()
+                if changed:
+                    log.info("Folder health check: %d folder(s) changed status", changed)
+            except Exception:
+                log.debug("Folder health check failed", exc_info=True)
+            _time.sleep(600)  # 10 minutes
+
+    threading.Thread(target=_folder_health_loop, daemon=True).start()
+
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
@@ -466,6 +482,34 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         folders = db.get_folder_tree()
         return jsonify([dict(f) for f in folders])
+
+    @app.route("/api/folders/missing")
+    def api_folders_missing():
+        db = _get_db()
+        missing = db.get_missing_folders()
+        return jsonify([dict(f) for f in missing])
+
+    @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
+    def api_folder_relocate(folder_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        new_path = body.get("path", "")
+        if not new_path:
+            return json_error("path is required")
+        if not os.path.isdir(new_path):
+            return json_error("path does not exist or is not a directory")
+
+        cascaded = db.relocate_folder(folder_id, new_path)
+        return jsonify({
+            "status": "ok",
+            "cascaded": cascaded,
+        })
+
+    @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
+    def api_folder_delete(folder_id):
+        db = _get_db()
+        result = db.delete_folder(folder_id)
+        return jsonify(result)
 
     @app.route("/api/photos")
     def api_photos():
@@ -3453,6 +3497,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
@@ -3734,6 +3780,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)

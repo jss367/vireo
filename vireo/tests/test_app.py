@@ -1349,3 +1349,72 @@ def test_workspace_page_has_add_folder_link(app_and_db):
         html = resp.data.decode()
         assert 'href="/pipeline"' in html
         assert 'Add Folder' in html
+
+
+# -- Missing folder API tests --
+
+
+def test_api_folders_missing(app_and_db):
+    """GET /api/folders/missing returns missing folders with counts."""
+    app, db = app_and_db
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE path = '/photos/2024'")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get("/api/folders/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["path"] == "/photos/2024"
+    assert data[0]["photo_count"] >= 1
+
+
+def test_api_folder_relocate(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate updates path and status."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024'").fetchone()["id"]
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    new_path = str(tmp_path / "relocated")
+    os.makedirs(new_path)
+
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid}/relocate", json={"path": new_path})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+
+    row = db.conn.execute("SELECT status, path FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["status"] == "ok"
+    assert row["path"] == new_path
+
+
+def test_api_folder_delete(app_and_db):
+    """DELETE /api/folders/<id> removes folder and its photos."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024/January'").fetchone()["id"]
+    photo_count_before = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE folder_id = ?", (fid,)
+    ).fetchone()[0]
+    assert photo_count_before > 0
+
+    client = app.test_client()
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_photos"] == photo_count_before
+
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+
+
+def test_folder_health_check_runs_at_startup(app_and_db):
+    """The app marks non-existent folders as missing after startup."""
+    app, db = app_and_db
+    # Folders in test fixture use fake paths that don't exist on disk.
+    # The health check should mark them missing.
+    changed = db.check_folder_health()
+    assert changed >= 1  # /photos/2024 and /photos/2024/January don't exist
+
+    missing = db.get_missing_folders()
+    assert len(missing) >= 1

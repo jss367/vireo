@@ -47,7 +47,8 @@ class Database:
                 path        TEXT UNIQUE,
                 parent_id   INTEGER REFERENCES folders(id),
                 name        TEXT,
-                photo_count INTEGER DEFAULT 0
+                photo_count INTEGER DEFAULT 0,
+                status      TEXT NOT NULL DEFAULT 'ok'
             );
 
             CREATE TABLE IF NOT EXISTS photos (
@@ -569,6 +570,14 @@ class Database:
             """)
             self.conn.commit()
 
+        # Folder health status
+        try:
+            self.conn.execute("SELECT status FROM folders LIMIT 0")
+        except Exception:
+            self.conn.execute(
+                "ALTER TABLE folders ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
+            )
+
         # Ensure indexes exist (for fresh DBs that skip migration, and for
         # legacy DBs where DROP TABLE predictions destroys earlier indexes)
         self.conn.execute(
@@ -775,10 +784,101 @@ class Database:
             """SELECT f.id, f.path, f.name, f.parent_id, f.photo_count
                FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?
+               WHERE wf.workspace_id = ? AND f.status = 'ok'
                ORDER BY f.path""",
             (self._ws_id(),),
         ).fetchall()
+
+    def check_folder_health(self):
+        """Check all folders for existence on disk. Update status column.
+
+        Returns the number of folders whose status changed.
+        """
+        rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
+        changed = 0
+        for row in rows:
+            exists = os.path.exists(row["path"])
+            new_status = "ok" if exists else "missing"
+            if new_status != row["status"]:
+                self.conn.execute(
+                    "UPDATE folders SET status = ? WHERE id = ?",
+                    (new_status, row["id"]),
+                )
+                changed += 1
+        if changed:
+            self.conn.commit()
+        return changed
+
+    def get_missing_folders(self):
+        """Return all folders with status='missing' and their photo counts."""
+        return self.conn.execute(
+            """SELECT f.id, f.path, f.name, f.parent_id,
+                      COUNT(p.id) as photo_count
+               FROM folders f
+               LEFT JOIN photos p ON p.folder_id = f.id
+               WHERE f.status = 'missing'
+               GROUP BY f.id
+               ORDER BY f.path"""
+        ).fetchall()
+
+    def relocate_folder(self, folder_id, new_path):
+        """Update folder path and set status to 'ok'.
+
+        Also checks if missing child folders exist at corresponding paths
+        under new_path. If they do, relocates them too.
+
+        Returns list of child folder dicts that were also relocated.
+        """
+        old_row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
+        self.conn.execute(
+            "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+            (new_path, folder_id),
+        )
+
+        # Check missing children for cascade
+        cascaded = []
+        children = self.conn.execute(
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ?",
+            (old_path + "/%",),
+        ).fetchall()
+        for child in children:
+            relative = child["path"][len(old_path):]  # e.g. "/sub/dir"
+            candidate = new_path + relative
+            if os.path.exists(candidate):
+                self.conn.execute(
+                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+                    (candidate, child["id"]),
+                )
+                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+
+        self.conn.commit()
+        return cascaded
+
+    def delete_folder(self, folder_id):
+        """Delete a folder and all its photos/data from the database.
+
+        Returns dict with 'deleted_photos' count.
+        """
+        photo_ids = [
+            row["id"]
+            for row in self.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ?", (folder_id,)
+            ).fetchall()
+        ]
+
+        if photo_ids:
+            self.delete_photos(photo_ids)
+
+        # Remove folder from workspace_folders and folders
+        self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (folder_id,))
+        self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        self.conn.commit()
+
+        return {"deleted_photos": len(photo_ids)}
 
     # -- Photos --
 
@@ -855,6 +955,7 @@ class Database:
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]
@@ -864,7 +965,7 @@ class Database:
         return self.conn.execute(
             """SELECT COUNT(*) FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?""",
+               WHERE wf.workspace_id = ? AND f.status = 'ok'""",
             (self._ws_id(),),
         ).fetchone()[0]
 
@@ -875,6 +976,7 @@ class Database:
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]
@@ -922,6 +1024,7 @@ class Database:
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                WHERE wf.workspace_id = ?
                GROUP BY k.id
                ORDER BY photo_count DESC
@@ -933,6 +1036,7 @@ class Database:
             """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
             GROUP BY month
             ORDER BY month""",
@@ -943,6 +1047,7 @@ class Database:
             """SELECT p.rating, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE wf.workspace_id = ?
             GROUP BY p.rating
             ORDER BY p.rating""",
@@ -953,6 +1058,7 @@ class Database:
             """SELECT p.flag, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE wf.workspace_id = ?
             GROUP BY p.flag""",
             (ws,),
@@ -979,6 +1085,7 @@ class Database:
             """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
             GROUP BY hour
             ORDER BY hour""",
@@ -994,6 +1101,7 @@ class Database:
                 COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE wf.workspace_id = ?
             GROUP BY bucket
             ORDER BY bucket""",
@@ -1005,6 +1113,7 @@ class Database:
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
             (ws, ws),
         ).fetchone()[0]
@@ -1028,7 +1137,8 @@ class Database:
                       "substr(p.timestamp, 1, 4) = ?"]
         params = [ws, str(year)]
 
-        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
@@ -1062,6 +1172,7 @@ class Database:
                       MAX(substr(p.timestamp, 1, 4)) as max_y
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE wf.workspace_id = ? AND p.timestamp IS NOT NULL""",
             (ws,),
         ).fetchone()
@@ -1101,7 +1212,8 @@ class Database:
             conditions.append("p.timestamp <= ?")
             params.append(date_to)
 
-        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -1164,7 +1276,8 @@ class Database:
             conditions.append("p.timestamp <= ?")
             params.append(date_to)
 
-        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -1228,7 +1341,8 @@ class Database:
                 conditions.append(f"p.id IN ({coll_subquery})")
                 params.extend(coll_params)
 
-        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -1244,6 +1358,7 @@ class Database:
         total = self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                WHERE wf.workspace_id = ?""",
             (ws,),
         ).fetchone()[0]
@@ -1344,7 +1459,8 @@ class Database:
             conditions.append("p.timestamp <= ?")
             params.append(date_to)
 
-        join_clause = "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -1403,6 +1519,7 @@ class Database:
                             ORDER BY pr.confidence DESC LIMIT 1) AS top_species
                     FROM photos p
                     JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                     WHERE wf.workspace_id = ?
                       AND p.latitude IS NOT NULL
                       AND p.longitude IS NOT NULL
@@ -1420,6 +1537,7 @@ class Database:
             """
             SELECT COUNT(*) FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
             """,
@@ -2830,7 +2948,7 @@ class Database:
             params.insert(0, self._ws_id())
 
         # Always join folders for folder-under rules, scoped to workspace
-        folder_join = " JOIN folders f ON f.id = p.folder_id"
+        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'"
         folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
 
         # folder_join comes before join_clause in the query, so its param goes first
