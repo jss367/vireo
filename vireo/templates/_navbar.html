@@ -712,6 +712,32 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   color: var(--accent);
 }
 .ws-menu-action:hover { background: var(--bg-tertiary); }
+
+/* ---------- Missing Folders Banner ---------- */
+.missing-folders-banner {
+  background: var(--warning-bg, #fff3cd);
+  color: var(--warning-text, #856404);
+  padding: 6px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--warning-border, #ffc107);
+}
+.missing-folders-banner a {
+  color: var(--warning-text, #856404);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.banner-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--warning-text, #856404);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+}
 </style>
 
 <nav class="navbar">
@@ -753,6 +779,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </span>
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
+
+<!-- Missing Folders Banner -->
+<div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
+  <span id="missingFoldersMsg"></span>
+  <a href="#" onclick="openMissingFoldersModal(); return false;">Review</a>
+  <button class="banner-dismiss" onclick="dismissMissingBanner()">&times;</button>
+</div>
 
 <!-- Create Workspace Modal -->
 <div class="modal-overlay" id="createWsModal">
@@ -2783,6 +2816,39 @@ function formatDuration(seconds) {
     init();
   }
 })();
+</script>
+<script>
+/* ---------- Missing Folders Banner ---------- */
+let _missingBannerDismissedCount = 0;
+
+async function checkMissingFolders() {
+  try {
+    const resp = await fetch('/api/folders/missing');
+    if (!resp.ok) return;
+    const folders = await resp.json();
+    const banner = document.getElementById('missingFoldersBanner');
+    const msg = document.getElementById('missingFoldersMsg');
+    if (folders.length > 0 && folders.length !== _missingBannerDismissedCount) {
+      const s = folders.length === 1 ? '' : 's';
+      msg.textContent = `${folders.length} folder${s} can\u2019t be found on disk.`;
+      banner.style.display = 'flex';
+    } else if (folders.length === 0) {
+      banner.style.display = 'none';
+      _missingBannerDismissedCount = 0;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function dismissMissingBanner() {
+  document.getElementById('missingFoldersBanner').style.display = 'none';
+  const msg = document.getElementById('missingFoldersMsg').textContent;
+  const match = msg.match(/^(\d+)/);
+  if (match) _missingBannerDismissedCount = parseInt(match[1]);
+}
+
+// Check on page load and every 10 minutes
+checkMissingFolders();
+setInterval(checkMissingFolders, 600000);
 </script>
 <script src="/static/vireo-utils.js"></script>
 <script src="/static/tauri-bridge.js"></script>
