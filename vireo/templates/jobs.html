@@ -248,6 +248,8 @@
   var leafBuffers = {};
   var LEAF_MAX = 20;
   var collapsedSteps = {};
+  var activeWsId = null;
+  var workspaceNames = {};
   var currentView = 'active'; // 'active', 'history', or a job id
 
   function esc(s) {
@@ -445,6 +447,8 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
+        activeWsId = data.active_workspace_id || null;
+        workspaceNames = data.workspace_names || {};
         updateList();
         updateRunningBadge();
         if (currentView === 'active') renderActiveOverview();
@@ -962,8 +966,33 @@
   }
 
   function renderActiveOverview() {
-    document.getElementById('jobDetailPane').innerHTML =
-      '<div class="jobs-detail-empty">Active overview coming soon</div>';
+    var pane = document.getElementById('jobDetailPane');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+
+    if (running.length === 0) {
+      pane.innerHTML = '<div class="jobs-overview-empty">No active jobs.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Start a pipeline from the Pipeline page, or run individual jobs from Browse.</span></div>';
+      return;
+    }
+
+    var thisWs = running.filter(function(j) { return j.workspace_id === activeWsId; });
+    var otherWs = running.filter(function(j) { return j.workspace_id !== activeWsId; });
+
+    var html = '<div style="padding:16px 24px 0;">';
+
+    thisWs.forEach(function(j) {
+      html += renderJobCard(j);
+    });
+
+    if (otherWs.length > 0) {
+      html += '<div class="jobs-overview-divider">Other Workspaces</div>';
+      otherWs.forEach(function(j) {
+        var wsName = workspaceNames[j.workspace_id] || ('Workspace ' + j.workspace_id);
+        html += renderJobCard(j, { workspaceName: wsName });
+      });
+    }
+
+    html += '</div>';
+    pane.innerHTML = html;
   }
 
   function renderHistoryOverview() {
