@@ -44,6 +44,13 @@
   text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
   background: var(--bg-tertiary);
 }
+.jobs-list-divider.clickable {
+  cursor: pointer; transition: background 0.1s; user-select: none;
+}
+.jobs-list-divider.clickable:hover { background: var(--bg-tertiary); }
+.jobs-list-divider.clickable.selected {
+  background: var(--bg-tertiary); border-left: 3px solid var(--accent); padding-left: 13px;
+}
 .job-list-item {
   padding: 10px 16px; cursor: pointer;
   border-bottom: 1px solid var(--border-subtle);
@@ -209,6 +216,7 @@
   var leafBuffers = {};
   var LEAF_MAX = 20;
   var collapsedSteps = {};
+  var currentView = 'active'; // 'active', 'history', or a job id
 
   function esc(s) {
     if (!s) return '';
@@ -248,10 +256,7 @@
         activeJobs = data.active || [];
         updateList();
         updateRunningBadge();
-        if (!selectedJobId && activeJobs.length > 0) {
-          var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-          if (running.length > 0) selectJob(running[0].id, 'active');
-        }
+        if (currentView === 'active') renderActiveOverview();
       })
       .catch(function() {});
   }
@@ -271,9 +276,6 @@
         });
         updateList();
         populateTypeFilter();
-        if (!selectedJobId && activeJobs.length === 0 && historyJobs.length > 0) {
-          selectJob(historyJobs[0].id, 'history');
-        }
       })
       .catch(function() {});
   }
@@ -301,18 +303,15 @@
     var html = '';
 
     var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-    if (running.length > 0) {
-      html += '<div class="jobs-list-divider">Active</div>';
-      running.forEach(function(j) { html += renderListItem(j, 'active'); });
-    }
+    html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
+      (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
+    running.forEach(function(j) { html += renderListItem(j, 'active'); });
 
     var filtered = historyJobs;
     if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
     if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
 
-    if (filtered.length > 0 || running.length === 0) {
-      html += '<div class="jobs-list-divider">History</div>';
-    }
+    html += '<div class="jobs-list-divider clickable' + (currentView === 'history' ? ' selected' : '') + '" data-view="history">History</div>';
     if (filtered.length === 0 && running.length === 0) {
       html += '<div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">No jobs yet</div>';
     }
@@ -366,11 +365,22 @@
 
   // Event delegation for job list clicks
   document.getElementById('jobListContent').addEventListener('click', function(e) {
+    var viewItem = e.target.closest('[data-view]');
+    if (viewItem) {
+      currentView = viewItem.getAttribute('data-view');
+      selectedJobId = null;
+      selectedSource = null;
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      renderMainPane();
+      updateList();
+      return;
+    }
     var item = e.target.closest('[data-job-id]');
     if (item) selectJob(item.getAttribute('data-job-id'), item.getAttribute('data-job-source'));
   });
 
   function selectJob(jobId, source) {
+    currentView = jobId;
     selectedJobId = jobId;
     selectedSource = source;
     leafBuffers = {};
@@ -588,6 +598,25 @@
     if (step.error && isExpanded) html += '<div class="tree-step-error">' + esc(step.error) + '</div>';
     html += '</div>';
     return html;
+  }
+
+  function renderMainPane() {
+    if (currentView === 'active') {
+      renderActiveOverview();
+    } else if (currentView === 'history') {
+      renderHistoryOverview();
+    }
+    // Individual job selection handled by existing selectJob flow
+  }
+
+  function renderActiveOverview() {
+    document.getElementById('jobDetailPane').innerHTML =
+      '<div class="jobs-detail-empty">Active overview coming soon</div>';
+  }
+
+  function renderHistoryOverview() {
+    document.getElementById('jobDetailPane').innerHTML =
+      '<div class="jobs-detail-empty">History overview coming soon</div>';
   }
 
   pollAll();
