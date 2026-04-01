@@ -1889,3 +1889,87 @@ def test_delete_folder(tmp_path):
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_missing_folder_photos_hidden_from_browse(tmp_path):
+    """Photos in missing folders don't appear in get_photos or count_photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+    db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    # Both visible before marking missing
+    assert db.count_photos() == 2
+    assert len(db.get_photos()) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    # Only one visible after marking missing
+    assert db.count_photos() == 1
+    photos = db.get_photos()
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "visible.jpg"
+
+
+def test_missing_folder_hidden_from_folder_tree(tmp_path):
+    """Missing folders don't appear in get_folder_tree."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+
+    assert len(db.get_folder_tree()) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    tree = db.get_folder_tree()
+    assert len(tree) == 1
+    assert tree[0]["name"] == "ok"
+
+
+def test_missing_folder_hidden_from_collection(tmp_path):
+    """Photos in missing folders don't appear in collection queries."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+    p1 = db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+    p2 = db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    # Create a collection that matches all photos
+    rules = json.dumps([{"field": "photo_ids", "value": [p1, p2]}])
+    db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("test", rules, ws),
+    )
+    db.conn.commit()
+    coll_id = db.conn.execute("SELECT id FROM collections WHERE name = 'test'").fetchone()["id"]
+
+    assert db.count_collection_photos(coll_id) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    assert db.count_collection_photos(coll_id) == 1
+    photos = db.get_collection_photos(coll_id)
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "visible.jpg"
