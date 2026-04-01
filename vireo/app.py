@@ -467,6 +467,34 @@ def create_app(db_path, thumb_cache_dir=None):
         folders = db.get_folder_tree()
         return jsonify([dict(f) for f in folders])
 
+    @app.route("/api/folders/missing")
+    def api_folders_missing():
+        db = _get_db()
+        missing = db.get_missing_folders()
+        return jsonify([dict(f) for f in missing])
+
+    @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
+    def api_folder_relocate(folder_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        new_path = body.get("path", "")
+        if not new_path:
+            return json_error("path is required")
+        if not os.path.isdir(new_path):
+            return json_error("path does not exist or is not a directory")
+
+        cascaded = db.relocate_folder(folder_id, new_path)
+        return jsonify({
+            "status": "ok",
+            "cascaded": cascaded,
+        })
+
+    @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
+    def api_folder_delete(folder_id):
+        db = _get_db()
+        result = db.delete_folder(folder_id)
+        return jsonify(result)
+
     @app.route("/api/photos")
     def api_photos():
         import config as cfg

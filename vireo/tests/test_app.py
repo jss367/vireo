@@ -1327,3 +1327,60 @@ def test_nav_order_rejects_non_list(app_and_db):
                       json={"nav_order": "not-a-list"},
                       content_type='application/json')
     assert resp.status_code == 400
+
+
+# -- Missing folder API tests --
+
+
+def test_api_folders_missing(app_and_db):
+    """GET /api/folders/missing returns missing folders with counts."""
+    app, db = app_and_db
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE path = '/photos/2024'")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get("/api/folders/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["path"] == "/photos/2024"
+    assert data[0]["photo_count"] >= 1
+
+
+def test_api_folder_relocate(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate updates path and status."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024'").fetchone()["id"]
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    new_path = str(tmp_path / "relocated")
+    os.makedirs(new_path)
+
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid}/relocate", json={"path": new_path})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+
+    row = db.conn.execute("SELECT status, path FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["status"] == "ok"
+    assert row["path"] == new_path
+
+
+def test_api_folder_delete(app_and_db):
+    """DELETE /api/folders/<id> removes folder and its photos."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024/January'").fetchone()["id"]
+    photo_count_before = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE folder_id = ?", (fid,)
+    ).fetchone()[0]
+    assert photo_count_before > 0
+
+    client = app.test_client()
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_photos"] == photo_count_before
+
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
