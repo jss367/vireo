@@ -1750,3 +1750,142 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     # Alternatives only
     alts = db.get_predictions(status="alternative")
     assert len(alts) == 2
+
+
+# -- Folder health / missing folder tests --
+
+
+def test_folder_status_column_exists(tmp_path):
+    """Folders table has a status column defaulting to 'ok'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.ensure_default_workspace()
+    db.set_active_workspace(1)
+    fid = db.add_folder("/photos/test", name="test")
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_check_folder_health_marks_missing(tmp_path):
+    """check_folder_health sets status='missing' for non-existent folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    real_dir = str(tmp_path / "real")
+    os.makedirs(real_dir)
+    fid_real = db.add_folder(real_dir, name="real")
+    fid_gone = db.add_folder("/nonexistent/folder", name="gone")
+
+    changed = db.check_folder_health()
+    assert changed == 1
+
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_gone,)).fetchone()
+    assert row["status"] == "missing"
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_real,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_check_folder_health_recovers(tmp_path):
+    """check_folder_health sets status back to 'ok' when folder reappears."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = str(tmp_path / "comeback")
+    fid = db.add_folder(folder, name="comeback")
+    # Mark missing manually
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    # Folder doesn't exist yet -> stays missing
+    db.check_folder_health()
+    assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "missing"
+
+    # Create folder -> recovery
+    os.makedirs(folder)
+    db.check_folder_health()
+    assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
+
+
+def test_get_missing_folders(tmp_path):
+    """get_missing_folders returns missing folders with photo counts."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    missing = db.get_missing_folders()
+    assert len(missing) == 1
+    assert missing[0]["path"] == "/gone/folder"
+    assert missing[0]["photo_count"] == 1
+
+
+def test_relocate_folder(tmp_path):
+    """relocate_folder updates path and sets status to 'ok'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/old/path", name="photos")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    new_path = str(tmp_path / "new_location")
+    os.makedirs(new_path)
+    db.relocate_folder(fid, new_path)
+
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["path"] == new_path
+    assert row["status"] == "ok"
+
+
+def test_relocate_folder_cascade(tmp_path):
+    """relocate_folder returns child folders that also exist at new location."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/old/root", name="root")
+    child = db.add_folder("/old/root/sub", name="sub", parent_id=parent)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    os.makedirs(os.path.join(new_root, "sub"))
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert len(cascaded) == 1
+    assert cascaded[0]["id"] == child
+
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row["path"] == os.path.join(new_root, "sub")
+    assert row["status"] == "ok"
+
+
+def test_delete_folder(tmp_path):
+    """delete_folder removes folder and its photos from the database."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/delete/me", name="me")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(fid)
+    assert result["deleted_photos"] == 1
+
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None

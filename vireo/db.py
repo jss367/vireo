@@ -47,7 +47,8 @@ class Database:
                 path        TEXT UNIQUE,
                 parent_id   INTEGER REFERENCES folders(id),
                 name        TEXT,
-                photo_count INTEGER DEFAULT 0
+                photo_count INTEGER DEFAULT 0,
+                status      TEXT NOT NULL DEFAULT 'ok'
             );
 
             CREATE TABLE IF NOT EXISTS photos (
@@ -569,6 +570,14 @@ class Database:
             """)
             self.conn.commit()
 
+        # Folder health status
+        try:
+            self.conn.execute("SELECT status FROM folders LIMIT 0")
+        except Exception:
+            self.conn.execute(
+                "ALTER TABLE folders ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
+            )
+
         # Ensure indexes exist (for fresh DBs that skip migration, and for
         # legacy DBs where DROP TABLE predictions destroys earlier indexes)
         self.conn.execute(
@@ -779,6 +788,97 @@ class Database:
                ORDER BY f.path""",
             (self._ws_id(),),
         ).fetchall()
+
+    def check_folder_health(self):
+        """Check all folders for existence on disk. Update status column.
+
+        Returns the number of folders whose status changed.
+        """
+        rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
+        changed = 0
+        for row in rows:
+            exists = os.path.exists(row["path"])
+            new_status = "ok" if exists else "missing"
+            if new_status != row["status"]:
+                self.conn.execute(
+                    "UPDATE folders SET status = ? WHERE id = ?",
+                    (new_status, row["id"]),
+                )
+                changed += 1
+        if changed:
+            self.conn.commit()
+        return changed
+
+    def get_missing_folders(self):
+        """Return all folders with status='missing' and their photo counts."""
+        return self.conn.execute(
+            """SELECT f.id, f.path, f.name, f.parent_id,
+                      COUNT(p.id) as photo_count
+               FROM folders f
+               LEFT JOIN photos p ON p.folder_id = f.id
+               WHERE f.status = 'missing'
+               GROUP BY f.id
+               ORDER BY f.path"""
+        ).fetchall()
+
+    def relocate_folder(self, folder_id, new_path):
+        """Update folder path and set status to 'ok'.
+
+        Also checks if missing child folders exist at corresponding paths
+        under new_path. If they do, relocates them too.
+
+        Returns list of child folder dicts that were also relocated.
+        """
+        old_row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
+        self.conn.execute(
+            "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+            (new_path, folder_id),
+        )
+
+        # Check missing children for cascade
+        cascaded = []
+        children = self.conn.execute(
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ?",
+            (old_path + "/%",),
+        ).fetchall()
+        for child in children:
+            relative = child["path"][len(old_path):]  # e.g. "/sub/dir"
+            candidate = new_path + relative
+            if os.path.exists(candidate):
+                self.conn.execute(
+                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+                    (candidate, child["id"]),
+                )
+                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+
+        self.conn.commit()
+        return cascaded
+
+    def delete_folder(self, folder_id):
+        """Delete a folder and all its photos/data from the database.
+
+        Returns dict with 'deleted_photos' count.
+        """
+        photo_ids = [
+            row["id"]
+            for row in self.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ?", (folder_id,)
+            ).fetchall()
+        ]
+
+        if photo_ids:
+            self.delete_photos(photo_ids)
+
+        # Remove folder from workspace_folders and folders
+        self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (folder_id,))
+        self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        self.conn.commit()
+
+        return {"deleted_photos": len(photo_ids)}
 
     # -- Photos --
 
