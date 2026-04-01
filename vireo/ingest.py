@@ -33,7 +33,8 @@ def discover_source_files(source_dir, file_types="both"):
 
     Args:
         source_dir: path to source directory (e.g., SD card mount)
-        file_types: "raw", "jpeg", or "both"
+        file_types: "raw", "jpeg", "both", or a list of extensions
+            (e.g. [".jpg", ".nef"])
 
     Returns:
         Sorted list of Path objects for matching files
@@ -42,7 +43,9 @@ def discover_source_files(source_dir, file_types="both"):
     if not source_path.is_dir():
         return []
 
-    if file_types == "raw":
+    if isinstance(file_types, list):
+        allowed = {ext.lower() for ext in file_types}
+    elif file_types == "raw":
         allowed = RAW_EXTENSIONS
     elif file_types == "jpeg":
         allowed = IMAGE_EXTENSIONS

@@ -336,15 +336,38 @@ body { padding-bottom: 36px; }
                 </div>
               </div>
             </div>
-            <div class="setting-row">
-              <div class="setting-item">
+            <div class="setting-row" style="align-items:flex-start;">
+              <div class="setting-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
                 <div class="setting-label">File Types</div>
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-right:12px;">
-                  <input type="checkbox" id="chkJpeg" checked style="accent-color:var(--accent);" onchange="updateStartButton()"> JPEG
-                </label>
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="updateStartButton()"> RAW
-                </label>
+                <div style="display:flex;gap:16px;">
+                  <div>
+                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
+                      <input type="checkbox" id="chkStandard" checked style="accent-color:var(--accent);" onchange="onGroupToggle('standard')"> Standard
+                    </label>
+                    <div id="standardExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".jpg" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> JPG</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".png" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> PNG</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".tiff" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> TIFF</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".bmp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> BMP</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".webp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> WebP</label>
+                    </div>
+                  </div>
+                  <div>
+                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
+                      <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="onGroupToggle('raw')"> RAW
+                    </label>
+                    <div id="rawExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".nef" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> NEF</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR2</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr3" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR3</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".arw" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ARW</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".raf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RAF</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".dng" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> DNG</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".rw2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RW2</label>
+                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".orf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ORF</label>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="setting-item" id="skipDuplicatesItem" style="display:none;">
                 <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
@@ -749,13 +772,40 @@ async function loadVolumes() {
   } catch(e) {}
 }
 
+function onGroupToggle(group) {
+  var parentId = group === 'standard' ? 'chkStandard' : 'chkRaw';
+  var checked = document.getElementById(parentId).checked;
+  var children = document.querySelectorAll('input[data-group="' + group + '"]');
+  children.forEach(function(cb) { cb.checked = checked; });
+  updateStartButton();
+}
+
+function onExtToggle(group) {
+  var parentId = group === 'standard' ? 'chkStandard' : 'chkRaw';
+  var children = document.querySelectorAll('input[data-group="' + group + '"]');
+  var allChecked = true;
+  var anyChecked = false;
+  children.forEach(function(cb) {
+    if (cb.checked) anyChecked = true;
+    else allChecked = false;
+  });
+  var parent = document.getElementById(parentId);
+  parent.checked = allChecked;
+  parent.indeterminate = anyChecked && !allChecked;
+  updateStartButton();
+}
+
 function getIngestFileTypes() {
-  var jpeg = document.getElementById('chkJpeg').checked;
-  var raw = document.getElementById('chkRaw').checked;
-  if (jpeg && raw) return 'both';
-  if (jpeg) return 'jpeg';
-  if (raw) return 'raw';
-  return 'both';
+  var exts = [];
+  var stdMap = {'.jpg': ['.jpg', '.jpeg'], '.png': ['.png'], '.tiff': ['.tiff', '.tif'], '.bmp': ['.bmp'], '.webp': ['.webp']};
+  document.querySelectorAll('input[data-group="standard"]:checked').forEach(function(cb) {
+    var ext = cb.getAttribute('data-ext');
+    (stdMap[ext] || [ext]).forEach(function(e) { exts.push(e); });
+  });
+  document.querySelectorAll('input[data-group="raw"]:checked').forEach(function(cb) {
+    exts.push(cb.getAttribute('data-ext'));
+  });
+  return exts;
 }
 
 function updateStartButton() {
@@ -764,13 +814,12 @@ function updateStartButton() {
 
   if (_sourceMode === 'import') {
     var hasFolders = _sourceFolders.length > 0;
-    var jpeg = document.getElementById('chkJpeg').checked;
-    var raw = document.getElementById('chkRaw').checked;
+    var anyType = getIngestFileTypes().length > 0;
     if (_copyMode) {
       var dest = document.getElementById('cfgDestination').value.trim();
-      btn.disabled = !hasFolders || !dest || (!jpeg && !raw);
+      btn.disabled = !hasFolders || !dest || !anyType;
     } else {
-      btn.disabled = !hasFolders || (!jpeg && !raw);
+      btn.disabled = !hasFolders || !anyType;
     }
   } else {
     var collId = document.getElementById('collectionPicker').value;
