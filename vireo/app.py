@@ -3497,6 +3497,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
@@ -3778,6 +3780,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
