@@ -233,7 +233,7 @@
   </div>
 
   <div class="jobs-detail-pane" id="jobDetailPane">
-    <div class="jobs-detail-empty">Select a job to view details</div>
+    <div class="jobs-detail-empty">Loading...</div>
   </div>
 </div>
 
@@ -475,8 +475,6 @@
       })
       .catch(function() {});
   }
-
-  function pollAll() { fetchJobs(); fetchHistory(); }
 
   function populateTypeFilter() {
     var sel = document.getElementById('filterType');
@@ -729,7 +727,9 @@
     pane.innerHTML = html;
   }
 
-  pollAll();
+  // Initial load
+  fetchJobs();
+  fetchHistory();
   pollTimer = setInterval(fetchJobs, 2000);
   setInterval(fetchHistory, 10000);
 })();
