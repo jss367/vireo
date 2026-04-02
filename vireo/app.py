@@ -10,16 +10,13 @@ import logging
 import logging.handlers
 import os
 import queue
-import subprocess
 import time
 import webbrowser
-from pathlib import Path
 
 from db import Database
 from flask import (
     Flask,
     Response,
-    g,
     jsonify,
     make_response,
     redirect,
@@ -65,30 +62,6 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
-
-
-def _trash_via_finder(filepath):
-    """Trash a file via Finder using AppleScript.
-
-    Fallback for when send2trash fails (e.g. external volumes where the
-    legacy Carbon API can't locate .Trashes).
-    """
-    result = subprocess.run(
-        [
-            "osascript",
-            "-e", "on run argv",
-            "-e", "set posixPath to item 1 of argv",
-            "-e", "set fileRef to POSIX file posixPath",
-            "-e", "tell application \"Finder\" to delete fileRef",
-            "-e", "end run",
-            "--",
-            filepath,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
 
 
 def create_app(db_path, thumb_cache_dir=None):
@@ -179,16 +152,10 @@ def create_app(db_path, thumb_cache_dir=None):
         return jsonify({"error": msg}), status
 
     def _get_db():
-        """Get a Database instance. One connection per request via Flask g."""
-        if "db" not in g:
-            g.db = Database(db_path)
-        return g.db
-
-    @app.teardown_appcontext
-    def _close_db(exc):
-        db = g.pop("db", None)
-        if db is not None:
-            db.conn.close()
+        """Get a Database instance. Creates a new connection per request."""
+        if not hasattr(app, "_db") or app._db is None:
+            app._db = Database(db_path)
+        return app._db
 
     @app.route("/api/health")
     def api_health():
@@ -277,22 +244,6 @@ def create_app(db_path, thumb_cache_dir=None):
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
-    def _folder_health_loop():
-        """Periodically check folder health."""
-        import time as _time
-        _time.sleep(30)  # Initial delay
-        while True:
-            try:
-                health_db = Database(db_path)
-                changed = health_db.check_folder_health()
-                if changed:
-                    log.info("Folder health check: %d folder(s) changed status", changed)
-            except Exception:
-                log.debug("Folder health check failed", exc_info=True)
-            _time.sleep(600)  # 10 minutes
-
-    threading.Thread(target=_folder_health_loop, daemon=True).start()
-
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
@@ -334,9 +285,9 @@ def create_app(db_path, thumb_cache_dir=None):
     def review():
         return render_template("review.html")
 
-    @app.route("/lightroom")
-    def lightroom_page():
-        return render_template("lightroom.html")
+    @app.route("/import")
+    def import_page():
+        return render_template("import.html")
 
     @app.route("/audit")
     def audit():
@@ -370,29 +321,11 @@ def create_app(db_path, thumb_cache_dir=None):
     def settings():
         return render_template("settings.html")
 
-    @app.route("/shortcuts")
-    def shortcuts_page():
-        return render_template("shortcuts.html")
-
     @app.route("/keywords")
     def keywords_page():
         return render_template("keywords.html")
 
-    @app.route("/jobs")
-    def jobs_page():
-        return render_template("jobs.html")
-
     # -- API routes --
-
-    def _attach_species(db, photo_dicts):
-        """Attach species keyword names to a list of photo dicts (in-place)."""
-        if not photo_dicts:
-            return photo_dicts
-        ids = [p["id"] for p in photo_dicts]
-        species_map = db.get_species_keywords_for_photos(ids)
-        for p in photo_dicts:
-            p["species"] = species_map.get(p["id"], [])
-        return photo_dicts
 
     @app.route("/api/browse/init")
     def api_browse_init():
@@ -410,12 +343,9 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
-        photo_dicts = [dict(p) for p in photos]
-        _attach_species(db, photo_dicts)
-
         return jsonify(
             {
-                "photos": photo_dicts,
+                "photos": [dict(p) for p in photos],
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -436,18 +366,6 @@ def create_app(db_path, thumb_cache_dir=None):
         from pipeline import load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
-        if results and results.get("photos"):
-            photo_ids = [p["id"] for p in results["photos"]]
-            placeholders = ",".join("?" for _ in photo_ids)
-            rows = db.conn.execute(
-                f"SELECT id, flag, rating FROM photos WHERE id IN ({placeholders})",
-                photo_ids,
-            ).fetchall()
-            flag_map = {r["id"]: (r["flag"], r["rating"]) for r in rows}
-            for p in results["photos"]:
-                f, r = flag_map.get(p["id"], ("none", 0))
-                p["flag"] = f
-                p["rating"] = r
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
@@ -459,15 +377,11 @@ def create_app(db_path, thumb_cache_dir=None):
             except Exception:
                 pass
 
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-        taxonomy_available = os.path.exists(taxonomy_path)
-
         return jsonify({
             "total_photos": total_photos,
             "has_detections": pipeline_counts["detections"],
             "has_masks": pipeline_counts["masks"],
             "has_sharpness": pipeline_counts["sharpness"],
-            "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
                 "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
@@ -482,34 +396,6 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         folders = db.get_folder_tree()
         return jsonify([dict(f) for f in folders])
-
-    @app.route("/api/folders/missing")
-    def api_folders_missing():
-        db = _get_db()
-        missing = db.get_missing_folders()
-        return jsonify([dict(f) for f in missing])
-
-    @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
-    def api_folder_relocate(folder_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        new_path = body.get("path", "")
-        if not new_path:
-            return json_error("path is required")
-        if not os.path.isdir(new_path):
-            return json_error("path does not exist or is not a directory")
-
-        cascaded = db.relocate_folder(folder_id, new_path)
-        return jsonify({
-            "status": "ok",
-            "cascaded": cascaded,
-        })
-
-    @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
-    def api_folder_delete(folder_id):
-        db = _get_db()
-        result = db.delete_folder(folder_id)
-        return jsonify(result)
 
     @app.route("/api/photos")
     def api_photos():
@@ -548,12 +434,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 keyword=keyword,
             )
 
-        photo_dicts = [dict(p) for p in photos]
-        _attach_species(db, photo_dicts)
-
         return jsonify(
             {
-                "photos": photo_dicts,
+                "photos": [dict(p) for p in photos],
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -573,26 +456,6 @@ def create_app(db_path, thumb_cache_dir=None):
             year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword
         )
         return jsonify(data)
-
-    @app.route("/api/browse/summary")
-    def api_browse_summary():
-        db = _get_db()
-        folder_id = request.args.get("folder_id", None, type=int)
-        rating_min = request.args.get("rating_min", None, type=int)
-        date_from = request.args.get("date_from", None)
-        date_to = request.args.get("date_to", None)
-        keyword = request.args.get("keyword", None)
-        collection_id = request.args.get("collection_id", None, type=int)
-        return jsonify(
-            db.get_browse_summary(
-                folder_id=folder_id,
-                rating_min=rating_min,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                collection_id=collection_id,
-            )
-        )
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -936,97 +799,6 @@ def create_app(db_path, thumb_cache_dir=None):
                        str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(photo_ids)})
 
-    @app.route("/api/batch/delete", methods=["POST"])
-    def api_batch_delete():
-        """Delete photos from Vireo, optionally moving files to trash."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        mode = body.get("mode", "vireo")
-        include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
-
-        if mode == "disk_permanent" and paths:
-            # Retry path: DB already cleaned up, just delete files
-            trashed = 0
-            trash_failed = []
-            for p in paths:
-                if not os.path.isfile(p):
-                    continue
-                try:
-                    os.remove(p)
-                    trashed += 1
-                except OSError:
-                    log.warning("Permanent delete failed for %s", p, exc_info=True)
-                    trash_failed.append({"path": p})
-            return jsonify({
-                "ok": True, "deleted": 0, "trashed": trashed,
-                "trash_failed": trash_failed,
-            })
-
-        if not photo_ids:
-            return json_error("photo_ids required")
-        if mode not in ("vireo", "disk", "disk_permanent"):
-            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
-
-        result = db.delete_photos(photo_ids, include_companions=include_companions)
-
-        # Clean up cached files (thumbnails, previews)
-        thumb_dir = app.config["THUMB_CACHE_DIR"]
-        preview_dir = os.path.join(os.path.dirname(thumb_dir), "previews")
-        for f in result["files"]:
-            pid = f["photo_id"]
-            for d in [thumb_dir, preview_dir]:
-                cached = os.path.join(d, f"{pid}.jpg")
-                if os.path.isfile(cached):
-                    os.remove(cached)
-
-        trashed = 0
-        trash_failed = []
-        if mode in ("disk", "disk_permanent"):
-            for f in result["files"]:
-                # Collect all files to delete: primary + companion
-                file_paths = []
-                primary = os.path.join(f["folder_path"], f["filename"])
-                file_paths.append(primary)
-                if include_companions and f.get("companion_path"):
-                    companion = os.path.join(f["folder_path"], f["companion_path"])
-                    file_paths.append(companion)
-
-                for filepath in file_paths:
-                    if not os.path.isfile(filepath):
-                        log.warning("File already missing: %s", filepath)
-                        continue
-                    if mode == "disk":
-                        try:
-                            from send2trash import send2trash as _trash
-                            _trash(filepath)
-                            trashed += 1
-                        except Exception:
-                            log.debug("send2trash failed for %s, trying Finder", filepath)
-                            try:
-                                _trash_via_finder(filepath)
-                                trashed += 1
-                            except Exception:
-                                log.warning("Trash failed for %s", filepath, exc_info=True)
-                                trash_failed.append({"path": filepath})
-                    else:  # disk_permanent
-                        try:
-                            os.remove(filepath)
-                            trashed += 1
-                        except OSError:
-                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
-                            trash_failed.append({"path": filepath})
-
-        return jsonify({
-            "ok": True,
-            "deleted": result["deleted"],
-            "trashed": trashed,
-            "trash_failed": trash_failed,
-        })
-
     # -- Undo --
 
     @app.route("/api/undo", methods=["POST"])
@@ -1044,46 +816,20 @@ def create_app(db_path, thumb_cache_dir=None):
         non_undoable = Database._NON_UNDOABLE
         placeholders = ",".join("?" for _ in non_undoable)
         latest = db.conn.execute(
-            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (db._ws_id(), *non_undoable),
         ).fetchone()
         if not latest:
             return jsonify({"available": False, "description": "", "count": 0})
         total = db.conn.execute(
-            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
+            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders})",
             (db._ws_id(), *non_undoable),
         ).fetchone()[0]
         return jsonify({
             "available": True,
             "description": latest["description"],
             "count": total,
-        })
-
-    @app.route("/api/redo", methods=["POST"])
-    def api_redo():
-        db = _get_db()
-        result = db.redo_last_undo()
-        if result is None:
-            return json_error("nothing to redo")
-        return jsonify({"ok": True, "redone": result["description"]})
-
-    @app.route("/api/redo/status")
-    def api_redo_status():
-        db = _get_db()
-        from db import Database
-        non_undoable = Database._NON_UNDOABLE
-        placeholders = ",".join("?" for _ in non_undoable)
-        latest = db.conn.execute(
-            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
-            "ORDER BY created_at ASC, id ASC LIMIT 1",
-            (db._ws_id(), *non_undoable),
-        ).fetchone()
-        if not latest:
-            return jsonify({"available": False, "description": ""})
-        return jsonify({
-            "available": True,
-            "description": latest["description"],
         })
 
     @app.route("/api/edit-history")
@@ -1183,12 +929,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_collections():
         db = _get_db()
         collections = db.get_collections()
-        result = []
-        for c in collections:
-            d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
-            result.append(d)
-        return jsonify(result)
+        return jsonify([dict(c) for c in collections])
 
     @app.route("/api/collections", methods=["POST"])
     def api_create_collection():
@@ -1426,25 +1167,6 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
-    @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
-    def api_set_nav_order():
-        """Save navbar link order for the active workspace."""
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_order = body.get("nav_order")
-        if not isinstance(nav_order, list):
-            return jsonify({"error": "nav_order must be a list"}), 400
-        ws = db.get_workspace(db._active_workspace_id)
-        existing = {}
-        if ws and ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
-        existing["nav_order"] = nav_order
-        db.update_workspace(db._active_workspace_id, config_overrides=existing)
-        return jsonify({"ok": True, "nav_order": nav_order})
-
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
@@ -1463,39 +1185,10 @@ def create_app(db_path, thumb_cache_dir=None):
         else:
             preds = db.get_predictions(status=status)
 
-        # Fetch alternatives to attach to their parent predictions
-        alt_preds = []
-        if not status or status == "pending":
-            if collection_id:
-                if photo_ids:
-                    alt_preds = db.get_predictions(photo_ids=photo_ids, status="alternative")
-            else:
-                alt_preds = db.get_predictions(status="alternative")
-
-        # Index alternatives by (detection_id, model)
-        alts_by_key = {}
-        for a in alt_preds:
-            ad = dict(a)
-            key = (ad["detection_id"], ad["model"])
-            alts_by_key.setdefault(key, []).append({
-                "id": ad["id"],
-                "species": ad["species"],
-                "confidence": ad["confidence"],
-                "taxonomy_kingdom": ad.get("taxonomy_kingdom"),
-                "taxonomy_phylum": ad.get("taxonomy_phylum"),
-                "taxonomy_class": ad.get("taxonomy_class"),
-                "taxonomy_order": ad.get("taxonomy_order"),
-                "taxonomy_family": ad.get("taxonomy_family"),
-                "taxonomy_genus": ad.get("taxonomy_genus"),
-                "scientific_name": ad.get("scientific_name"),
-            })
-
-        # Enrich predictions and attach alternatives
+        # Enrich disagreement/refinement predictions with existing species keywords
         results = []
         for p in preds:
             d = dict(p)
-            if d.get("status") == "alternative":
-                continue  # alternatives are nested, not top-level
             if d.get("category") in ("disagreement", "refinement"):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
@@ -1503,9 +1196,6 @@ def create_app(db_path, thumb_cache_dir=None):
                     if db.is_keyword_species(k["id"])
                 ]
                 d["existing_species"] = existing_species
-            # Attach alternatives
-            key = (d.get("detection_id"), d.get("model"))
-            d["alternatives"] = alts_by_key.get(key, [])
             results.append(d)
         return jsonify(results)
 
@@ -1524,7 +1214,6 @@ def create_app(db_path, thumb_cache_dir=None):
         preds = db.get_predictions(photo_ids=photo_ids)
 
         # Collect distinct models and build per-photo lookup
-        # With multi-detection, each photo may have multiple predictions per model
         models = set()
         by_photo = {}
         for pr in preds:
@@ -1535,15 +1224,10 @@ def create_app(db_path, thumb_cache_dir=None):
             if pid not in by_photo:
                 by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
             if model not in by_photo[pid]["predictions"]:
-                by_photo[pid]["predictions"][model] = []
-            by_photo[pid]["predictions"][model].append({
-                "species": d["species"],
-                "confidence": d["confidence"],
-                "box_x": d.get("box_x"),
-                "box_y": d.get("box_y"),
-                "box_w": d.get("box_w"),
-                "box_h": d.get("box_h"),
-            })
+                by_photo[pid]["predictions"][model] = {
+                    "species": d["species"],
+                    "confidence": d["confidence"],
+                }
 
         return jsonify({
             "models": sorted(models),
@@ -1571,21 +1255,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_reject_prediction(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE pr.id = ?""",
-            (pred_id,),
+            "SELECT photo_id, species FROM predictions WHERE id = ?", (pred_id,)
         ).fetchone()
         db.update_prediction_status(pred_id, "rejected")
         if pred:
-            # Also reject sibling alternative predictions
-            db.conn.execute(
-                """UPDATE predictions SET status = 'rejected'
-                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
-                (pred["detection_id"], pred["model"], pred_id),
-            )
-            db.conn.commit()
             db.record_edit('prediction_reject',
                            f'Rejected prediction "{pred["species"]}"',
                            'rejected',
@@ -1663,15 +1336,6 @@ def create_app(db_path, thumb_cache_dir=None):
         for pred_id in removed:
             db.ungroup_prediction(pred_id)
         return jsonify({"ok": True})
-
-    # -- Detection API routes --
-
-    @app.route("/api/detections/<int:photo_id>")
-    def api_detections(photo_id):
-        """Get all detections for a photo."""
-        db = _get_db()
-        dets = db.get_detections(photo_id)
-        return jsonify([dict(d) for d in dets])
 
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
@@ -1869,56 +1533,6 @@ def create_app(db_path, thumb_cache_dir=None):
             "output_format": cfg.get("darktable_output_format"),
             "output_dir": cfg.get("darktable_output_dir"),
         })
-
-    @app.route("/api/photos/open-external", methods=["POST"])
-    def api_photos_open_external():
-        import subprocess
-        import sys
-
-        import config as cfg
-
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids")
-        if not isinstance(photo_ids, list) or not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
-        if not all(isinstance(pid, int) for pid in photo_ids):
-            return jsonify({"error": "photo_ids must be a list of integers"}), 400
-
-        db = _get_db()
-        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
-        file_paths = []
-        for pid in photo_ids:
-            photo = db.get_photo(pid)
-            if not photo:
-                continue
-            folder_path = folders.get(photo["folder_id"], "")
-            if folder_path:
-                file_paths.append(os.path.join(folder_path, photo["filename"]))
-
-        if not file_paths:
-            return jsonify({"error": "No photos found"}), 404
-
-        editor = cfg.get("external_editor")
-        try:
-            if editor:
-                if sys.platform == "darwin" and editor.endswith(".app"):
-                    subprocess.Popen(["open", "-a", editor] + file_paths)
-                else:
-                    subprocess.Popen([editor] + file_paths)
-            else:
-                if sys.platform == "darwin":
-                    subprocess.Popen(["open"] + file_paths)
-                elif sys.platform == "win32":
-                    for fp in file_paths:
-                        os.startfile(fp)
-                else:
-                    for fp in file_paths:
-                        subprocess.Popen(["xdg-open", fp])
-        except Exception as e:
-            log.warning("Failed to open external editor: %s", e)
-            return jsonify({"error": str(e)}), 500
-
-        return jsonify({"opened": len(file_paths)})
 
     @app.route("/api/storage")
     def api_storage():
@@ -2118,7 +1732,7 @@ def create_app(db_path, thumb_cache_dir=None):
         entries = []
         total_size = 0
         for f in sorted(os.listdir(CACHE_DIR)):
-            if f.endswith(".pt"):
+            if f.endswith(".npy") or f.endswith(".pt"):
                 fp = os.path.join(CACHE_DIR, f)
                 size = os.path.getsize(fp)
                 total_size += size
@@ -2259,12 +1873,7 @@ def create_app(db_path, thumb_cache_dir=None):
             from importlib.metadata import version as pkg_version
             ver = pkg_version("vireo")
         except Exception:
-            import tomllib
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
-                    ver = tomllib.load(f)["project"]["version"]
-            except Exception:
-                ver = "0.0.0"
+            ver = "0.1.0"
         return jsonify({"version": ver})
 
     @app.route("/api/volumes", methods=["GET"])
@@ -2282,39 +1891,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 if os.path.isdir(path):
                     volumes.append({"name": name, "path": path})
         return jsonify(volumes)
-
-    @app.route("/api/browse", methods=["GET"])
-    def api_browse():
-        """List subdirectories at a given path for folder browser."""
-        path = request.args.get("path", os.path.expanduser("~"))
-        if not os.path.isdir(path):
-            return json_error("path is not a valid directory")
-        dirs = []
-        try:
-            for name in sorted(os.listdir(path), key=str.casefold):
-                if name.startswith("."):
-                    continue
-                full = os.path.join(path, name)
-                if os.path.isdir(full):
-                    dirs.append({"name": name, "path": full})
-        except PermissionError:
-            return json_error("permission denied", 403)
-        return jsonify({"path": path, "dirs": dirs})
-
-    @app.route("/api/browse/mkdir", methods=["POST"])
-    def api_browse_mkdir():
-        """Create a new directory."""
-        body = request.get_json(silent=True) or {}
-        path = body.get("path", "")
-        if not path:
-            return json_error("path is required")
-        if not os.path.isabs(path):
-            return json_error("path must be absolute")
-        try:
-            os.makedirs(path, exist_ok=True)
-        except OSError as e:
-            return json_error(str(e), 500)
-        return jsonify({"name": os.path.basename(path), "path": path})
 
     # -- Import API routes --
 
@@ -2748,11 +2324,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name, pr.confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
+            "SELECT species, scientific_name, confidence FROM predictions WHERE photo_id = ? AND workspace_id = ?",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2841,11 +2413,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Use overrides from request, or fall back to DB data
         pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
+            "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2909,11 +2477,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 continue
 
             pred = db.conn.execute(
-                """SELECT pr.species, pr.scientific_name
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE d.photo_id = ? AND d.workspace_id = ?
-                   ORDER BY pr.confidence DESC LIMIT 1""",
+                "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
                 (photo_id, db._active_workspace_id),
             ).fetchone()
 
@@ -2960,7 +2524,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/system/info")
     def api_system_info():
-        """Return system information: GPU, Python, PyTorch."""
+        """Return system information: ONNX Runtime, Python, hardware."""
         import platform
 
         info = {
@@ -2968,116 +2532,82 @@ def create_app(db_path, thumb_cache_dir=None):
             "platform": platform.platform(),
             "device": "CPU",
             "device_detail": "No GPU acceleration",
-            "torch_version": None,
-            "torch_detail": "",
+            "onnxruntime_version": None,
+            "onnxruntime_providers": [],
         }
         try:
-            import torch
+            import onnxruntime as ort
 
-            info["torch_version"] = torch.__version__
-            if torch.cuda.is_available():
+            info["onnxruntime_version"] = ort.__version__
+            available = ort.get_available_providers()
+            info["onnxruntime_providers"] = available
+
+            if "CoreMLExecutionProvider" in available:
+                info["device"] = "CoreML"
+                info["device_detail"] = "Apple CoreML acceleration"
+            elif "CUDAExecutionProvider" in available:
                 info["device"] = "CUDA"
-                info["device_detail"] = torch.cuda.get_device_name(0)
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                info["device"] = "MPS"
-                info["device_detail"] = "Apple Metal Performance Shaders"
+                info["device_detail"] = "NVIDIA CUDA acceleration"
             else:
                 info["device"] = "CPU"
                 info["device_detail"] = "GPU not available — using CPU"
-            info["torch_detail"] = (
-                f"CUDA: {torch.cuda.is_available()}, MPS: {getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available()}"
-            )
         except ImportError:
-            info["torch_detail"] = "PyTorch not installed"
+            info["device_detail"] = "onnxruntime not installed"
 
-        # MegaDetector status
+        # MegaDetector status — just check for the ONNX file
         try:
-            from PytorchWildlife.models import detection as pw_detection  # noqa: F401
+            from detector import MEGADETECTOR_ONNX_PATH
 
             info["megadetector"] = "installed"
             info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
 
-            # Check if weights are downloaded
-            import glob
-
-            import torch
-
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-            weight_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
-            if weight_files:
-                size_mb = round(os.path.getsize(weight_files[0]) / 1024 / 1024, 1)
-                info["megadetector_weights_path"] = weight_files[0]
+            if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+                size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+                info["megadetector_weights"] = "downloaded"
+                info["megadetector_weights_path"] = MEGADETECTOR_ONNX_PATH
                 info["megadetector_weights_size"] = f"{size_mb} MB"
-                # Validate the weights file is loadable
-                try:
-                    ckpt = torch.load(weight_files[0], map_location="cpu", weights_only=False)
-                    if isinstance(ckpt, dict):
-                        info["megadetector_weights"] = "downloaded"
-                    else:
-                        info["megadetector_weights"] = "corrupt"
-                        info["megadetector_weights_detail"] = "File loads but has unexpected format"
-                except Exception as e:
-                    info["megadetector_weights"] = "corrupt"
-                    info["megadetector_weights_detail"] = str(e)[:100]
             else:
                 info["megadetector_weights"] = "not downloaded"
                 info["megadetector_weights_path"] = None
                 info["megadetector_weights_size"] = None
         except ImportError:
-            info["megadetector"] = "not installed"
-            info["megadetector_detail"] = "pip install PytorchWildlife"
-            info["megadetector_weights"] = "unavailable"
-        except Exception as e:
-            info["megadetector"] = "error"
-            info["megadetector_detail"] = str(e)
-            info["megadetector_weights"] = "error"
+            info["megadetector"] = "unavailable"
+            info["megadetector_detail"] = "detector module not available"
 
         return jsonify(info)
 
     @app.route("/api/megadetector/download", methods=["POST"])
     def api_megadetector_download():
-        """Download MegaDetector weights as a background job."""
+        """Download MegaDetector ONNX model as a background job."""
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            import torch
-            import wget
+            from detector import MEGADETECTOR_ONNX_DIR, MEGADETECTOR_ONNX_PATH
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
 
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-            os.makedirs(hub_dir, exist_ok=True)
-            dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
-            wget_dest = os.path.join(hub_dir, "MDV6-yolov9-c.pt")
+            os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
 
-            # Remove partial downloads (wget saves as MDV6-yolov9-c.pt, PW expects MDV6b-)
-            for f in [dest, wget_dest, dest + ".tmp", wget_dest + ".tmp"]:
-                if os.path.exists(f):
-                    os.remove(f)
-
-            url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
             runner.push_event(job["id"], "progress", {
-                "phase": "Downloading MegaDetector weights (~50 MB)...",
+                "phase": "Downloading MegaDetector ONNX model...",
                 "current": 0, "total": 1,
             })
 
-            wget.download(url, out=hub_dir)
+            import shutil
 
-            # wget saves as MDV6-yolov9-c.pt, PytorchWildlife expects MDV6b-yolov9-c.pt
-            if os.path.exists(wget_dest) and not os.path.exists(dest):
-                os.rename(wget_dest, dest)
+            cached_path = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx",
+                subfolder="megadetector-v6",
+            )
 
-            if not os.path.exists(dest):
-                raise RuntimeError("Download completed but weights file not found")
+            dest = MEGADETECTOR_ONNX_PATH
+            if cached_path != dest:
+                shutil.copy2(cached_path, dest)
 
-            # Validate the downloaded file
-            runner.push_event(job["id"], "progress", {
-                "phase": "Validating weights...",
-                "current": 1, "total": 1,
-            })
-            ckpt = torch.load(dest, map_location="cpu", weights_only=False)
-            if not isinstance(ckpt, dict):
-                os.remove(dest)
-                raise RuntimeError("Downloaded file is not a valid model checkpoint")
+            if not os.path.isfile(dest):
+                raise RuntimeError("Download completed but ONNX file not found")
 
             size_mb = round(os.path.getsize(dest) / 1024 / 1024, 1)
             return {"status": "downloaded", "size": f"{size_mb} MB", "path": dest}
@@ -3087,138 +2617,94 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/megadetector/delete", methods=["POST"])
     def api_megadetector_delete():
-        """Delete MegaDetector weights from disk."""
-        import glob
+        """Delete MegaDetector ONNX model from disk."""
+        import shutil
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
+        import detector
+        from detector import MEGADETECTOR_ONNX_DIR
 
         removed = []
-        for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
-            for f in glob.glob(os.path.join(hub_dir, pattern)):
-                os.remove(f)
-                removed.append(f)
+        if os.path.isdir(MEGADETECTOR_ONNX_DIR):
+            shutil.rmtree(MEGADETECTOR_ONNX_DIR)
+            removed.append(MEGADETECTOR_ONNX_DIR)
 
         # Clear the cached singleton so it reloads next time
-        import detector
-        detector._detector = None
+        detector._session = None
 
         return jsonify({"deleted": removed, "count": len(removed)})
 
     @app.route("/api/models/pipeline")
     def api_models_pipeline():
         """Return download status of all pipeline models (MegaDetector, SAM2, DINOv2)."""
-        import glob
-
+        models_dir = os.path.expanduser("~/.vireo/models")
         models = []
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
-
-        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
-
-        # MegaDetector
-        md_files = glob.glob(os.path.join(hub_dir, "MDV6*yolov9-c.pt"))
+        # MegaDetector — check for ONNX model in ~/.vireo/models/megadetector-v6/
+        md_dir = os.path.join(models_dir, "megadetector-v6")
+        md_onnx = os.path.join(md_dir, "model.onnx")
         md_status = "not downloaded"
         md_size = None
-        if md_files:
-            md_size = round(os.path.getsize(md_files[0]) / 1024 / 1024, 1)
-            try:
-                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-                ckpt = torch.load(md_files[0], map_location="cpu", weights_only=False)
-                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
-                md_status = "downloaded" if isinstance(ckpt, dict) else "corrupt"
-                del ckpt
-            except Exception:
-                md_status = "corrupt"
-                os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
+        if os.path.isfile(md_onnx):
+            md_size = round(os.path.getsize(md_onnx) / 1024 / 1024, 1)
+            md_status = "downloaded"
         models.append({
             "id": "megadetector-v6",
             "name": "MegaDetector V6",
             "role": "Detection",
-            "description": "YOLOv9-c animal detector",
+            "description": "YOLOv9-c animal detector (ONNX)",
             "size_estimate": "~50 MB",
             "status": md_status,
             "size": f"{md_size} MB" if md_size else None,
         })
 
-        # SAM2 variants
+        # SAM2 variants — check for ONNX models in ~/.vireo/models/sam2-{variant}/
         sam2_variants = [
-            ("sam2-tiny", "facebook/sam2.1-hiera-tiny", "SAM2 Tiny", "~40 MB"),
-            ("sam2-small", "facebook/sam2.1-hiera-small", "SAM2 Small", "~150 MB"),
-            ("sam2-base-plus", "facebook/sam2.1-hiera-base-plus", "SAM2 Base+", "~320 MB"),
-            ("sam2-large", "facebook/sam2.1-hiera-large", "SAM2 Large", "~900 MB"),
+            ("sam2-tiny", "SAM2 Tiny", "~40 MB"),
+            ("sam2-small", "SAM2 Small", "~150 MB"),
+            ("sam2-base-plus", "SAM2 Base+", "~320 MB"),
+            ("sam2-large", "SAM2 Large", "~900 MB"),
         ]
-        for variant_id, hf_repo, name, size_est in sam2_variants:
-            repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
+        for variant_id, name, size_est in sam2_variants:
+            variant_dir = os.path.join(models_dir, variant_id)
+            encoder_path = os.path.join(variant_dir, "image_encoder.onnx")
+            decoder_path = os.path.join(variant_dir, "mask_decoder.onnx")
             status = "not downloaded"
             size = None
-            if os.path.exists(repo_dir):
-                # Check for actual weight files (snapshots with .pt files)
-                pt_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.pt"), recursive=True)
-                if pt_files:
-                    total_size = sum(os.path.getsize(f) for f in pt_files)
-                    size = round(total_size / 1024 / 1024, 1)
-                    status = "downloaded" if size > 10 else "incomplete"
-                else:
-                    # Check for safetensors
-                    st_files = glob.glob(os.path.join(repo_dir, "snapshots", "**", "*.safetensors"), recursive=True)
-                    if st_files:
-                        total_size = sum(os.path.getsize(f) for f in st_files)
-                        size = round(total_size / 1024 / 1024, 1)
-                        status = "downloaded" if size > 10 else "incomplete"
+            if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
+                total_size = os.path.getsize(encoder_path) + os.path.getsize(decoder_path)
+                size = round(total_size / 1024 / 1024, 1)
+                status = "downloaded"
+            elif os.path.isfile(encoder_path) or os.path.isfile(decoder_path):
+                status = "incomplete"
             models.append({
                 "id": variant_id,
                 "name": name,
                 "role": "Segmentation",
-                "description": f"SAM2 mask generation ({variant_id})",
+                "description": f"SAM2 mask generation ({variant_id}, ONNX)",
                 "size_estimate": size_est,
                 "status": status,
                 "size": f"{size} MB" if size else None,
-                "hf_repo": hf_repo,
             })
 
-        # DINOv2 variants
+        # DINOv2 variants — check for ONNX models in ~/.vireo/models/dinov2-{variant}/
         dinov2_variants = [
-            ("vit-s14", "dinov2_vits14", "DINOv2 ViT-S/14", "384-dim", "~85 MB"),
-            ("vit-b14", "dinov2_vitb14", "DINOv2 ViT-B/14", "768-dim", "~350 MB"),
-            ("vit-l14", "dinov2_vitl14", "DINOv2 ViT-L/14", "1024-dim", "~1.2 GB"),
+            ("vit-s14", "DINOv2 ViT-S/14", "384-dim", "~85 MB"),
+            ("vit-b14", "DINOv2 ViT-B/14", "768-dim", "~350 MB"),
+            ("vit-l14", "DINOv2 ViT-L/14", "1024-dim", "~1.2 GB"),
         ]
-        for variant_id, hub_name, name, dims, size_est in dinov2_variants:
-            # DINOv2 caches in torch hub dir
-            dinov2_hub = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+        for variant_id, name, dims, size_est in dinov2_variants:
+            variant_dir = os.path.join(models_dir, f"dinov2-{variant_id}")
+            model_path = os.path.join(variant_dir, "model.onnx")
             status = "not downloaded"
             size = None
-            # Check HuggingFace cache too (newer versions use HF)
-            hf_dinov2 = os.path.join(hf_hub_dir, f"models--facebook--{hub_name}")
-            # torch.hub caches the repo, check if model file exists
-            if os.path.exists(dinov2_hub):
-                # The model is loaded via torch.hub.load which downloads the repo
-                # Weights are auto-downloaded on first model creation
-                status = "repo cached"
-            if os.path.exists(hf_dinov2):
-                pt_files = glob.glob(os.path.join(hf_dinov2, "snapshots", "**", "*.bin"), recursive=True)
-                if pt_files:
-                    total_size = sum(os.path.getsize(f) for f in pt_files)
-                    size = round(total_size / 1024 / 1024, 1)
-                    status = "downloaded"
-            # Also check torch hub checkpoints
-            ckpt_files = glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth"))
-            if ckpt_files:
-                size = round(os.path.getsize(ckpt_files[0]) / 1024 / 1024, 1)
+            if os.path.isfile(model_path):
+                size = round(os.path.getsize(model_path) / 1024 / 1024, 1)
                 status = "downloaded"
             models.append({
                 "id": variant_id,
                 "name": name,
                 "role": "Embeddings",
-                "description": f"{dims} embeddings for grouping",
+                "description": f"{dims} embeddings for grouping (ONNX)",
                 "size_estimate": size_est,
                 "status": status,
                 "size": f"{size} MB" if size else None,
@@ -3228,7 +2714,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/models/pipeline/download", methods=["POST"])
     def api_models_pipeline_download():
-        """Download a pipeline model by ID."""
+        """Download a pipeline model (ONNX) by ID from jss367/vireo-onnx-models."""
         body = request.get_json(silent=True) or {}
         model_id = body.get("model_id")
         if not model_id:
@@ -3237,143 +2723,105 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        # Map each pipeline model ID to its HF subfolder and required files
+        PIPELINE_MODELS = {
+            "megadetector-v6": {
+                "subfolder": "megadetector-v6",
+                "files": ["model.onnx"],
+            },
+            "sam2-tiny": {
+                "subfolder": "sam2-tiny",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-small": {
+                "subfolder": "sam2-small",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-base-plus": {
+                "subfolder": "sam2-base-plus",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "sam2-large": {
+                "subfolder": "sam2-large",
+                "files": ["image_encoder.onnx", "mask_decoder.onnx"],
+            },
+            "vit-s14": {
+                "subfolder": "dinov2-vit-s14",
+                "files": ["model.onnx"],
+            },
+            "vit-b14": {
+                "subfolder": "dinov2-vit-b14",
+                "files": ["model.onnx"],
+            },
+            "vit-l14": {
+                "subfolder": "dinov2-vit-l14",
+                "files": ["model.onnx"],
+            },
+        }
+
+        if model_id not in PIPELINE_MODELS:
+            return json_error(f"Unknown pipeline model: {model_id}")
+
         def work(job):
-            import urllib.request
+            import shutil
 
-            import torch
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
 
-            MAX_RETRIES = 3
+            spec = PIPELINE_MODELS[model_id]
+            subfolder = spec["subfolder"]
+            files = spec["files"]
+            model_dir = os.path.join(os.path.expanduser("~/.vireo/models"), subfolder)
+            os.makedirs(model_dir, exist_ok=True)
 
-            def _retry(fn, description):
-                """Retry a download function up to MAX_RETRIES times with backoff."""
+            total = len(files)
+            for fi, filename in enumerate(files):
+                runner.push_event(job["id"], "progress", {
+                    "phase": f"Downloading {fi + 1}/{total}: {filename}...",
+                    "current": fi,
+                    "total": total,
+                })
+
+                MAX_RETRIES = 3
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
-                        return fn()
+                        cached = hf_hub_download(
+                            repo_id=ONNX_REPO,
+                            filename=filename,
+                            subfolder=subfolder,
+                        )
+                        dest = os.path.join(model_dir, filename)
+                        if cached != dest:
+                            shutil.copy2(cached, dest)
+                        break
                     except Exception as exc:
-                        mro_names = [cls.__name__ for cls in type(exc).__mro__]
-                        is_network = isinstance(exc, (OSError, ConnectionError)) or \
-                            any(kw in name for name in mro_names for kw in ("Timeout", "Transport", "ReadError"))
-                        if not is_network or attempt == MAX_RETRIES:
+                        if attempt == MAX_RETRIES:
                             raise
                         wait = 2 ** attempt
-                        log.warning("Download attempt %d/%d for %s failed (%s), retrying in %ds...",
-                                    attempt, MAX_RETRIES, description, exc, wait)
-                        runner.push_event(job["id"], "progress", {
-                            "phase": f"Connection error, retrying in {wait}s (attempt {attempt}/{MAX_RETRIES})...",
-                            "current": 0, "total": 1,
-                        })
                         import time
+                        log.warning(
+                            "Download attempt %d/%d for %s/%s failed (%s), "
+                            "retrying in %ds...",
+                            attempt, MAX_RETRIES, subfolder, filename, exc, wait,
+                        )
+                        runner.push_event(job["id"], "progress", {
+                            "phase": f"Retrying {filename} in {wait}s "
+                                     f"(attempt {attempt}/{MAX_RETRIES})...",
+                            "current": fi, "total": total,
+                        })
                         time.sleep(wait)
 
-            def _download_url(url, dest, label):
-                """Download a URL with byte-level progress reporting."""
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req) as resp:
-                    total = int(resp.headers.get("Content-Length", 0))
-                    total_mb = round(total / 1024 / 1024, 1) if total else "?"
-                    downloaded = 0
-                    chunk_size = 64 * 1024
-                    with open(dest, "wb") as f:
-                        while True:
-                            chunk = resp.read(chunk_size)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            mb = round(downloaded / 1024 / 1024, 1)
-                            pct = round(downloaded / total * 100) if total else 0
-                            runner.push_event(job["id"], "progress", {
-                                "phase": f"{label}: {mb}/{total_mb} MB ({pct}%)",
-                                "current": downloaded,
-                                "total": total,
-                            })
-
             runner.push_event(job["id"], "progress", {
-                "phase": f"Starting download: {model_id}...", "current": 0, "total": 1,
+                "phase": "Download complete", "current": total, "total": total,
             })
-
-            if model_id == "megadetector-v6":
-                hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-                os.makedirs(hub_dir, exist_ok=True)
-                dest = os.path.join(hub_dir, "MDV6b-yolov9-c.pt")
-                for f in [dest, os.path.join(hub_dir, "MDV6-yolov9-c.pt")]:
-                    if os.path.exists(f):
-                        os.remove(f)
-                url = "https://zenodo.org/records/15398270/files/MDV6-yolov9-c.pt?download=1"
-                _retry(lambda: _download_url(url, dest, "MegaDetector V6"), "MegaDetector V6")
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Validating weights...", "current": 1, "total": 1,
-                })
-                _prev = os.environ.get("TORCH_FORCE_WEIGHTS_ONLY_LOAD")
-                os.environ.pop("TORCH_FORCE_WEIGHTS_ONLY_LOAD", None)
-                os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
-                try:
-                    ckpt = torch.load(dest, map_location="cpu", weights_only=False)
-                    if not isinstance(ckpt, dict):
-                        raise RuntimeError("Invalid checkpoint format")
-                    del ckpt
-                finally:
-                    os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
-                    if _prev:
-                        os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = _prev
-                return {"status": "downloaded", "model_id": model_id}
-
-            elif model_id.startswith("sam2-"):
-                hf_map = {
-                    "sam2-tiny": "facebook/sam2.1-hiera-tiny",
-                    "sam2-small": "facebook/sam2.1-hiera-small",
-                    "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
-                    "sam2-large": "facebook/sam2.1-hiera-large",
-                }
-                hf_id = hf_map.get(model_id)
-                if not hf_id:
-                    raise ValueError(f"Unknown SAM2 variant: {model_id}")
-                # Download weights via huggingface_hub with progress
-                from huggingface_hub import snapshot_download
-                runner.push_event(job["id"], "progress", {
-                    "phase": f"Downloading {model_id} from HuggingFace...",
-                    "current": 0, "total": 1,
-                })
-                _retry(lambda: snapshot_download(hf_id), model_id)
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Verifying model loads...", "current": 1, "total": 1,
-                })
-                from sam2.build_sam import build_sam2_hf
-                model = build_sam2_hf(hf_id, device="cpu")
-                del model
-                return {"status": "downloaded", "model_id": model_id}
-
-            elif model_id.startswith("vit-"):
-                hub_map = {
-                    "vit-s14": "dinov2_vits14",
-                    "vit-b14": "dinov2_vitb14",
-                    "vit-l14": "dinov2_vitl14",
-                }
-                hub_name = hub_map.get(model_id)
-                if not hub_name:
-                    raise ValueError(f"Unknown DINOv2 variant: {model_id}")
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Downloading DINOv2 repo from torch hub...",
-                    "current": 0, "total": 1,
-                })
-                # torch.hub.load downloads repo + weights automatically
-                model = _retry(lambda: torch.hub.load("facebookresearch/dinov2", hub_name, trust_repo=True), model_id)
-                del model
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Model loaded and verified", "current": 1, "total": 1,
-                })
-                return {"status": "downloaded", "model_id": model_id}
-
-            else:
-                raise ValueError(f"Unknown model: {model_id}")
+            return {"status": "downloaded", "model_id": model_id}
 
         job_id = runner.start(f"download-{model_id}", work, config={"model_id": model_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
     @app.route("/api/models/pipeline/delete", methods=["POST"])
     def api_models_pipeline_delete():
-        """Delete a pipeline model's cached weights."""
-        import glob
+        """Delete a pipeline model's ONNX files from ~/.vireo/models/."""
         import shutil
 
         body = request.get_json(silent=True) or {}
@@ -3381,56 +2829,37 @@ def create_app(db_path, thumb_cache_dir=None):
         if not model_id:
             return json_error("model_id required")
 
-        try:
-            import torch
-            hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
-        except ImportError:
-            return json_error("torch not installed")
-
-        hf_hub_dir = os.path.expanduser("~/.cache/huggingface/hub")
+        models_dir = os.path.expanduser("~/.vireo/models")
         removed = []
 
         if model_id == "megadetector-v6":
-            for pattern in ["MDV6*yolov9-c.pt", "MDV6*yolov9-c (1).pt"]:
-                for f in glob.glob(os.path.join(hub_dir, pattern)):
-                    os.remove(f)
-                    removed.append(f)
+            model_dir = os.path.join(models_dir, "megadetector-v6")
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             import detector
-            detector._detector = None
+            detector._session = None
 
         elif model_id.startswith("sam2-"):
-            hf_map = {
-                "sam2-tiny": "facebook/sam2.1-hiera-tiny",
-                "sam2-small": "facebook/sam2.1-hiera-small",
-                "sam2-base-plus": "facebook/sam2.1-hiera-base-plus",
-                "sam2-large": "facebook/sam2.1-hiera-large",
-            }
-            hf_repo = hf_map.get(model_id)
-            if hf_repo:
-                repo_dir = os.path.join(hf_hub_dir, f"models--{hf_repo.replace('/', '--')}")
-                if os.path.exists(repo_dir):
-                    shutil.rmtree(repo_dir)
-                    removed.append(repo_dir)
+            model_dir = os.path.join(models_dir, model_id)
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             # Clear singleton
             import masking
-            masking._sam2_predictor = None
+            masking._encoder_session = None
+            masking._decoder_session = None
             masking._sam2_variant_loaded = None
 
         elif model_id.startswith("vit-"):
-            hub_map = {
-                "vit-s14": "dinov2_vits14",
-                "vit-b14": "dinov2_vitb14",
-                "vit-l14": "dinov2_vitl14",
-            }
-            hub_name = hub_map.get(model_id)
-            if hub_name:
-                for f in glob.glob(os.path.join(hub_dir, f"{hub_name}*.pth")):
-                    os.remove(f)
-                    removed.append(f)
+            model_dir = os.path.join(models_dir, f"dinov2-{model_id}")
+            if os.path.isdir(model_dir):
+                shutil.rmtree(model_dir)
+                removed.append(model_dir)
             # Clear singleton
             import dino_embed as dinov2_mod
-            dinov2_mod._dinov2_model = None
-            dinov2_mod._dinov2_variant_loaded = None
+            dinov2_mod._session = None
+            dinov2_mod._variant_loaded = None
 
         return jsonify({"deleted": removed, "count": len(removed), "model_id": model_id})
 
@@ -3497,8 +2926,6 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
@@ -3518,11 +2945,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
-            runner.set_steps(job["id"], [
-                {"id": "scan", "label": "Scan photos"},
-                {"id": "thumbnails", "label": "Generate thumbnails"},
-            ])
-            runner.update_step(job["id"], "scan", status="running")
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
             do_scan(
@@ -3530,9 +2952,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
             )
             photo_count = job["progress"].get("total", 0)
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{photo_count} photos")
-            runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
             from thumbnails import generate_all
@@ -3570,9 +2989,6 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
             )
-            from thumbnails import format_summary as thumb_summary
-            runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
@@ -3759,77 +3175,51 @@ def create_app(db_path, thumb_cache_dir=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
-        copy = body.get("copy", True)
 
-        if not source:
-            return json_error("source is required")
+        if not source or not destination:
+            return json_error("source and destination are required")
         if not os.path.isdir(source):
             return json_error(f"source directory not found: {source}")
-        if copy:
-            if not destination:
-                return json_error("source and destination are required")
-            if not os.path.isabs(destination):
-                return json_error("destination must be an absolute path")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
+            from ingest import ingest as do_ingest
             from scanner import scan as do_scan
             from thumbnails import generate_all
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
             job["_start_time"] = time.time()
 
-            scan_target = str(Path(source))  # normalize (strips trailing slash)
+            # Phase 1: Copy files
+            def ingest_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current, "total": total,
+                    "current_file": filename,
+                    "phase": "Importing photos",
+                })
 
-            # Define steps based on whether we're copying
-            steps = []
-            if copy:
-                steps.append({"id": "ingest", "label": "Import photos"})
-            steps.extend([
-                {"id": "scan", "label": "Scan photos"},
-                {"id": "thumbnails", "label": "Generate thumbnails"},
-                {"id": "collection", "label": "Create collection"},
-            ])
-            runner.set_steps(job["id"], steps)
+            ingest_result = do_ingest(
+                source_dir=source,
+                destination_dir=destination,
+                db=thread_db,
+                file_types=file_types,
+                folder_template=folder_template,
+                skip_duplicates=skip_duplicates,
+                progress_callback=ingest_cb,
+            )
 
-            if copy:
-                from ingest import ingest as do_ingest
+            # Track destination paths of files actually copied
+            copied_paths = ingest_result.get("copied_paths", [])
 
-                # Phase 1: Copy files
-                runner.update_step(job["id"], "ingest", status="running")
-
-                def ingest_cb(current, total, filename):
-                    job["progress"]["current"] = current
-                    job["progress"]["total"] = total
-                    job["progress"]["current_file"] = filename
-                    runner.push_event(job["id"], "progress", {
-                        "current": current, "total": total,
-                        "current_file": filename,
-                        "phase": "Importing photos",
-                    })
-
-                ingest_result = do_ingest(
-                    source_dir=source,
-                    destination_dir=destination,
-                    db=thread_db,
-                    file_types=file_types,
-                    folder_template=folder_template,
-                    skip_duplicates=skip_duplicates,
-                    progress_callback=ingest_cb,
-                )
-                copied_paths = ingest_result.get("copied_paths", [])
-                scan_target = destination
-                runner.update_step(job["id"], "ingest", status="completed",
-                                   summary=f"{ingest_result.get('copied', 0)} copied")
-
-            # Phase 2: Scan to index into DB
-            runner.update_step(job["id"], "scan", status="running")
-
+            # Phase 2: Scan destination to index into DB
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3839,13 +3229,9 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb)
-            scan_count = job["progress"].get("total", 0)
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{scan_count} photos")
+            do_scan(destination, thread_db, progress_callback=scan_cb)
 
             # Phase 3: Generate thumbnails
-            runner.update_step(job["id"], "thumbnails", status="running")
             runner.push_event(job["id"], "progress", {
                 "current": 0, "total": 0,
                 "current_file": "Checking for new thumbnails...",
@@ -3861,45 +3247,32 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Generating thumbnails",
                 })
 
-            thumb_result = generate_all(
+            generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
             )
-            from thumbnails import format_summary as thumb_summary
-            runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
 
-            # Phase 4: Create collection
-            runner.update_step(job["id"], "collection", status="running")
+            # Phase 4: Create collection from files actually copied
+            # Use a temp table to avoid SQLite variable-limit issues
+            # and match by exact path (unique per file, unlike hashes)
             photo_ids = []
-            if copy:
-                # Collection from copied files (existing logic)
-                if copied_paths:
-                    thread_db.conn.execute(
-                        "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                    )
-                    thread_db.conn.execute("DELETE FROM _imported_paths")
-                    thread_db.conn.executemany(
-                        "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                        [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                    )
-                    rows = thread_db.conn.execute(
-                        """SELECT p.id FROM photos p
-                           JOIN folders f ON p.folder_id = f.id
-                           JOIN _imported_paths ip ON f.path = ip.dirpath
-                                                   AND p.filename = ip.fname"""
-                    ).fetchall()
-                    photo_ids = [r["id"] for r in rows]
-                    thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
-            else:
-                # Collection from all photos in the scanned folder
+            if copied_paths:
+                thread_db.conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                )
+                thread_db.conn.execute("DELETE FROM _imported_paths")
+                thread_db.conn.executemany(
+                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                )
                 rows = thread_db.conn.execute(
                     """SELECT p.id FROM photos p
                        JOIN folders f ON p.folder_id = f.id
-                       WHERE f.path = ? OR f.path LIKE ?""",
-                    (scan_target, scan_target.rstrip("/") + "/%"),
+                       JOIN _imported_paths ip ON f.path = ip.dirpath
+                                               AND p.filename = ip.fname"""
                 ).fetchall()
                 photo_ids = [r["id"] for r in rows]
+                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
 
             collection_id = None
             collection_name = None
@@ -3911,26 +3284,19 @@ def create_app(db_path, thumb_cache_dir=None):
                     json.dumps([{"field": "photo_ids", "value": photo_ids}]),
                 )
 
-            col_summary = collection_name if collection_name else "no photos"
-            runner.update_step(job["id"], "collection", status="completed",
-                               summary=col_summary)
-
-            result = {
+            return {
+                "copied": ingest_result.get("copied", 0),
+                "skipped_duplicate": ingest_result.get("skipped_duplicate", 0),
+                "failed": ingest_result.get("failed", 0),
+                "total": ingest_result.get("total", 0),
                 "photos_indexed": len(photo_ids),
                 "collection_id": collection_id,
                 "collection_name": collection_name,
             }
-            if copy:
-                result["copied"] = ingest_result.get("copied", 0)
-                result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
-                result["failed"] = ingest_result.get("failed", 0)
-                result["total"] = ingest_result.get("total", 0)
-
-            return result
 
         job_id = runner.start(
             "import-full", work,
-            config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
+            config={"source": source, "destination": destination, "file_types": file_types},
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
@@ -4022,12 +3388,6 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db.set_active_workspace(active_ws)
             job["_start_time"] = time.time()
 
-            runner.set_steps(job["id"], [
-                {"id": "score", "label": "Score sharpness"},
-                {"id": "save", "label": "Save results & auto-flag"},
-            ])
-            runner.update_step(job["id"], "score", status="running")
-
             def progress_cb(current, total, msg):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -4051,11 +3411,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 collection_id,
                 progress_callback=progress_cb,
             )
-            runner.update_step(job["id"], "score", status="completed",
-                               summary=f"{len(result['results'])} scored")
 
             # Save scores to database
-            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4078,8 +3435,6 @@ def create_app(db_path, thumb_cache_dir=None):
                     best_count += 1
 
             result["auto_flagged"] = best_count
-            runner.update_step(job["id"], "save", status="completed",
-                               summary=f"{best_count} flagged")
             # Don't return the full results list (could be huge)
             del result["results"]
             return result
@@ -4144,14 +3499,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         active = runner.list_jobs()
         history = runner.get_history(db, limit=10)
-        ws_rows = db.get_workspaces()
-        ws_names = {w["id"]: w["name"] for w in ws_rows}
-        return jsonify({
-            "active": active,
-            "history": history,
-            "active_workspace_id": db._active_workspace_id,
-            "workspace_names": ws_names,
-        })
+        return jsonify({"active": active, "history": history})
 
     @app.route("/api/jobs/<job_id>")
     def api_job_status(job_id):
@@ -4299,12 +3647,11 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Find all photos with this species prediction
         rows = db.conn.execute(
-            """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
+            """SELECT pr.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               WHERE pr.species = ? AND d.workspace_id = ? AND p.embedding IS NOT NULL""",
+               JOIN photos p ON p.id = pr.photo_id
+               WHERE pr.species = ? AND pr.workspace_id = ? AND p.embedding IS NOT NULL""",
             (species_name, db._active_workspace_id),
         ).fetchall()
 
@@ -4410,18 +3757,17 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Labeled %d photos as '%s'", len(photo_ids), label)
         return jsonify({"ok": True, "updated": len(photo_ids), "keyword_id": kid})
 
-    @app.route("/api/species/summary")
+    @app.route("/api/species")
     def api_species_list():
         """List all species with prediction counts, for the variant explorer."""
         db = _get_db()
         rows = db.conn.execute(
-            """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
-                      pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
-                      pr.scientific_name
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE pr.status != 'rejected' AND d.workspace_id = ?
-               GROUP BY pr.species
+            """SELECT species, COUNT(*) as photo_count,
+                      taxonomy_order, taxonomy_family, taxonomy_genus,
+                      scientific_name
+               FROM predictions
+               WHERE status != 'rejected' AND workspace_id = ?
+               GROUP BY species
                ORDER BY photo_count DESC""",
             (db._active_workspace_id,),
         ).fetchall()
@@ -4596,7 +3942,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_extract_masks():
         """Run SAM2 mask extraction as a background job.
 
-        Requires MegaDetector detections to already be computed (run classify first).
+        Requires MegaDetector detection_box to already be computed (run classify first).
         For each photo with a detection but no mask, loads a working-resolution proxy,
         runs SAM2 to refine the bounding box into a pixel mask, and saves it.
         """
@@ -4633,33 +3979,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
             # Get photos that have detections but no masks
             if collection_id:
-                coll_photos = thread_db.get_collection_photos(
+                photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                # Filter to photos with detections but no masks
-                ws_id = thread_db._active_workspace_id
-                photos = []
-                for p in coll_photos:
-                    if p["mask_path"]:
-                        continue
-                    det = thread_db.conn.execute(
-                        """SELECT box_x, box_y, box_w, box_h, detector_confidence
-                           FROM detections
-                           WHERE photo_id = ? AND workspace_id = ?
-                           ORDER BY detector_confidence DESC LIMIT 1""",
-                        (p["id"], ws_id),
-                    ).fetchone()
-                    if det:
-                        photos.append({
-                            "id": p["id"],
-                            "folder_id": p["folder_id"],
-                            "filename": p["filename"],
-                            "detection_box": json.dumps({
-                                "x": det["box_x"], "y": det["box_y"],
-                                "w": det["box_w"], "h": det["box_h"],
-                            }),
-                            "detection_conf": det["detector_confidence"],
-                        })
+                photos = [
+                    p
+                    for p in photos
+                    if p["detection_box"] and not thread_db.conn.execute(
+                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
+                    ).fetchone()[0]
+                ]
             else:
                 photos = thread_db.get_photos_missing_masks()
 
@@ -4794,13 +4123,6 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
 
-            runner.set_steps(job["id"], [
-                {"id": "load", "label": "Load features"},
-                {"id": "group", "label": "Group encounters & bursts"},
-                {"id": "save", "label": "Save results"},
-            ])
-
-            runner.update_step(job["id"], "load", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4809,13 +4131,8 @@ def create_app(db_path, thumb_cache_dir=None):
 
             photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
             if not photos:
-                runner.update_step(job["id"], "load", status="failed",
-                                   error="No photos with pipeline features found")
                 return {"error": "No photos with pipeline features found. Run extract-masks first."}
-            runner.update_step(job["id"], "load", status="completed",
-                               summary=f"{len(photos)} photos")
 
-            runner.update_step(job["id"], "group", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4823,11 +4140,7 @@ def create_app(db_path, thumb_cache_dir=None):
             )
 
             results = run_full_pipeline(photos, config=pipeline_cfg)
-            summary = results.get("summary", {})
-            runner.update_step(job["id"], "group", status="completed",
-                               summary=f"{summary.get('encounters', 0)} encounters")
 
-            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4836,79 +4149,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, active_ws)
-            runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]
 
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
-        return jsonify({"job_id": job_id})
-
-    @app.route("/api/jobs/pipeline", methods=["POST"])
-    def api_job_pipeline():
-        """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
-
-        Overlaps I/O stages and interleaves detection with classification.
-        Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
-        """
-        from pipeline_job import PipelineParams, run_pipeline_job
-
-        body = request.get_json(silent=True) or {}
-        source = body.get("source")
-        sources = body.get("sources")
-        collection_id = body.get("collection_id")
-
-        if not source and not sources and not collection_id:
-            return json_error("source, sources, or collection_id required")
-
-        # Validate all source directories exist
-        if sources:
-            for s in sources:
-                if not os.path.isdir(s):
-                    return json_error(f"source directory not found: {s}")
-        elif source and not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
-
-        destination = body.get("destination")
-        if destination and not os.path.isabs(destination):
-            return json_error("destination must be an absolute path")
-
-        params = PipelineParams(
-            collection_id=collection_id,
-            source=source,
-            sources=sources,
-            destination=destination,
-            file_types=body.get("file_types", "both"),
-            folder_template=body.get("folder_template", "%Y/%m-%d"),
-            skip_duplicates=body.get("skip_duplicates", True),
-            labels_file=body.get("labels_file"),
-            labels_files=body.get("labels_files"),
-            model_id=body.get("model_id"),
-            reclassify=body.get("reclassify", False),
-            skip_classify=body.get("skip_classify", False),
-            download_taxonomy=body.get("download_taxonomy", True),
-            skip_extract_masks=body.get("skip_extract_masks", False),
-            skip_regroup=body.get("skip_regroup", False),
-            preview_max_size=body.get("preview_max_size", 1920),
-        )
-
-        runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
-
-        def work(job):
-            return run_pipeline_job(job, runner, db_path, active_ws, params)
-
-        job_id = runner.start(
-            "pipeline", work,
-            config={
-                "source": source,
-                "sources": sources,
-                "collection_id": collection_id,
-                "skip_classify": params.skip_classify,
-                "skip_extract_masks": params.skip_extract_masks,
-                "skip_regroup": params.skip_regroup,
-            },
-            workspace_id=active_ws,
-        )
         return jsonify({"job_id": job_id})
 
     @app.route("/api/encounters/species", methods=["POST"])
@@ -5069,31 +4313,13 @@ def create_app(db_path, thumb_cache_dir=None):
                       mask_path, subject_tenengrad, bg_tenengrad,
                       crop_complete, bg_separation,
                       subject_clip_high, subject_clip_low, subject_y_median,
-                      phash_crop, subject_size
+                      phash_crop, subject_size, detection_box, detection_conf
                FROM photos WHERE id = ?""",
             (photo_id,),
         ).fetchone()
         if not row:
             return json_error("Photo not found", 404)
-        result = dict(row)
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
-            result["detection_box"] = {
-                "x": det["box_x"], "y": det["box_y"],
-                "w": det["box_w"], "h": det["box_h"],
-            }
-            result["detection_conf"] = det["detector_confidence"]
-        else:
-            result["detection_box"] = None
-            result["detection_conf"] = None
-        return jsonify(result)
+        return jsonify(dict(row))
 
     @app.route("/masks/<filename>")
     def serve_mask(filename):
@@ -5437,22 +4663,14 @@ def create_app(db_path, thumb_cache_dir=None):
         from models import get_active_model
         active_model = get_active_model()
         if not active_model:
-            return jsonify({"results": [], "total_matches": 0, "model_used": None,
-                            "reason": "no_model"})
+            return jsonify({"results": [], "total_matches": 0, "model_used": None})
 
         model_name = active_model["name"]
-        model_type = active_model.get("model_type", "bioclip")
-
-        # timm models don't produce CLIP embeddings — text search unsupported
-        if model_type == "timm":
-            return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
-                            "reason": "model_no_text_search"})
 
         # Load embeddings for current model
         emb_pairs = db.get_embeddings_by_model(model_name)
         if not emb_pairs:
-            return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
-                            "reason": "no_embeddings"})
+            return jsonify({"results": [], "total_matches": 0, "model_used": model_name})
 
         # Encode query text
         from text_encoder import encode_text
@@ -5578,39 +4796,19 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         result = dict(photo)
-        # Remove binary embedding and dead detection columns from response
+        # Remove binary embedding from response
         result.pop("embedding", None)
-        result.pop("detection_box", None)
-        result.pop("detection_conf", None)
 
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
-            result["detection_box"] = {
-                "x": det["box_x"], "y": det["box_y"],
-                "w": det["box_w"], "h": det["box_h"],
-            }
-            result["detection_conf"] = det["detector_confidence"]
+        # Parse detection_box from JSON string
+        if result.get("detection_box") and isinstance(result["detection_box"], str):
+            result["detection_box"] = json.loads(result["detection_box"])
 
-        # Get detections for this photo (from detections table)
-        dets = db.get_detections(photo_id)
-        result["detections"] = [dict(d) for d in dets]
-
-        # Get predictions for this photo (through detections JOIN)
+        # Get predictions for this photo
         preds = db.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.model, pr.category, pr.status,
-                      pr.group_id, pr.vote_count, pr.total_votes, pr.individual,
-                      d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
-               ORDER BY pr.confidence DESC""",
+            """SELECT species, confidence, model, category, status,
+                      group_id, vote_count, total_votes, individual
+               FROM predictions WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY confidence DESC""",
             (photo_id, db._active_workspace_id),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
@@ -5619,12 +4817,10 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Compute crop info from primary detection (highest confidence)
-        primary_det = dets[0] if dets else None
-        if primary_det:
+        # Compute crop info if detection exists
+        if result.get("detection_box"):
             import config as cfg
-            box = {"x": primary_det["box_x"], "y": primary_det["box_y"],
-                   "w": primary_det["box_w"], "h": primary_det["box_h"]}
+            box = result["detection_box"]
             pad = cfg.load().get("detection_padding", 0.2)
             result["crop_box"] = {
                 "x": max(0, box["x"] - box["w"] * pad),
@@ -5644,7 +4840,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         db = _get_db()
         photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+            "SELECT p.filename, p.detection_box, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
             (photo_id,),
         ).fetchone()
         if not photo:
@@ -5655,21 +4851,10 @@ def create_app(db_path, thumb_cache_dir=None):
         if img is None:
             return "Could not load image", 500
 
-        # Get primary detection box from detections table
-        det_row = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        det_box = None
-        if det_row:
-            det_box = {
-                "x": det_row["box_x"], "y": det_row["box_y"],
-                "w": det_row["box_w"], "h": det_row["box_h"],
-            }
+        det_box = photo["detection_box"]
         if det_box:
+            if isinstance(det_box, str):
+                det_box = json.loads(det_box)
             iw, ih = img.size
             padding = cfg.load().get("detection_padding", 0.2)
             pad_w = det_box["w"] * padding
