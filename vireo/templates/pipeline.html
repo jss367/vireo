@@ -826,6 +826,7 @@ function initPipelinePage() {
     renderSourceFolders();
     selectSourceMode('import');
     updateStartButton();
+    fetchFolderPreview();
   }
 }
 
@@ -848,6 +849,219 @@ var _copyMode = false;
 var _sourceWasReady = false;
 var _sourceFolders = [];
 
+// -- Import preview state --
+var _previewData = null;       // response from /api/import/folder-preview
+var _previewSelected = {};     // { filePath: true/false }
+var _previewAbort = null;      // AbortController for in-flight request
+
+function fetchFolderPreview() {
+  // Cancel any in-flight request
+  if (_previewAbort) _previewAbort.abort();
+
+  var folders = _sourceFolders;
+  if (!folders.length || _sourceMode !== 'import') {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  var fileTypes = getIngestFileTypes();
+  if (!fileTypes.length) {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  showPreviewLoading();
+  _previewAbort = new AbortController();
+
+  fetch('/api/import/folder-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folders: folders, file_types: fileTypes }),
+    signal: _previewAbort.signal,
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _previewData = data;
+      // Initialize selection: all checked by default, duplicates unchecked
+      _previewSelected = {};
+      data.files.forEach(function(f) {
+        _previewSelected[f.path] = !f.duplicate;
+      });
+      renderPreview();
+    })
+    .catch(function(err) {
+      if (err.name === 'AbortError') return;
+      showPreviewError('Failed to load preview: ' + err.message);
+    });
+}
+
+function showPreviewPlaceholder() {
+  document.getElementById('previewPlaceholder').style.display = '';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  _previewData = null;
+}
+
+function showPreviewLoading() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = '';
+  document.getElementById('previewError').style.display = 'none';
+}
+
+function showPreviewError(msg) {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  var errEl = document.getElementById('previewError');
+  errEl.style.display = '';
+  errEl.textContent = msg;
+}
+
+function renderPreview() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  document.getElementById('previewContent').style.display = '';
+
+  var data = _previewData;
+  if (!data) return;
+
+  // Summary bar
+  var summary = document.getElementById('previewSummary');
+  var sizeStr = formatBytes(data.total_size);
+  var typeStrs = Object.keys(data.type_breakdown).map(function(ext) {
+    return data.type_breakdown[ext] + ' ' + ext.replace('.', '').toUpperCase();
+  });
+  summary.innerHTML =
+    '<span class="stat"><span class="stat-value">' + data.total_count + '</span> photos</span>' +
+    '<span class="stat"><span class="stat-value">' + sizeStr + '</span></span>' +
+    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>' +
+    (data.duplicate_count > 0 ? '<span class="stat"><span class="stat-value">' + data.duplicate_count + '</span> already imported</span>' : '');
+
+  // Group files by subfolder
+  var groups = {};
+  data.files.forEach(function(f) {
+    var key = f.subfolder;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  // Render grid
+  var grid = document.getElementById('previewGrid');
+  grid.innerHTML = '';
+
+  Object.keys(groups).sort().forEach(function(subfolder) {
+    var files = groups[subfolder];
+    var groupEl = document.createElement('div');
+    groupEl.className = 'preview-folder-group';
+
+    // Folder header with checkbox
+    var header = document.createElement('div');
+    header.className = 'preview-folder-header';
+    var folderCheck = document.createElement('input');
+    folderCheck.type = 'checkbox';
+    folderCheck.checked = files.some(function(f) { return _previewSelected[f.path]; });
+    folderCheck.style.accentColor = 'var(--accent)';
+    folderCheck.onchange = function() {
+      files.forEach(function(f) { _previewSelected[f.path] = folderCheck.checked; });
+      renderPreview();
+    };
+    header.appendChild(folderCheck);
+    header.appendChild(document.createTextNode(' ' + subfolder + ' (' + files.length + ')'));
+    groupEl.appendChild(header);
+
+    // Thumbnail grid
+    var thumbsEl = document.createElement('div');
+    thumbsEl.className = 'preview-thumbs';
+    files.forEach(function(f) {
+      var thumb = document.createElement('div');
+      thumb.className = 'preview-thumb skeleton' + (f.duplicate ? ' duplicate' : '');
+      thumb.dataset.path = f.path;
+
+      var check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'thumb-check';
+      check.checked = !!_previewSelected[f.path];
+      check.onchange = function(e) {
+        e.stopPropagation();
+        _previewSelected[f.path] = check.checked;
+        updatePreviewCounts();
+      };
+      thumb.appendChild(check);
+
+      var img = document.createElement('img');
+      img.alt = f.filename;
+      img.loading = 'lazy';
+      thumb.appendChild(img);
+
+      thumbsEl.appendChild(thumb);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+
+  // Set up IntersectionObserver for lazy thumbnail loading
+  setupThumbnailObserver();
+  updatePreviewCounts();
+}
+
+function setupThumbnailObserver() {
+  var grid = document.getElementById('previewGrid');
+  var thumbs = grid.querySelectorAll('.preview-thumb.skeleton');
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (!entry.isIntersecting) return;
+      var el = entry.target;
+      var path = el.dataset.path;
+      var img = el.querySelector('img');
+      img.onload = function() { el.classList.remove('skeleton'); };
+      img.onerror = function() { el.classList.remove('skeleton'); };
+      img.src = '/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path);
+      observer.unobserve(el);
+    });
+  }, { root: grid, rootMargin: '200px' });
+
+  thumbs.forEach(function(t) { observer.observe(t); });
+}
+
+function updatePreviewCounts() {
+  if (!_previewData) return;
+  var selected = 0;
+  var total = _previewData.files.length;
+  _previewData.files.forEach(function(f) {
+    if (_previewSelected[f.path]) selected++;
+  });
+  var countEl = document.getElementById('previewSelectedCount');
+  if (selected === total) {
+    countEl.textContent = '';
+  } else {
+    countEl.textContent = selected + ' of ' + total + ' selected';
+  }
+  // Update select-all checkbox
+  var chkAll = document.getElementById('chkSelectAll');
+  chkAll.checked = selected === total;
+  chkAll.indeterminate = selected > 0 && selected < total;
+}
+
+function toggleSelectAll() {
+  var checked = document.getElementById('chkSelectAll').checked;
+  if (_previewData) {
+    _previewData.files.forEach(function(f) { _previewSelected[f.path] = checked; });
+    renderPreview();
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  var k = 1024;
+  var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
   var val = input.value.trim();
@@ -856,12 +1070,14 @@ function addSourceFolder() {
   input.value = '';
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function removeSourceFolder(idx) {
   _sourceFolders.splice(idx, 1);
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function renderSourceFolders() {
@@ -943,6 +1159,7 @@ function onGroupToggle(group) {
   var children = document.querySelectorAll('input[data-group="' + group + '"]');
   children.forEach(function(cb) { cb.checked = checked; });
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function onExtToggle(group) {
@@ -958,6 +1175,7 @@ function onExtToggle(group) {
   parent.checked = allChecked;
   parent.indeterminate = anyChecked && !allChecked;
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function getIngestFileTypes() {
@@ -1767,6 +1985,7 @@ async function browseForFolder() {
       _sourceFolders.push(path);
       renderSourceFolders();
       updateStartButton();
+      fetchFolderPreview();
       return;
     }
   }
@@ -1911,6 +2130,7 @@ function selectFolder() {
     document.getElementById('cfgDestination').value = _fbSelectedDir;
   }
   updateStartButton();
+  fetchFolderPreview();
   closeFolderBrowser();
 }
 
