@@ -1450,12 +1450,10 @@ def test_api_import_folder_preview(app_and_db, tmp_path):
     assert data["duplicate_count"] == 0
 
 
-def test_api_import_folder_preview_duplicates(app_and_db, tmp_path):
-    """Folder preview marks files already in the database as duplicates."""
+def test_api_import_folder_preview_duplicate_count_deferred(app_and_db, tmp_path):
+    """Folder preview returns duplicate_count=0 (duplicate detection deferred)."""
     app, db = app_and_db
 
-    # bird1.jpg in folder /photos/2024 is already in the DB (from conftest)
-    # Create a source folder with a file that has the same name in a matching path
     source = tmp_path / "source_dupes"
     source.mkdir()
     from PIL import Image
@@ -1470,6 +1468,7 @@ def test_api_import_folder_preview_duplicates(app_and_db, tmp_path):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["total_count"] == 2
+    assert data["duplicate_count"] == 0
 
 
 def test_api_import_folder_preview_no_folders(app_and_db):
