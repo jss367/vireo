@@ -14,7 +14,7 @@ def _xmp_path(filepath):
     return xmp if os.path.isfile(xmp) else None
 
 
-def _companion_files(db, photo, src_dir):
+def _companion_files(photo, src_dir):
     """Return list of extra files to move alongside a photo (XMP + companion RAW/JPEG)."""
     extras = []
     xmp = _xmp_path(os.path.join(src_dir, photo["filename"]))
@@ -75,16 +75,18 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
         src_file = os.path.join(src_dir, photo["filename"])
 
         if not os.path.isfile(src_file):
+            log.warning("Move skipped for %s: source file missing", photo["filename"])
             errors.append(f"{photo['filename']}: source file missing")
             continue
 
         dst_file = os.path.join(destination, photo["filename"])
         if os.path.exists(dst_file):
+            log.warning("Move skipped for %s: already exists at destination", photo["filename"])
             errors.append(f"{photo['filename']}: already exists at destination")
             continue
 
         # Gather companion files
-        companions = _companion_files(db, photo, src_dir)
+        companions = _companion_files(photo, src_dir)
 
         # Check companion collisions
         comp_collision = False
@@ -98,6 +100,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
         # Copy main file
         if not _copy_and_verify(src_file, dst_file):
+            log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
             errors.append(f"{photo['filename']}: verification failed after copy")
             continue
 
@@ -169,6 +172,8 @@ def move_folder(db, folder_id, destination, progress_cb=None):
     if os.path.exists(dest_path):
         return {"moved": 0, "errors": [f"Destination already exists: {dest_path}"]}
 
+    log.info("Moving folder %s -> %s", src_path, dest_path)
+
     # Use rsync for robust copy with checksums
     try:
         result = subprocess.run(
@@ -179,7 +184,11 @@ def move_folder(db, folder_id, destination, progress_cb=None):
             return {"moved": 0, "errors": [f"rsync failed: {result.stderr.strip()}"]}
     except FileNotFoundError:
         # rsync not available, fall back to shutil
-        shutil.copytree(src_path, dest_path)
+        try:
+            shutil.copytree(src_path, dest_path)
+        except Exception as exc:
+            shutil.rmtree(dest_path, ignore_errors=True)
+            return {"moved": 0, "errors": [f"Copy failed: {exc}"]}
     except subprocess.TimeoutExpired:
         return {"moved": 0, "errors": ["rsync timed out after 1 hour"]}
 
@@ -187,6 +196,7 @@ def move_folder(db, folder_id, destination, progress_cb=None):
     src_count = sum(1 for _, _, files in os.walk(src_path) for _ in files)
     dst_count = sum(1 for _, _, files in os.walk(dest_path) for _ in files)
     if src_count != dst_count:
+        shutil.rmtree(dest_path, ignore_errors=True)
         return {"moved": 0, "errors": [
             f"File count mismatch: source={src_count}, dest={dst_count}. Originals preserved."
         ]}
@@ -200,12 +210,14 @@ def move_folder(db, folder_id, destination, progress_cb=None):
     ).fetchall()
     total_photos = len(all_photos)
 
-    # Delete originals
-    shutil.rmtree(src_path)
-
-    # Update DB: cascade folder paths
+    # Update DB first: cascade folder paths (safer — if rmtree fails,
+    # old folder becomes orphan on disk rather than DB pointing to deleted paths)
     db.move_folder_path(folder_id, dest_path)
     db.update_folder_counts()
+
+    # Delete originals
+    log.info("Verification passed, deleting originals: %s", src_path)
+    shutil.rmtree(src_path)
 
     if progress_cb:
         progress_cb(total_photos, total_photos, folder_name)
