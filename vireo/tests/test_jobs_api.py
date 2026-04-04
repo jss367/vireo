@@ -297,3 +297,23 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
         data = resp.get_json()
         assert "job_id" in data
         assert data["job_id"].startswith("pipeline-")
+
+
+def test_update_step_current_file(app_and_db):
+    """update_step supports current_file field on steps."""
+    from jobs import JobRunner
+    runner = JobRunner.__new__(JobRunner)
+    runner._jobs = {}
+    runner._subscribers = {}
+    runner._lock = __import__('threading').Lock()
+    runner._history_db_path = None
+
+    job_id = "test-cf"
+    runner._jobs[job_id] = {
+        "id": job_id,
+        "steps": [
+            {"id": "scan", "label": "Scan", "status": "running"},
+        ],
+    }
+    runner.update_step(job_id, "scan", current_file="DSC_0001.NEF")
+    assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
