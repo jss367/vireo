@@ -1557,3 +1557,25 @@ def test_api_import_folder_preview_thumbnail_no_path(app_and_db):
     client = app.test_client()
     resp = client.get("/api/import/folder-preview/thumbnail")
     assert resp.status_code == 400
+
+
+def test_api_import_full_accepts_exclude_paths(app_and_db, tmp_path):
+    """POST /api/jobs/import-full accepts exclude_paths parameter."""
+    app, _ = app_and_db
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "keep.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "skip.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source),
+        "copy": False,
+        "file_types": [".jpg", ".jpeg"],
+        "exclude_paths": [str(source / "skip.jpg")],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data

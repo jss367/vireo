@@ -3833,6 +3833,7 @@ def create_app(db_path, thumb_cache_dir=None):
         folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
         copy = body.get("copy", True)
+        exclude_paths = set(body.get("exclude_paths", []))
 
         if not source:
             return json_error("source is required")

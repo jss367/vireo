@@ -1272,6 +1272,14 @@ async function startPipeline() {
       body.sources = _sourceFolders;
     }
     body.file_types = getIngestFileTypes();
+    // Add excluded paths from preview selection
+    if (_previewData && _previewSelected) {
+      var excluded = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excluded.push(f.path);
+      });
+      if (excluded.length > 0) body.exclude_paths = excluded;
+    }
     if (_copyMode) {
       body.destination = document.getElementById('cfgDestination').value.trim();
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
