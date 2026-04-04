@@ -2381,6 +2381,31 @@ def create_app(db_path, thumb_cache_dir=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/folder-preview/thumbnail")
+    def api_import_folder_preview_thumbnail():
+        """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return json_error("path parameter required", 400)
+        if not os.path.isfile(file_path):
+            return "", 404
+
+        from image_loader import load_image
+        img = load_image(file_path, max_size=200)
+        if img is None:
+            return "", 404
+
+        import io
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        buf.seek(0)
+
+        resp = make_response(buf.read())
+        resp.content_type = "image/jpeg"
+        resp.cache_control.public = True
+        resp.cache_control.max_age = 300  # 5 min — these are ephemeral
+        return resp
+
     # -- Audit API routes --
 
     @app.route("/api/audit/drift")

@@ -1518,3 +1518,43 @@ def test_api_import_folder_preview_subfolders(app_and_db, tmp_path):
     for f in data["files"]:
         subfolders.add(f["subfolder"])
     assert len(subfolders) == 3  # root, sub1, sub2
+
+
+def test_api_import_folder_preview_thumbnail(app_and_db, tmp_path):
+    """GET /api/import/folder-preview/thumbnail returns a JPEG thumbnail."""
+    app, _ = app_and_db
+
+    # Create a test image
+    source = tmp_path / "thumb_test"
+    source.mkdir()
+    from PIL import Image
+    img = Image.new("RGB", (800, 600), color=(255, 0, 0))
+    img_path = source / "photo.jpg"
+    img.save(str(img_path))
+
+    client = app.test_client()
+    resp = client.get(f"/api/import/folder-preview/thumbnail?path={img_path}")
+    assert resp.status_code == 200
+    assert resp.content_type == "image/jpeg"
+    assert len(resp.data) > 0
+
+    # Verify the returned image is resized (200px long edge)
+    import io
+    thumb = Image.open(io.BytesIO(resp.data))
+    assert max(thumb.size) == 200
+
+
+def test_api_import_folder_preview_thumbnail_missing(app_and_db):
+    """Thumbnail endpoint returns 404 for non-existent file."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail?path=/no/such/file.jpg")
+    assert resp.status_code == 404
+
+
+def test_api_import_folder_preview_thumbnail_no_path(app_and_db):
+    """Thumbnail endpoint returns 400 when path param is missing."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail")
+    assert resp.status_code == 400
