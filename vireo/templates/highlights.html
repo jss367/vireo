@@ -1,4 +1,246 @@
 <!DOCTYPE html>
-<html>
-<body>Highlights</body>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Highlights</title>
+<style>
+  .highlights-controls { display:flex; align-items:center; gap:20px; padding:12px 24px; background:var(--bg-secondary); border-bottom:1px solid var(--border-primary); flex-wrap:wrap; }
+  .control-group { display:flex; align-items:center; gap:8px; }
+  .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
+  .control-group input[type=range] { width:120px; }
+  .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+  .control-value { font-size:13px; color:var(--text-primary); min-width:30px; }
+  .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
+  .save-btn:hover { opacity:0.9; }
+  .highlights-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:12px; padding:24px; }
+  .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
+  .highlights-card:hover { border-color:var(--accent); }
+  .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
+  .card-info { padding:6px 8px; font-size:12px; display:flex; justify-content:space-between; }
+  .card-species { color:var(--text-primary); }
+  .card-quality { color:var(--text-secondary); }
+  .highlights-summary { padding:8px 24px; font-size:13px; color:var(--text-secondary); border-top:1px solid var(--border-primary); }
+  .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
+  .highlights-empty a { color:var(--accent); }
+  /* Save modal */
+  .save-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:500; align-items:center; justify-content:center; }
+  .save-modal-overlay.open { display:flex; }
+  .save-modal { background:var(--bg-primary); border:1px solid var(--border-primary); border-radius:8px; padding:24px; min-width:360px; }
+  .save-modal h3 { margin:0 0 16px; font-size:16px; color:var(--text-primary); }
+  .save-modal input[type=text] { width:100%; padding:8px; font-size:14px; border:1px solid var(--border-secondary); border-radius:4px; box-sizing:border-box; margin-bottom:12px; background:var(--bg-input); color:var(--text-primary); }
+  .save-modal-actions { display:flex; gap:8px; justify-content:flex-end; }
+  .save-modal-actions button { padding:6px 16px; border-radius:4px; border:none; cursor:pointer; font-size:13px; }
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<div class="highlights-controls" id="controlsBar">
+  <div class="control-group">
+    <label for="folderSelect">Folder</label>
+    <select id="folderSelect"></select>
+  </div>
+  <div class="control-group">
+    <label for="countSlider">Count</label>
+    <input type="range" id="countSlider" min="1" max="100" value="20">
+    <span class="control-value" id="countValue">20</span>
+  </div>
+  <div class="control-group">
+    <label for="speciesSlider">Max/species</label>
+    <input type="range" id="speciesSlider" min="1" max="20" value="5">
+    <span class="control-value" id="speciesValue">5</span>
+  </div>
+  <div class="control-group">
+    <label for="qualitySlider">Min quality</label>
+    <input type="range" id="qualitySlider" min="0" max="100" value="0" step="5">
+    <span class="control-value" id="qualityValue">0.00</span>
+  </div>
+  <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
+</div>
+
+<div id="grid" class="highlights-grid"></div>
+<div id="emptyState" class="highlights-empty" style="display:none;">
+  <p>No highlights available yet.</p>
+  <p>Run a pipeline with quality scoring enabled to generate highlights.</p>
+  <p><a href="/jobs">Go to Jobs</a></p>
+</div>
+<div class="highlights-summary" id="summary"></div>
+
+<!-- Save modal -->
+<div class="save-modal-overlay" id="saveModal">
+  <div class="save-modal">
+    <h3>Save as Collection</h3>
+    <input type="text" id="saveNameInput" placeholder="Collection name">
+    <div id="saveDuplicateWarning" style="display:none; color:var(--warning); font-size:13px; margin-bottom:12px;"></div>
+    <div class="save-modal-actions">
+      <button onclick="closeSaveModal()" style="background:var(--bg-secondary); color:var(--text-primary);">Cancel</button>
+      <button id="replaceBtn" onclick="doSave('replace')" style="display:none; background:var(--warning); color:#fff;">Replace</button>
+      <button onclick="doSave('new')" style="background:var(--accent); color:var(--accent-text);">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var currentPhotos = [];
+var currentFolders = [];
+var currentFolderName = '';
+var debounceTimer = null;
+var existingCollections = [];
+
+function escapeAttr(s) {
+  if (!s) return '';
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function loadHighlights() {
+  var params = new URLSearchParams();
+  var folderSelect = document.getElementById('folderSelect');
+  if (folderSelect.value) params.set('folder_id', folderSelect.value);
+  params.set('count', document.getElementById('countSlider').value);
+  params.set('max_per_species', document.getElementById('speciesSlider').value);
+  params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
+
+  var resp = await safeFetch('/api/highlights?' + params);
+  var data = await resp.json();
+
+  currentPhotos = data.photos;
+  currentFolders = data.folders;
+
+  // Populate folder dropdown (only on first load or if folders changed)
+  if (folderSelect.options.length !== data.folders.length) {
+    folderSelect.innerHTML = '';
+    data.folders.forEach(function(f) {
+      var opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.name + ' (' + f.photo_count + ')';
+      folderSelect.appendChild(opt);
+    });
+  }
+
+  currentFolderName = folderSelect.options[folderSelect.selectedIndex]
+    ? folderSelect.options[folderSelect.selectedIndex].textContent.replace(/\s*\(\d+\)$/, '')
+    : '';
+
+  var grid = document.getElementById('grid');
+  var emptyState = document.getElementById('emptyState');
+  var summary = document.getElementById('summary');
+
+  if (!data.folders.length) {
+    grid.style.display = 'none';
+    emptyState.style.display = 'block';
+    summary.textContent = '';
+    document.getElementById('controlsBar').style.display = 'none';
+    return;
+  }
+
+  emptyState.style.display = 'none';
+  grid.style.display = '';
+  document.getElementById('controlsBar').style.display = '';
+
+  // Update count slider max
+  var countSlider = document.getElementById('countSlider');
+  countSlider.max = Math.min(data.meta.eligible, 100);
+
+  // Render grid
+  grid.innerHTML = '';
+  data.photos.forEach(function(p) {
+    var card = document.createElement('div');
+    card.className = 'highlights-card';
+    card.onclick = function() { if (window.openLightbox) openLightbox(p.id, p.filename); };
+    var thumbSrc = '/thumbnails/' + p.id + '.jpg';
+    card.innerHTML = '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
+      + '<div class="card-info">'
+      + '<span class="card-species">' + escapeAttr(p.species || 'Unidentified') + '</span>'
+      + '<span class="card-quality">' + (p.quality_score != null ? p.quality_score.toFixed(2) : '\u2014') + '</span>'
+      + '</div>';
+    grid.appendChild(card);
+  });
+
+  // Summary
+  var speciesCount = Object.keys(data.meta.species_breakdown).length;
+  summary.textContent = 'Showing ' + data.photos.length + ' highlights from ' + data.meta.total_in_folder
+    + ' photos \u00b7 Species: ' + speciesCount + ' \u00b7 Avg quality: ' + data.meta.avg_quality;
+}
+
+function debounceLoad() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadHighlights, 300);
+}
+
+// Slider value display updates
+document.getElementById('countSlider').addEventListener('input', function() {
+  document.getElementById('countValue').textContent = this.value;
+  debounceLoad();
+});
+document.getElementById('speciesSlider').addEventListener('input', function() {
+  document.getElementById('speciesValue').textContent = this.value;
+  debounceLoad();
+});
+document.getElementById('qualitySlider').addEventListener('input', function() {
+  document.getElementById('qualityValue').textContent = (this.value / 100).toFixed(2);
+  debounceLoad();
+});
+document.getElementById('folderSelect').addEventListener('change', loadHighlights);
+
+// Save modal
+async function showSaveModal() {
+  document.getElementById('saveNameInput').value = 'Highlights - ' + currentFolderName;
+  document.getElementById('saveDuplicateWarning').style.display = 'none';
+  document.getElementById('replaceBtn').style.display = 'none';
+
+  // Check for existing collection with same name
+  var resp = await safeFetch('/api/collections');
+  existingCollections = await resp.json();
+  var proposed = document.getElementById('saveNameInput').value;
+  var existing = existingCollections.find(function(c) { return c.name === proposed; });
+  if (existing) {
+    document.getElementById('saveDuplicateWarning').textContent =
+      'A collection named "' + proposed + '" already exists.';
+    document.getElementById('saveDuplicateWarning').style.display = 'block';
+    document.getElementById('replaceBtn').style.display = '';
+  }
+  document.getElementById('saveModal').classList.add('open');
+}
+
+function closeSaveModal() {
+  document.getElementById('saveModal').classList.remove('open');
+}
+
+async function doSave(mode) {
+  var name = document.getElementById('saveNameInput').value.trim();
+  if (!name) return;
+  var photoIds = currentPhotos.map(function(p) { return p.id; });
+
+  if (mode === 'replace') {
+    var existing = existingCollections.find(function(c) { return c.name === name; });
+    if (existing) {
+      await safeFetch('/api/collections/' + existing.id, { method: 'DELETE' });
+    }
+  } else if (mode === 'new') {
+    // If name already taken, append number
+    var baseName = name;
+    var counter = 2;
+    var names = existingCollections.map(function(c) { return c.name; });
+    while (names.indexOf(name) >= 0) {
+      name = baseName + ' (' + counter + ')';
+      counter++;
+    }
+  }
+
+  await safeFetch('/api/highlights/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: photoIds, name: name }),
+  });
+  closeSaveModal();
+}
+
+// Initial load
+loadHighlights();
+</script>
+</body>
 </html>
