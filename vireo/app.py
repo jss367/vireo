@@ -2353,9 +2353,9 @@ def create_app(db_path, thumb_cache_dir=None):
         # become cardA/DCIM and cardB/DCIM).
         root_names = {}
         if multi_source:
-            parts = [f.rstrip("/").split("/") for f in folders]
+            parts = [Path(f).parts for f in folders]
             for depth in range(1, max(len(p) for p in parts) + 1):
-                suffixes = ["/".join(p[-depth:]) for p in parts]
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
                 if len(set(suffixes)) == len(suffixes):
                     for folder_path, suffix in zip(folders, suffixes, strict=True):
                         root_names[folder_path] = suffix
