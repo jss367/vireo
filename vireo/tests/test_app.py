@@ -1519,6 +1519,36 @@ def test_api_import_folder_preview_subfolders(app_and_db, tmp_path):
     assert len(subfolders) == 3  # root, sub1, sub2
 
 
+def test_api_import_folder_preview_multi_source_same_basename(app_and_db, tmp_path):
+    """Multi-source preview disambiguates folders with same basename."""
+    app, _ = app_and_db
+
+    # Two sources with identical leaf names and overlapping subfolders
+    card_a = tmp_path / "mnt" / "cardA" / "DCIM"
+    card_b = tmp_path / "mnt" / "cardB" / "DCIM"
+    (card_a / "100CANON").mkdir(parents=True)
+    (card_b / "100CANON").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(card_a / "100CANON" / "a.jpg"))
+    Image.new("RGB", (100, 100)).save(str(card_b / "100CANON" / "b.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(card_a), str(card_b)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    data = resp.get_json()
+    assert data["total_count"] == 2
+
+    # Subfolders must be distinct even though both have 100CANON
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2
+    # Should use parent to disambiguate: cardA/DCIM/100CANON vs cardB/DCIM/100CANON
+    for sf in subfolders:
+        assert "DCIM" in sf
+        assert "100CANON" in sf
+
+
 def test_api_import_folder_preview_thumbnail(app_and_db, tmp_path):
     """GET /api/import/folder-preview/thumbnail returns a JPEG thumbnail."""
     app, _ = app_and_db
