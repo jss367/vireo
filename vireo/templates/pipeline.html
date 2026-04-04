@@ -303,13 +303,6 @@ body { padding-bottom: 36px; }
           </div>
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
-              <div class="setting-item">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
-                </label>
-              </div>
-            </div>
-            <div class="setting-row">
               <div class="setting-item" id="folderLabelItem">
                 <div class="setting-label" id="lblFolder">Folders</div>
                 <div style="display:flex;gap:6px;">
@@ -321,19 +314,6 @@ body { padding-bottom: 36px; }
                   <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
-              </div>
-            </div>
-            <div id="copyOnlyFields" style="display:none;">
-              <div class="setting-row">
-                <div class="setting-item">
-                  <div class="setting-label">Destination</div>
-                  <div style="display:flex;gap:6px;">
-                    <input type="text" class="setting-select" id="cfgDestination"
-                           placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                           oninput="updateStartButton()">
-                    <button onclick="openFolderBrowser()" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
-                  </div>
-                </div>
               </div>
             </div>
             <div class="setting-row" style="align-items:flex-start;">
@@ -369,11 +349,6 @@ body { padding-bottom: 36px; }
                   </div>
                 </div>
               </div>
-              <div class="setting-item" id="skipDuplicatesItem" style="display:none;">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
-                </label>
-              </div>
             </div>
           </div>
         </div>
@@ -407,10 +382,85 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Scan & Import -->
+  <!-- Card 2: Destination -->
+  <div class="stage-card" id="card-destination">
+    <div class="stage-header" onclick="toggleCard('destination')">
+      <span class="stage-num" id="numDestination">2</span>
+      <span class="stage-name">Destination</span>
+      <span class="stage-summary" id="summaryDestination"></span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <!-- Section 1: Workspace -->
+      <div class="setting-label">Workspace</div>
+      <div class="dest-section">
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="current" id="radioWsCurrent" checked
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">Current workspace</span>
+            <span style="font-size:13px;color:var(--text-dim);" id="lblCurrentWsName"></span>
+          </label>
+        </div>
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="new" id="radioWsNew"
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">New workspace</span>
+          </label>
+          <div id="newWsNameRow" style="display:none;margin-top:8px;margin-left:24px;">
+            <input type="text" class="setting-select" id="destNewWsName"
+                   placeholder="e.g. Kenya 2025" style="font-family:inherit;max-width:300px;"
+                   oninput="updateStartButton()">
+            <span class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
+
+      <!-- Section 2: File Copying -->
+      <div class="setting-label">File Copying</div>
+      <div id="destCopySection">
+        <div class="setting-row">
+          <div class="setting-item">
+            <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
+            </label>
+          </div>
+        </div>
+        <div id="copyOnlyFields" style="display:none;">
+          <div class="setting-row">
+            <div class="setting-item">
+              <div class="setting-label">Destination</div>
+              <div style="display:flex;gap:6px;">
+                <input type="text" class="setting-select" id="cfgDestination"
+                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                       oninput="updateStartButton()">
+                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="destCopyDisabledNote" style="display:none;font-size:12px;color:var(--text-dim);font-style:italic;margin-top:4px;">
+          Not applicable for existing collections
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 3: Scan & Import -->
   <div class="stage-card" id="card-scan">
     <div class="stage-header" onclick="toggleCard('scan')">
-      <span class="stage-num" id="numScan">2</span>
+      <span class="stage-num" id="numScan">3</span>
       <span class="stage-name">Scan &amp; Import</span>
       <span class="stage-summary" id="summaryScan"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -427,10 +477,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 3: Thumbnails & Previews -->
+  <!-- Card 4: Thumbnails & Previews -->
   <div class="stage-card" id="card-previews">
     <div class="stage-header" onclick="toggleCard('previews')">
-      <span class="stage-num" id="numPreviews">3</span>
+      <span class="stage-num" id="numPreviews">4</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
       <span class="stage-summary" id="summaryPreviews"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -459,10 +509,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 4: Classify -->
+  <!-- Card 5: Classify -->
   <div class="stage-card" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">4</span>
+      <span class="stage-num" id="numClassify">5</span>
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
@@ -503,10 +553,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 5: Extract Features -->
+  <!-- Card 6: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">5</span>
+      <span class="stage-num" id="numExtract">6</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
@@ -556,10 +606,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 6: Group & Score -->
+  <!-- Card 7: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">6</span>
+      <span class="stage-num" id="numGroup">7</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
