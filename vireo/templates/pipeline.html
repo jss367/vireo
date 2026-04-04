@@ -712,6 +712,13 @@ function initPipelinePage() {
       console.error('Failed to load pipeline page data:', e);
     });
 
+  // Load active workspace name for Destination card
+  safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
+    if (ws && ws.name) {
+      document.getElementById('lblCurrentWsName').textContent = '(' + ws.name + ')';
+    }
+  });
+
   // Load collections, models, labels, volumes in parallel
   loadCollections();
   loadModels();
@@ -740,6 +747,19 @@ async function loadCollections() {
       sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
     });
   } catch(e) {}
+}
+
+// -- Card 2: Destination --
+var _destWorkspaceMode = 'current'; // 'current' or 'new'
+
+function onDestWorkspaceChange() {
+  _destWorkspaceMode = document.getElementById('radioWsNew').checked ? 'new' : 'current';
+  document.getElementById('newWsNameRow').style.display = _destWorkspaceMode === 'new' ? '' : 'none';
+  document.getElementById('destWsError').style.display = 'none';
+  if (_destWorkspaceMode === 'new') {
+    document.getElementById('destNewWsName').focus();
+  }
+  updateStartButton();
 }
 
 // -- Card 1: Source --
@@ -776,17 +796,11 @@ function renderSourceFolders() {
 function onCopyModeChange() {
   _copyMode = document.getElementById('chkCopyPhotos').checked;
   var copyFields = document.getElementById('copyOnlyFields');
-  var skipDup = document.getElementById('skipDuplicatesItem');
-  var lbl = document.getElementById('lblFolder');
 
   if (_copyMode) {
     copyFields.style.display = '';
-    skipDup.style.display = '';
-    lbl.textContent = 'Source Folders';
   } else {
     copyFields.style.display = 'none';
-    skipDup.style.display = 'none';
-    lbl.textContent = 'Folders';
   }
   updateStartButton();
 }
@@ -806,6 +820,17 @@ function selectSourceMode(mode) {
     importBody.classList.add('dimmed');
     collBody.classList.remove('dimmed');
   }
+
+  var copySection = document.getElementById('destCopySection');
+  var copyNote = document.getElementById('destCopyDisabledNote');
+  if (mode === 'collection') {
+    copySection.classList.add('dimmed');
+    copyNote.style.display = '';
+  } else {
+    copySection.classList.remove('dimmed');
+    copyNote.style.display = 'none';
+  }
+
   updateStartButton();
 }
 
@@ -880,15 +905,22 @@ function updateStartButton() {
   if (_sourceMode === 'import') {
     var hasFolders = _sourceFolders.length > 0;
     var anyType = getIngestFileTypes().length > 0;
-    if (_copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      btn.disabled = !hasFolders || !dest || !anyType;
-    } else {
-      btn.disabled = !hasFolders || !anyType;
-    }
+    btn.disabled = !hasFolders || !anyType;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
+  }
+
+  // Destination card validation
+  if (!btn.disabled) {
+    if (_destWorkspaceMode === 'new') {
+      var wsName = document.getElementById('destNewWsName').value.trim();
+      if (!wsName) btn.disabled = true;
+    }
+    if (_sourceMode === 'import' && _copyMode) {
+      var dest = document.getElementById('cfgDestination').value.trim();
+      if (!dest) btn.disabled = true;
+    }
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
