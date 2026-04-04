@@ -446,7 +446,7 @@
       }
 
       // 4: Current file (from step-level data)
-      if (step.current_file) {
+      if (isRunning && step.current_file) {
         html += '<div class="tree-step-current-file">' + esc(step.current_file) + '</div>';
       }
 

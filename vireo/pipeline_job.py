@@ -434,8 +434,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             models_ready.set()
             return
         stages["model_loader"]["status"] = "running"
-        runner.update_step(job["id"], "model_loader", status="running")
-        runner.update_step(job["id"], "model_loader", current_file="Resolving model...")
+        runner.update_step(job["id"], "model_loader", status="running",
+                           current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
             from classify_job import _load_labels, _load_taxonomy
