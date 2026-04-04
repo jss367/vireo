@@ -51,12 +51,14 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     total = len(photo_ids)
     moved = 0
     errors = []
-    moved_map = []  # (photo_id, old_folder_id)
 
-    # Ensure destination folder record exists
+    # Ensure destination folder record exists and is linked to active workspace
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
     if dest_row:
         dest_folder_id = dest_row["id"]
+        # Ensure folder is linked to the active workspace so moved photos remain visible
+        if db._active_workspace_id is not None:
+            db.add_workspace_folder(db._active_workspace_id, dest_folder_id)
     else:
         dest_folder_id = db.add_folder(destination, name=os.path.basename(destination))
 
@@ -123,23 +125,28 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
         if not comp_ok:
             continue
 
-        # Verification passed — delete originals
+        # Verification passed — update DB before deleting originals
+        # This ensures a crash leaves duplicates (safe) rather than orphans
+        db.conn.execute(
+            "UPDATE photos SET folder_id = ? WHERE id = ?",
+            (dest_folder_id, pid),
+        )
+        db.conn.commit()
+
+        # Now safe to delete originals
         os.remove(src_file)
         for comp in companions:
             comp_src = os.path.join(src_dir, comp)
             if os.path.isfile(comp_src):
                 os.remove(comp_src)
 
-        moved_map.append((pid, photo["folder_id"]))
         moved += 1
 
         if progress_cb:
             progress_cb(i + 1, total, photo["filename"])
 
-    # Update DB in single transaction
-    if moved_map:
-        pids = [m[0] for m in moved_map]
-        db.batch_update_photo_folder(pids, dest_folder_id)
+    # Update folder counts
+    if moved > 0:
         db.update_folder_counts()
 
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
