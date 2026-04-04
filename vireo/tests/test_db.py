@@ -1973,3 +1973,81 @@ def test_missing_folder_hidden_from_collection(tmp_path):
     photos = db.get_collection_photos(coll_id)
     assert len(photos) == 1
     assert photos[0]["filename"] == "visible.jpg"
+
+
+# -- Move rules --
+
+def test_create_move_rule(db):
+    """Creating a move rule stores name, destination, and criteria."""
+    rule_id = db.create_move_rule("Archive hawks", "/nas/archive", {"rating_min": 3, "species": ["Red-tailed Hawk"]})
+    assert rule_id is not None
+    rule = db.get_move_rule(rule_id)
+    assert rule["name"] == "Archive hawks"
+    assert rule["destination"] == "/nas/archive"
+    import json
+    assert json.loads(rule["criteria"]) == {"rating_min": 3, "species": ["Red-tailed Hawk"]}
+
+
+def test_list_move_rules(db):
+    """Listing rules returns all saved rules."""
+    db.create_move_rule("Rule A", "/dest/a", {})
+    db.create_move_rule("Rule B", "/dest/b", {"flag": "flagged"})
+    rules = db.list_move_rules()
+    assert len(rules) == 2
+    names = {r["name"] for r in rules}
+    assert names == {"Rule A", "Rule B"}
+
+
+def test_update_move_rule(db):
+    """Updating a rule changes its fields."""
+    rid = db.create_move_rule("Old name", "/old", {})
+    db.update_move_rule(rid, name="New name", destination="/new", criteria={"rating_min": 5})
+    rule = db.get_move_rule(rid)
+    assert rule["name"] == "New name"
+    assert rule["destination"] == "/new"
+
+
+def test_delete_move_rule(db):
+    """Deleting a rule removes it."""
+    rid = db.create_move_rule("Temp", "/tmp", {})
+    db.delete_move_rule(rid)
+    assert db.get_move_rule(rid) is None
+
+
+def test_batch_update_photo_folder(db):
+    """batch_update_photo_folder moves photos to a new folder in one transaction."""
+    fid1 = db.add_folder("/src", name="src")
+    fid2 = db.add_folder("/dst", name="dst")
+    p1 = db.add_photo(folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    db.batch_update_photo_folder([p1, p2], fid2)
+    photo1 = db.get_photo(p1)
+    photo2 = db.get_photo(p2)
+    assert photo1["folder_id"] == fid2
+    assert photo2["folder_id"] == fid2
+
+
+def test_move_folder_path_cascade(db):
+    """move_folder_path updates parent and all child folder paths."""
+    fid = db.add_folder("/local/2024", name="2024")
+    cid = db.add_folder("/local/2024/march", name="march", parent_id=fid)
+    gcid = db.add_folder("/local/2024/march/birds", name="birds", parent_id=cid)
+    db.move_folder_path(fid, "/nas/photos/2024")
+    parent = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
+    grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
+    assert parent["path"] == "/nas/photos/2024"
+    assert child["path"] == "/nas/photos/2024/march"
+    assert grandchild["path"] == "/nas/photos/2024/march/birds"
+
+
+def test_check_filename_collisions(db):
+    """check_filename_collisions detects conflicts at destination folder."""
+    fid1 = db.add_folder("/src", name="src")
+    fid2 = db.add_folder("/dst", name="dst")
+    db.add_photo(folder_id=fid1, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p_dst = db.add_photo(folder_id=fid2, filename="bird.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    p_src = db.conn.execute("SELECT id FROM photos WHERE folder_id = ? AND filename = 'bird.jpg'", (fid1,)).fetchone()["id"]
+    collisions = db.check_filename_collisions([p_src], fid2)
+    assert len(collisions) == 1
+    assert collisions[0]["filename"] == "bird.jpg"

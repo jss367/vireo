@@ -4,7 +4,14 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
+from db import Database
 from PIL import Image
+
+
+@pytest.fixture
+def db(tmp_path):
+    """Return a Database backed by a temp file."""
+    return Database(str(tmp_path / "test.db"))
 
 
 @pytest.fixture
