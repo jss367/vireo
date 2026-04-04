@@ -110,9 +110,8 @@ async function loadHighlights() {
   currentPhotos = data.photos;
   currentFolders = data.folders;
 
-  // Populate folder dropdown (only on first load or if folders changed)
-  if (folderSelect.options.length !== data.folders.length) {
-    folderSelect.innerHTML = '';
+  // Populate folder dropdown on first load
+  if (!folderSelect.options.length) {
     data.folders.forEach(function(f) {
       var opt = document.createElement('option');
       opt.value = f.id;
@@ -141,16 +140,20 @@ async function loadHighlights() {
   grid.style.display = '';
   document.getElementById('controlsBar').style.display = '';
 
-  // Update count slider max
+  // Update count slider max and clamp value
   var countSlider = document.getElementById('countSlider');
   countSlider.max = Math.min(data.meta.eligible, 100);
+  if (parseInt(countSlider.value) > parseInt(countSlider.max)) {
+    countSlider.value = countSlider.max;
+    document.getElementById('countValue').textContent = countSlider.value;
+  }
 
   // Render grid
   grid.innerHTML = '';
   data.photos.forEach(function(p) {
     var card = document.createElement('div');
     card.className = 'highlights-card';
-    card.onclick = function() { if (window.openLightbox) openLightbox(p.id, p.filename); };
+    card.onclick = function() { if (window.openLightbox) openLightbox(p.id, p.filename, currentPhotos); };
     var thumbSrc = '/thumbnails/' + p.id + '.jpg';
     card.innerHTML = '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
       + '<div class="card-info">'
