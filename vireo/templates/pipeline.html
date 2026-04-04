@@ -1065,6 +1065,10 @@ async function startPipeline() {
     if (numEl) numEl.className = 'stage-num';
   });
 
+  // Destination is a config-only card — mark complete immediately since
+  // workspace creation and copy settings are already resolved at this point.
+  document.getElementById('numDestination').classList.add('complete');
+
   try {
     var data = await safeFetch('/api/jobs/pipeline', {
       method: 'POST',
