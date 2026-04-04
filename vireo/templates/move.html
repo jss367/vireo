@@ -9,14 +9,1068 @@
 <title>Vireo - Move</title>
 <style>
 body { padding-bottom: 36px; }
-.content { max-width: 1100px; }
+.content { max-width: 1100px; margin: 0 auto; padding: 20px; }
+.page-title { font-size: 20px; font-weight: 700; color: var(--text-primary); margin-bottom: 20px; }
+
+/* Tabs */
+.move-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-primary);
+  margin-bottom: 20px;
+}
+.move-tab {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+.move-tab:hover { color: var(--text-primary); }
+.move-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Section card */
+.move-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.move-section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 14px 0;
+}
+.move-section p.desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 16px 0;
+}
+
+/* Form row */
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.form-row label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-width: 90px;
+  flex-shrink: 0;
+}
+.form-row select,
+.form-row input[type="text"],
+.form-row input[type="number"] {
+  padding: 7px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  flex: 1;
+  min-width: 200px;
+}
+.form-row select:focus,
+.form-row input:focus { outline: none; border-color: var(--accent); }
+
+/* Destination row with browse btn */
+.dest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+.dest-row input {
+  flex: 1;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.dest-row input:focus { outline: none; border-color: var(--accent); }
+
+/* Buttons */
+.btn {
+  padding: 7px 18px;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.9; }
+.btn-primary { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.btn-secondary { background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border-secondary); }
+.btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+.btn-danger:hover { background: rgba(231,76,60,0.1); }
+.btn-small { padding: 4px 12px; font-size: 12px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Photo grid */
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.grid-card {
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border: 2px solid var(--border-primary);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.15s;
+}
+.grid-card:hover { transform: translateY(-1px); border-color: var(--accent); }
+.grid-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.grid-card-img-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3/2;
+}
+.grid-card-img-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: var(--bg-tertiary);
+}
+.grid-card-info {
+  padding: 6px 8px;
+}
+.grid-card-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Selection counter bar */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--accent-dim, rgba(36,229,202,0.08));
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  font-size: 13px;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+.selection-bar .count { font-weight: 600; }
+
+/* Rules list */
+.rules-list {
+  margin-top: 12px;
+}
+.rule-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  background: var(--bg-secondary);
+  flex-wrap: wrap;
+}
+.rule-item:hover { border-color: var(--border-secondary); }
+.rule-info { flex: 1; min-width: 200px; }
+.rule-name { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.rule-dest { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.rule-criteria { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.rule-last-run { font-size: 11px; color: var(--text-dim); min-width: 120px; text-align: right; }
+.rule-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* Rule form */
+.rule-form {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 16px;
+  margin-top: 12px;
+}
+.rule-form h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px 0;
+}
+.rule-form .form-row select,
+.rule-form .form-row input[type="text"],
+.rule-form .form-row input[type="number"] {
+  min-width: 150px;
+}
+.rule-form .criteria-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.criteria-field label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.criteria-field select,
+.criteria-field input[type="text"],
+.criteria-field input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+.criteria-field select:focus,
+.criteria-field input:focus { outline: none; border-color: var(--accent); }
+.criteria-field .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.criteria-field .checkbox-row input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.preview-result {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* Folder info row */
+.folder-info {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/* Loading */
+.loading {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 0;
+}
+
+/* Folder browser modal (move-specific, reuses modal base from navbar) */
+.browser-breadcrumb {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.browser-folder-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.browser-folder-item:hover { background: var(--bg-hover, var(--bg-tertiary)); }
+
+.new-folder-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.new-folder-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.new-folder-row input:focus { outline: none; border-color: var(--accent); }
 </style>
 </head>
 <body>
+
 {% include '_navbar.html' %}
-<div class="content" style="padding:20px;">
-<h2>Move Photos</h2>
-<p>Loading...</p>
+
+<div class="content">
+  <h2 class="page-title">Move Photos</h2>
+
+  <div class="move-tabs">
+    <button class="move-tab active" onclick="switchTab('quick')">Quick Move</button>
+    <button class="move-tab" onclick="switchTab('photo')">Photo Move</button>
+    <button class="move-tab" onclick="switchTab('rules')">Rules</button>
+  </div>
+
+  <!-- Quick Move Tab -->
+  <div class="tab-panel active" id="tab-quick">
+    <div class="move-section">
+      <h3>Move Entire Folder</h3>
+      <p class="desc">Move all files in a folder (including subfolders) to a new location. Files are copied first, verified, then originals are removed.</p>
+
+      <div class="form-row">
+        <label>Source Folder</label>
+        <select id="quickFolderSelect" onchange="onQuickFolderChange()">
+          <option value="">-- Select a folder --</option>
+        </select>
+      </div>
+      <div class="folder-info" id="quickFolderInfo"></div>
+
+      <div class="form-row">
+        <label>Destination</label>
+        <div class="dest-row">
+          <input type="text" id="quickDestInput" placeholder="/path/to/destination">
+          <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;">
+        <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Photo Move Tab -->
+  <div class="tab-panel" id="tab-photo">
+    <div class="move-section">
+      <h3>Move Selected Photos</h3>
+      <p class="desc">Select individual photos to move to a different folder. Companion files (XMP sidecars, RAW pairs) are moved automatically.</p>
+
+      <div class="form-row">
+        <label>Source Folder</label>
+        <select id="photoFolderSelect" onchange="loadPhotosForFolder()">
+          <option value="">-- Select a folder --</option>
+        </select>
+      </div>
+
+      <div id="photoSelectionBar" class="selection-bar" style="display:none;">
+        <span class="count" id="photoSelCount">0 photos selected</span>
+        <button class="btn btn-small btn-secondary" onclick="clearPhotoSelection()">Clear</button>
+      </div>
+
+      <div id="photoGridContainer">
+        <div class="empty-state">Select a folder to view photos</div>
+      </div>
+
+      <div class="form-row" style="margin-top:16px;">
+        <label>Destination</label>
+        <div class="dest-row">
+          <input type="text" id="photoDestInput" placeholder="/path/to/destination">
+          <button class="btn btn-secondary btn-small" onclick="openBrowser('photoDestInput')">Browse</button>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button class="btn btn-primary" id="photoMoveBtn" onclick="startPhotoMove()" disabled>Move Photos</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rules Tab -->
+  <div class="tab-panel" id="tab-rules">
+    <div class="move-section">
+      <h3>Move Rules</h3>
+      <p class="desc">Create reusable rules to move photos matching specific criteria. Preview matches before running.</p>
+
+      <button class="btn btn-primary btn-small" onclick="showRuleForm()">New Rule</button>
+
+      <div id="ruleFormContainer" style="display:none;"></div>
+
+      <div class="rules-list" id="rulesList">
+        <div class="loading">Loading rules...</div>
+      </div>
+    </div>
+  </div>
 </div>
+
+<!-- Folder Browser Modal -->
+<div class="modal-overlay" id="moveBrowserModal" style="z-index:1001;">
+  <div class="modal" style="max-width:600px;width:85%;">
+    <h3>Select Folder</h3>
+    <div class="browser-breadcrumb" id="moveBrowserBreadcrumb"></div>
+    <div id="moveBrowserList" style="height:300px;overflow-y:auto;border:1px solid var(--border-primary);border-radius:4px;margin-bottom:12px;"></div>
+    <div class="new-folder-row">
+      <input type="text" id="newFolderName" placeholder="New folder name...">
+      <button class="btn btn-secondary btn-small" onclick="createNewFolder()">Create</button>
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="selectBrowserFolder()">Select This Folder</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeBrowser()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Modal -->
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal" style="max-width:450px;">
+    <h3 id="confirmTitle">Confirm Move</h3>
+    <p id="confirmMessage" style="font-size:13px;color:var(--text-secondary);"></p>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeConfirm()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- State ---------- */
+var allFolders = [];
+var photoList = [];
+var selectedPhotos = new Set();
+var lastSelectedIdx = -1;
+var browserTargetInput = null;
+var browserPath = '';
+var confirmCallback = null;
+var editingRuleId = null;
+
+/* ---------- Init ---------- */
+document.addEventListener('DOMContentLoaded', function() {
+  loadFolders();
+  loadRules();
+});
+
+/* ---------- Tab Switching ---------- */
+function switchTab(name) {
+  document.querySelectorAll('.move-tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+  document.getElementById('tab-' + name).classList.add('active');
+  // Highlight the correct tab button
+  document.querySelectorAll('.move-tab').forEach(function(t) {
+    if (t.textContent.toLowerCase().replace(/\s/g, '').indexOf(name) === 0 ||
+        (name === 'quick' && t.textContent.indexOf('Quick') >= 0) ||
+        (name === 'photo' && t.textContent.indexOf('Photo') >= 0) ||
+        (name === 'rules' && t.textContent.indexOf('Rules') >= 0)) {
+      t.classList.add('active');
+    }
+  });
+}
+
+/* ---------- Load Folders ---------- */
+async function loadFolders() {
+  try {
+    var data = await safeFetch('/api/folders');
+    allFolders = data || [];
+    populateFolderSelects();
+  } catch (e) {
+    console.error('Failed to load folders:', e);
+  }
+}
+
+function populateFolderSelects() {
+  var selects = ['quickFolderSelect', 'photoFolderSelect'];
+  selects.forEach(function(id) {
+    var sel = document.getElementById(id);
+    // Preserve the first default option
+    var defaultOpt = sel.options[0];
+    sel.innerHTML = '';
+    sel.appendChild(defaultOpt);
+
+    allFolders.forEach(function(f) {
+      var opt = document.createElement('option');
+      opt.value = f.id;
+      var count = f.photo_count || 0;
+      opt.textContent = f.path + ' (' + count + ' photos)';
+      sel.appendChild(opt);
+    });
+  });
+}
+
+/* ---------- Quick Move ---------- */
+function onQuickFolderChange() {
+  var sel = document.getElementById('quickFolderSelect');
+  var info = document.getElementById('quickFolderInfo');
+  var fid = parseInt(sel.value);
+  if (!fid) {
+    info.textContent = '';
+    updateQuickMoveBtn();
+    return;
+  }
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+  if (folder) {
+    info.textContent = (folder.photo_count || 0) + ' photos in this folder';
+  }
+  updateQuickMoveBtn();
+}
+
+function updateQuickMoveBtn() {
+  var fid = document.getElementById('quickFolderSelect').value;
+  var dest = document.getElementById('quickDestInput').value.trim();
+  document.getElementById('quickMoveBtn').disabled = !(fid && dest);
+}
+
+function startQuickMove() {
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var dest = document.getElementById('quickDestInput').value.trim();
+  if (!fid || !dest) return;
+
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+  var folderName = folder ? folder.path : 'folder #' + fid;
+  var photoCount = folder ? (folder.photo_count || 0) : '?';
+
+  showConfirm(
+    'Move Folder',
+    'Move "' + folderName + '" (' + photoCount + ' photos) to "' + dest + '"? Files will be copied and verified before originals are removed.',
+    function() {
+      executeQuickMove(fid, dest);
+    }
+  );
+}
+
+async function executeQuickMove(folderId, destination) {
+  try {
+    var resp = await safeFetch('/api/jobs/move-folder', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({folder_id: folderId, destination: destination}),
+    });
+    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+  } catch (e) {
+    // safeFetch already shows error toast
+  }
+}
+
+/* ---------- Photo Move ---------- */
+async function loadPhotosForFolder() {
+  var sel = document.getElementById('photoFolderSelect');
+  var fid = parseInt(sel.value);
+  var container = document.getElementById('photoGridContainer');
+  selectedPhotos.clear();
+  lastSelectedIdx = -1;
+  updatePhotoSelectionUI();
+
+  if (!fid) {
+    container.innerHTML = '<div class="empty-state">Select a folder to view photos</div>';
+    return;
+  }
+
+  container.innerHTML = '<div class="loading">Loading photos...</div>';
+
+  try {
+    var data = await safeFetch('/api/photos?folder_id=' + fid + '&per_page=500');
+    photoList = data.photos || [];
+    if (photoList.length === 0) {
+      container.innerHTML = '<div class="empty-state">No photos in this folder</div>';
+      return;
+    }
+    renderPhotoGrid();
+  } catch (e) {
+    container.innerHTML = '<div class="empty-state">Failed to load photos</div>';
+  }
+}
+
+function renderPhotoGrid() {
+  var container = document.getElementById('photoGridContainer');
+  var html = '<div class="photo-grid">';
+  photoList.forEach(function(p, idx) {
+    var selClass = selectedPhotos.has(p.id) ? ' selected' : '';
+    html += '<div class="grid-card' + selClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="handlePhotoClick(event, ' + p.id + ', ' + idx + ')">';
+    html += '<div class="grid-card-img-wrap"><img src="/thumb/' + p.id + '" loading="lazy" alt=""></div>';
+    html += '<div class="grid-card-info"><div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div></div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function handlePhotoClick(e, id, idx) {
+  e.preventDefault();
+  if (e.shiftKey && lastSelectedIdx >= 0) {
+    // Range select
+    var start = Math.min(lastSelectedIdx, idx);
+    var end = Math.max(lastSelectedIdx, idx);
+    for (var i = start; i <= end; i++) {
+      if (photoList[i]) selectedPhotos.add(photoList[i].id);
+    }
+  } else if (e.metaKey || e.ctrlKey) {
+    // Toggle
+    if (selectedPhotos.has(id)) {
+      selectedPhotos.delete(id);
+    } else {
+      selectedPhotos.add(id);
+    }
+  } else {
+    // Single select
+    selectedPhotos.clear();
+    selectedPhotos.add(id);
+  }
+  lastSelectedIdx = idx;
+
+  // Update card highlights
+  document.querySelectorAll('#photoGridContainer .grid-card').forEach(function(el) {
+    var cardId = parseInt(el.dataset.id);
+    el.classList.toggle('selected', selectedPhotos.has(cardId));
+  });
+
+  updatePhotoSelectionUI();
+}
+
+function clearPhotoSelection() {
+  selectedPhotos.clear();
+  lastSelectedIdx = -1;
+  document.querySelectorAll('#photoGridContainer .grid-card').forEach(function(el) {
+    el.classList.remove('selected');
+  });
+  updatePhotoSelectionUI();
+}
+
+function updatePhotoSelectionUI() {
+  var bar = document.getElementById('photoSelectionBar');
+  var btn = document.getElementById('photoMoveBtn');
+  var count = selectedPhotos.size;
+
+  if (count > 0) {
+    bar.style.display = 'flex';
+    document.getElementById('photoSelCount').textContent = count + ' photo' + (count !== 1 ? 's' : '') + ' selected';
+  } else {
+    bar.style.display = 'none';
+  }
+
+  var dest = document.getElementById('photoDestInput').value.trim();
+  btn.disabled = !(count > 0 && dest);
+}
+
+function startPhotoMove() {
+  var ids = Array.from(selectedPhotos);
+  var dest = document.getElementById('photoDestInput').value.trim();
+  if (ids.length === 0 || !dest) return;
+
+  showConfirm(
+    'Move Photos',
+    'Move ' + ids.length + ' photo' + (ids.length !== 1 ? 's' : '') + ' to "' + dest + '"? Companion files will be included automatically.',
+    function() {
+      executePhotoMove(ids, dest);
+    }
+  );
+}
+
+async function executePhotoMove(photoIds, destination) {
+  try {
+    var resp = await safeFetch('/api/jobs/move-photos', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds, destination: destination}),
+    });
+    showToast('Move started (job ' + resp.job_id + ') — track progress in the bottom panel');
+    // Clear selection after starting
+    clearPhotoSelection();
+  } catch (e) {
+    // safeFetch already shows error toast
+  }
+}
+
+/* ---------- Rules ---------- */
+var rulesList = [];
+
+async function loadRules() {
+  try {
+    var data = await safeFetch('/api/move-rules');
+    rulesList = data || [];
+    renderRules();
+  } catch (e) {
+    document.getElementById('rulesList').innerHTML = '<div class="empty-state">Failed to load rules</div>';
+  }
+}
+
+function renderRules() {
+  var container = document.getElementById('rulesList');
+  if (rulesList.length === 0) {
+    container.innerHTML = '<div class="empty-state">No move rules yet. Create one to get started.</div>';
+    return;
+  }
+
+  var html = '';
+  rulesList.forEach(function(r) {
+    var criteria = {};
+    try { criteria = typeof r.criteria === 'string' ? JSON.parse(r.criteria) : (r.criteria || {}); } catch(e) {}
+    var critSummary = buildCriteriaSummary(criteria);
+
+    html += '<div class="rule-item" data-id="' + r.id + '">';
+    html += '<div class="rule-info">';
+    html += '<div class="rule-name">' + escapeHtml(r.name) + '</div>';
+    html += '<div class="rule-dest">Destination: ' + escapeHtml(r.destination) + '</div>';
+    if (critSummary) {
+      html += '<div class="rule-criteria">' + escapeHtml(critSummary) + '</div>';
+    }
+    html += '</div>';
+    html += '<div class="rule-last-run">' + (r.last_run_at ? 'Last run: ' + r.last_run_at : 'Never run') + '</div>';
+    html += '<div class="rule-actions">';
+    html += '<button class="btn btn-primary btn-small" onclick="runRule(' + r.id + ')">Run</button>';
+    html += '<button class="btn btn-secondary btn-small" onclick="editRule(' + r.id + ')">Edit</button>';
+    html += '<button class="btn btn-danger btn-small" onclick="deleteRule(' + r.id + ')">Delete</button>';
+    html += '</div>';
+    html += '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function buildCriteriaSummary(criteria) {
+  var parts = [];
+  if (criteria.rating_min) parts.push('Rating >= ' + criteria.rating_min);
+  if (criteria.flag && criteria.flag !== 'any') parts.push('Flag: ' + criteria.flag);
+  if (criteria.species && criteria.species.length) parts.push('Species: ' + criteria.species.join(', '));
+  if (criteria.has_predictions) parts.push('Has predictions');
+  return parts.join(' | ');
+}
+
+function showRuleForm(rule) {
+  editingRuleId = rule ? rule.id : null;
+  var criteria = {};
+  if (rule) {
+    try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : (rule.criteria || {}); } catch(e) {}
+  }
+
+  var html = '<div class="rule-form">';
+  html += '<h4>' + (editingRuleId ? 'Edit Rule' : 'New Rule') + '</h4>';
+
+  html += '<div class="form-row">';
+  html += '<label>Name</label>';
+  html += '<input type="text" id="ruleNameInput" value="' + escapeAttr(rule ? rule.name : '') + '" placeholder="e.g. Archive hawks">';
+  html += '</div>';
+
+  html += '<div class="form-row">';
+  html += '<label>Destination</label>';
+  html += '<div class="dest-row">';
+  html += '<input type="text" id="ruleDestInput" value="' + escapeAttr(rule ? rule.destination : '') + '" placeholder="/path/to/destination">';
+  html += '<button class="btn btn-secondary btn-small" onclick="openBrowser(\'ruleDestInput\')">Browse</button>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="criteria-grid">';
+
+  html += '<div class="criteria-field">';
+  html += '<label>Minimum Rating</label>';
+  html += '<select id="ruleCriteriaRating">';
+  html += '<option value="">Any</option>';
+  for (var i = 1; i <= 5; i++) {
+    var sel = (criteria.rating_min === i) ? ' selected' : '';
+    html += '<option value="' + i + '"' + sel + '>' + i + '</option>';
+  }
+  html += '</select>';
+  html += '</div>';
+
+  html += '<div class="criteria-field">';
+  html += '<label>Flag</label>';
+  html += '<select id="ruleCriteriaFlag">';
+  var flagOpts = [['', 'Any'], ['flagged', 'Flagged'], ['rejected', 'Rejected'], ['none', 'Unflagged']];
+  flagOpts.forEach(function(opt) {
+    var sel = (criteria.flag === opt[0] || (!criteria.flag && opt[0] === '')) ? ' selected' : '';
+    html += '<option value="' + opt[0] + '"' + sel + '>' + opt[1] + '</option>';
+  });
+  html += '</select>';
+  html += '</div>';
+
+  html += '<div class="criteria-field">';
+  html += '<label>Species (comma-separated)</label>';
+  html += '<input type="text" id="ruleCriteriaSpecies" value="' + escapeAttr(criteria.species ? criteria.species.join(', ') : '') + '" placeholder="e.g. Red-tailed Hawk, Bald Eagle">';
+  html += '</div>';
+
+  html += '<div class="criteria-field">';
+  html += '<label>Has Predictions</label>';
+  html += '<div class="checkbox-row">';
+  html += '<input type="checkbox" id="ruleCriteriaHasPred"' + (criteria.has_predictions ? ' checked' : '') + '>';
+  html += '<span style="font-size:12px;color:var(--text-secondary);">Only photos with predictions</span>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '</div>'; // criteria-grid
+
+  html += '<div id="rulePreviewResult"></div>';
+
+  html += '<div class="form-actions">';
+  html += '<button class="btn btn-primary" onclick="saveRule()">Save Rule</button>';
+  html += '<button class="btn btn-secondary" onclick="previewRule()">Preview</button>';
+  html += '<button class="btn btn-secondary" onclick="hideRuleForm()">Cancel</button>';
+  html += '</div>';
+
+  html += '</div>';
+
+  document.getElementById('ruleFormContainer').innerHTML = html;
+  document.getElementById('ruleFormContainer').style.display = 'block';
+}
+
+function hideRuleForm() {
+  document.getElementById('ruleFormContainer').style.display = 'none';
+  document.getElementById('ruleFormContainer').innerHTML = '';
+  editingRuleId = null;
+}
+
+function gatherCriteria() {
+  var criteria = {};
+  var rating = document.getElementById('ruleCriteriaRating').value;
+  if (rating) criteria.rating_min = parseInt(rating);
+  var flag = document.getElementById('ruleCriteriaFlag').value;
+  if (flag) criteria.flag = flag;
+  var species = document.getElementById('ruleCriteriaSpecies').value.trim();
+  if (species) {
+    criteria.species = species.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+  }
+  if (document.getElementById('ruleCriteriaHasPred').checked) {
+    criteria.has_predictions = true;
+  }
+  return criteria;
+}
+
+async function previewRule() {
+  var criteria = gatherCriteria();
+  var resultDiv = document.getElementById('rulePreviewResult');
+  resultDiv.innerHTML = '<div class="loading">Checking matches...</div>';
+
+  try {
+    var resp = await safeFetch('/api/move-rules/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({criteria: criteria}),
+    });
+    var count = resp.photo_ids ? resp.photo_ids.length : 0;
+    resultDiv.innerHTML = '<div class="preview-result">' + count + ' photo' + (count !== 1 ? 's' : '') + ' match this criteria</div>';
+  } catch (e) {
+    resultDiv.innerHTML = '<div class="preview-result" style="color:var(--danger);">Preview failed</div>';
+  }
+}
+
+async function saveRule() {
+  var name = document.getElementById('ruleNameInput').value.trim();
+  var dest = document.getElementById('ruleDestInput').value.trim();
+  if (!name || !dest) {
+    showToast('Name and destination are required', 'error');
+    return;
+  }
+  var criteria = gatherCriteria();
+
+  try {
+    if (editingRuleId) {
+      await safeFetch('/api/move-rules/' + editingRuleId, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
+      });
+      showToast('Rule updated');
+    } else {
+      await safeFetch('/api/move-rules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, destination: dest, criteria: criteria}),
+      });
+      showToast('Rule created');
+    }
+    hideRuleForm();
+    loadRules();
+  } catch (e) {
+    // safeFetch handles error toast
+  }
+}
+
+function editRule(ruleId) {
+  var rule = rulesList.find(function(r) { return r.id === ruleId; });
+  if (rule) showRuleForm(rule);
+}
+
+async function deleteRule(ruleId) {
+  showConfirm('Delete Rule', 'Are you sure you want to delete this rule? This cannot be undone.', async function() {
+    try {
+      await safeFetch('/api/move-rules/' + ruleId, {method: 'DELETE'});
+      showToast('Rule deleted');
+      loadRules();
+    } catch (e) {
+      // safeFetch handles error toast
+    }
+  });
+}
+
+async function runRule(ruleId) {
+  var rule = rulesList.find(function(r) { return r.id === ruleId; });
+  if (!rule) return;
+
+  var criteria = {};
+  try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : (rule.criteria || {}); } catch(e) {}
+
+  // First, preview to get matching photo IDs
+  try {
+    var preview = await safeFetch('/api/move-rules/preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({criteria: criteria}),
+    });
+    var photoIds = preview.photo_ids || [];
+    if (photoIds.length === 0) {
+      showToast('No photos match this rule', 'error');
+      return;
+    }
+
+    showConfirm(
+      'Run Rule: ' + rule.name,
+      'Move ' + photoIds.length + ' matching photo' + (photoIds.length !== 1 ? 's' : '') + ' to "' + rule.destination + '"?',
+      async function() {
+        try {
+          var resp = await safeFetch('/api/jobs/move-photos', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({photo_ids: photoIds, destination: rule.destination, rule_id: ruleId}),
+          });
+          showToast('Rule running (job ' + resp.job_id + ') — track progress in the bottom panel');
+        } catch (e) {
+          // safeFetch handles error toast
+        }
+      }
+    );
+  } catch (e) {
+    // safeFetch handles error toast
+  }
+}
+
+/* ---------- Folder Browser ---------- */
+function openBrowser(targetInputId) {
+  browserTargetInput = targetInputId;
+  var currentVal = document.getElementById(targetInputId).value.trim();
+  browserPath = currentVal || '';
+  document.getElementById('moveBrowserModal').classList.add('open');
+  document.getElementById('newFolderName').value = '';
+  browseTo(browserPath || null);
+}
+
+function closeBrowser() {
+  document.getElementById('moveBrowserModal').classList.remove('open');
+  browserTargetInput = null;
+}
+
+async function browseTo(path) {
+  var url = path ? '/api/browse?path=' + encodeURIComponent(path) : '/api/browse';
+  try {
+    var data = await safeFetch(url);
+    browserPath = data.path;
+
+    document.getElementById('moveBrowserBreadcrumb').textContent = data.path;
+
+    var list = document.getElementById('moveBrowserList');
+    var html = '';
+    var parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+    if (data.path !== '/') {
+      html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(parent) + '\')">&#128194; ..</div>';
+    }
+    if (data.dirs) {
+      data.dirs.forEach(function(d) {
+        html += '<div class="browser-folder-item" ondblclick="browseTo(\'' + escapeAttr(d.path) + '\')">&#128194; ' + escapeHtml(d.name) + '</div>';
+      });
+    }
+    if (!data.dirs || data.dirs.length === 0) {
+      if (data.path === '/') {
+        html += '<div style="padding:10px;color:var(--text-dim);font-size:13px;">No subdirectories</div>';
+      }
+    }
+    list.innerHTML = html;
+  } catch (e) {
+    // safeFetch handles error toast
+  }
+}
+
+function selectBrowserFolder() {
+  if (!browserTargetInput || !browserPath) return;
+  document.getElementById(browserTargetInput).value = browserPath;
+  closeBrowser();
+  // Trigger any button state updates
+  updateQuickMoveBtn();
+  updatePhotoSelectionUI();
+}
+
+async function createNewFolder() {
+  var name = document.getElementById('newFolderName').value.trim();
+  if (!name || !browserPath) return;
+
+  var newPath = browserPath + (browserPath.endsWith('/') ? '' : '/') + name;
+  try {
+    await safeFetch('/api/browse/mkdir', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: newPath}),
+    });
+    // Refresh the browser to show the new folder
+    browseTo(browserPath);
+    document.getElementById('newFolderName').value = '';
+  } catch (e) {
+    // safeFetch handles error toast
+  }
+}
+
+/* ---------- Confirm Modal ---------- */
+function showConfirm(title, message, callback) {
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMessage').textContent = message;
+  confirmCallback = callback;
+  document.getElementById('confirmModal').classList.add('open');
+}
+
+function closeConfirm() {
+  document.getElementById('confirmModal').classList.remove('open');
+  confirmCallback = null;
+}
+
+function confirmOk() {
+  var cb = confirmCallback;
+  closeConfirm();
+  if (cb) cb();
+}
+
+/* ---------- Input listeners for button state ---------- */
+document.addEventListener('DOMContentLoaded', function() {
+  var quickDest = document.getElementById('quickDestInput');
+  if (quickDest) quickDest.addEventListener('input', updateQuickMoveBtn);
+
+  var photoDest = document.getElementById('photoDestInput');
+  if (photoDest) photoDest.addEventListener('input', updatePhotoSelectionUI);
+});
+
+/* ---------- Utility ---------- */
+function escapeHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function escapeAttr(s) {
+  if (!s) return '';
+  return s.replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
 </body>
 </html>
