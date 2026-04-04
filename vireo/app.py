@@ -2346,8 +2346,26 @@ def create_app(db_path, thumb_cache_dir=None):
 
         all_files = []
         multi_source = len(folders) > 1
+
+        # Compute unique display names for each source folder.
+        # Use shortest trailing path segments that are unique across
+        # all sources (e.g. /mnt/cardA/DCIM and /mnt/cardB/DCIM
+        # become cardA/DCIM and cardB/DCIM).
+        root_names = {}
+        if multi_source:
+            parts = [f.rstrip("/").split("/") for f in folders]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = ["/".join(p[-depth:]) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for folder_path, suffix in zip(folders, suffixes, strict=True):
+                        root_names[folder_path] = suffix
+                    break
+            else:
+                for folder_path in folders:
+                    root_names[folder_path] = folder_path
+
         for folder in folders:
-            root_name = os.path.basename(folder.rstrip("/"))
+            root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
             discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
             for f in discovered:
                 stat = f.stat()
