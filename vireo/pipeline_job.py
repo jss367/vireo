@@ -435,6 +435,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             return
         stages["model_loader"]["status"] = "running"
         runner.update_step(job["id"], "model_loader", status="running")
+        runner.update_step(job["id"], "model_loader", current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
             from classify_job import _load_labels, _load_taxonomy
@@ -461,6 +462,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             weights_path = active_model["weights_path"]
             model_type = active_model.get("model_type", "bioclip")
             model_name = active_model["name"]
+            runner.update_step(job["id"], "model_loader", current_file=model_name)
 
             # Download taxonomy if missing and requested
             taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
