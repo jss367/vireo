@@ -734,7 +734,7 @@ function renderRules() {
       html += '<div class="rule-criteria">' + escapeHtml(critSummary) + '</div>';
     }
     html += '</div>';
-    html += '<div class="rule-last-run">' + (r.last_run_at ? 'Last run: ' + r.last_run_at : 'Never run') + '</div>';
+    html += '<div class="rule-last-run">' + (r.last_run_at ? 'Last run: ' + escapeHtml(r.last_run_at) : 'Never run') + '</div>';
     html += '<div class="rule-actions">';
     html += '<button class="btn btn-primary btn-small" onclick="runRule(' + r.id + ')">Run</button>';
     html += '<button class="btn btn-secondary btn-small" onclick="editRule(' + r.id + ')">Edit</button>';
@@ -751,6 +751,8 @@ function buildCriteriaSummary(criteria) {
   if (criteria.flag && criteria.flag !== 'any') parts.push('Flag: ' + criteria.flag);
   if (criteria.species && criteria.species.length) parts.push('Species: ' + criteria.species.join(', '));
   if (criteria.has_predictions) parts.push('Has predictions');
+  if (criteria.folder_ids && criteria.folder_ids.length) parts.push('Folders: ' + criteria.folder_ids.length + ' selected');
+  if (criteria.imported_before) parts.push('Before: ' + criteria.imported_before);
   return parts.join(' | ');
 }
 
@@ -814,6 +816,22 @@ function showRuleForm(rule) {
   html += '</div>';
   html += '</div>';
 
+  html += '<div class="criteria-field">';
+  html += '<label>Source Folders</label>';
+  html += '<select id="ruleCriteriaFolders" multiple style="height:80px;">';
+  allFolders.forEach(function(f) {
+    var sel = (criteria.folder_ids && criteria.folder_ids.indexOf(f.id) >= 0) ? ' selected' : '';
+    html += '<option value="' + f.id + '"' + sel + '>' + escapeHtml(f.path) + '</option>';
+  });
+  html += '</select>';
+  html += '<span style="font-size:11px;color:var(--text-dim);">Hold Ctrl/Cmd to select multiple</span>';
+  html += '</div>';
+
+  html += '<div class="criteria-field">';
+  html += '<label>Imported Before</label>';
+  html += '<input type="date" id="ruleCriteriaImportedBefore" value="' + escapeAttr(criteria.imported_before || '') + '">';
+  html += '</div>';
+
   html += '</div>'; // criteria-grid
 
   html += '<div id="rulePreviewResult"></div>';
@@ -848,6 +866,15 @@ function gatherCriteria() {
   }
   if (document.getElementById('ruleCriteriaHasPred').checked) {
     criteria.has_predictions = true;
+  }
+  var folderSelect = document.getElementById('ruleCriteriaFolders');
+  if (folderSelect) {
+    var selectedFolders = Array.from(folderSelect.selectedOptions).map(function(o) { return parseInt(o.value); });
+    if (selectedFolders.length) criteria.folder_ids = selectedFolders;
+  }
+  var importedBefore = document.getElementById('ruleCriteriaImportedBefore');
+  if (importedBefore && importedBefore.value) {
+    criteria.imported_before = importedBefore.value;
   }
   return criteria;
 }
