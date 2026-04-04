@@ -2345,16 +2345,22 @@ def create_app(db_path, thumb_cache_dir=None):
         from ingest import discover_source_files
 
         all_files = []
+        multi_source = len(folders) > 1
         for folder in folders:
+            root_name = os.path.basename(folder.rstrip("/"))
             discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
             for f in discovered:
                 stat = f.stat()
                 # Determine subfolder relative to the source root
                 try:
                     rel = f.parent.relative_to(folder)
-                    subfolder = str(rel) if str(rel) != "." else os.path.basename(folder)
+                    subfolder = str(rel) if str(rel) != "." else root_name
                 except ValueError:
-                    subfolder = os.path.basename(folder)
+                    subfolder = root_name
+                # Prefix with source root name when multiple sources to
+                # prevent collisions (e.g. two cards with DCIM/100CANON)
+                if multi_source and subfolder != root_name:
+                    subfolder = os.path.join(root_name, subfolder)
 
                 all_files.append({
                     "path": str(f),
@@ -3895,6 +3901,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     folder_template=folder_template,
                     skip_duplicates=skip_duplicates,
                     progress_callback=ingest_cb,
+                    skip_paths=exclude_paths or None,
                 )
                 copied_paths = ingest_result.get("copied_paths", [])
                 scan_target = destination
@@ -3913,7 +3920,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb)
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
@@ -4963,6 +4970,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
+            exclude_paths=set(body.get("exclude_paths", [])) or None,
         )
 
         runner = app._job_runner
