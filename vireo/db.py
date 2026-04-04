@@ -2080,6 +2080,44 @@ class Database:
             result.setdefault(r["photo_id"], []).append(r["name"])
         return result
 
+    def get_highlights_candidates(self, folder_id, min_quality=0.0):
+        """Return photos eligible for highlights selection.
+
+        Returns photos in the given folder that have a quality_score >= min_quality
+        and are not user-rejected. Includes the top accepted prediction species
+        (or NULL) and DINO embeddings for MMR diversity.
+
+        Ordered by quality_score DESC.
+        """
+        rows = self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.extension,
+                      p.timestamp, p.width, p.height, p.rating, p.flag,
+                      p.thumb_path, p.quality_score, p.subject_sharpness,
+                      p.subject_size, p.sharpness, p.phash_crop,
+                      p.dino_subject_embedding, p.dino_global_embedding,
+                      bp.species
+               FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               LEFT JOIN (
+                   SELECT det.photo_id, pred.species,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY det.photo_id
+                              ORDER BY pred.confidence DESC
+                          ) AS rn
+                   FROM detections det
+                   JOIN predictions pred ON pred.detection_id = det.id
+                   WHERE det.workspace_id = ? AND pred.status = 'accepted'
+               ) bp ON bp.photo_id = p.id AND bp.rn = 1
+               WHERE p.folder_id = ?
+                 AND wf.workspace_id = ?
+                 AND p.quality_score IS NOT NULL
+                 AND p.quality_score >= ?
+                 AND p.flag != 'rejected'
+               ORDER BY p.quality_score DESC""",
+            (self._ws_id(), folder_id, self._ws_id(), min_quality),
+        ).fetchall()
+        return rows
+
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
 
     def update_keyword(self, keyword_id, **kwargs):
