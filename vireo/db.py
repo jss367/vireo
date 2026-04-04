@@ -2118,6 +2118,27 @@ class Database:
         ).fetchall()
         return rows
 
+    def get_folders_with_quality_data(self):
+        """Return folders that have at least one photo with a quality_score.
+
+        Used to populate the folder dropdown on the highlights page.
+        Returns id, path, name, and count of scored photos, ordered by most recent photo first.
+        """
+        return self.conn.execute(
+            """SELECT f.id, f.path, f.name,
+                      COUNT(p.id) as photo_count,
+                      MAX(p.timestamp) as latest_photo
+               FROM folders f
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               JOIN photos p ON p.folder_id = f.id
+               WHERE wf.workspace_id = ?
+                 AND f.status = 'ok'
+                 AND p.quality_score IS NOT NULL
+               GROUP BY f.id
+               ORDER BY latest_photo DESC""",
+            (self._ws_id(),),
+        ).fetchall()
+
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
 
     def update_keyword(self, keyword_id, **kwargs):

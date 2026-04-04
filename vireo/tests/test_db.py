@@ -2034,3 +2034,31 @@ def test_get_highlights_candidates_excludes_rejected(tmp_path):
     results = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
     assert len(results) == 1
     assert results[0]["filename"] == "good.jpg"
+
+
+# --- Folders with quality data ---
+
+
+def test_get_folders_with_quality_data(tmp_path):
+    """Returns only folders that have photos with quality scores."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Folder with quality data
+    fid1 = db.add_folder('/scored', name='scored')
+    pid1 = db.add_photo(
+        folder_id=fid1, filename='a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid1,))
+    # Folder without quality data
+    fid2 = db.add_folder('/noscores', name='noscores')
+    db.add_photo(
+        folder_id=fid2, filename='b.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    assert len(folders) == 1
+    assert folders[0]["name"] == "scored"
+    assert folders[0]["photo_count"] > 0
