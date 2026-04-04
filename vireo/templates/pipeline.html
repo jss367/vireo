@@ -973,6 +973,39 @@ async function startPipeline() {
   _pipelineRunning = true;
   _pipelineAbort = false;
 
+  // Create new workspace if requested
+  if (_destWorkspaceMode === 'new') {
+    var wsName = document.getElementById('destNewWsName').value.trim();
+    if (!wsName) {
+      document.getElementById('destWsError').textContent = 'Name is required';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+    try {
+      var wsData = await safeFetch('/api/workspaces', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: wsName })
+      }, { toast: false });
+      // Activate the new workspace
+      await safeFetch('/api/workspaces/' + wsData.id + '/activate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ current_path: window.location.pathname })
+      });
+      // Update the navbar workspace display
+      var wsBtn = document.getElementById('wsDropdownBtn');
+      if (wsBtn) wsBtn.textContent = wsName;
+      document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
+    } catch(e) {
+      document.getElementById('destWsError').textContent = e.message || 'Failed to create workspace';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+  }
+
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
   btn.onclick = stopPipeline;
@@ -1027,7 +1060,7 @@ async function startPipeline() {
   }
 
   // Reset all stage cards to pending state
-  ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
