@@ -325,6 +325,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 except Exception:
                     failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
+                processed = generated + skipped + failed
+                scan_total = stages["scan"].get("count", 0) if stages["scan"]["status"] == "completed" else 0
+                runner.update_step(job["id"], "thumbnails",
+                                   current_file=os.path.basename(photo_path),
+                                   progress={"current": processed, "total": scan_total})
 
             stages["thumbnails"]["status"] = "completed"
             from thumbnails import format_summary as thumb_summary
