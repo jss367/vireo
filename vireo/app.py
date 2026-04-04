@@ -27,6 +27,7 @@ from flask import (
     request,
     send_from_directory,
 )
+from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -381,6 +382,10 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/jobs")
     def jobs_page():
         return render_template("jobs.html")
+
+    @app.route("/highlights")
+    def highlights_page():
+        return render_template("highlights.html")
 
     # -- API routes --
 
@@ -1265,6 +1270,82 @@ def create_app(db_path, thumb_cache_dir=None):
                 "total": total,
             }
         )
+
+    # -- Highlights --
+
+    @app.route("/api/highlights")
+    def api_highlights():
+        db = _get_db()
+
+        folders = db.get_folders_with_quality_data()
+        if not folders:
+            return jsonify({
+                "photos": [],
+                "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
+                "folders": [],
+            })
+
+        folder_id = request.args.get("folder_id", type=int)
+        if folder_id is None:
+            folder_id = folders[0]["id"]  # Most recent
+
+        count = request.args.get("count", type=int)
+        max_per_species = request.args.get("max_per_species", 5, type=int)
+        min_quality = request.args.get("min_quality", 0.0, type=float)
+
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        total_in_folder = db.count_filtered_photos(folder_id=folder_id)
+
+        # Adaptive default: 5% clamped to [10, 50]
+        if count is None:
+            count = max(10, min(50, int(len(candidates) * 0.05))) if candidates else 0
+
+        selected = select_highlights(
+            [dict(r) for r in candidates],
+            count=count,
+            max_per_species=max_per_species,
+        )
+
+        # Build species breakdown
+        species_counts = {}
+        for p in selected:
+            sp = p.get("species") or "Unidentified"
+            species_counts[sp] = species_counts.get(sp, 0) + 1
+
+        # Strip binary fields before JSON response
+        photo_list = []
+        for p in selected:
+            out = {k: v for k, v in p.items()
+                   if k not in ("dino_subject_embedding", "dino_global_embedding")}
+            photo_list.append(out)
+
+        return jsonify({
+            "photos": photo_list,
+            "meta": {
+                "total_in_folder": total_in_folder,
+                "eligible": len(candidates),
+                "species_breakdown": species_counts,
+                "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
+            },
+            "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+        })
+
+    @app.route("/api/highlights/save", methods=["POST"])
+    def api_highlights_save():
+        db = _get_db()
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        name = body.get("name", "").strip()
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not name:
+            return json_error("name required")
+
+        rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
+        cid = db.add_collection(name, rules)
+        return jsonify({"ok": True, "id": cid})
 
     # -- Workspace API routes --
 

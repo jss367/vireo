@@ -1418,3 +1418,80 @@ def test_folder_health_check_runs_at_startup(app_and_db):
 
     missing = db.get_missing_folders()
     assert len(missing) >= 1
+
+
+def test_highlights_page(app_and_db):
+    """GET /highlights returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/highlights")
+    assert resp.status_code == 200
+
+
+def test_highlights_get_empty(app_and_db):
+    """GET /api/highlights returns empty when no quality data exists."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photos"] == []
+    assert "folders" in data
+    assert "meta" in data
+
+
+def test_highlights_get_with_data(app_and_db):
+    """GET /api/highlights returns highlight photos for a folder with quality data."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/highlights_test', 'highlights_test', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    for i in range(20):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, ?, ?, 'none')",
+            (fid, f"img{i}.jpg", 0.9 - i * 0.03),
+        )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&count=5")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["photos"]) == 5
+    assert data["meta"]["total_in_folder"] == 20
+
+
+def test_highlights_save(app_and_db):
+    """POST /api/highlights/save creates a static collection."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/save_test', 'save_test', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score) VALUES (?, 'a.jpg', 0.8)",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.post("/api/highlights/save", json={
+        "photo_ids": [pid],
+        "name": "Highlights - save_test",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert "id" in data
+
+    # Verify collection was created
+    collections = db.get_collections()
+    names = [c["name"] for c in collections]
+    assert "Highlights - save_test" in names
