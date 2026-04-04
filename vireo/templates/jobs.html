@@ -445,9 +445,10 @@
         }
       }
 
-      // 4: Current file (from step-level data)
-      if (isRunning && step.current_file) {
-        html += '<div class="tree-step-current-file">' + esc(step.current_file) + '</div>';
+      // 4: Current file (step-level preferred, fall back to job-level)
+      var currentFile = step.current_file || (isRunning && job.progress && job.progress.current_file ? job.progress.current_file : '');
+      if (isRunning && currentFile) {
+        html += '<div class="tree-step-current-file">' + esc(currentFile) + '</div>';
       }
 
       // Error detail
