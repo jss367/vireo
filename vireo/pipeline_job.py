@@ -150,10 +150,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 collected_photo_ids.append(photo_id)
                 scan_to_thumb.put((photo_id, path))
                 stages["scan"]["count"] = len(collected_photo_ids)
+                runner.update_step(job["id"], "scan",
+                                   current_file=os.path.basename(path))
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Scanning photos",
                     "current": current,

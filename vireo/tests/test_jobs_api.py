@@ -317,3 +317,33 @@ def test_update_step_current_file(app_and_db):
     }
     runner.update_step(job_id, "scan", current_file="DSC_0001.NEF")
     assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
+
+
+def test_scan_step_has_progress(app_and_db, tmp_path):
+    """Scan step reports step-level progress with current/total."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'b.jpg'))
+
+    resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(50):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    scan_step = data['steps'][0]
+    assert scan_step['id'] == 'scan'
+    # After completion, progress should have current == total
+    assert 'progress' in scan_step
+    assert scan_step['progress']['current'] == scan_step['progress']['total']
+    assert scan_step['progress']['total'] >= 2
