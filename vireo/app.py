@@ -2333,6 +2333,54 @@ def create_app(db_path, thumb_cache_dir=None):
         except Exception as e:
             return json_error(str(e), 500)
 
+    @app.route("/api/import/folder-preview", methods=["POST"])
+    def api_import_folder_preview():
+        """Discover files in source folders and return metadata for preview."""
+        body = request.get_json(silent=True) or {}
+        folders = body.get("folders", [])
+        file_types = body.get("file_types", [])
+        if not folders:
+            return json_error("folders required", 400)
+
+        from ingest import discover_source_files
+
+        all_files = []
+        for folder in folders:
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
+            for f in discovered:
+                stat = f.stat()
+                # Determine subfolder relative to the source root
+                try:
+                    rel = f.parent.relative_to(folder)
+                    subfolder = str(rel) if str(rel) != "." else os.path.basename(folder)
+                except ValueError:
+                    subfolder = os.path.basename(folder)
+
+                all_files.append({
+                    "path": str(f),
+                    "filename": f.name,
+                    "subfolder": subfolder,
+                    "size": stat.st_size,
+                    "extension": f.suffix.lower(),
+                    "mtime": stat.st_mtime,
+                })
+
+        # Build summary
+        type_breakdown = {}
+        total_size = 0
+        for f in all_files:
+            ext = f["extension"]
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += f["size"]
+
+        return jsonify({
+            "total_count": len(all_files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": all_files,
+        })
+
     # -- Audit API routes --
 
     @app.route("/api/audit/drift")
