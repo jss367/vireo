@@ -397,6 +397,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         generated += 1
 
                 stages["previews"]["count"] = i + 1
+                runner.update_step(job["id"], "previews",
+                                   current_file=photo["filename"],
+                                   progress={"current": i + 1, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Generating previews",
                     "current": i + 1,

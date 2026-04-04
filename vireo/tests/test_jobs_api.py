@@ -378,3 +378,34 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
     thumb_step = next(s for s in data['steps'] if s['id'] == 'thumbnails')
     assert 'progress' in thumb_step
     assert thumb_step['progress']['current'] > 0
+
+
+def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
+    """Preview step in pipeline reports step-level progress."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
+
+    resp = client.post('/api/jobs/pipeline', json={
+        'source': scan_dir,
+        'skip_classify': True,
+        'skip_extract_masks': True,
+        'skip_regroup': True,
+    })
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(100):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    preview_step = next(s for s in data['steps'] if s['id'] == 'previews')
+    assert 'progress' in preview_step
+    assert preview_step['progress']['total'] > 0
