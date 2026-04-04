@@ -70,6 +70,7 @@ def ingest(
     skip_duplicates=True,
     progress_callback=None,
     extra_known_hashes=None,
+    skip_paths=None,
 ):
     """Copy and organize photos from source to destination.
 
@@ -91,6 +92,8 @@ def ingest(
         dict with counts: copied, skipped_duplicate, failed, total
     """
     files = discover_source_files(source_dir, file_types)
+    if skip_paths:
+        files = [f for f in files if str(f) not in skip_paths]
     total = len(files)
 
     # Load known hashes from database for duplicate detection and merge with
