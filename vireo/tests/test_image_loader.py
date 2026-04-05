@@ -16,6 +16,34 @@ def _jpeg_bytes(size, color='green'):
     return buf.getvalue()
 
 
+def _jpeg_bytes_with_orientation(size, orientation, color='green'):
+    """Return JPEG bytes with an EXIF orientation tag set.
+
+    orientation: integer 1–8 as defined by the EXIF spec.
+    """
+    from PIL import Image
+    import struct
+
+    # Build a minimal EXIF block with Orientation tag (0x0112).
+    # TIFF header (little-endian) + 1 IFD entry.
+    ifd_count = 1
+    tag = 0x0112  # Orientation
+    type_ = 3     # SHORT
+    count = 1
+    value = orientation
+    # TIFF header: "II" (LE), magic 42, offset to IFD = 8
+    tiff = struct.pack('<2sHI', b'II', 42, 8)
+    # IFD: count + entry + next-IFD offset
+    entry = struct.pack('<HHII', tag, type_, count, value)
+    ifd = struct.pack('<H', ifd_count) + entry + struct.pack('<I', 0)
+    exif_bytes = b'Exif\x00\x00' + tiff + ifd
+
+    img = Image.new('RGB', size, color=color)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', exif=exif_bytes)
+    return buf.getvalue()
+
+
 class _FakeRaw:
     """Stand-in for a rawpy raw-file handle, used via monkeypatched imread."""
 
@@ -187,3 +215,29 @@ def test_raw_returns_none_when_no_embedded_and_postprocess_fails(tmp_path, monke
 
     result = load_image(str(nef), max_size=1024)
     assert result is None
+
+
+def test_raw_embedded_jpeg_exif_orientation_applied(tmp_path, monkeypatch):
+    """Embedded JPEG portrait shot (EXIF orientation=6, 90° CW) is corrected.
+
+    Without exif_transpose the image would remain landscape (wider than tall).
+    After the fix the returned image must be portrait (taller than wide).
+    """
+    from image_loader import load_image
+
+    nef = tmp_path / "portrait.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    # 4000x2666 stored but EXIF says rotate 90 CW → logical size 2666x4000 (portrait)
+    # EXIF orientation 6 = 90° clockwise rotation needed
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes_with_orientation((4000, 2666), orientation=6),
+    ))
+
+    result = load_image(str(nef), max_size=1920)
+
+    assert result is not None
+    w, h = result.size
+    assert h > w, (
+        f"Expected portrait image (h > w) after EXIF correction, got {w}x{h}"
+    )

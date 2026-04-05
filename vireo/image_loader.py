@@ -21,7 +21,7 @@ import io
 import logging
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ def _extract_embedded_jpeg(raw):
     try:
         img = Image.open(io.BytesIO(thumb.data))
         img.load()
+        img = ImageOps.exif_transpose(img)
         return img.convert("RGB")
     except Exception:
         return None
