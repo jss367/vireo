@@ -335,3 +335,27 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
         data = resp.get_json()
         assert "job_id" in data
         assert data["job_id"].startswith("pipeline-")
+
+
+def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
+    """Pipeline should auto-skip classify/extract/regroup when no model is available."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+    col_id = db.add_collection("Test", json.dumps([]))
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            # Don't set skip_classify — let the auto-skip kick in
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "job_id" in data
+        assert "model_warning" in data
+        assert "skipped" in data["model_warning"].lower() or "no model" in data["model_warning"].lower()

@@ -4932,6 +4932,23 @@ def create_app(db_path, thumb_cache_dir=None):
             preview_max_size=body.get("preview_max_size", 1920),
         )
 
+        # Auto-skip classify stages if no model is available
+        model_warning = None
+        if not params.skip_classify:
+            from models import get_active_model, get_models
+
+            _model = None
+            if params.model_id:
+                _all = get_models()
+                _model = next((m for m in _all if m["id"] == params.model_id and m["downloaded"]), None)
+            if not _model:
+                _model = get_active_model()
+            if not _model:
+                params.skip_classify = True
+                params.skip_extract_masks = True
+                params.skip_regroup = True
+                model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
+
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
@@ -4950,7 +4967,10 @@ def create_app(db_path, thumb_cache_dir=None):
             },
             workspace_id=active_ws,
         )
-        return jsonify({"job_id": job_id})
+        result = {"job_id": job_id}
+        if model_warning:
+            result["model_warning"] = model_warning
+        return jsonify(result)
 
     @app.route("/api/encounters/species", methods=["POST"])
     def api_encounter_species():
