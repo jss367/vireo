@@ -1350,10 +1350,47 @@ async function updateReadiness() {
       }
     }
 
+    // ExifTool status
+    if (r.exiftool && !r.exiftool.installed) {
+      var exifMsg = '<span style="color:var(--warning,#f0c040);">&#9679;</span> ExifTool: not installed — metadata extraction will be skipped and scanning will be slower. ';
+      if (r.exiftool.brew_available) {
+        exifMsg += '<button onclick="installExiftool(this)" style="background:var(--accent,#24E5CA);color:#000;border:none;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:12px;">Install</button>';
+      } else {
+        exifMsg += 'Install <a href="https://brew.sh" target="_blank" style="color:var(--accent,#24E5CA);">Homebrew</a>, then run <code>brew install exiftool</code>';
+      }
+      items.push(exifMsg);
+    }
+
     panel.innerHTML = items.join('<br>');
     panel.style.display = items.length > 0 ? '' : 'none';
   } catch(e) {
     panel.style.display = 'none';
+  }
+}
+
+async function installExiftool(btn) {
+  var origText = btn.textContent;
+  btn.textContent = 'Installing...';
+  btn.disabled = true;
+  try {
+    var r = await safeFetch('/api/system/install-exiftool', { method: 'POST' }, { toast: false });
+    if (r.success) {
+      btn.textContent = 'Installed!';
+      btn.style.background = 'var(--accent,#24E5CA)';
+      setTimeout(function() { updateReadiness(); }, 1000);
+    } else {
+      btn.textContent = 'Failed';
+      btn.style.background = 'var(--danger,#e74c3c)';
+      btn.title = r.error || 'Installation failed';
+      setTimeout(function() {
+        btn.textContent = 'Retry';
+        btn.disabled = false;
+        btn.style.background = 'var(--accent,#24E5CA)';
+      }, 3000);
+    }
+  } catch(e) {
+    btn.textContent = 'Error';
+    btn.disabled = false;
   }
 }
 
