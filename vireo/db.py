@@ -224,6 +224,15 @@ class Database:
                 PRIMARY KEY (group_id, taxon_id)
             );
 
+            CREATE TABLE IF NOT EXISTS move_rules (
+                id          INTEGER PRIMARY KEY,
+                name        TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                criteria    TEXT DEFAULT '{}',
+                created_at  TEXT DEFAULT (datetime('now')),
+                last_run_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -857,6 +866,170 @@ class Database:
 
         self.conn.commit()
         return cascaded
+
+    # -- Move operations --
+
+    def create_move_rule(self, name, destination, criteria):
+        """Create a saved move rule. Returns the rule id."""
+        import json as _json
+        cur = self.conn.execute(
+            "INSERT INTO move_rules (name, destination, criteria) VALUES (?, ?, ?)",
+            (name, destination, _json.dumps(criteria)),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_move_rule(self, rule_id):
+        """Return a single move rule by id."""
+        return self.conn.execute(
+            "SELECT * FROM move_rules WHERE id = ?", (rule_id,)
+        ).fetchone()
+
+    def list_move_rules(self):
+        """Return all saved move rules ordered by name."""
+        return self.conn.execute(
+            "SELECT * FROM move_rules ORDER BY name"
+        ).fetchall()
+
+    def update_move_rule(self, rule_id, name=_UNSET, destination=_UNSET, criteria=_UNSET):
+        """Update fields on a move rule."""
+        import json as _json
+        sets, params = [], []
+        if name is not _UNSET:
+            sets.append("name = ?")
+            params.append(name)
+        if destination is not _UNSET:
+            sets.append("destination = ?")
+            params.append(destination)
+        if criteria is not _UNSET:
+            sets.append("criteria = ?")
+            params.append(_json.dumps(criteria))
+        if not sets:
+            return
+        params.append(rule_id)
+        self.conn.execute(f"UPDATE move_rules SET {', '.join(sets)} WHERE id = ?", params)
+        self.conn.commit()
+
+    def delete_move_rule(self, rule_id):
+        """Delete a move rule."""
+        self.conn.execute("DELETE FROM move_rules WHERE id = ?", (rule_id,))
+        self.conn.commit()
+
+    def touch_move_rule(self, rule_id):
+        """Update last_run_at timestamp on a move rule."""
+        self.conn.execute(
+            "UPDATE move_rules SET last_run_at = datetime('now') WHERE id = ?",
+            (rule_id,),
+        )
+        self.conn.commit()
+
+    def batch_update_photo_folder(self, photo_ids, target_folder_id):
+        """Move photos to target folder in a single transaction."""
+        if not photo_ids:
+            return
+        placeholders = ",".join("?" for _ in photo_ids)
+        self.conn.execute(
+            f"UPDATE photos SET folder_id = ? WHERE id IN ({placeholders})",
+            [target_folder_id] + list(photo_ids),
+        )
+        self.conn.commit()
+
+    def move_folder_path(self, folder_id, new_path):
+        """Update a folder's path and cascade to all children.
+
+        Unlike relocate_folder (which only updates missing children),
+        this updates ALL child folders regardless of status.
+        """
+        old_row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        if not old_row:
+            return
+        old_path = old_row["path"]
+        self.conn.execute(
+            "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
+        )
+        children = self.conn.execute(
+            "SELECT id, path FROM folders WHERE path LIKE ?",
+            (old_path + "/%",),
+        ).fetchall()
+        for child in children:
+            child_new = new_path + child["path"][len(old_path):]
+            self.conn.execute(
+                "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
+            )
+        self.conn.commit()
+
+    def check_filename_collisions(self, photo_ids, target_folder_id):
+        """Check if any photo filenames already exist in the target folder.
+
+        Returns list of dicts with photo_id and filename for conflicts.
+        """
+        if not photo_ids:
+            return []
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT p.id AS photo_id, p.filename
+                FROM photos p
+                WHERE p.id IN ({placeholders})
+                  AND EXISTS (
+                    SELECT 1 FROM photos t
+                    WHERE t.folder_id = ? AND t.filename = p.filename
+                  )""",
+            list(photo_ids) + [target_folder_id],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def query_move_rule_matches(self, criteria):
+        """Return photo IDs matching move rule criteria.
+
+        Criteria keys (all optional, AND logic):
+          rating_min, flag, species, folder_ids,
+          has_predictions, imported_before
+        """
+        conditions = ["wf.workspace_id = ?"]
+        params = [self._ws_id()]
+        joins = ["JOIN workspace_folders wf ON wf.folder_id = p.folder_id",
+                 "JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'"]
+
+        if "rating_min" in criteria:
+            conditions.append("p.rating >= ?")
+            params.append(criteria["rating_min"])
+        if "flag" in criteria:
+            conditions.append("p.flag = ?")
+            params.append(criteria["flag"])
+        if "folder_ids" in criteria and criteria["folder_ids"]:
+            fph = ",".join("?" for _ in criteria["folder_ids"])
+            conditions.append(f"p.folder_id IN ({fph})")
+            params.extend(criteria["folder_ids"])
+        if "has_predictions" in criteria:
+            if criteria["has_predictions"]:
+                conditions.append(
+                    "EXISTS (SELECT 1 FROM predictions pr WHERE pr.photo_id = p.id AND pr.workspace_id = ?)"
+                )
+                params.append(self._ws_id())
+            else:
+                conditions.append(
+                    "NOT EXISTS (SELECT 1 FROM predictions pr WHERE pr.photo_id = p.id AND pr.workspace_id = ?)"
+                )
+                params.append(self._ws_id())
+        if "imported_before" in criteria:
+            conditions.append("p.timestamp < ?")
+            params.append(criteria["imported_before"])
+        if "species" in criteria and criteria["species"]:
+            sph = ",".join("?" for _ in criteria["species"])
+            joins.append("JOIN photo_keywords pk ON pk.photo_id = p.id")
+            joins.append("JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1")
+            conditions.append(f"k.name IN ({sph})")
+            params.extend(criteria["species"])
+
+        join_sql = "\n".join(joins)
+        where_sql = " AND ".join(conditions)
+        rows = self.conn.execute(
+            f"SELECT DISTINCT p.id FROM photos p {join_sql} WHERE {where_sql}",
+            params,
+        ).fetchall()
+        return [r["id"] for r in rows]
 
     def delete_folder(self, folder_id):
         """Delete a folder and all its photos/data from the database.

@@ -383,6 +383,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def jobs_page():
         return render_template("jobs.html")
 
+    @app.route("/move")
+    def move_page():
+        return render_template("move.html")
+
     @app.route("/highlights")
     def highlights_page():
         return render_template("highlights.html")
@@ -2397,6 +2401,54 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error(str(e), 500)
         return jsonify({"name": os.path.basename(path), "path": path})
 
+    # -- Move rules API --
+
+    @app.route("/api/move-rules", methods=["GET"])
+    def api_list_move_rules():
+        db = _get_db()
+        rules = db.list_move_rules()
+        return jsonify([dict(r) for r in rules])
+
+    @app.route("/api/move-rules", methods=["POST"])
+    def api_create_move_rule():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        destination = body.get("destination", "").strip()
+        criteria = body.get("criteria", {})
+        if not name or not destination:
+            return json_error("name and destination required")
+        rule_id = db.create_move_rule(name, destination, criteria)
+        return jsonify({"ok": True, "id": rule_id})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
+    def api_update_move_rule(rule_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs = {}
+        if "name" in body:
+            kwargs["name"] = body["name"]
+        if "destination" in body:
+            kwargs["destination"] = body["destination"]
+        if "criteria" in body:
+            kwargs["criteria"] = body["criteria"]
+        db.update_move_rule(rule_id, **kwargs)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
+    def api_delete_move_rule(rule_id):
+        db = _get_db()
+        db.delete_move_rule(rule_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/preview", methods=["POST"])
+    def api_move_rule_preview():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        criteria = body.get("criteria", {})
+        photo_ids = db.query_move_rule_matches(criteria)
+        return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
@@ -3926,6 +3978,118 @@ def create_app(db_path, thumb_cache_dir=None):
                 "file_types": file_types,
                 "folder_template": folder_template,
             },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    # -- Move job routes --
+
+    @app.route("/api/jobs/move-photos", methods=["POST"])
+    def api_job_move_photos():
+        """Move selected photos to a destination directory."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        destination = body.get("destination", "")
+        rule_id = body.get("rule_id")
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from move import move_photos
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "rate": round(
+                        current / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Moving photos",
+                })
+
+            result = move_photos(
+                db=thread_db,
+                photo_ids=photo_ids,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+            if rule_id:
+                thread_db.touch_move_rule(rule_id)
+
+            return result
+
+        job_id = runner.start(
+            "move-photos", work,
+            config={"photo_ids": photo_ids, "destination": destination},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/move-folder", methods=["POST"])
+    def api_job_move_folder():
+        """Move an entire folder to a destination."""
+        body = request.get_json(silent=True) or {}
+        folder_id = body.get("folder_id")
+        destination = body.get("destination", "")
+
+        if not folder_id:
+            return json_error("folder_id required")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from move import move_folder
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "phase": "Moving folder",
+                })
+
+            return move_folder(
+                db=thread_db,
+                folder_id=folder_id,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+        job_id = runner.start(
+            "move-folder", work,
+            config={"folder_id": folder_id, "destination": destination},
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
