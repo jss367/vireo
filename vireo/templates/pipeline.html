@@ -435,7 +435,7 @@ body { padding-bottom: 36px; }
   <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
 
   <!-- Card 1: Source -->
-  <div class="stage-card expanded" id="card-source">
+  <div class="stage-card expanded" id="card-source" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('source')">
       <span class="stage-num" id="numSource">1</span>
       <span class="stage-name">Source</span>
@@ -448,7 +448,7 @@ body { padding-bottom: 36px; }
       <div class="source-choice">
         <div class="source-option" id="sourceOptionImport">
           <div class="source-option-header" onclick="selectSourceMode('import')">
-            <input type="radio" name="sourceMode" value="import" id="radioImport" checked>
+            <input type="radio" name="sourceMode" value="import" id="radioImport" checked data-testid="source-import">
             <label for="radioImport" style="cursor:pointer;font-weight:600;font-size:13px;">Import Photos</label>
           </div>
           <div class="source-option-body" id="sourceImportBody">
@@ -507,10 +507,10 @@ body { padding-bottom: 36px; }
 
         <div class="source-option" id="sourceOptionCollection">
           <div class="source-option-header" onclick="selectSourceMode('collection')">
-            <input type="radio" name="sourceMode" value="collection" id="radioCollection">
+            <input type="radio" name="sourceMode" value="collection" id="radioCollection" data-testid="source-collection">
             <label for="radioCollection" style="cursor:pointer;font-weight:600;font-size:13px;">Use Existing Collection</label>
           </div>
-          <div class="source-option-body dimmed" id="sourceCollectionBody">
+          <div class="source-option-body dimmed" id="sourceCollectionBody" data-testid="collection-section">
             <div class="setting-row">
               <div class="setting-item">
                 <div class="setting-label">Collection</div>
@@ -533,7 +533,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 2: Destination -->
-  <div class="stage-card" id="card-destination">
+  <div class="stage-card" id="card-destination" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('destination')">
       <span class="stage-num" id="numDestination">2</span>
       <span class="stage-name">Destination</span>
@@ -547,7 +547,7 @@ body { padding-bottom: 36px; }
         <div class="dest-option">
           <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
             <input type="radio" name="destWorkspace" value="current" id="radioWsCurrent" checked
-                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);" data-testid="workspace-current">
             <span style="font-size:13px;font-weight:600;">Current workspace</span>
             <span style="font-size:13px;color:var(--text-dim);" id="lblCurrentWsName"></span>
           </label>
@@ -555,14 +555,14 @@ body { padding-bottom: 36px; }
         <div class="dest-option">
           <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
             <input type="radio" name="destWorkspace" value="new" id="radioWsNew"
-                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);" data-testid="workspace-new">
             <span style="font-size:13px;font-weight:600;">New workspace</span>
           </label>
           <div id="newWsNameRow" style="display:none;margin-top:8px;margin-left:24px;">
             <input type="text" class="setting-select" id="destNewWsName"
                    placeholder="e.g. Kenya 2025" style="font-family:inherit;max-width:300px;"
-                   oninput="updateStartButton()">
-            <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;"></div>
+                   oninput="updateStartButton()" data-testid="new-workspace-name">
+            <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;" data-testid="workspace-name-error"></div>
           </div>
         </div>
       </div>
@@ -572,15 +572,15 @@ body { padding-bottom: 36px; }
 
       <!-- Section 2: File Copying -->
       <div class="setting-label">File Copying</div>
-      <div id="destCopySection">
+      <div id="destCopySection" data-testid="file-copying-section">
         <div class="setting-row">
           <div class="setting-item">
             <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
+              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()" data-testid="copy-photos-toggle"> Copy photos to another location
             </label>
           </div>
         </div>
-        <div id="copyOnlyFields" style="display:none;">
+        <div id="copyOnlyFields" style="display:none;" data-testid="destination-section">
           <div class="setting-row">
             <div class="setting-item">
               <div class="setting-label">Destination</div>
@@ -608,7 +608,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 3: Scan & Import -->
-  <div class="stage-card" id="card-scan">
+  <div class="stage-card" id="card-scan" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('scan')">
       <span class="stage-num" id="numScan">3</span>
       <span class="stage-name">Scan &amp; Import</span>
@@ -628,7 +628,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 4: Thumbnails & Previews -->
-  <div class="stage-card" id="card-previews">
+  <div class="stage-card" id="card-previews" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('previews')">
       <span class="stage-num" id="numPreviews">4</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
@@ -660,7 +660,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 5: Classify -->
-  <div class="stage-card" id="card-classify">
+  <div class="stage-card" id="card-classify" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('classify')">
       <span class="stage-num" id="numClassify">5</span>
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
@@ -704,7 +704,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 6: Extract Features -->
-  <div class="stage-card" id="card-extract">
+  <div class="stage-card" id="card-extract" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('extract')">
       <span class="stage-num" id="numExtract">6</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
@@ -757,7 +757,7 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 7: Group & Score -->
-  <div class="stage-card" id="card-group">
+  <div class="stage-card" id="card-group" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('group')">
       <span class="stage-num" id="numGroup">7</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
@@ -785,7 +785,7 @@ body { padding-bottom: 36px; }
 
   <!-- Pipeline action bar -->
   <div class="pipeline-action-bar">
-    <button class="btn btn-primary btn-large" id="btnStartPipeline" onclick="startPipeline()" disabled>
+    <button class="btn btn-primary btn-large" id="btnStartPipeline" onclick="startPipeline()" disabled data-testid="start-pipeline-btn">
       Start Pipeline
     </button>
   </div>
