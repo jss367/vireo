@@ -2427,6 +2427,35 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("permission denied", 403)
         return jsonify({"path": path, "dirs": dirs})
 
+    @app.route("/api/browse/photo-counts", methods=["POST"])
+    def api_browse_photo_counts():
+        """Return recursive photo-file counts for a list of folder paths.
+
+        Used by the folder browser to show per-folder counts next to each
+        subfolder so users can see which folders contain photos before
+        selecting one.
+        """
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths", [])
+        file_types = body.get("file_types", [])
+        if not isinstance(paths, list):
+            return json_error("paths must be a list", 400)
+
+        from ingest import discover_source_files
+
+        ft = file_types if file_types else "both"
+        counts = {}
+        for p in paths:
+            if not isinstance(p, str) or not os.path.isdir(p):
+                counts[p] = 0
+                continue
+            try:
+                discovered = discover_source_files(p, file_types=ft, recursive=True)
+                counts[p] = len(discovered)
+            except (OSError, PermissionError):
+                counts[p] = 0
+        return jsonify({"counts": counts})
+
     @app.route("/api/browse/mkdir", methods=["POST"])
     def api_browse_mkdir():
         """Create a new directory."""
