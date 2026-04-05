@@ -158,8 +158,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 runner.update_step(job["id"], "scan", current_file=message)
                 runner.push_event(job["id"], "progress", {
                     "phase": message,
-                    "current": 0,
-                    "total": 0,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
