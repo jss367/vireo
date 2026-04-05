@@ -589,6 +589,10 @@ body { padding-bottom: 36px; }
       Start Pipeline
     </button>
   </div>
+  <div id="modelWarningBanner" style="display:none;background:var(--warning,#f0c040);color:#000;padding:8px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <span id="modelWarningText"></span>
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+  </div>
 </div>
 
 <script>
@@ -875,6 +879,7 @@ async function startPipeline() {
   if (_pipelineRunning) return;
   _pipelineRunning = true;
   _pipelineAbort = false;
+  document.getElementById('modelWarningBanner').style.display = 'none';
 
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
@@ -945,6 +950,13 @@ async function startPipeline() {
     if (!data || !data.job_id) {
       document.getElementById('statusSource').textContent = (data && data.error) || 'Failed to start pipeline';
       return;
+    }
+
+    // Show model warning banner if returned
+    if (data.model_warning) {
+      var banner = document.getElementById('modelWarningBanner');
+      document.getElementById('modelWarningText').textContent = data.model_warning;
+      banner.style.display = '';
     }
 
     // Show progress on all cards
