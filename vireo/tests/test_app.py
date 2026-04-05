@@ -1418,3 +1418,194 @@ def test_folder_health_check_runs_at_startup(app_and_db):
 
     missing = db.get_missing_folders()
     assert len(missing) >= 1
+
+
+def test_api_import_folder_preview(app_and_db, tmp_path):
+    """POST /api/import/folder-preview returns file discovery results."""
+    app, db = app_and_db
+
+    # Create test images in a temp folder
+    source = tmp_path / "source_photos"
+    source.mkdir()
+    from PIL import Image
+    for name in ["a.jpg", "b.jpg", "c.png"]:
+        Image.new("RGB", (200, 150)).save(str(source / name))
+    # Non-image file should be excluded
+    (source / "readme.txt").write_text("ignore me")
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg", ".png"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["total_count"] == 3
+    assert data["total_size"] > 0
+    assert ".jpg" in data["type_breakdown"]
+    assert data["type_breakdown"][".jpg"] == 2
+    assert data["type_breakdown"][".png"] == 1
+    assert len(data["files"]) == 3
+    assert data["duplicate_count"] == 0
+
+
+def test_api_import_folder_preview_duplicate_count_deferred(app_and_db, tmp_path):
+    """Folder preview returns duplicate_count=0 (duplicate detection deferred)."""
+    app, db = app_and_db
+
+    source = tmp_path / "source_dupes"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "bird1.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "newbird.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 2
+    assert data["duplicate_count"] == 0
+
+
+def test_api_import_folder_preview_no_folders(app_and_db):
+    """Folder preview returns error when no folders provided."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={})
+    assert resp.status_code == 400
+
+
+def test_api_import_folder_preview_nonexistent(app_and_db):
+    """Folder preview returns error for non-existent folder."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": ["/nonexistent/path/xyz"],
+        "file_types": [".jpg"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 0
+
+
+def test_api_import_folder_preview_subfolders(app_and_db, tmp_path):
+    """Folder preview groups files by subfolder."""
+    app, _ = app_and_db
+
+    source = tmp_path / "nested"
+    (source / "sub1").mkdir(parents=True)
+    (source / "sub2").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "root.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "sub1" / "a.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "sub2" / "b.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    data = resp.get_json()
+    assert data["total_count"] == 3
+
+    # Files should have subfolder info
+    subfolders = set()
+    for f in data["files"]:
+        subfolders.add(f["subfolder"])
+    assert len(subfolders) == 3  # root, sub1, sub2
+
+
+def test_api_import_folder_preview_multi_source_same_basename(app_and_db, tmp_path):
+    """Multi-source preview disambiguates folders with same basename."""
+    app, _ = app_and_db
+
+    # Two sources with identical leaf names and overlapping subfolders
+    card_a = tmp_path / "mnt" / "cardA" / "DCIM"
+    card_b = tmp_path / "mnt" / "cardB" / "DCIM"
+    (card_a / "100CANON").mkdir(parents=True)
+    (card_b / "100CANON").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(card_a / "100CANON" / "a.jpg"))
+    Image.new("RGB", (100, 100)).save(str(card_b / "100CANON" / "b.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(card_a), str(card_b)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    data = resp.get_json()
+    assert data["total_count"] == 2
+
+    # Subfolders must be distinct even though both have 100CANON
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2
+    # Should use parent to disambiguate: cardA/DCIM/100CANON vs cardB/DCIM/100CANON
+    for sf in subfolders:
+        assert "DCIM" in sf
+        assert "100CANON" in sf
+
+
+def test_api_import_folder_preview_thumbnail(app_and_db, tmp_path):
+    """GET /api/import/folder-preview/thumbnail returns a JPEG thumbnail."""
+    app, _ = app_and_db
+
+    # Create a test image
+    source = tmp_path / "thumb_test"
+    source.mkdir()
+    from PIL import Image
+    img = Image.new("RGB", (800, 600), color=(255, 0, 0))
+    img_path = source / "photo.jpg"
+    img.save(str(img_path))
+
+    client = app.test_client()
+    resp = client.get(f"/api/import/folder-preview/thumbnail?path={img_path}")
+    assert resp.status_code == 200
+    assert resp.content_type == "image/jpeg"
+    assert len(resp.data) > 0
+
+    # Verify the returned image is resized (200px long edge)
+    import io
+    thumb = Image.open(io.BytesIO(resp.data))
+    assert max(thumb.size) == 200
+
+
+def test_api_import_folder_preview_thumbnail_missing(app_and_db):
+    """Thumbnail endpoint returns 404 for non-existent file."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail?path=/no/such/file.jpg")
+    assert resp.status_code == 404
+
+
+def test_api_import_folder_preview_thumbnail_no_path(app_and_db):
+    """Thumbnail endpoint returns 400 when path param is missing."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail")
+    assert resp.status_code == 400
+
+
+def test_api_import_full_accepts_exclude_paths(app_and_db, tmp_path):
+    """POST /api/jobs/import-full accepts exclude_paths parameter."""
+    app, _ = app_and_db
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "keep.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "skip.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source),
+        "copy": False,
+        "file_types": [".jpg", ".jpeg"],
+        "exclude_paths": [str(source / "skip.jpg")],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data

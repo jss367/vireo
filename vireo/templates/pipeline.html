@@ -10,7 +10,27 @@
 <style>
 /* Page overrides */
 body { padding-bottom: 36px; }
-.content { max-width: 900px; }
+.pipeline-layout {
+  display: flex;
+  gap: 24px;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+.pipeline-left {
+  flex: 0 0 auto;
+  width: 900px;
+  max-width: 900px;
+}
+.pipeline-right {
+  flex: 1 1 300px;
+  min-width: 300px;
+}
+@media (max-width: 1300px) {
+  .pipeline-layout { flex-direction: column; }
+  .pipeline-left { width: 100%; max-width: 900px; }
+  .pipeline-right { width: 100%; max-width: 900px; }
+}
 
 /* Stage cards */
 .stage-card {
@@ -276,12 +296,127 @@ body { padding-bottom: 36px; }
   border: 1px solid var(--border-color); background: var(--bg-primary);
   color: var(--text-primary); font-family: inherit;
 }
+
+/* Preview panel */
+.preview-panel {
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 8px;
+  min-height: 400px;
+  position: sticky;
+  top: 60px;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.preview-summary {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.preview-summary .stat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.preview-summary .stat-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.preview-controls {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.preview-selected-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.preview-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.preview-folder-group {
+  margin-bottom: 8px;
+}
+.preview-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.preview-folder-header:hover {
+  color: var(--text-primary);
+}
+.preview-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 4px;
+  padding: 0 4px;
+}
+.preview-thumb {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-tertiary, #14374E);
+  cursor: pointer;
+}
+.preview-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.2s;
+}
+.preview-thumb.skeleton img {
+  display: none;
+}
+.preview-thumb.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-primary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.preview-thumb .thumb-check {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 1;
+  accent-color: var(--accent);
+}
+.preview-thumb.duplicate {
+  opacity: 0.4;
+}
+.preview-error {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--warning, #E5A024);
+}
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
 
-<div class="content">
+<div class="pipeline-layout">
+<div class="pipeline-left">
   <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
 
   <!-- Card 1: Source -->
@@ -589,7 +724,37 @@ body { padding-bottom: 36px; }
       Start Pipeline
     </button>
   </div>
+</div><!-- end pipeline-left -->
+
+<div class="pipeline-right">
+  <div class="preview-panel" id="previewPanel">
+    <div class="preview-placeholder" id="previewPlaceholder">
+      <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
+        <div style="font-size:32px;margin-bottom:12px;">&#128247;</div>
+        <div style="font-size:14px;">Select a folder to see a preview</div>
+      </div>
+    </div>
+    <div id="previewContent" style="display:none;">
+      <div class="preview-summary" id="previewSummary"></div>
+      <div class="preview-controls">
+        <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+          <input type="checkbox" id="chkSelectAll" checked
+                 style="accent-color:var(--accent);"
+                 onchange="toggleSelectAll()"> Select all
+        </label>
+        <span class="preview-selected-count" id="previewSelectedCount"></span>
+      </div>
+      <div class="preview-grid" id="previewGrid"></div>
+    </div>
+    <div class="preview-loading" id="previewLoading" style="display:none;">
+      <div style="text-align:center;padding:40px 20px;color:var(--text-dim);">
+        Loading preview...
+      </div>
+    </div>
+    <div class="preview-error" id="previewError" style="display:none;"></div>
+  </div>
 </div>
+</div><!-- end pipeline-layout -->
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
@@ -661,6 +826,7 @@ function initPipelinePage() {
     renderSourceFolders();
     selectSourceMode('import');
     updateStartButton();
+    fetchFolderPreview();
   }
 }
 
@@ -683,6 +849,219 @@ var _copyMode = false;
 var _sourceWasReady = false;
 var _sourceFolders = [];
 
+// -- Import preview state --
+var _previewData = null;       // response from /api/import/folder-preview
+var _previewSelected = {};     // { filePath: true/false }
+var _previewAbort = null;      // AbortController for in-flight request
+
+function fetchFolderPreview() {
+  // Cancel any in-flight request
+  if (_previewAbort) _previewAbort.abort();
+
+  var folders = _sourceFolders;
+  if (!folders.length || _sourceMode !== 'import') {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  var fileTypes = getIngestFileTypes();
+  if (!fileTypes.length) {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  showPreviewLoading();
+  _previewAbort = new AbortController();
+
+  fetch('/api/import/folder-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folders: folders, file_types: fileTypes }),
+    signal: _previewAbort.signal,
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _previewData = data;
+      // Initialize selection: all checked by default, duplicates unchecked
+      _previewSelected = {};
+      data.files.forEach(function(f) {
+        _previewSelected[f.path] = !f.duplicate;
+      });
+      renderPreview();
+    })
+    .catch(function(err) {
+      if (err.name === 'AbortError') return;
+      showPreviewError('Failed to load preview: ' + err.message);
+    });
+}
+
+function showPreviewPlaceholder() {
+  document.getElementById('previewPlaceholder').style.display = '';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  _previewData = null;
+}
+
+function showPreviewLoading() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = '';
+  document.getElementById('previewError').style.display = 'none';
+}
+
+function showPreviewError(msg) {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  var errEl = document.getElementById('previewError');
+  errEl.style.display = '';
+  errEl.textContent = msg;
+}
+
+function renderPreview() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  document.getElementById('previewContent').style.display = '';
+
+  var data = _previewData;
+  if (!data) return;
+
+  // Summary bar
+  var summary = document.getElementById('previewSummary');
+  var sizeStr = formatBytes(data.total_size);
+  var typeStrs = Object.keys(data.type_breakdown).map(function(ext) {
+    return data.type_breakdown[ext] + ' ' + ext.replace('.', '').toUpperCase();
+  });
+  summary.innerHTML =
+    '<span class="stat"><span class="stat-value">' + data.total_count + '</span> photos</span>' +
+    '<span class="stat"><span class="stat-value">' + sizeStr + '</span></span>' +
+    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>' +
+    (data.duplicate_count > 0 ? '<span class="stat"><span class="stat-value">' + data.duplicate_count + '</span> already imported</span>' : '');
+
+  // Group files by subfolder
+  var groups = {};
+  data.files.forEach(function(f) {
+    var key = f.subfolder;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  // Render grid
+  var grid = document.getElementById('previewGrid');
+  grid.innerHTML = '';
+
+  Object.keys(groups).sort().forEach(function(subfolder) {
+    var files = groups[subfolder];
+    var groupEl = document.createElement('div');
+    groupEl.className = 'preview-folder-group';
+
+    // Folder header with checkbox
+    var header = document.createElement('div');
+    header.className = 'preview-folder-header';
+    var folderCheck = document.createElement('input');
+    folderCheck.type = 'checkbox';
+    folderCheck.checked = files.some(function(f) { return _previewSelected[f.path]; });
+    folderCheck.style.accentColor = 'var(--accent)';
+    folderCheck.onchange = function() {
+      files.forEach(function(f) { _previewSelected[f.path] = folderCheck.checked; });
+      renderPreview();
+    };
+    header.appendChild(folderCheck);
+    header.appendChild(document.createTextNode(' ' + subfolder + ' (' + files.length + ')'));
+    groupEl.appendChild(header);
+
+    // Thumbnail grid
+    var thumbsEl = document.createElement('div');
+    thumbsEl.className = 'preview-thumbs';
+    files.forEach(function(f) {
+      var thumb = document.createElement('div');
+      thumb.className = 'preview-thumb skeleton' + (f.duplicate ? ' duplicate' : '');
+      thumb.dataset.path = f.path;
+
+      var check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'thumb-check';
+      check.checked = !!_previewSelected[f.path];
+      check.onchange = function(e) {
+        e.stopPropagation();
+        _previewSelected[f.path] = check.checked;
+        updatePreviewCounts();
+      };
+      thumb.appendChild(check);
+
+      var img = document.createElement('img');
+      img.alt = f.filename;
+      img.loading = 'lazy';
+      thumb.appendChild(img);
+
+      thumbsEl.appendChild(thumb);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+
+  // Set up IntersectionObserver for lazy thumbnail loading
+  setupThumbnailObserver();
+  updatePreviewCounts();
+}
+
+function setupThumbnailObserver() {
+  var grid = document.getElementById('previewGrid');
+  var thumbs = grid.querySelectorAll('.preview-thumb.skeleton');
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (!entry.isIntersecting) return;
+      var el = entry.target;
+      var path = el.dataset.path;
+      var img = el.querySelector('img');
+      img.onload = function() { el.classList.remove('skeleton'); };
+      img.onerror = function() { el.classList.remove('skeleton'); };
+      img.src = '/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path);
+      observer.unobserve(el);
+    });
+  }, { root: grid, rootMargin: '200px' });
+
+  thumbs.forEach(function(t) { observer.observe(t); });
+}
+
+function updatePreviewCounts() {
+  if (!_previewData) return;
+  var selected = 0;
+  var total = _previewData.files.length;
+  _previewData.files.forEach(function(f) {
+    if (_previewSelected[f.path]) selected++;
+  });
+  var countEl = document.getElementById('previewSelectedCount');
+  if (selected === total) {
+    countEl.textContent = '';
+  } else {
+    countEl.textContent = selected + ' of ' + total + ' selected';
+  }
+  // Update select-all checkbox
+  var chkAll = document.getElementById('chkSelectAll');
+  chkAll.checked = selected === total;
+  chkAll.indeterminate = selected > 0 && selected < total;
+}
+
+function toggleSelectAll() {
+  var checked = document.getElementById('chkSelectAll').checked;
+  if (_previewData) {
+    _previewData.files.forEach(function(f) { _previewSelected[f.path] = checked; });
+    renderPreview();
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  var k = 1024;
+  var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
 function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
   var val = input.value.trim();
@@ -691,12 +1070,14 @@ function addSourceFolder() {
   input.value = '';
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function removeSourceFolder(idx) {
   _sourceFolders.splice(idx, 1);
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function renderSourceFolders() {
@@ -778,6 +1159,7 @@ function onGroupToggle(group) {
   var children = document.querySelectorAll('input[data-group="' + group + '"]');
   children.forEach(function(cb) { cb.checked = checked; });
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function onExtToggle(group) {
@@ -793,6 +1175,7 @@ function onExtToggle(group) {
   parent.checked = allChecked;
   parent.indeterminate = anyChecked && !allChecked;
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function getIngestFileTypes() {
@@ -889,6 +1272,14 @@ async function startPipeline() {
       body.sources = _sourceFolders;
     }
     body.file_types = getIngestFileTypes();
+    // Add excluded paths from preview selection
+    if (_previewData && _previewSelected) {
+      var excluded = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excluded.push(f.path);
+      });
+      if (excluded.length > 0) body.exclude_paths = excluded;
+    }
     if (_copyMode) {
       body.destination = document.getElementById('cfgDestination').value.trim();
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
@@ -1602,6 +1993,7 @@ async function browseForFolder() {
       _sourceFolders.push(path);
       renderSourceFolders();
       updateStartButton();
+      fetchFolderPreview();
       return;
     }
   }
@@ -1746,6 +2138,7 @@ function selectFolder() {
     document.getElementById('cfgDestination').value = _fbSelectedDir;
   }
   updateStartButton();
+  fetchFolderPreview();
   closeFolderBrowser();
 }
 
