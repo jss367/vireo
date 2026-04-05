@@ -1301,6 +1301,101 @@ def test_api_browse_mkdir_missing_path(app_and_db):
     assert resp.status_code == 400
 
 
+def test_api_browse_photo_counts_recursive(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts returns recursive photo counts per path."""
+    # Folder with photos at root
+    a = tmp_path / "a"
+    a.mkdir()
+    (a / "one.jpg").write_bytes(b"x")
+    (a / "two.jpg").write_bytes(b"x")
+    # Folder with photos only in subfolder (recursive must find them)
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "nested").mkdir()
+    (b / "nested" / "deep.jpg").write_bytes(b"x")
+    # Folder with no photos
+    c = tmp_path / "c"
+    c.mkdir()
+    (c / "readme.txt").write_text("hi")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(a), str(b), str(c)],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(a)] == 2
+    assert data["counts"][str(b)] == 1
+    assert data["counts"][str(c)] == 0
+
+
+def test_api_browse_photo_counts_empty_paths(app_and_db):
+    """POST /api/browse/photo-counts with empty paths returns empty counts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [], "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert resp.get_json()["counts"] == {}
+
+
+def test_api_browse_photo_counts_skips_missing(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts tolerates paths that don't exist."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+    missing = str(tmp_path / "does_not_exist")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(real), missing],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(real)] == 1
+    assert data["counts"][missing] == 0
+
+
+def test_api_browse_photo_counts_skips_non_string_entries(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts skips non-string path entries (no 500)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(real), {}, [], 42, None],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"] == {str(real): 1}
+
+
+def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts only counts files matching requested types."""
+    d = tmp_path / "mixed"
+    d.mkdir()
+    (d / "a.jpg").write_bytes(b"x")
+    (d / "b.nef").write_bytes(b"x")
+    (d / "c.txt").write_text("hi")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    # Only request .nef
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(d)], "file_types": [".nef"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert resp.get_json()["counts"][str(d)] == 1
+
+
 def test_nav_order_save_and_load(app_and_db):
     """PUT /api/workspaces/active/nav-order saves and returns nav order."""
     app, db = app_and_db

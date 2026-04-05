@@ -284,6 +284,13 @@ body { padding-bottom: 36px; }
 }
 .folder-browser-item:hover { background: var(--bg-tertiary); }
 .folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.folder-browser-item-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-browser-count {
+  font-size: 11px; color: var(--text-muted); margin-left: 8px;
+  font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
 .folder-browser-empty {
   padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
 }
@@ -2217,6 +2224,9 @@ async function browseForDestination() {
 var _fbCurrentPath = '';
 var _fbSelectedDir = '';
 var _fbMode = 'destination'; // 'source' or 'destination'
+var _fbCountsAbort = null;
+var _fbCountCache = {}; // key: "path|ext1,ext2" -> count (session-scoped)
+var _fbBrowseToken = 0; // incremented on every browseTo to stamp stale responses
 
 function openFolderBrowser(mode) {
   _fbMode = mode || 'destination';
@@ -2254,6 +2264,10 @@ function browseTo(path) {
   _fbSelectedDir = '';
   document.getElementById('fbSelectedPath').textContent = '';
   cancelNewFolder();
+  // Invalidate any in-flight photo-count request so its results don't
+  // land in a now-stale list.
+  _fbBrowseToken += 1;
+  if (_fbCountsAbort) { _fbCountsAbort.abort(); _fbCountsAbort = null; }
 
   var url = '/api/browse';
   if (path === '__pictures__') {
@@ -2309,9 +2323,16 @@ function renderFolderList(dirs) {
   var html = '';
   for (var i = 0; i < dirs.length; i++) {
     html += '<div class="folder-browser-item" data-path="' + escapeAttr(dirs[i].path) + '">' +
-            '\uD83D\uDCC1 ' + escapeHtml(dirs[i].name) + '</div>';
+            '<span class="folder-browser-item-name">\uD83D\uDCC1 ' + escapeHtml(dirs[i].name) + '</span>' +
+            '<span class="folder-browser-count" data-count-path="' + escapeAttr(dirs[i].path) + '"></span>' +
+            '</div>';
   }
   listEl.innerHTML = html;
+  // In source mode, asynchronously fetch recursive photo counts for each
+  // subfolder so users can see which ones contain photos.
+  if (_fbMode === 'source') {
+    fetchFolderCounts(dirs.map(function(d) { return d.path; }));
+  }
   // Event delegation: click to select, double-click to drill in
   listEl.onclick = function(e) {
     var item = e.target.closest('.folder-browser-item');
@@ -2326,6 +2347,60 @@ function renderFolderList(dirs) {
     var item = e.target.closest('.folder-browser-item');
     if (item) browseTo(item.getAttribute('data-path'));
   };
+}
+
+function applyCount(path, count) {
+  // Hide zero counts to reduce visual noise; show formatted number otherwise.
+  if (!count) return;
+  // Iterate rather than use a CSS selector so paths containing quotes,
+  // backslashes, or other special chars match correctly.
+  var badges = document.getElementsByClassName('folder-browser-count');
+  var label = count.toLocaleString() + (count === 1 ? ' photo' : ' photos');
+  for (var i = 0; i < badges.length; i++) {
+    if (badges[i].getAttribute('data-count-path') === path) {
+      badges[i].textContent = label;
+    }
+  }
+}
+
+function fetchFolderCounts(paths) {
+  if (!paths || !paths.length) return;
+  var fileTypes = getIngestFileTypes();
+  if (!fileTypes.length) return;
+  var cacheKey = fileTypes.slice().sort().join(',');
+  var token = _fbBrowseToken;
+
+  // Serve cached counts immediately, collect uncached paths.
+  var uncached = [];
+  for (var i = 0; i < paths.length; i++) {
+    var p = paths[i];
+    var key = p + '|' + cacheKey;
+    if (Object.prototype.hasOwnProperty.call(_fbCountCache, key)) {
+      applyCount(p, _fbCountCache[key]);
+    } else {
+      uncached.push(p);
+    }
+  }
+  if (!uncached.length) return;
+
+  _fbCountsAbort = new AbortController();
+  fetch('/api/browse/photo-counts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: uncached, file_types: fileTypes }),
+    signal: _fbCountsAbort.signal,
+  })
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data || token !== _fbBrowseToken) return; // stale response
+      var counts = data.counts || {};
+      for (var p in counts) {
+        if (!Object.prototype.hasOwnProperty.call(counts, p)) continue;
+        _fbCountCache[p + '|' + cacheKey] = counts[p];
+        applyCount(p, counts[p]);
+      }
+    })
+    .catch(function(err) { if (err.name !== 'AbortError') { /* silent */ } });
 }
 
 function selectFolder() {
