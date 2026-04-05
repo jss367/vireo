@@ -28,13 +28,14 @@ def build_destination_path(exif_timestamp, template="%Y/%m-%d"):
     return exif_timestamp.strftime(template)
 
 
-def discover_source_files(source_dir, file_types="both"):
+def discover_source_files(source_dir, file_types="both", recursive=True):
     """Discover image files in source directory.
 
     Args:
         source_dir: path to source directory (e.g., SD card mount)
         file_types: "raw", "jpeg", "both", or a list of extensions
             (e.g. [".jpg", ".nef"])
+        recursive: if True (default), scan subfolders; if False, only scan root
 
     Returns:
         Sorted list of Path objects for matching files
@@ -52,9 +53,10 @@ def discover_source_files(source_dir, file_types="both"):
     else:
         allowed = SUPPORTED_EXTENSIONS
 
+    candidates = source_path.rglob("*") if recursive else source_path.iterdir()
     return sorted(
         f
-        for f in source_path.rglob("*")
+        for f in candidates
         if f.is_file()
         and f.suffix.lower() in allowed
         and not f.name.startswith(".")
