@@ -3957,7 +3957,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
 
         if not source or not destination:
@@ -4139,7 +4139,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
         copy = body.get("copy", True)
         exclude_paths = set(body.get("exclude_paths", []))
@@ -5262,7 +5262,7 @@ def create_app(db_path, thumb_cache_dir=None):
             sources=sources,
             destination=destination,
             file_types=body.get("file_types", "both"),
-            folder_template=body.get("folder_template", "%Y/%m-%d"),
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
             skip_duplicates=body.get("skip_duplicates", True),
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
