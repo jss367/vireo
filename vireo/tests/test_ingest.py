@@ -85,6 +85,16 @@ def test_discover_source_files_recursive(tmp_path):
     assert files[0].name == "IMG_001.jpg"
 
 
+def test_discover_source_files_non_recursive(tmp_path):
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["top.jpg"])
+    sub = src / "DCIM"
+    _create_test_files(str(sub), ["nested.jpg"])
+    files = discover_source_files(str(src), file_types="both", recursive=False)
+    assert len(files) == 1
+    assert files[0].name == "top.jpg"
+
+
 def test_discover_source_files_nonexistent_dir():
     files = discover_source_files("/nonexistent/path", file_types="both")
     assert files == []

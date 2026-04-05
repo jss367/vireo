@@ -566,6 +566,46 @@ def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
     assert last_stages["model_loader"]["status"] == "skipped"
 
 
+def test_pipeline_passes_recursive_false_to_scan(tmp_path, monkeypatch):
+    """Pipeline forwards recursive=False to scanner.scan()."""
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert scan_kwargs.get("recursive") is False
+
+
 def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     """Scan progress events should include rate and eta_seconds fields."""
     import time

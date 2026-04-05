@@ -464,6 +464,9 @@ body { padding-bottom: 36px; }
                   <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
+                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-top:6px;display:inline-flex;align-items:center;gap:4px;">
+                  <input type="checkbox" id="chkIncludeSubfolders" checked style="accent-color:var(--accent);" onchange="fetchFolderPreview()"> Include subfolders
+                </label>
               </div>
             </div>
             <div class="setting-row" style="align-items:flex-start;">
@@ -965,7 +968,7 @@ function fetchFolderPreview() {
   fetch('/api/import/folder-preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folders: folders, file_types: fileTypes }),
+    body: JSON.stringify({ folders: folders, file_types: fileTypes, recursive: document.getElementById('chkIncludeSubfolders').checked }),
     signal: _previewAbort.signal,
   })
     .then(function(r) { return r.json(); })
@@ -1405,6 +1408,7 @@ async function startPipeline() {
     if (_sourceFolders.length > 0) {
       body.sources = _sourceFolders;
     }
+    body.recursive = document.getElementById('chkIncludeSubfolders').checked;
     body.file_types = getIngestFileTypes();
     // Add excluded paths from preview selection
     if (_previewData && _previewSelected) {
