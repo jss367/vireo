@@ -1,7 +1,7 @@
 import pytest
 from playwright.sync_api import expect
 
-# Every user-facing page route in the app
+# Every user-facing page route in the app (19 total)
 PAGES = [
     "/browse",
     "/review",
@@ -19,6 +19,9 @@ PAGES = [
     "/jobs",
     "/move",
     "/highlights",
+    "/dashboard",
+    "/logs",
+    "/map",
 ]
 
 
