@@ -3798,16 +3798,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
             def status_cb(message):
                 runner.update_step(job["id"], "scan", current_file=message)
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "phase": message,
-                        "current": job["progress"].get("current", 0),
-                        "total": job["progress"].get("total", 0),
-                        "current_file": message,
-                    },
-                )
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": message,
+                    "rate": 0,
+                })
 
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental,

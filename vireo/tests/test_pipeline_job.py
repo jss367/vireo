@@ -716,3 +716,11 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
     ]
     assert any("Discovering" in msg for msg in scan_status_messages), \
         f"Expected 'Discovering files...' status update, got: {scan_status_messages[:5]}"
+
+    # Status updates should also emit SSE progress events for real-time subscribers
+    status_sse_events = [
+        e[2] for e in runner.events
+        if e[1] == "progress" and "Discovering" in e[2].get("phase", "")
+    ]
+    assert len(status_sse_events) > 0, \
+        "Status updates should also push SSE progress events"
