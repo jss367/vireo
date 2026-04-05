@@ -156,6 +156,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             def status_cb(message):
                 runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": 0,
+                    "total": 0,
+                    "stages": {k: dict(v) for k, v in stages.items()},
+                })
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
