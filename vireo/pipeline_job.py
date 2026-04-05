@@ -422,7 +422,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "total": total,
                     "current_file": photo["filename"],
                     "rate": round(
-                        (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                        (i + 1) / max(time.time() - job["_start_time"], 0.01) * 60, 1
                     ),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
@@ -620,7 +620,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "phase": "Classifying species",
                     "current": batch_idx,
                     "total": total,
-                    "rate": round(batch_idx / max(time.time() - start_time, 0.01), 1),
+                    "rate": round(batch_idx / max(time.time() - start_time, 0.01) * 60, 1),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
                 stages["classify"]["count"] = batch_idx
@@ -831,7 +831,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "phase": "Extracting features (SAM2 + DINOv2)",
                     "current": i + 1,
                     "total": total,
-                    "rate": round((i + 1) / max(time.time() - start_time, 0.01), 1),
+                    "rate": round((i + 1) / max(time.time() - start_time, 0.01) * 60, 1),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
