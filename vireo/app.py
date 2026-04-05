@@ -1786,6 +1786,13 @@ def create_app(db_path, thumb_cache_dir=None):
             model_source.startswith("hf-hub:") or model_source == "timm"
         )
 
+        import shutil
+
+        exiftool_status = {
+            "installed": shutil.which("exiftool") is not None,
+            "brew_available": shutil.which("brew") is not None,
+        }
+
         # timm models have a fixed class set — no labels needed
         if model_type == "timm":
             return jsonify(
@@ -1798,6 +1805,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "labels_count": 10000,
                     "use_tol": False,
                     "embeddings_cached": True,  # no embeddings to compute
+                    "exiftool": exiftool_status,
                 }
             )
 
@@ -1868,8 +1876,41 @@ def create_app(db_path, thumb_cache_dir=None):
                 "labels_count": label_count,
                 "use_tol": use_tol,
                 "embeddings_cached": embeddings_cached,
+                "exiftool": exiftool_status,
             }
         )
+
+    @app.route("/api/system/install-exiftool", methods=["POST"])
+    def api_install_exiftool():
+        """Install exiftool via Homebrew."""
+        import shutil
+        import subprocess
+
+        if shutil.which("exiftool"):
+            return jsonify({"success": True, "message": "exiftool is already installed"})
+
+        if not shutil.which("brew"):
+            return jsonify({
+                "success": False,
+                "error": "Homebrew is not installed. Install it from https://brew.sh, then run: brew install exiftool",
+            })
+
+        try:
+            result = subprocess.run(
+                ["brew", "install", "exiftool"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                return jsonify({"success": True, "message": "exiftool installed successfully"})
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"brew install failed: {result.stderr[:500]}",
+                })
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "error": "Installation timed out after 5 minutes"})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
 
     @app.route("/api/classify/config")
     def api_classify_config():
@@ -5238,6 +5279,23 @@ def create_app(db_path, thumb_cache_dir=None):
             exclude_paths=set(body.get("exclude_paths", [])) or None,
         )
 
+        # Auto-skip classify stages if no model is available
+        model_warning = None
+        if not params.skip_classify:
+            from models import get_active_model, get_models
+
+            _model = None
+            if params.model_id:
+                _all = get_models()
+                _model = next((m for m in _all if m["id"] == params.model_id and m["downloaded"]), None)
+            if not _model:
+                _model = get_active_model()
+            if not _model:
+                params.skip_classify = True
+                params.skip_extract_masks = True
+                params.skip_regroup = True
+                model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
+
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
@@ -5256,7 +5314,10 @@ def create_app(db_path, thumb_cache_dir=None):
             },
             workspace_id=active_ws,
         )
-        return jsonify({"job_id": job_id})
+        result = {"job_id": job_id}
+        if model_warning:
+            result["model_warning"] = model_warning
+        return jsonify(result)
 
     @app.route("/api/encounters/species", methods=["POST"])
     def api_encounter_species():
