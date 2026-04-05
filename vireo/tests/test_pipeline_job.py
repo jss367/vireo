@@ -79,7 +79,7 @@ def test_pipeline_params_defaults():
     assert params.source is None
     assert params.destination is None
     assert params.file_types == "both"
-    assert params.folder_template == "%Y/%m-%d"
+    assert params.folder_template == "%Y/%Y-%m-%d"
     assert params.skip_duplicates is True
     assert params.labels_file is None
     assert params.labels_files is None

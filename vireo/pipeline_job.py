@@ -33,7 +33,7 @@ class PipelineParams:
     sources: list | None = None
     destination: str | None = None
     file_types: str = "both"
-    folder_template: str = "%Y/%m-%d"
+    folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
     labels_file: str | None = None
     labels_files: list | None = None

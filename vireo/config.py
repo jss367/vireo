@@ -71,7 +71,7 @@ DEFAULTS = {
     },
     # --- Ingest (import from external source) ---
     "ingest": {
-        "folder_template": "%Y/%m-%d",
+        "folder_template": "%Y/%Y-%m-%d",
         "skip_duplicates": True,
         "file_types": "both",
     },
