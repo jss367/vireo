@@ -5,8 +5,19 @@ Performance notes:
 - We use half_size=True when the target is ≤ half the sensor resolution (3x faster)
 - PIL resize and JPEG encode are negligible (<0.15s)
 - libraw (via rawpy) is already C — Rust/numba won't help here
+
+RAW strategy (JPEG-first):
+- Modern cameras embed a full-resolution JPEG in the RAW file (the same image
+  the camera would produce in RAW+JPEG mode). For a photo organizer, that's
+  both faster to decode and sufficient in quality.
+- It also works for RAW variants libraw cannot decode. Example: Nikon Z 8
+  "High Efficiency*" (HE*) files use TicoRAW compression that libraw 0.22
+  cannot decode. The embedded JPEG is our only path for those files.
+- We prefer the embedded JPEG whenever it meets the requested size, and
+  fall back to it when demosaic-based decode raises.
 """
 
+import io
 import logging
 from pathlib import Path
 
@@ -23,7 +34,8 @@ def load_image(file_path, max_size=1024):
     """Load an image file and return a PIL Image, resized to max_size.
 
     Supports JPEG, PNG, TIFF, and RAW formats (NEF, CR2, ARW, etc.).
-    Uses half-size RAW decoding when possible (3x faster for large files).
+    For RAW files, prefers the embedded full-res JPEG preview when it meets
+    the requested size; falls back to demosaic-based decode otherwise.
     Returns None if the file cannot be loaded.
 
     Args:
@@ -41,25 +53,13 @@ def load_image(file_path, max_size=1024):
 
     try:
         if ext in RAW_EXTENSIONS:
-            import rawpy
-
-            with rawpy.imread(str(path)) as raw:
-                # Use half_size decode when we don't need full resolution.
-                # Half-size is ~3x faster and still produces ~4000x2700 for a 45MP sensor.
-                # Only use full decode for 1:1 (max_size=None/0) or very large targets.
-                use_half = False
-                if max_size and max_size > 0:
-                    sensor_long = max(raw.sizes.width, raw.sizes.height)
-                    half_long = sensor_long // 2
-                    # If target fits within half-size output, use half decode
-                    if max_size <= half_long:
-                        use_half = True
-
-                rgb = raw.postprocess(half_size=use_half)
-            img = Image.fromarray(rgb)
+            img = _load_raw(path, max_size)
         else:
             img = Image.open(str(path))
             img = img.convert("RGB")
+
+        if img is None:
+            return None
 
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)
@@ -68,3 +68,68 @@ def load_image(file_path, max_size=1024):
     except Exception as e:
         log.warning("Failed to load image: %s — %s", file_path, e)
         return None
+
+
+def _load_raw(path, max_size):
+    """Load a RAW file using JPEG-first strategy.
+
+    1. Try the embedded JPEG preview; use it if it's big enough for max_size.
+    2. Otherwise demosaic via rawpy.postprocess().
+    3. If postprocess fails, fall back to the embedded JPEG (even if small).
+    """
+    import rawpy
+
+    with rawpy.imread(str(path)) as raw:
+        embedded = _extract_embedded_jpeg(raw)
+
+        # JPEG-first: if the embedded preview is large enough for the request,
+        # use it and skip the slower RAW decode entirely.
+        if (embedded is not None and max_size and max_size > 0
+                and max(embedded.size) >= max_size):
+            return embedded
+
+        # Otherwise demosaic the sensor data, falling back to the embedded
+        # JPEG if libraw can't decode this RAW variant.
+        try:
+            return _postprocess_raw(raw, max_size)
+        except Exception as e:
+            if embedded is not None:
+                log.info(
+                    "RAW decode failed for %s, using embedded JPEG (%dx%d): %s",
+                    path, embedded.size[0], embedded.size[1], e,
+                )
+                return embedded
+            raise
+
+
+def _extract_embedded_jpeg(raw):
+    """Return the embedded JPEG preview as a PIL Image, or None if unavailable."""
+    import rawpy
+    try:
+        thumb = raw.extract_thumb()
+    except Exception:
+        return None
+    if thumb.format != rawpy.ThumbFormat.JPEG:
+        return None
+    try:
+        img = Image.open(io.BytesIO(thumb.data))
+        img.load()
+        return img.convert("RGB")
+    except Exception:
+        return None
+
+
+def _postprocess_raw(raw, max_size):
+    """Demosaic raw sensor data into a PIL Image.
+
+    Uses half-size decode when the target fits, which is ~3x faster and still
+    produces ~4000x2700 for a 45MP sensor.
+    """
+    use_half = False
+    if max_size and max_size > 0:
+        sensor_long = max(raw.sizes.width, raw.sizes.height)
+        half_long = sensor_long // 2
+        if max_size <= half_long:
+            use_half = True
+    rgb = raw.postprocess(half_size=use_half)
+    return Image.fromarray(rgb)
