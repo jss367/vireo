@@ -262,32 +262,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 _update_stages(runner, job["id"], stages)
 
                 # Scan only the destination subfolders that received files,
-                # not the entire destination tree.
+                # not the entire destination tree. We use restrict_dirs so the
+                # scanner still roots the folder hierarchy at the destination,
+                # preserving parent folder links.
+                restrict = None
                 if all_copied_paths:
-                    dest_subfolders = sorted({
+                    restrict = sorted({
                         str(Path(p).parent) for p in all_copied_paths
                     })
-                    for subfolder in dest_subfolders:
-                        do_scan(
-                            subfolder, thread_db,
-                            progress_callback=progress_cb,
-                            incremental=True,
-                            extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                            photo_callback=photo_cb,
-                            status_callback=status_cb,
-                            recursive=False,
-                        )
-                else:
-                    # No files copied (all duplicates) — scan full destination
-                    # to pick up existing files.
-                    do_scan(
-                        params.destination, thread_db,
-                        progress_callback=progress_cb,
-                        incremental=True,
-                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                        photo_callback=photo_cb,
-                        status_callback=status_cb,
-                    )
+                do_scan(
+                    params.destination, thread_db,
+                    progress_callback=progress_cb,
+                    incremental=True,
+                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                    photo_callback=photo_cb,
+                    status_callback=status_cb,
+                    restrict_dirs=restrict,
+                )
             else:
                 # Scan-in-place: scan each source folder independently.
                 for src_folder in sources:
