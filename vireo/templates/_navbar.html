@@ -792,7 +792,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <nav class="navbar">
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
   <div class="ws-dropdown" id="wsDropdown">
-    <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn">
+    <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn" data-testid="workspace-dropdown">
       <span id="wsCurrentName">Default</span>
       <span class="ws-arrow">&#9662;</span>
     </button>
@@ -803,13 +803,13 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/pipeline" data-nav-id="pipeline">Pipeline</a>
+  <a href="/pipeline" data-nav-id="pipeline" data-testid="nav-pipeline">Pipeline</a>
   <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
-  <a href="/jobs" data-nav-id="jobs">Jobs<span class="nav-job-badge" id="navJobBadge"></span></a>
+  <a href="/jobs" data-nav-id="jobs" data-testid="nav-jobs">Jobs<span class="nav-job-badge" id="navJobBadge" data-testid="job-badge"></span></a>
   <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
-  <a href="/review" data-nav-id="review">Review</a>
+  <a href="/review" data-nav-id="review" data-testid="nav-review">Review</a>
   <a href="/cull" data-nav-id="cull">Cull</a>
-  <a href="/browse" data-nav-id="browse">Browse</a>
+  <a href="/browse" data-nav-id="browse" data-testid="nav-browse">Browse</a>
   <a href="/map" data-nav-id="map">Map</a>
   <a href="/variants" data-nav-id="variants">Variants</a>
   <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
