@@ -34,7 +34,7 @@ class FakeRunner:
         self.events.append((job_id, event_type, data))
 
     def set_steps(self, job_id, steps):
-        pass
+        self.steps_defined = list(steps)
 
     def update_step(self, job_id, step_id, **kwargs):
         self.step_updates.append((job_id, step_id, kwargs))
@@ -296,7 +296,7 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     assert len(stage_events) > 0
 
     # Each stages dict should have all expected stage keys
-    expected_keys = {"scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup"}
+    expected_keys = {"ingest", "scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup"}
     for _, _, data in stage_events:
         assert expected_keys.issubset(data["stages"].keys())
 
@@ -706,15 +706,22 @@ def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # The scan step should have received update_step calls with progress
-    # during the ingest phase (before do_scan runs)
-    scan_progress_updates = [
+    # The ingest step should have received update_step calls with progress
+    ingest_progress_updates = [
         (step_id, kwargs) for _, step_id, kwargs in runner.step_updates
-        if step_id == "scan" and "progress" in kwargs
+        if step_id == "ingest" and "progress" in kwargs
         and kwargs["progress"].get("total", 0) > 0
     ]
-    assert len(scan_progress_updates) > 0, \
-        "Ingest phase should call update_step with progress for the scan step"
+    assert len(ingest_progress_updates) > 0, \
+        "Ingest phase should call update_step with progress for the ingest step"
+
+    # Ingest step should have been marked completed
+    ingest_completed = [
+        kwargs for _, step_id, kwargs in runner.step_updates
+        if step_id == "ingest" and kwargs.get("status") == "completed"
+    ]
+    assert len(ingest_completed) > 0, \
+        "Ingest step should be marked completed after import finishes"
 
 
 def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
@@ -764,3 +771,121 @@ def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
     ]
     assert len(status_sse_events) > 0, \
         "Status updates should also push SSE progress events"
+
+
+def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatch):
+    """The 'ingest' step should only appear in step_defs when destination is set."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    img = Image.new("RGB", (100, 100), "red")
+    img.save(str(photo_dir / "test.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Without destination — no ingest step
+    runner_no_dest = FakeRunner()
+    job = _make_job()
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    run_pipeline_job(job, runner_no_dest, db_path, ws_id, params)
+    step_ids = [s["id"] for s in runner_no_dest.steps_defined]
+    assert "ingest" not in step_ids, "ingest step should not appear without destination"
+
+    # With destination — ingest step present
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    runner_dest = FakeRunner()
+    job2 = _make_job()
+    params2 = PipelineParams(
+        source=str(photo_dir),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    run_pipeline_job(job2, runner_dest, db_path, ws_id, params2)
+    step_ids2 = [s["id"] for s in runner_dest.steps_defined]
+    assert "ingest" in step_ids2, "ingest step should appear when destination is set"
+    assert step_ids2.index("ingest") < step_ids2.index("scan"), \
+        "ingest step should come before scan"
+
+
+def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
+    """After ingest, scan should use restrict_dirs to target only subfolders
+    that received files, while keeping the destination as root for folder hierarchy."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Create source images
+    src = tmp_path / "source"
+    src.mkdir()
+    for name in ["a.jpg", "b.jpg"]:
+        img = Image.new("RGB", (100, 100), "red")
+        img.save(str(src / name))
+
+    # Create destination with existing files in a different subfolder
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    existing_folder = dest / "2025" / "01-01"
+    existing_folder.mkdir(parents=True)
+    for i in range(5):
+        img = Image.new("RGB", (100, 100), "blue")
+        img.save(str(existing_folder / f"existing_{i}.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Track scan() calls
+    scan_calls = []
+    from unittest.mock import patch
+
+    import scanner as scanner_mod
+    original_scan = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        scan_calls.append({"root": str(root), "restrict_dirs": kwargs.get("restrict_dirs")})
+        return original_scan(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Scan should be called with the destination as root (for folder hierarchy)
+    assert len(scan_calls) > 0, "Scan should have been called"
+    assert scan_calls[-1]["root"] == str(dest), \
+        f"Scan root should be the destination, got: {scan_calls[-1]['root']}"
+    # restrict_dirs should be set to only the subfolders that received files
+    restrict = scan_calls[-1]["restrict_dirs"]
+    assert restrict is not None, "restrict_dirs should be set when files were copied"
+    # The restrict dirs should NOT include the existing subfolder
+    for d in restrict:
+        assert str(existing_folder) != d, \
+            f"restrict_dirs should not include pre-existing folder {existing_folder}"
