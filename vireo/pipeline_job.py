@@ -140,13 +140,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         nonlocal collection_id
 
         if skip_scan:
+            stages["scan"]["status"] = "skipped"
             runner.update_step(job["id"], "scan", status="completed",
                                summary="Skipped (using collection)")
+            _update_stages(runner, job["id"], stages)
             scan_to_thumb.put(_SENTINEL)
             return
-        stages["scan"]["status"] = "running"
-        runner.update_step(job["id"], "scan", status="running")
-        _update_stages(runner, job["id"], stages)
+        # Note: stages["scan"]["status"] is NOT set to "running" here. It is
+        # flipped to "running" just before each do_scan() call below, so
+        # numScan doesn't pulse during the ingest sub-phase.
         try:
             import config as cfg
             from scanner import scan as do_scan
@@ -168,6 +170,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 runner.update_step(job["id"], "scan", current_file=message)
                 runner.push_event(job["id"], "progress", {
                     "phase": message,
+                    "stage_id": "scan",
                     "current": job["progress"].get("current", 0),
                     "total": job["progress"].get("total", 0),
                     "stages": {k: dict(v) for k, v in stages.items()},
@@ -185,6 +188,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                    progress={"current": current, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Scanning photos",
+                    "stage_id": "scan",
                     "current": current,
                     "total": total,
                     "rate": rate,
@@ -207,6 +211,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                        progress={"current": current, "total": total})
                     runner.push_event(job["id"], "progress", {
                         "phase": "Importing photos",
+                        "stage_id": "ingest",
                         "current": current,
                         "total": total,
                         "current_file": filename,
@@ -270,6 +275,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     restrict = sorted({
                         str(Path(p).parent) for p in all_copied_paths
                     })
+                # Flip scan to running and reset job progress so status
+                # events during enumeration don't carry ingest's numbers.
+                stages["scan"]["status"] = "running"
+                runner.update_step(job["id"], "scan", status="running")
+                job["progress"]["current"] = 0
+                job["progress"]["total"] = 0
+                _update_stages(runner, job["id"], stages)
                 do_scan(
                     params.destination, thread_db,
                     progress_callback=progress_cb,
@@ -281,6 +293,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
+                stages["scan"]["status"] = "running"
+                runner.update_step(job["id"], "scan", status="running")
+                job["progress"]["current"] = 0
+                job["progress"]["total"] = 0
+                _update_stages(runner, job["id"], stages)
                 for src_folder in sources:
                     do_scan(
                         src_folder, thread_db,
@@ -399,6 +416,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 runner.update_step(job["id"], "thumbnails",
                                    current_file=os.path.basename(photo_path),
                                    progress={"current": processed, "total": scan_total})
+                elapsed = time.time() - job["_start_time"]
+                rate = round(processed / max(elapsed, 0.01) * 60, 1)
+                runner.push_event(job["id"], "progress", {
+                    "phase": "Generating thumbnails",
+                    "stage_id": "thumbnails",
+                    "current": processed,
+                    "total": scan_total,
+                    "current_file": os.path.basename(photo_path),
+                    "rate": rate,
+                    "stages": {k: dict(v) for k, v in stages.items()},
+                })
 
             stages["thumbnails"]["status"] = "completed"
             from thumbnails import format_summary as thumb_summary
@@ -473,6 +501,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                    progress={"current": i + 1, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Generating previews",
+                    "stage_id": "previews",
                     "current": i + 1,
                     "total": total,
                     "current_file": photo["filename"],
@@ -542,12 +571,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     from taxonomy import download_taxonomy
                     runner.push_event(job["id"], "progress", {
                         "phase": "Downloading taxonomy...",
+                        "stage_id": "model_loader",
                         "current": 0, "total": 0,
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
                     download_taxonomy(taxonomy_path, progress_callback=lambda msg:
                         runner.push_event(job["id"], "progress", {
                             "phase": msg,
+                            "stage_id": "model_loader",
                             "current": 0, "total": 0,
                             "stages": {k: dict(v) for k, v in stages.items()},
                         })
@@ -570,6 +601,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # Load classifier
             runner.push_event(job["id"], "progress", {
                 "phase": f"Loading {model_name}...",
+                "stage_id": "model_loader",
                 "current": 0, "total": 0,
                 "stages": {k: dict(v) for k, v in stages.items()},
             })
@@ -673,6 +705,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
                 runner.push_event(job["id"], "progress", {
                     "phase": "Classifying species",
+                    "stage_id": "classify",
                     "current": batch_idx,
                     "total": total,
                     "rate": round(batch_idx / max(time.time() - start_time, 0.01) * 60, 1),
@@ -884,6 +917,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                    progress={"current": i + 1, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Extracting features (SAM2 + DINOv2)",
+                    "stage_id": "extract_masks",
                     "current": i + 1,
                     "total": total,
                     "rate": round((i + 1) / max(time.time() - start_time, 0.01) * 60, 1),
