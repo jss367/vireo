@@ -227,7 +227,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
-                    recursive=params.recursive,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
