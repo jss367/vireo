@@ -195,6 +195,13 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          # Newer ubuntu-22.04 runner images ship with an active /swapfile,
+          # so fallocate would fail with "Text file busy". Disable and remove
+          # any existing one before creating our larger 10G swap.
+          if [ -e /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
           sudo fallocate -l 10G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
