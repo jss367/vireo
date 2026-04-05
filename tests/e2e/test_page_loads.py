@@ -1,7 +1,9 @@
 import pytest
 from playwright.sync_api import expect
 
-# Every user-facing page route in the app (19 total)
+# Every user-facing page route in the app.
+# /map is excluded: it loads Leaflet from unpkg.com CDN, so network
+# latency would cause CI flakes unrelated to Vireo itself.
 PAGES = [
     "/browse",
     "/review",
@@ -21,7 +23,6 @@ PAGES = [
     "/highlights",
     "/dashboard",
     "/logs",
-    "/map",
 ]
 
 
