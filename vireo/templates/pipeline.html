@@ -165,6 +165,21 @@ body { padding-bottom: 36px; }
   letter-spacing: 1px;
 }
 
+/* Destination card sections */
+.dest-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dest-option {
+  padding: 4px 0;
+}
+#destCopySection.dimmed {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* Pipeline action bar */
 .pipeline-action-bar {
   margin-top: 8px;
@@ -438,13 +453,6 @@ body { padding-bottom: 36px; }
           </div>
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
-              <div class="setting-item">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
-                </label>
-              </div>
-            </div>
-            <div class="setting-row">
               <div class="setting-item" id="folderLabelItem">
                 <div class="setting-label" id="lblFolder">Folders</div>
                 <div style="display:flex;gap:6px;">
@@ -456,19 +464,6 @@ body { padding-bottom: 36px; }
                   <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
-              </div>
-            </div>
-            <div id="copyOnlyFields" style="display:none;">
-              <div class="setting-row">
-                <div class="setting-item">
-                  <div class="setting-label">Destination</div>
-                  <div style="display:flex;gap:6px;">
-                    <input type="text" class="setting-select" id="cfgDestination"
-                           placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                           oninput="updateStartButton()">
-                    <button onclick="openFolderBrowser()" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
-                  </div>
-                </div>
               </div>
             </div>
             <div class="setting-row" style="align-items:flex-start;">
@@ -504,11 +499,6 @@ body { padding-bottom: 36px; }
                   </div>
                 </div>
               </div>
-              <div class="setting-item" id="skipDuplicatesItem" style="display:none;">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
-                </label>
-              </div>
             </div>
           </div>
         </div>
@@ -542,10 +532,85 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Scan & Import -->
+  <!-- Card 2: Destination -->
+  <div class="stage-card" id="card-destination">
+    <div class="stage-header" onclick="toggleCard('destination')">
+      <span class="stage-num" id="numDestination">2</span>
+      <span class="stage-name">Destination</span>
+      <span class="stage-summary" id="summaryDestination"></span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <!-- Section 1: Workspace -->
+      <div class="setting-label">Workspace</div>
+      <div class="dest-section">
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="current" id="radioWsCurrent" checked
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">Current workspace</span>
+            <span style="font-size:13px;color:var(--text-dim);" id="lblCurrentWsName"></span>
+          </label>
+        </div>
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="new" id="radioWsNew"
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">New workspace</span>
+          </label>
+          <div id="newWsNameRow" style="display:none;margin-top:8px;margin-left:24px;">
+            <input type="text" class="setting-select" id="destNewWsName"
+                   placeholder="e.g. Kenya 2025" style="font-family:inherit;max-width:300px;"
+                   oninput="updateStartButton()">
+            <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
+
+      <!-- Section 2: File Copying -->
+      <div class="setting-label">File Copying</div>
+      <div id="destCopySection">
+        <div class="setting-row">
+          <div class="setting-item">
+            <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
+            </label>
+          </div>
+        </div>
+        <div id="copyOnlyFields" style="display:none;">
+          <div class="setting-row">
+            <div class="setting-item">
+              <div class="setting-label">Destination</div>
+              <div style="display:flex;gap:6px;">
+                <input type="text" class="setting-select" id="cfgDestination"
+                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                       oninput="updateStartButton()">
+                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="destCopyDisabledNote" style="display:none;font-size:12px;color:var(--text-dim);font-style:italic;margin-top:4px;">
+          Not applicable for existing collections
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 3: Scan & Import -->
   <div class="stage-card" id="card-scan">
     <div class="stage-header" onclick="toggleCard('scan')">
-      <span class="stage-num" id="numScan">2</span>
+      <span class="stage-num" id="numScan">3</span>
       <span class="stage-name">Scan &amp; Import</span>
       <span class="stage-summary" id="summaryScan"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -562,10 +627,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 3: Thumbnails & Previews -->
+  <!-- Card 4: Thumbnails & Previews -->
   <div class="stage-card" id="card-previews">
     <div class="stage-header" onclick="toggleCard('previews')">
-      <span class="stage-num" id="numPreviews">3</span>
+      <span class="stage-num" id="numPreviews">4</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
       <span class="stage-summary" id="summaryPreviews"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -594,10 +659,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 4: Classify -->
+  <!-- Card 5: Classify -->
   <div class="stage-card" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">4</span>
+      <span class="stage-num" id="numClassify">5</span>
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
@@ -638,10 +703,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 5: Extract Features -->
+  <!-- Card 6: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">5</span>
+      <span class="stage-num" id="numExtract">6</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
@@ -691,10 +756,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 6: Group & Score -->
+  <!-- Card 7: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">6</span>
+      <span class="stage-num" id="numGroup">7</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
@@ -812,6 +877,13 @@ function initPipelinePage() {
       console.error('Failed to load pipeline page data:', e);
     });
 
+  // Load active workspace name for Destination card
+  safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
+    if (ws && ws.name) {
+      document.getElementById('lblCurrentWsName').textContent = '(' + ws.name + ')';
+    }
+  });
+
   // Load collections, models, labels, volumes in parallel
   loadCollections();
   loadModels();
@@ -841,6 +913,19 @@ async function loadCollections() {
       sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
     });
   } catch(e) {}
+}
+
+// -- Card 2: Destination --
+var _destWorkspaceMode = 'current'; // 'current' or 'new'
+
+function onDestWorkspaceChange() {
+  _destWorkspaceMode = document.getElementById('radioWsNew').checked ? 'new' : 'current';
+  document.getElementById('newWsNameRow').style.display = _destWorkspaceMode === 'new' ? '' : 'none';
+  document.getElementById('destWsError').style.display = 'none';
+  if (_destWorkspaceMode === 'new') {
+    document.getElementById('destNewWsName').focus();
+  }
+  updateStartButton();
 }
 
 // -- Card 1: Source --
@@ -1092,17 +1177,11 @@ function renderSourceFolders() {
 function onCopyModeChange() {
   _copyMode = document.getElementById('chkCopyPhotos').checked;
   var copyFields = document.getElementById('copyOnlyFields');
-  var skipDup = document.getElementById('skipDuplicatesItem');
-  var lbl = document.getElementById('lblFolder');
 
   if (_copyMode) {
     copyFields.style.display = '';
-    skipDup.style.display = '';
-    lbl.textContent = 'Source Folders';
   } else {
     copyFields.style.display = 'none';
-    skipDup.style.display = 'none';
-    lbl.textContent = 'Folders';
   }
   updateStartButton();
 }
@@ -1122,6 +1201,17 @@ function selectSourceMode(mode) {
     importBody.classList.add('dimmed');
     collBody.classList.remove('dimmed');
   }
+
+  var copySection = document.getElementById('destCopySection');
+  var copyNote = document.getElementById('destCopyDisabledNote');
+  if (mode === 'collection') {
+    copySection.classList.add('dimmed');
+    copyNote.style.display = '';
+  } else {
+    copySection.classList.remove('dimmed');
+    copyNote.style.display = 'none';
+  }
+
   updateStartButton();
 }
 
@@ -1198,15 +1288,22 @@ function updateStartButton() {
   if (_sourceMode === 'import') {
     var hasFolders = _sourceFolders.length > 0;
     var anyType = getIngestFileTypes().length > 0;
-    if (_copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      btn.disabled = !hasFolders || !dest || !anyType;
-    } else {
-      btn.disabled = !hasFolders || !anyType;
-    }
+    btn.disabled = !hasFolders || !anyType;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
+  }
+
+  // Destination card validation
+  if (!btn.disabled) {
+    if (_destWorkspaceMode === 'new') {
+      var wsName = document.getElementById('destNewWsName').value.trim();
+      if (!wsName) btn.disabled = true;
+    }
+    if (_sourceMode === 'import' && _copyMode) {
+      var dest = document.getElementById('cfgDestination').value.trim();
+      if (!dest) btn.disabled = true;
+    }
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
@@ -1215,7 +1312,7 @@ function updateStartButton() {
   if (sourceReady) {
     numSource.classList.add('complete');
     if (!_sourceWasReady) {
-      document.getElementById('card-scan').classList.add('expanded');
+      document.getElementById('card-destination').classList.add('expanded');
     }
   } else {
     numSource.className = 'stage-num';
@@ -1258,6 +1355,39 @@ async function startPipeline() {
   if (_pipelineRunning) return;
   _pipelineRunning = true;
   _pipelineAbort = false;
+
+  // Create new workspace if requested
+  if (_destWorkspaceMode === 'new') {
+    var wsName = document.getElementById('destNewWsName').value.trim();
+    if (!wsName) {
+      document.getElementById('destWsError').textContent = 'Name is required';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+    try {
+      var wsData = await safeFetch('/api/workspaces', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: wsName })
+      }, { toast: false });
+      // Activate the new workspace
+      await safeFetch('/api/workspaces/' + wsData.id + '/activate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ current_path: window.location.pathname })
+      });
+      // Update the navbar workspace display
+      var wsBtn = document.getElementById('wsDropdownBtn');
+      if (wsBtn) wsBtn.textContent = wsName;
+      document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
+    } catch(e) {
+      document.getElementById('destWsError').textContent = e.message || 'Failed to create workspace';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+  }
 
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
@@ -1321,10 +1451,14 @@ async function startPipeline() {
   }
 
   // Reset all stage cards to pending state
-  ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
+
+  // Destination is a config-only card — mark complete immediately since
+  // workspace creation and copy settings are already resolved at this point.
+  document.getElementById('numDestination').classList.add('complete');
 
   try {
     var data = await safeFetch('/api/jobs/pipeline', {
