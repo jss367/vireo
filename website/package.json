@@ -3,8 +3,8 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
-    "dev": "cp ../static/help.json public/help.json && astro dev",
-    "build": "cp ../static/help.json public/help.json && astro build",
+    "dev": "node -e \"require('fs').copyFileSync('../static/help.json','public/help.json')\" && astro dev",
+    "build": "node -e \"require('fs').copyFileSync('../static/help.json','public/help.json')\" && astro build",
     "preview": "astro preview"
   },
   "dependencies": {
