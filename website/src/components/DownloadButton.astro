@@ -5,9 +5,10 @@ interface Props {
   href: string;
   version: string;
   highlighted?: boolean;
+  note?: string;
 }
 
-const { platform, label, href, version, highlighted = false } = Astro.props;
+const { platform, label, href, version, highlighted = false, note } = Astro.props;
 
 const platformNames: Record<string, string> = {
   macos: 'macOS',
@@ -35,6 +36,7 @@ const platformNames: Record<string, string> = {
   <span class="download-btn__info">
     <span class="download-btn__label">{label}</span>
     <span class="download-btn__meta">{platformNames[platform]} &middot; v{version}</span>
+    {note && <span class="download-btn__note">{note}</span>}
   </span>
 </a>
 
@@ -84,5 +86,11 @@ const platformNames: Record<string, string> = {
   .download-btn__meta {
     font-size: var(--text-sm);
     color: var(--color-text-muted);
+  }
+
+  .download-btn__note {
+    font-size: var(--text-xs, 0.75rem);
+    color: #f5a623;
+    font-weight: 500;
   }
 </style>
