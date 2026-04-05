@@ -104,8 +104,7 @@ async function loadHighlights() {
   params.set('max_per_species', document.getElementById('speciesSlider').value);
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
 
-  var resp = await safeFetch('/api/highlights?' + params);
-  var data = await resp.json();
+  var data = await safeFetch('/api/highlights?' + params);
 
   currentPhotos = data.photos;
   currentFolders = data.folders;
@@ -196,8 +195,7 @@ async function showSaveModal() {
   document.getElementById('replaceBtn').style.display = 'none';
 
   // Check for existing collection with same name
-  var resp = await safeFetch('/api/collections');
-  existingCollections = await resp.json();
+  existingCollections = await safeFetch('/api/collections');
   var proposed = document.getElementById('saveNameInput').value;
   var existing = existingCollections.find(function(c) { return c.name === proposed; });
   if (existing) {
