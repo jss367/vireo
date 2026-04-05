@@ -1013,6 +1013,14 @@ var _stageToProgress = {
   regroup: 'Group',
 };
 
+function _formatETA(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.round((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -1057,8 +1065,15 @@ function _updatePipelineStageUI(p) {
 
     var parts = [];
     if (p.phase) parts.push(p.phase);
-    if (p.current > 0) parts.push(p.current + '/' + p.total);
-    if (p.rate) parts.push(p.rate + '/s');
+    if (p.total > 0 && p.current > 0) {
+      parts.push(p.current.toLocaleString() + ' / ' + p.total.toLocaleString());
+    }
+    if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
+    if (p.eta_seconds != null && p.eta_seconds > 0) {
+      parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
+    } else if (p.current > 0 && p.current < 10) {
+      parts.push('Estimating...');
+    }
     if (p.current_file) parts.push(p.current_file);
     var label = parts.join(' \u2014 ');
     if (text) text.textContent = label;
