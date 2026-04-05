@@ -289,15 +289,19 @@ def test_readiness_includes_exiftool_status(app_and_db):
         assert isinstance(data["exiftool"]["brew_available"], bool)
 
 
-def test_install_exiftool_endpoint_exists(app_and_db):
+def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
+    import shutil
+    import subprocess
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd == "exiftool" else original_which(cmd))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
     app, _ = app_and_db
     with app.test_client() as client:
         resp = client.post("/api/system/install-exiftool")
         assert resp.status_code == 200
         data = resp.get_json()
-        # Should have success or error field
-        assert "success" in data or "error" in data
+        assert data.get("success") is True
 
 
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
