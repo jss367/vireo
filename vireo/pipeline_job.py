@@ -44,6 +44,7 @@ class PipelineParams:
     skip_classify: bool = False
     download_taxonomy: bool = True
     preview_max_size: int = 1920
+    exclude_paths: set | None = None
 
 
 def _should_abort(abort_event):
@@ -150,10 +151,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 collected_photo_ids.append(photo_id)
                 scan_to_thumb.put((photo_id, path))
                 stages["scan"]["count"] = len(collected_photo_ids)
+                runner.update_step(job["id"], "scan",
+                                   current_file=os.path.basename(path))
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Scanning photos",
                     "current": current,
@@ -196,6 +201,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         skip_duplicates=params.skip_duplicates,
                         progress_callback=ingest_cb,
                         extra_known_hashes=accumulated_hashes,
+                        skip_paths=params.exclude_paths,
                     )
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
@@ -222,6 +228,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         incremental=True,
                         extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                         photo_callback=photo_cb,
+                        skip_paths=params.exclude_paths,
                     )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
@@ -321,12 +328,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 except Exception:
                     failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
+                processed = generated + skipped + failed
+                # Use scan count directly regardless of whether scan has
+                # completed yet — this avoids the total staying at 0/? when
+                # the thumbnail worker catches up with scan before scan's
+                # status flips to "completed".
+                scan_total = stages["scan"].get("count", 0)
+                runner.update_step(job["id"], "thumbnails",
+                                   current_file=os.path.basename(photo_path),
+                                   progress={"current": processed, "total": scan_total})
 
             stages["thumbnails"]["status"] = "completed"
             from thumbnails import format_summary as thumb_summary
             thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
+            processed = generated + skipped + failed
             runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
+                               summary=thumb_summary(thumb_result),
+                               progress={"current": processed, "total": processed})
             result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
             errors.append(f"[thumbnails] Fatal: {e}")
@@ -388,6 +406,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         generated += 1
 
                 stages["previews"]["count"] = i + 1
+                runner.update_step(job["id"], "previews",
+                                   current_file=photo["filename"],
+                                   progress={"current": i + 1, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Generating previews",
                     "current": i + 1,
@@ -422,7 +443,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             models_ready.set()
             return
         stages["model_loader"]["status"] = "running"
-        runner.update_step(job["id"], "model_loader", status="running")
+        runner.update_step(job["id"], "model_loader", status="running",
+                           current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
             from classify_job import _load_labels, _load_taxonomy
@@ -449,6 +471,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             weights_path = active_model["weights_path"]
             model_type = active_model.get("model_type", "bioclip")
             model_name = active_model["name"]
+            runner.update_step(job["id"], "model_loader", current_file=model_name)
 
             # Download taxonomy if missing and requested
             taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")

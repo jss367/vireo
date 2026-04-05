@@ -7,7 +7,7 @@ def test_pipeline_page_loads_with_stages(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     stages = page.locator("[data-testid='stage-card']")
-    expect(stages).to_have_count(6)
+    expect(stages).to_have_count(7)
 
 
 def test_pipeline_start_button_disabled_without_folders(live_server, page):
@@ -20,6 +20,8 @@ def test_pipeline_start_button_disabled_without_folders(live_server, page):
 def test_pipeline_copy_toggle_shows_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
+    # Expand the Destination card first (collapsed by default)
+    page.click("#card-destination .stage-header")
     dest = page.locator("[data-testid='destination-section']")
     expect(dest).to_be_hidden()
     page.check("[data-testid='copy-photos-toggle']")
@@ -29,6 +31,7 @@ def test_pipeline_copy_toggle_shows_destination(live_server, page):
 def test_pipeline_copy_toggle_hides_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
     page.check("[data-testid='copy-photos-toggle']")
     dest = page.locator("[data-testid='destination-section']")
     expect(dest).to_be_visible()
