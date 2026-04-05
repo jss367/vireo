@@ -140,9 +140,10 @@ def main():
             "--exclude-module", "jupyter",
             "--exclude-module", "IPython",
         ]
-        # --strip corrupts Windows system DLLs (api-ms-win-core-*.dll),
-        # causing "Invalid access to memory location" at runtime
-        if platform.system() != "Windows":
+        # --strip only on macOS (Mach-O). On Windows it corrupts system
+        # DLLs; on Linux it breaks ELF page alignment of scipy's bundled
+        # OpenBLAS (libscipy_openblas64_), causing ImportError at startup.
+        if platform.system() == "Darwin":
             pyinstaller_args.append("--strip")
 
     pyinstaller_args.append(os.path.join(repo_root, "vireo", "app.py"))
