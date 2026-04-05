@@ -889,3 +889,136 @@ def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
     for d in restrict:
         assert str(existing_folder) != d, \
             f"restrict_dirs should not include pre-existing folder {existing_folder}"
+
+
+def test_pipeline_progress_events_carry_stage_id(tmp_path, monkeypatch):
+    """Each per-stage progress event should carry a stage_id so the
+    Pipeline UI can route concurrent stages (scan + thumbnails) to their
+    own progress bars instead of colliding."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(3):
+        img = Image.new("RGB", (100, 100), "green")
+        img.save(str(photo_dir / f"p_{i}.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Gather all progress events that include a stage_id
+    stage_ids_seen = {
+        e[2]["stage_id"]
+        for e in runner.events
+        if e[1] == "progress" and "stage_id" in e[2]
+    }
+    # Scan and thumbnails are the minimum we expect for a scan-in-place
+    # run with classify/extract/regroup skipped.
+    assert "scan" in stage_ids_seen, \
+        f"Expected scan stage_id in events; saw: {stage_ids_seen}"
+    assert "thumbnails" in stage_ids_seen, \
+        f"Expected thumbnails stage_id in events; saw: {stage_ids_seen}"
+
+
+def test_pipeline_scan_not_running_during_ingest(tmp_path, monkeypatch):
+    """In copy mode, stages.scan should stay 'pending' while ingest runs,
+    so the Scan card doesn't pulse during the import sub-phase."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for name in ["a.jpg", "b.jpg"]:
+        img = Image.new("RGB", (100, 100), "red")
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Find events emitted while ingest was running
+    ingest_running_events = [
+        e[2] for e in runner.events
+        if e[1] == "progress"
+        and e[2].get("stages", {}).get("ingest", {}).get("status") == "running"
+    ]
+    assert len(ingest_running_events) > 0, \
+        "Expected some events emitted while ingest was running"
+    # During ingest, scan should still be pending (not running)
+    for ev in ingest_running_events:
+        scan_status = ev.get("stages", {}).get("scan", {}).get("status")
+        assert scan_status == "pending", \
+            f"scan should be 'pending' while ingest is running, got: {scan_status}"
+
+
+def test_pipeline_collection_mode_marks_scan_skipped(tmp_path, monkeypatch):
+    """In collection mode, stages.scan should be 'skipped' (not stuck
+    on 'pending') so the Scan card renders as resolved."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Create an empty collection to reference
+    coll_id = db.add_collection("test collection", json.dumps([]))
+
+    params = PipelineParams(
+        collection_id=coll_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Check that at least one event shows scan as 'skipped'
+    scan_statuses = {
+        e[2]["stages"]["scan"]["status"]
+        for e in runner.events
+        if e[1] == "progress" and "stages" in e[2] and "scan" in e[2]["stages"]
+    }
+    assert "skipped" in scan_statuses, \
+        f"scan should be 'skipped' in collection mode, saw: {scan_statuses}"

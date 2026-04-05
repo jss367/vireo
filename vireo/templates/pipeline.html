@@ -1529,6 +1529,7 @@ async function startPipeline() {
 
 // Map pipeline stage names to UI card element suffixes
 var _stageToCard = {
+  ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
   previews: 'Previews',
@@ -1540,6 +1541,7 @@ var _stageToCard = {
 
 // Map pipeline stage names to the progress bar element suffixes
 var _stageToProgress = {
+  ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
   previews: 'Previews',
@@ -1559,7 +1561,9 @@ function _formatETA(seconds) {
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
-  // Update stage number badges based on stage status
+  // Update stage number badges based on stage status. "skipped" renders
+  // as complete so cards that don't run (e.g. ingest in scan-in-place
+  // mode) still look resolved rather than pending.
   for (var stageName in stages) {
     var info = stages[stageName];
     var cardSuffix = _stageToCard[stageName];
@@ -1573,46 +1577,48 @@ function _updatePipelineStageUI(p) {
       // Auto-expand the card
       var card = document.getElementById('card-' + cardSuffix.toLowerCase());
       if (card) card.classList.add('expanded');
-    } else if (info.status === 'completed') {
+    } else if (info.status === 'completed' || info.status === 'skipped') {
       numEl.className = 'stage-num complete';
     }
   }
 
-  // Update the progress bar for the currently-active stage
-  var progressSuffix = null;
-  // Find the running stage that has a progress bar
-  for (var sName in _stageToProgress) {
-    if (stages[sName] && stages[sName].status === 'running') {
-      progressSuffix = _stageToProgress[sName];
-      break;
-    }
+  // Route the progress event to the correct card via p.stage_id (set
+  // by the backend). Stages can run concurrently (scan + thumbnails),
+  // so explicit routing is required to keep their bars separate.
+  // Events without stage_id are stage-status broadcasts from
+  // _update_stages and should not clobber card-specific phase labels.
+  if (!p.stage_id) return;
+  var progressSuffix = _stageToProgress[p.stage_id];
+  if (!progressSuffix) return;
+
+  var progressWrap = document.getElementById('progress' + progressSuffix);
+  var fill = document.getElementById('fill' + progressSuffix);
+  var text = document.getElementById('text' + progressSuffix);
+  var status = document.getElementById('status' + progressSuffix);
+
+  var parts = [];
+  if (p.phase) parts.push(p.phase);
+  if (p.total > 0 && p.current > 0) {
+    parts.push(p.current.toLocaleString() + ' / ' + p.total.toLocaleString());
   }
+  if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
+  if (p.eta_seconds != null && p.eta_seconds > 0) {
+    parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
+  } else if (p.total > 0 && p.current > 0 && p.current < 10) {
+    parts.push('Estimating...');
+  }
+  if (p.current_file) parts.push(p.current_file);
+  var label = parts.join(' \u2014 ');
 
-  if (progressSuffix && p.total > 0) {
-    var progressWrap = document.getElementById('progress' + progressSuffix);
-    var fill = document.getElementById('fill' + progressSuffix);
-    var text = document.getElementById('text' + progressSuffix);
-    var status = document.getElementById('status' + progressSuffix);
+  // Always update the status line so indeterminate phases like
+  // "Discovering files..." are visible even before the bar has a total.
+  if (status) status.textContent = label;
 
+  if (p.total > 0) {
     if (progressWrap) progressWrap.style.display = '';
     var pct = Math.round(p.current / p.total * 100);
     if (fill) fill.style.width = pct + '%';
-
-    var parts = [];
-    if (p.phase) parts.push(p.phase);
-    if (p.total > 0 && p.current > 0) {
-      parts.push(p.current.toLocaleString() + ' / ' + p.total.toLocaleString());
-    }
-    if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
-    if (p.eta_seconds != null && p.eta_seconds > 0) {
-      parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
-    } else if (p.current > 0 && p.current < 10) {
-      parts.push('Estimating...');
-    }
-    if (p.current_file) parts.push(p.current_file);
-    var label = parts.join(' \u2014 ');
     if (text) text.textContent = label;
-    if (status) status.textContent = label;
   }
 }
 
@@ -1628,6 +1634,13 @@ function _onPipelineComplete(result) {
     document.getElementById('txtSource').textContent = 'Collection selected';
   } else {
     document.getElementById('txtSource').textContent = _sourceFolders.length + ' folder(s)';
+  }
+  // If the ingest progress bar was shown (copy mode), finalize it.
+  var fillSource = document.getElementById('fillSource');
+  if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
+    fillSource.style.width = '100%';
+    var statusSourceEl = document.getElementById('statusSource');
+    if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
   }
 
   // Scan card
