@@ -3082,8 +3082,7 @@ function closeRelocateBrowser() {
 
 async function browseRelocate(path) {
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
-  const resp = await safeFetch(url);
-  const data = await resp.json();
+  const data = await safeFetch(url);
   _relocateBrowserPath = data.path;
 
   document.getElementById('relocateBreadcrumb').textContent = data.path;
@@ -3102,12 +3101,11 @@ async function browseRelocate(path) {
 
 async function confirmRelocate() {
   if (!_relocatingFolderId || !_relocateBrowserPath) return;
-  const resp = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
+  const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({path: _relocateBrowserPath}),
   });
-  const data = await resp.json();
   closeRelocateBrowser();
 
   if (data.cascaded && data.cascaded.length > 0) {
