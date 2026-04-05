@@ -3795,9 +3795,14 @@ def create_app(db_path, thumb_cache_dir=None):
             runner.update_step(job["id"], "scan", status="running")
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            def status_cb(message):
+                runner.update_step(job["id"], "scan", current_file=message)
+
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental,
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                status_callback=status_cb,
             )
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",

@@ -154,6 +154,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 runner.update_step(job["id"], "scan",
                                    current_file=os.path.basename(path))
 
+            def status_cb(message):
+                runner.update_step(job["id"], "scan", current_file=message)
+
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -180,6 +183,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 from ingest import ingest as do_ingest
 
                 def ingest_cb(current, total, filename):
+                    runner.update_step(job["id"], "scan",
+                                       current_file=filename,
+                                       progress={"current": current, "total": total})
                     runner.push_event(job["id"], "progress", {
                         "phase": "Importing photos",
                         "current": current,
@@ -225,6 +231,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
+                    status_callback=status_cb,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -236,6 +243,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                         photo_callback=photo_cb,
                         skip_paths=params.exclude_paths,
+                        status_callback=status_cb,
                     )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",

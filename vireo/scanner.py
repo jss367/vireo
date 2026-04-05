@@ -234,7 +234,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -245,6 +245,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
+        status_callback: optional callable(message) for phase status updates
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -252,6 +253,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         return
 
     # Discover all image files
+    if status_callback:
+        status_callback("Discovering files...")
     image_files = sorted(
         f
         for f in root_path.rglob("*")
@@ -263,6 +266,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     total = len(image_files)
     log.info("Found %d images in %s", total, root)
+    if progress_callback:
+        progress_callback(0, total)
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
@@ -359,6 +364,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Batch extract metadata via ExifTool only for files that need processing
     paths_to_extract = [str(ip) for ip in files_to_process]
+    if paths_to_extract and status_callback:
+        status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
 
     for image_path in files_to_process:

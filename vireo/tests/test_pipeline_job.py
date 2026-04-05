@@ -28,6 +28,7 @@ def _make_job():
 class FakeRunner:
     def __init__(self):
         self.events = []
+        self.step_updates = []
 
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
@@ -36,7 +37,7 @@ class FakeRunner:
         pass
 
     def update_step(self, job_id, step_id, **kwargs):
-        pass
+        self.step_updates.append((job_id, step_id, kwargs))
 
 
 def test_pipeline_params_has_skip_classify():
@@ -627,3 +628,91 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     assert "eta_seconds" in last, "Progress event should include eta_seconds"
     assert isinstance(last["rate"], (int, float))
     assert isinstance(last["eta_seconds"], (int, float))
+
+
+def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
+    """Ingest (import) phase should call update_step so the jobs page shows progress."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Create source images
+    src = tmp_path / "source"
+    src.mkdir()
+    for name in ["a.jpg", "b.jpg"]:
+        img = Image.new("RGB", (100, 100), "red")
+        img.save(str(src / name))
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The scan step should have received update_step calls with progress
+    # during the ingest phase (before do_scan runs)
+    scan_progress_updates = [
+        (step_id, kwargs) for _, step_id, kwargs in runner.step_updates
+        if step_id == "scan" and "progress" in kwargs
+        and kwargs["progress"].get("total", 0) > 0
+    ]
+    assert len(scan_progress_updates) > 0, \
+        "Ingest phase should call update_step with progress for the scan step"
+
+
+def test_pipeline_scan_step_gets_status_updates(tmp_path, monkeypatch):
+    """Scanner should report status messages (e.g. 'Discovering files...')
+    via update_step current_file during blocking phases."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    img = Image.new("RGB", (100, 100), "red")
+    img.save(str(photo_dir / "test.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Scanner should have sent a "Discovering files..." status via update_step
+    scan_status_messages = [
+        kwargs.get("current_file", "")
+        for _, step_id, kwargs in runner.step_updates
+        if step_id == "scan" and "current_file" in kwargs
+    ]
+    assert any("Discovering" in msg for msg in scan_status_messages), \
+        f"Expected 'Discovering files...' status update, got: {scan_status_messages[:5]}"
