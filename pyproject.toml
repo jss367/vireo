@@ -28,6 +28,7 @@ dependencies = [
 dev = [
     "pytest>=9.0",
     "pytest-cov>=6.0",
+    "pytest-playwright>=0.7",
     "ruff>=0.11",
 ]
 
@@ -61,6 +62,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "vireo/tests/*" = ["E402", "B011", "F841", "SIM115", "SIM117"]
 "tests/*" = ["E402", "B017", "F841"]
+"tests/e2e/*" = ["E402", "B017", "F841"]
 # -- production code: pre-existing violations, fix in dedicated cleanup PR --
 "vireo/app.py" = ["B007", "F841", "SIM105", "SIM118"]
 "vireo/classifier.py" = ["B905"]
