@@ -564,3 +564,66 @@ def test_pipeline_skip_classify_skips_model_loader(tmp_path, monkeypatch):
     assert last_stages is not None
     assert last_stages["classify"]["status"] == "skipped"
     assert last_stages["model_loader"]["status"] == "skipped"
+
+
+def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
+    """Scan progress events should include rate and eta_seconds fields."""
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    for i in range(12):
+        (src / f"img{i:02d}.jpg").write_bytes(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+
+    runner = JobRunner()
+    progress_events = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress" and data.get("phase") == "Scanning photos":
+            progress_events.append(data)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        source=str(src),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-scan-rate",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(progress_events) > 0, "Expected at least one scan progress event"
+    last = progress_events[-1]
+    assert "rate" in last, "Progress event should include rate"
+    assert "eta_seconds" in last, "Progress event should include eta_seconds"
+    assert isinstance(last["rate"], (int, float))
+    assert isinstance(last["eta_seconds"], (int, float))

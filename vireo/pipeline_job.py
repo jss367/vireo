@@ -154,10 +154,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                elapsed = time.time() - job["_start_time"]
+                rate = round(current / max(elapsed, 0.01) * 60, 1)  # files/min
+                remaining = total - current
+                rate_per_sec = current / max(elapsed, 0.01)
+                eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and current >= 10 else None
                 runner.push_event(job["id"], "progress", {
                     "phase": "Scanning photos",
                     "current": current,
                     "total": total,
+                    "rate": rate,
+                    "eta_seconds": eta,
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
