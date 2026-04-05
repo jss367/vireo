@@ -16,6 +16,25 @@ def _jpeg_bytes(size, color='green'):
     return buf.getvalue()
 
 
+def _jpeg_bytes_with_orientation(size, orientation, color='green'):
+    """Return JPEG bytes encoding an image with the given EXIF orientation tag.
+
+    orientation: integer EXIF orientation value (1–8).
+    The pixel data is stored with dimensions matching `size`, but the EXIF
+    header instructs viewers to apply a rotation/flip.  For example,
+    orientation=6 means "rotate 90° CW", so a (100, 200) stored image
+    should display as (200, 100) after transposition.
+    """
+    from PIL import Image
+
+    img = Image.new('RGB', size, color=color)
+    exif = img.getexif()
+    exif[0x0112] = orientation  # EXIF Orientation tag
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', exif=exif.tobytes())
+    return buf.getvalue()
+
+
 class _FakeRaw:
     """Stand-in for a rawpy raw-file handle, used via monkeypatched imread."""
 
@@ -187,3 +206,37 @@ def test_raw_returns_none_when_no_embedded_and_postprocess_fails(tmp_path, monke
 
     result = load_image(str(nef), max_size=1024)
     assert result is None
+
+
+def test_embedded_jpeg_exif_orientation_applied(tmp_path, monkeypatch):
+    """Embedded JPEG EXIF orientation must be applied so portrait RAWs aren't sideways.
+
+    This is a regression test for the fix to the JPEG-first path: without
+    ImageOps.exif_transpose the returned image could be rotated 90° relative
+    to its correct orientation.  We encode a 100x200 landscape image with
+    EXIF orientation=6 ("rotate 90° CW") and expect the extracted image to
+    come back as 200x100 after transposition.
+    """
+    from image_loader import load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    # Store a 2000x1000 image with EXIF orientation=6 ("rotate 90° CW").
+    # After transposition the correct display dimensions become 1000x2000.
+    # max_size=1920 is smaller than max(2000, 1000)=2000, so the JPEG-first
+    # path is taken (postprocess is skipped entirely).
+    _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes_with_orientation((2000, 1000), orientation=6),
+    ))
+
+    result = load_image(str(nef), max_size=1920)
+
+    assert result is not None
+    assert result.mode == "RGB"
+    # After EXIF transpose (90° CW): 2000×1000 stored → 1000×2000 display.
+    # load_image then thumbnails the longest side (2000) down to 1920,
+    # giving (960, 1920).
+    assert result.size == (960, 1920), (
+        f"Expected (960, 1920) after EXIF orientation transpose + resize, got {result.size}"
+    )
