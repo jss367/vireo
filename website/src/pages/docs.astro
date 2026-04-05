@@ -252,9 +252,14 @@ for (const entry of helpData) {
 <script>
   import Fuse from 'fuse.js';
 
-  const helpData = await fetch('/help.json').then(r => r.json());
+  const items = Array.from(document.querySelectorAll('.faq-item')).map(el => ({
+    question: el.getAttribute('data-question') || '',
+    keywords: (el.getAttribute('data-keywords') || '').split(','),
+    answer: el.getAttribute('data-answer') || '',
+    category: el.getAttribute('data-cat') || ''
+  }));
 
-  const fuse = new Fuse(helpData, {
+  const fuse = new Fuse(items, {
     keys: [
       { name: 'question', weight: 3 },
       { name: 'keywords', weight: 2 },

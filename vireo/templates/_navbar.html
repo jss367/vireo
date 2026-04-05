@@ -1206,7 +1206,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
       // Skip if any overlay or modal is open
-      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open')) return;
+      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active')) return;
 
       for (var shortcutStr in keyToHref) {
         if (matchesShortcut(e, shortcutStr)) {
@@ -1322,7 +1322,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   // Listen for ? key
   document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-    if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open')) return;
+    if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
     // When overlay is open, consume ALL key events so page handlers don't fire
     if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
       if (e.key === 'Escape') {
@@ -2032,7 +2032,7 @@ async function inatDoSubmit() {
 // If adding JS-based navigation shortcuts, guard with:
 //   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); }
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }

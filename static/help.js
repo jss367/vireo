@@ -22,6 +22,9 @@
         includeMatches: true
       });
       renderGrouped(helpData);
+    })
+    .catch(function() {
+      results.innerHTML = '<div class="help-empty">Failed to load help data. Please try again later.</div>';
     });
 
   // Render all entries grouped by category (default state)
@@ -76,6 +79,7 @@
   // Open / close
   window.openHelpModal = function() {
     modal.classList.add('active');
+    document.body.style.overflow = 'hidden';
     input.value = '';
     onSearch();
     input.focus();
@@ -83,6 +87,7 @@
 
   window.closeHelpModal = function() {
     modal.classList.remove('active');
+    document.body.style.overflow = '';
   };
 
   // Close on backdrop click
