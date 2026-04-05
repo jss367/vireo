@@ -1,5 +1,4 @@
 import os
-import socket
 import sys
 import threading
 
@@ -12,13 +11,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
 import config as cfg
 from app import create_app
 from db import Database
-
-
-def _free_port():
-    """Find a free TCP port on localhost."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def seed_e2e_data(db, thumb_dir):
@@ -62,7 +54,7 @@ def seed_e2e_data(db, thumb_dir):
 def live_server(tmp_path, monkeypatch):
     """Start an isolated Flask server with seeded E2E data."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
     thumb_dir = str(tmp_path / "thumbs")
@@ -73,8 +65,8 @@ def live_server(tmp_path, monkeypatch):
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
 
-    port = _free_port()
-    server = make_server("127.0.0.1", port, app)
+    server = make_server("127.0.0.1", 0, app)
+    port = server.socket.getsockname()[1]
     thread = threading.Thread(target=server.serve_forever)
     thread.daemon = True
     thread.start()

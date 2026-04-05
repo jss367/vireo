@@ -37,6 +37,8 @@ include = ["vireo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "vireo/tests"]
+markers = ["e2e: end-to-end browser tests (require Playwright)"]
+addopts = "--ignore=tests/e2e"
 
 [tool.ruff]
 target-version = "py311"
