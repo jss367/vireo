@@ -1795,6 +1795,38 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    @app.route("/api/system/install-exiftool", methods=["POST"])
+    def api_install_exiftool():
+        """Install exiftool via Homebrew."""
+        import shutil
+        import subprocess
+
+        if shutil.which("exiftool"):
+            return jsonify({"success": True, "message": "exiftool is already installed"})
+
+        if not shutil.which("brew"):
+            return jsonify({
+                "success": False,
+                "error": "Homebrew is not installed. Install it from https://brew.sh, then run: brew install exiftool",
+            })
+
+        try:
+            result = subprocess.run(
+                ["brew", "install", "exiftool"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                return jsonify({"success": True, "message": "exiftool installed successfully"})
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"brew install failed: {result.stderr[:500]}",
+                })
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "error": "Installation timed out after 5 minutes"})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
+
     @app.route("/api/classify/config")
     def api_classify_config():
         """Return classifier configuration from model registry."""

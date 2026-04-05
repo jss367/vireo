@@ -289,6 +289,30 @@ def test_readiness_includes_exiftool_status(app_and_db):
         assert isinstance(data["exiftool"]["brew_available"], bool)
 
 
+def test_install_exiftool_endpoint_exists(app_and_db):
+    """Install-exiftool endpoint should exist and return JSON."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        # Should have success or error field
+        assert "success" in data or "error" in data
+
+
+def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
+    """Install endpoint should fail gracefully when brew is not available."""
+    import shutil
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        data = resp.get_json()
+        assert data.get("success") is False
+        assert "brew" in data.get("error", "").lower()
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
