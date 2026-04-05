@@ -3050,8 +3050,7 @@ function closeMissingFoldersModal() {
 }
 
 async function loadMissingFolders() {
-  const resp = await safeFetch('/api/folders/missing');
-  const folders = await resp.json();
+  const folders = await safeFetch('/api/folders/missing');
   const container = document.getElementById('missingFoldersList');
   if (folders.length === 0) {
     container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
