@@ -85,7 +85,7 @@ def test_ingest_defaults_present():
     from config import DEFAULTS
 
     ingest = DEFAULTS["ingest"]
-    assert ingest["folder_template"] == "%Y/%m-%d"
+    assert ingest["folder_template"] == "%Y/%Y-%m-%d"
     assert ingest["skip_duplicates"] is True
     assert ingest["file_types"] == "both"
 

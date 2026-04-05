@@ -43,6 +43,23 @@ def seed_e2e_data(db, thumb_dir):
 
     db.create_workspace("Field Work")
 
+    # Add detections and predictions so the review page has content
+    species_for_photo = [
+        "Red-tailed Hawk", "Red-tailed Hawk", "Red-tailed Hawk",
+        "American Robin", "American Robin",
+    ]
+    for pid, species in zip(photos, species_for_photo, strict=True):
+        det_ids = db.save_detections(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.95, "category": "animal"},
+        ], detector_model="test-detector")
+        db.add_prediction(
+            detection_id=det_ids[0],
+            species=species,
+            confidence=0.92,
+            model="test-classifier",
+        )
+
     return {"photos": photos, "folders": [f1, f2]}
 
 

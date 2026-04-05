@@ -12,7 +12,7 @@ from PIL import Image
 
 def test_build_destination_path_default_template():
     dt = datetime(2026, 3, 28, 14, 30, 0)
-    assert build_destination_path(dt) == "2026/03-28"
+    assert build_destination_path(dt) == "2026/2026-03-28"
 
 
 def test_build_destination_path_custom_template():
@@ -85,6 +85,16 @@ def test_discover_source_files_recursive(tmp_path):
     assert files[0].name == "IMG_001.jpg"
 
 
+def test_discover_source_files_non_recursive(tmp_path):
+    src = tmp_path / "sd_card"
+    _create_test_files(str(src), ["top.jpg"])
+    sub = src / "DCIM"
+    _create_test_files(str(sub), ["nested.jpg"])
+    files = discover_source_files(str(src), file_types="both", recursive=False)
+    assert len(files) == 1
+    assert files[0].name == "top.jpg"
+
+
 def test_discover_source_files_nonexistent_dir():
     files = discover_source_files("/nonexistent/path", file_types="both")
     assert files == []
@@ -109,7 +119,7 @@ def test_ingest_copies_files_to_date_folders(tmp_path):
 
     assert result["copied"] == 1
     assert result["total"] == 1
-    assert (dst / "2026" / "03-28" / "photo.jpg").exists()
+    assert (dst / "2026" / "2026-03-28" / "photo.jpg").exists()
 
 
 def test_ingest_unsorted_fallback(tmp_path):
@@ -195,7 +205,7 @@ def test_ingest_filename_collision(tmp_path):
     ingest(str(src1), str(dst), db=db)
     ingest(str(src2), str(dst), db=db)
 
-    date_folder = dst / "2026" / "03-28"
+    date_folder = dst / "2026" / "2026-03-28"
     files = sorted(f.name for f in date_folder.iterdir())
     assert "IMG_001.jpg" in files
     assert "IMG_001_1.jpg" in files
@@ -296,9 +306,9 @@ def test_ingest_then_scan_end_to_end(tmp_path):
     assert result["failed"] == 0
 
     # Verify folder structure
-    assert (dst / "2026" / "03-25").exists()
-    assert (dst / "2026" / "03-26").exists()
-    assert (dst / "2026" / "03-27").exists()
+    assert (dst / "2026" / "2026-03-25").exists()
+    assert (dst / "2026" / "2026-03-26").exists()
+    assert (dst / "2026" / "2026-03-27").exists()
 
     # Step 2: Scan the destination
     scan(str(dst), db)

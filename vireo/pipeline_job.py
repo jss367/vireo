@@ -33,7 +33,7 @@ class PipelineParams:
     sources: list | None = None
     destination: str | None = None
     file_types: str = "both"
-    folder_template: str = "%Y/%m-%d"
+    folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
     labels_file: str | None = None
     labels_files: list | None = None
@@ -45,6 +45,7 @@ class PipelineParams:
     download_taxonomy: bool = True
     preview_max_size: int = 1920
     exclude_paths: set | None = None
+    recursive: bool = True
 
 
 def _should_abort(abort_event):
@@ -221,6 +222,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         progress_callback=ingest_cb,
                         extra_known_hashes=accumulated_hashes,
                         skip_paths=params.exclude_paths,
+                        recursive=params.recursive,
                     )
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
@@ -250,6 +252,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         photo_callback=photo_cb,
                         skip_paths=params.exclude_paths,
                         status_callback=status_cb,
+                        recursive=params.recursive,
                     )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",

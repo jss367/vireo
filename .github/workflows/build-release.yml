@@ -187,7 +187,21 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev
 
-      # ── Resource monitor (Linux only) ──────────────────────
+      # ── Swap & resource monitor (Linux only) ────────────────
+      # Rust/Tauri release builds can exceed the 7GB RAM on GitHub runners
+      # during linking. A swap file prevents the OOM killer from cancelling
+      # the build.
+      - name: Create swap file
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled:"
+          free -h
+
       - name: Start resource monitor
         if: runner.os == 'Linux'
         shell: bash
@@ -198,6 +212,7 @@ jobs:
           while true; do
             echo "--- $(date -u '+%H:%M:%S') ---"
             free -h | grep Mem
+            free -h | grep Swap
             ps -eo pid,pcpu,pmem,rss,comm --sort=-rss | head -6
             echo ""
             sleep 30
@@ -328,6 +343,10 @@ jobs:
       - name: Build Tauri app (Linux direct)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          # Override global CARGO_BUILD_JOBS — Linux runners have only 7GB RAM
+          # and linking Tauri with 3 parallel jobs can OOM even with swap.
+          CARGO_BUILD_JOBS: "2"
         run: |
           echo "=== Starting Tauri build at $(date -u) ==="
           cd src-tauri
@@ -350,7 +369,7 @@ jobs:
 
       # ── Dump resource monitor (Linux only) ─────────────────
       - name: Dump resource monitor log
-        if: runner.os == 'Linux' && always()
+        if: always() && runner.os == 'Linux'
         shell: bash
         run: |
           kill "$(cat /tmp/resource-monitor.pid)" 2>/dev/null || true

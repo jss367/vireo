@@ -2540,7 +2540,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         for folder in folders:
             root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
-            discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both", recursive=body.get("recursive", True))
             for f in discovered:
                 stat = f.stat()
                 # Determine subfolder relative to the source root
@@ -3969,7 +3969,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
 
         if not source or not destination:
@@ -4151,7 +4151,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
         copy = body.get("copy", True)
         exclude_paths = set(body.get("exclude_paths", []))
@@ -5274,7 +5274,7 @@ def create_app(db_path, thumb_cache_dir=None):
             sources=sources,
             destination=destination,
             file_types=body.get("file_types", "both"),
-            folder_template=body.get("folder_template", "%Y/%m-%d"),
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
             skip_duplicates=body.get("skip_duplicates", True),
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
@@ -5286,6 +5286,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
+            recursive=body.get("recursive", True),
         )
 
         # Auto-skip classify stages if no model is available
