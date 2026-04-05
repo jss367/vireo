@@ -73,6 +73,26 @@ def test_scan_discovers_photos(tmp_path):
     assert filenames == {'img1.jpg', 'img2.jpg', 'img3.jpg'}
 
 
+def test_scan_non_recursive_only_finds_root_photos(tmp_path):
+    """scan(recursive=False) only finds photos in the root folder, not subfolders."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['root.jpg'],
+        'sub': ['sub.jpg'],
+        'sub/deep': ['deep.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'root.jpg'}
+
+
 def test_scan_reads_dimensions(tmp_path):
     """scan() reads image dimensions."""
     from db import Database

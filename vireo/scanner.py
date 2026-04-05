@@ -234,7 +234,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, recursive=True):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -245,6 +245,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
+        recursive: if True (default), scan subfolders; if False, only scan root directory
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -252,9 +253,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         return
 
     # Discover all image files
+    candidates = root_path.rglob("*") if recursive else root_path.iterdir()
     image_files = sorted(
         f
-        for f in root_path.rglob("*")
+        for f in candidates
         if f.is_file()
         and f.suffix.lower() in SUPPORTED_EXTENSIONS
         and not f.name.startswith(".")
