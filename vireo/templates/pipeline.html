@@ -1635,12 +1635,17 @@ function _onPipelineComplete(result) {
   } else {
     document.getElementById('txtSource').textContent = _sourceFolders.length + ' folder(s)';
   }
-  // If the ingest progress bar was shown (copy mode), finalize it.
-  var fillSource = document.getElementById('fillSource');
-  if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
-    fillSource.style.width = '100%';
-    var statusSourceEl = document.getElementById('statusSource');
-    if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+  // If the ingest progress bar was shown (copy mode), finalize it
+  // only on a successful pipeline run. On failure, leave the bar at
+  // its last state so the user can see how far ingest got, and don't
+  // show a misleading "Done!" label for an incomplete import.
+  if (succeeded) {
+    var fillSource = document.getElementById('fillSource');
+    if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
+      fillSource.style.width = '100%';
+      var statusSourceEl = document.getElementById('statusSource');
+      if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+    }
   }
 
   // Scan card
