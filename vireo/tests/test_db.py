@@ -2051,3 +2051,92 @@ def test_check_filename_collisions(db):
     collisions = db.check_filename_collisions([p_src], fid2)
     assert len(collisions) == 1
     assert collisions[0]["filename"] == "bird.jpg"
+
+
+# --- Highlights candidates ---
+
+
+def test_get_highlights_candidates(tmp_path):
+    """get_highlights_candidates returns photos with quality scores, species, and embeddings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/test/folder', name='folder')
+    # Insert photos with varying quality scores
+    for i, qs in enumerate([0.9, 0.7, 0.5, 0.3, None]):
+        pid = db.add_photo(
+            folder_id=fid, filename=f'img{i}.jpg', extension='.jpg',
+            file_size=1000, file_mtime=1000.0,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?", (qs, pid)
+        )
+        if qs is not None and qs >= 0.5:
+            # Add a detection + accepted prediction for photos with decent quality
+            did = db.conn.execute(
+                "INSERT INTO detections (photo_id, workspace_id, detector_confidence) VALUES (?, ?, 0.9)",
+                (pid, db._ws_id()),
+            ).lastrowid
+            db.conn.execute(
+                "INSERT INTO predictions (detection_id, species, confidence, status) VALUES (?, ?, 0.95, 'accepted')",
+                (did, f"Species{i}"),
+            )
+    db.conn.commit()
+
+    # min_quality=0.5 should return 3 photos (0.9, 0.7, 0.5), excluding None and 0.3
+    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.5)
+    assert len(results) == 3
+    # Should be ordered by quality_score DESC
+    scores = [r["quality_score"] for r in results]
+    assert scores == sorted(scores, reverse=True)
+    # Each result should have species field (may be None for unclassified)
+    assert all("species" in dict(r) for r in results)
+
+
+def test_get_highlights_candidates_excludes_rejected(tmp_path):
+    """Flagged-rejected photos are excluded."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/test/folder', name='folder')
+    good_pid = db.add_photo(
+        folder_id=fid, filename='good.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (good_pid,))
+    bad_pid = db.add_photo(
+        folder_id=fid, filename='bad.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.9, flag = 'rejected' WHERE id = ?", (bad_pid,))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert len(results) == 1
+    assert results[0]["filename"] == "good.jpg"
+
+
+# --- Folders with quality data ---
+
+
+def test_get_folders_with_quality_data(tmp_path):
+    """Returns only folders that have photos with quality scores."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Folder with quality data
+    fid1 = db.add_folder('/scored', name='scored')
+    pid1 = db.add_photo(
+        folder_id=fid1, filename='a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid1,))
+    # Folder without quality data
+    fid2 = db.add_folder('/noscores', name='noscores')
+    db.add_photo(
+        folder_id=fid2, filename='b.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    assert len(folders) == 1
+    assert folders[0]["name"] == "scored"
+    assert folders[0]["photo_count"] > 0

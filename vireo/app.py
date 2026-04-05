@@ -27,6 +27,7 @@ from flask import (
     request,
     send_from_directory,
 )
+from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -385,6 +386,10 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/move")
     def move_page():
         return render_template("move.html")
+
+    @app.route("/highlights")
+    def highlights_page():
+        return render_template("highlights.html")
 
     # -- API routes --
 
@@ -1269,6 +1274,82 @@ def create_app(db_path, thumb_cache_dir=None):
                 "total": total,
             }
         )
+
+    # -- Highlights --
+
+    @app.route("/api/highlights")
+    def api_highlights():
+        db = _get_db()
+
+        folders = db.get_folders_with_quality_data()
+        if not folders:
+            return jsonify({
+                "photos": [],
+                "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
+                "folders": [],
+            })
+
+        folder_id = request.args.get("folder_id", type=int)
+        if folder_id is None:
+            folder_id = folders[0]["id"]  # Most recent
+
+        count = request.args.get("count", type=int)
+        max_per_species = request.args.get("max_per_species", 5, type=int)
+        min_quality = request.args.get("min_quality", 0.0, type=float)
+
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        total_in_folder = db.count_filtered_photos(folder_id=folder_id)
+
+        # Adaptive default: 5% clamped to [10, 50]
+        if count is None:
+            count = max(10, min(50, int(len(candidates) * 0.05))) if candidates else 0
+
+        selected = select_highlights(
+            [dict(r) for r in candidates],
+            count=count,
+            max_per_species=max_per_species,
+        )
+
+        # Build species breakdown
+        species_counts = {}
+        for p in selected:
+            sp = p.get("species") or "Unidentified"
+            species_counts[sp] = species_counts.get(sp, 0) + 1
+
+        # Strip binary fields before JSON response
+        photo_list = []
+        for p in selected:
+            out = {k: v for k, v in p.items()
+                   if k not in ("dino_subject_embedding", "dino_global_embedding")}
+            photo_list.append(out)
+
+        return jsonify({
+            "photos": photo_list,
+            "meta": {
+                "total_in_folder": total_in_folder,
+                "eligible": len(candidates),
+                "species_breakdown": species_counts,
+                "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
+            },
+            "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+        })
+
+    @app.route("/api/highlights/save", methods=["POST"])
+    def api_highlights_save():
+        db = _get_db()
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        name = body.get("name", "").strip()
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not name:
+            return json_error("name required")
+
+        rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
+        cid = db.add_collection(name, rules)
+        return jsonify({"ok": True, "id": cid})
 
     # -- Workspace API routes --
 
@@ -2384,6 +2465,103 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify(result)
         except Exception as e:
             return json_error(str(e), 500)
+
+    @app.route("/api/import/folder-preview", methods=["POST"])
+    def api_import_folder_preview():
+        """Discover files in source folders and return metadata for preview."""
+        body = request.get_json(silent=True) or {}
+        folders = body.get("folders", [])
+        file_types = body.get("file_types", [])
+        if not folders:
+            return json_error("folders required", 400)
+
+        from ingest import discover_source_files
+
+        all_files = []
+        multi_source = len(folders) > 1
+
+        # Compute unique display names for each source folder.
+        # Use shortest trailing path segments that are unique across
+        # all sources (e.g. /mnt/cardA/DCIM and /mnt/cardB/DCIM
+        # become cardA/DCIM and cardB/DCIM).
+        root_names = {}
+        if multi_source:
+            parts = [Path(f).parts for f in folders]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for folder_path, suffix in zip(folders, suffixes, strict=True):
+                        root_names[folder_path] = suffix
+                    break
+            else:
+                for folder_path in folders:
+                    root_names[folder_path] = folder_path
+
+        for folder in folders:
+            root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
+            for f in discovered:
+                stat = f.stat()
+                # Determine subfolder relative to the source root
+                try:
+                    rel = f.parent.relative_to(folder)
+                    subfolder = str(rel) if str(rel) != "." else root_name
+                except ValueError:
+                    subfolder = root_name
+                # Prefix with source root name when multiple sources to
+                # prevent collisions (e.g. two cards with DCIM/100CANON)
+                if multi_source and subfolder != root_name:
+                    subfolder = os.path.join(root_name, subfolder)
+
+                all_files.append({
+                    "path": str(f),
+                    "filename": f.name,
+                    "subfolder": subfolder,
+                    "size": stat.st_size,
+                    "extension": f.suffix.lower(),
+                    "mtime": stat.st_mtime,
+                })
+
+        # Build summary
+        type_breakdown = {}
+        total_size = 0
+        for f in all_files:
+            ext = f["extension"]
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += f["size"]
+
+        return jsonify({
+            "total_count": len(all_files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": all_files,
+        })
+
+    @app.route("/api/import/folder-preview/thumbnail")
+    def api_import_folder_preview_thumbnail():
+        """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return json_error("path parameter required", 400)
+        if not os.path.isfile(file_path):
+            return "", 404
+
+        from image_loader import load_image
+        img = load_image(file_path, max_size=200)
+        if img is None:
+            return "", 404
+
+        import io
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        buf.seek(0)
+
+        resp = make_response(buf.read())
+        resp.content_type = "image/jpeg"
+        resp.cache_control.public = True
+        resp.cache_control.max_age = 300  # 5 min — these are ephemeral
+        return resp
 
     # -- Audit API routes --
 
@@ -3555,6 +3733,8 @@ def create_app(db_path, thumb_cache_dir=None):
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(
                     job["id"],
                     "progress",
@@ -3924,6 +4104,7 @@ def create_app(db_path, thumb_cache_dir=None):
         folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
         copy = body.get("copy", True)
+        exclude_paths = set(body.get("exclude_paths", []))
 
         if not source:
             return json_error("source is required")
@@ -3985,6 +4166,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     folder_template=folder_template,
                     skip_duplicates=skip_duplicates,
                     progress_callback=ingest_cb,
+                    skip_paths=exclude_paths or None,
                 )
                 copied_paths = ingest_result.get("copied_paths", [])
                 scan_target = destination
@@ -4003,7 +4185,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb)
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
@@ -5053,6 +5235,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
+            exclude_paths=set(body.get("exclude_paths", [])) or None,
         )
 
         runner = app._job_runner

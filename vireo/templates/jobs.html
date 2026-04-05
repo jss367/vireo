@@ -135,13 +135,21 @@
   font-size: 13px;
 }
 .tree-step-header:hover { background: var(--bg-tertiary); }
-.tree-step-icon {
+.tree-toggle {
+  width: 14px; text-align: center; flex-shrink: 0; font-size: 10px;
+  color: var(--text-muted); transition: transform 0.15s;
+}
+.tree-status-icon {
   width: 18px; text-align: center; flex-shrink: 0; font-size: 12px;
 }
-.tree-step-icon.pending { color: var(--text-ghost); }
-.tree-step-icon.running { color: var(--accent); }
-.tree-step-icon.completed { color: var(--success, #4caf50); }
-.tree-step-icon.failed { color: var(--danger); }
+.tree-status-icon.pending { color: var(--text-ghost); }
+.tree-status-icon.running { color: var(--accent); animation: pulse-step 1.5s ease-in-out infinite; }
+.tree-status-icon.completed { color: var(--success, #4caf50); }
+.tree-status-icon.failed { color: var(--danger); }
+@keyframes pulse-step {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
 .tree-step-label { flex: 1; color: var(--text-primary); }
 .tree-step-label.pending { color: var(--text-ghost); }
 .tree-step-summary { font-size: 12px; color: var(--text-muted); }
@@ -154,6 +162,13 @@
 }
 .tree-step-bar-fill {
   height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+}
+.tree-step-bar-fill.indeterminate {
+  width: 30%; animation: shimmer 1.5s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
 }
 .tree-step-duration {
   font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums;
@@ -273,13 +288,17 @@
     return Math.floor(secs / 86400) + 'd ago';
   }
 
-  function stepIcon(status) {
+  function toggleIcon(isExpanded) {
+    return '<span class="tree-toggle">' + (isExpanded ? '\u25BC' : '\u25B6') + '</span>';
+  }
+
+  function statusIcon(status) {
     switch (status) {
-      case 'pending': return '<span class="tree-step-icon pending">\u25CB</span>';
-      case 'running': return '<span class="tree-step-icon running">\u25BC</span>';
-      case 'completed': return '<span class="tree-step-icon completed">\u2713</span>';
-      case 'failed': return '<span class="tree-step-icon failed">\u2717</span>';
-      default: return '<span class="tree-step-icon pending">\u25CB</span>';
+      case 'pending': return '<span class="tree-status-icon pending">\u25CB</span>';
+      case 'running': return '<span class="tree-status-icon running">\u25CB</span>';
+      case 'completed': return '<span class="tree-status-icon completed">\u2713</span>';
+      case 'failed': return '<span class="tree-status-icon failed">\u2717</span>';
+      default: return '<span class="tree-status-icon pending">\u25CB</span>';
     }
   }
 
@@ -364,15 +383,21 @@
 
     var html = '<div class="tree-step" data-step-id="' + esc(step.id) + '">';
     html += '<div class="tree-step-header" data-toggle-step="' + esc(step.id) + '">';
-    html += stepIcon(step.status);
+    html += toggleIcon(isExpanded);
+    html += statusIcon(step.status);
     html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + esc(step.label) + '</span>';
 
     // 1-3: Progress counts, bar, percentage (for steps with progress)
-    if (step.progress && step.progress.total > 0) {
-      var pct = Math.round((step.progress.current / step.progress.total) * 100);
-      html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ' + step.progress.total.toLocaleString() + '</span>';
-      html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
-      html += '<span class="tree-step-progress-text">' + pct + '%</span>';
+    if (step.progress && step.progress.current > 0) {
+      if (step.progress.total > 0) {
+        var pct = Math.round((step.progress.current / step.progress.total) * 100);
+        html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ' + step.progress.total.toLocaleString() + '</span>';
+        html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
+        html += '<span class="tree-step-progress-text">' + pct + '%</span>';
+      } else {
+        html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ?</span>';
+        html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
+      }
     }
 
     // 7: Summary for completed steps
@@ -420,9 +445,10 @@
         }
       }
 
-      // 4: Current file (from job-level progress, shown on running step)
-      if (isRunning && job.progress && job.progress.current_file) {
-        html += '<div class="tree-step-current-file">' + esc(job.progress.current_file) + '</div>';
+      // 4: Current file (step-level preferred, fall back to job-level)
+      var currentFile = step.current_file || (isRunning && job.progress && job.progress.current_file ? job.progress.current_file : '');
+      if (isRunning && currentFile) {
+        html += '<div class="tree-step-current-file">' + esc(currentFile) + '</div>';
       }
 
       // Error detail
@@ -636,7 +662,7 @@
   function renderDetail(job) {
     var pane = document.getElementById('jobDetailPane');
     pane.innerHTML = '<div style="padding:16px 24px 0;">' + renderJobCard(job) + '</div>';
-    var activeStep = pane.querySelector('.tree-step-icon.running');
+    var activeStep = pane.querySelector('.tree-status-icon.running');
     if (activeStep) activeStep.closest('.tree-step').scrollIntoView({ block: 'nearest' });
   }
 
