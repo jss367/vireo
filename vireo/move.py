@@ -57,7 +57,18 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     if dest_row:
         dest_folder_id = dest_row["id"]
     else:
-        dest_folder_id = db.add_folder(destination, name=os.path.basename(destination))
+        # Insert folder record without auto-linking to workspace (add_folder would auto-link)
+        cur = db.conn.execute(
+            "INSERT OR IGNORE INTO folders (path, name) VALUES (?, ?)",
+            (destination, os.path.basename(destination)),
+        )
+        db.conn.commit()
+        if cur.rowcount > 0:
+            dest_folder_id = cur.lastrowid
+        else:
+            dest_folder_id = db.conn.execute(
+                "SELECT id FROM folders WHERE path = ?", (destination,)
+            ).fetchone()["id"]
     workspace_linked = False
 
     photos_map = db.get_photos_by_ids(photo_ids)
