@@ -8,10 +8,6 @@ from werkzeug.serving import make_server
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vireo'))
 
-import config as cfg
-from app import create_app
-from db import Database
-
 
 def seed_e2e_data(db, thumb_dir):
     """Seed database with data for E2E tests."""
@@ -54,6 +50,12 @@ def seed_e2e_data(db, thumb_dir):
 def live_server(tmp_path, monkeypatch):
     """Start an isolated Flask server with seeded E2E data."""
     monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Import after HOME is patched so top-level logging setup uses tmp_path
+    import config as cfg
+    from app import create_app
+    from db import Database
+
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
 
     db_path = str(tmp_path / "test.db")
