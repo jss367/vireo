@@ -3279,17 +3279,14 @@ def create_app(db_path, thumb_cache_dir=None):
                 size_mb = round(os.path.getsize(weight_files[0]) / 1024 / 1024, 1)
                 info["megadetector_weights_path"] = weight_files[0]
                 info["megadetector_weights_size"] = f"{size_mb} MB"
-                # Validate the weights file is loadable
-                try:
-                    ckpt = torch.load(weight_files[0], map_location="cpu", weights_only=False)
-                    if isinstance(ckpt, dict):
-                        info["megadetector_weights"] = "downloaded"
-                    else:
-                        info["megadetector_weights"] = "corrupt"
-                        info["megadetector_weights_detail"] = "File loads but has unexpected format"
-                except Exception as e:
+                # Lightweight validation — check zip header instead of loading entire checkpoint
+                import zipfile
+
+                if zipfile.is_zipfile(weight_files[0]):
+                    info["megadetector_weights"] = "downloaded"
+                else:
                     info["megadetector_weights"] = "corrupt"
-                    info["megadetector_weights_detail"] = str(e)[:100]
+                    info["megadetector_weights_detail"] = "File is not a valid PyTorch checkpoint"
             else:
                 info["megadetector_weights"] = "not downloaded"
                 info["megadetector_weights_path"] = None
