@@ -52,15 +52,13 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     moved = 0
     errors = []
 
-    # Ensure destination folder record exists and is linked to active workspace
+    # Ensure destination folder record exists (workspace link deferred until first successful move)
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
     if dest_row:
         dest_folder_id = dest_row["id"]
-        # Ensure folder is linked to the active workspace so moved photos remain visible
-        if db._active_workspace_id is not None:
-            db.add_workspace_folder(db._active_workspace_id, dest_folder_id)
     else:
         dest_folder_id = db.add_folder(destination, name=os.path.basename(destination))
+    workspace_linked = False
 
     photos_map = db.get_photos_by_ids(photo_ids)
 
@@ -125,7 +123,12 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
         if not comp_ok:
             continue
 
-        # Verification passed — update DB before deleting originals
+        # Verification passed — link destination folder to workspace on first success
+        if not workspace_linked and db._active_workspace_id is not None:
+            db.add_workspace_folder(db._active_workspace_id, dest_folder_id)
+            workspace_linked = True
+
+        # Update DB before deleting originals
         # This ensures a crash leaves duplicates (safe) rather than orphans
         db.conn.execute(
             "UPDATE photos SET folder_id = ? WHERE id = ?",
