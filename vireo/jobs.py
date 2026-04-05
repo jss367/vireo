@@ -342,7 +342,7 @@ class JobRunner:
                     start = datetime.fromisoformat(step["started_at"])
                     end = datetime.fromisoformat(step["finished_at"])
                     step["duration"] = round((end - start).total_seconds(), 1)
-                for key in ("status", "summary", "error", "progress"):
+                for key in ("status", "summary", "error", "progress", "current_file"):
                     if key in kwargs:
                         step[key] = kwargs[key]
                 break

@@ -10,7 +10,27 @@
 <style>
 /* Page overrides */
 body { padding-bottom: 36px; }
-.content { max-width: 900px; }
+.pipeline-layout {
+  display: flex;
+  gap: 24px;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+.pipeline-left {
+  flex: 0 0 auto;
+  width: 900px;
+  max-width: 900px;
+}
+.pipeline-right {
+  flex: 1 1 300px;
+  min-width: 300px;
+}
+@media (max-width: 1300px) {
+  .pipeline-layout { flex-direction: column; }
+  .pipeline-left { width: 100%; max-width: 900px; }
+  .pipeline-right { width: 100%; max-width: 900px; }
+}
 
 /* Stage cards */
 .stage-card {
@@ -145,6 +165,21 @@ body { padding-bottom: 36px; }
   letter-spacing: 1px;
 }
 
+/* Destination card sections */
+.dest-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dest-option {
+  padding: 4px 0;
+}
+#destCopySection.dimmed {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* Pipeline action bar */
 .pipeline-action-bar {
   margin-top: 8px;
@@ -276,12 +311,127 @@ body { padding-bottom: 36px; }
   border: 1px solid var(--border-color); background: var(--bg-primary);
   color: var(--text-primary); font-family: inherit;
 }
+
+/* Preview panel */
+.preview-panel {
+  background: var(--bg-secondary, #0E2A3D);
+  border: 1px solid var(--border-primary, #14374E);
+  border-radius: 8px;
+  min-height: 400px;
+  position: sticky;
+  top: 60px;
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.preview-summary {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  font-size: 13px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.preview-summary .stat {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.preview-summary .stat-value {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.preview-controls {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-primary, #14374E);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.preview-selected-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.preview-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.preview-folder-group {
+  margin-bottom: 8px;
+}
+.preview-folder-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.preview-folder-header:hover {
+  color: var(--text-primary);
+}
+.preview-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 4px;
+  padding: 0 4px;
+}
+.preview-thumb {
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-tertiary, #14374E);
+  cursor: pointer;
+}
+.preview-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.2s;
+}
+.preview-thumb.skeleton img {
+  display: none;
+}
+.preview-thumb.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-primary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.preview-thumb .thumb-check {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 1;
+  accent-color: var(--accent);
+}
+.preview-thumb.duplicate {
+  opacity: 0.4;
+}
+.preview-error {
+  padding: 16px;
+  font-size: 13px;
+  color: var(--warning, #E5A024);
+}
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
 
-<div class="content">
+<div class="pipeline-layout">
+<div class="pipeline-left">
   <h2 style="margin-bottom:20px;font-size:20px;">Pipeline</h2>
 
   <!-- Card 1: Source -->
@@ -303,13 +453,6 @@ body { padding-bottom: 36px; }
           </div>
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
-              <div class="setting-item">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
-                </label>
-              </div>
-            </div>
-            <div class="setting-row">
               <div class="setting-item" id="folderLabelItem">
                 <div class="setting-label" id="lblFolder">Folders</div>
                 <div style="display:flex;gap:6px;">
@@ -321,19 +464,6 @@ body { padding-bottom: 36px; }
                   <button onclick="addSourceFolder()" class="btn btn-secondary" style="white-space:nowrap;">Add</button>
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
-              </div>
-            </div>
-            <div id="copyOnlyFields" style="display:none;">
-              <div class="setting-row">
-                <div class="setting-item">
-                  <div class="setting-label">Destination</div>
-                  <div style="display:flex;gap:6px;">
-                    <input type="text" class="setting-select" id="cfgDestination"
-                           placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                           oninput="updateStartButton()">
-                    <button onclick="openFolderBrowser()" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
-                  </div>
-                </div>
               </div>
             </div>
             <div class="setting-row" style="align-items:flex-start;">
@@ -369,11 +499,6 @@ body { padding-bottom: 36px; }
                   </div>
                 </div>
               </div>
-              <div class="setting-item" id="skipDuplicatesItem" style="display:none;">
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                  <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
-                </label>
-              </div>
             </div>
           </div>
         </div>
@@ -407,10 +532,85 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Scan & Import -->
+  <!-- Card 2: Destination -->
+  <div class="stage-card" id="card-destination">
+    <div class="stage-header" onclick="toggleCard('destination')">
+      <span class="stage-num" id="numDestination">2</span>
+      <span class="stage-name">Destination</span>
+      <span class="stage-summary" id="summaryDestination"></span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <!-- Section 1: Workspace -->
+      <div class="setting-label">Workspace</div>
+      <div class="dest-section">
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="current" id="radioWsCurrent" checked
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">Current workspace</span>
+            <span style="font-size:13px;color:var(--text-dim);" id="lblCurrentWsName"></span>
+          </label>
+        </div>
+        <div class="dest-option">
+          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+            <input type="radio" name="destWorkspace" value="new" id="radioWsNew"
+                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);">
+            <span style="font-size:13px;font-weight:600;">New workspace</span>
+          </label>
+          <div id="newWsNameRow" style="display:none;margin-top:8px;margin-left:24px;">
+            <input type="text" class="setting-select" id="destNewWsName"
+                   placeholder="e.g. Kenya 2025" style="font-family:inherit;max-width:300px;"
+                   oninput="updateStartButton()">
+            <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
+
+      <!-- Section 2: File Copying -->
+      <div class="setting-label">File Copying</div>
+      <div id="destCopySection">
+        <div class="setting-row">
+          <div class="setting-item">
+            <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()"> Copy photos to another location
+            </label>
+          </div>
+        </div>
+        <div id="copyOnlyFields" style="display:none;">
+          <div class="setting-row">
+            <div class="setting-item">
+              <div class="setting-label">Destination</div>
+              <div style="display:flex;gap:6px;">
+                <input type="text" class="setting-select" id="cfgDestination"
+                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
+                       oninput="updateStartButton()">
+                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+              </label>
+            </div>
+          </div>
+        </div>
+        <div id="destCopyDisabledNote" style="display:none;font-size:12px;color:var(--text-dim);font-style:italic;margin-top:4px;">
+          Not applicable for existing collections
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 3: Scan & Import -->
   <div class="stage-card" id="card-scan">
     <div class="stage-header" onclick="toggleCard('scan')">
-      <span class="stage-num" id="numScan">2</span>
+      <span class="stage-num" id="numScan">3</span>
       <span class="stage-name">Scan &amp; Import</span>
       <span class="stage-summary" id="summaryScan"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -427,10 +627,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 3: Thumbnails & Previews -->
+  <!-- Card 4: Thumbnails & Previews -->
   <div class="stage-card" id="card-previews">
     <div class="stage-header" onclick="toggleCard('previews')">
-      <span class="stage-num" id="numPreviews">3</span>
+      <span class="stage-num" id="numPreviews">4</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
       <span class="stage-summary" id="summaryPreviews"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -459,10 +659,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 4: Classify -->
+  <!-- Card 5: Classify -->
   <div class="stage-card" id="card-classify">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">4</span>
+      <span class="stage-num" id="numClassify">5</span>
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
@@ -503,10 +703,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 5: Extract Features -->
+  <!-- Card 6: Extract Features -->
   <div class="stage-card" id="card-extract">
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">5</span>
+      <span class="stage-num" id="numExtract">6</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
@@ -556,10 +756,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 6: Group & Score -->
+  <!-- Card 7: Group & Score -->
   <div class="stage-card" id="card-group">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">6</span>
+      <span class="stage-num" id="numGroup">7</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
@@ -593,7 +793,37 @@ body { padding-bottom: 36px; }
     <span id="modelWarningText"></span>
     <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
   </div>
+</div><!-- end pipeline-left -->
+
+<div class="pipeline-right">
+  <div class="preview-panel" id="previewPanel">
+    <div class="preview-placeholder" id="previewPlaceholder">
+      <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
+        <div style="font-size:32px;margin-bottom:12px;">&#128247;</div>
+        <div style="font-size:14px;">Select a folder to see a preview</div>
+      </div>
+    </div>
+    <div id="previewContent" style="display:none;">
+      <div class="preview-summary" id="previewSummary"></div>
+      <div class="preview-controls">
+        <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
+          <input type="checkbox" id="chkSelectAll" checked
+                 style="accent-color:var(--accent);"
+                 onchange="toggleSelectAll()"> Select all
+        </label>
+        <span class="preview-selected-count" id="previewSelectedCount"></span>
+      </div>
+      <div class="preview-grid" id="previewGrid"></div>
+    </div>
+    <div class="preview-loading" id="previewLoading" style="display:none;">
+      <div style="text-align:center;padding:40px 20px;color:var(--text-dim);">
+        Loading preview...
+      </div>
+    </div>
+    <div class="preview-error" id="previewError" style="display:none;"></div>
+  </div>
 </div>
+</div><!-- end pipeline-layout -->
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
@@ -651,6 +881,13 @@ function initPipelinePage() {
       console.error('Failed to load pipeline page data:', e);
     });
 
+  // Load active workspace name for Destination card
+  safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
+    if (ws && ws.name) {
+      document.getElementById('lblCurrentWsName').textContent = '(' + ws.name + ')';
+    }
+  });
+
   // Load collections, models, labels, volumes in parallel
   loadCollections();
   loadModels();
@@ -665,6 +902,7 @@ function initPipelinePage() {
     renderSourceFolders();
     selectSourceMode('import');
     updateStartButton();
+    fetchFolderPreview();
   }
 }
 
@@ -681,11 +919,237 @@ async function loadCollections() {
   } catch(e) {}
 }
 
+// -- Card 2: Destination --
+var _destWorkspaceMode = 'current'; // 'current' or 'new'
+
+function onDestWorkspaceChange() {
+  _destWorkspaceMode = document.getElementById('radioWsNew').checked ? 'new' : 'current';
+  document.getElementById('newWsNameRow').style.display = _destWorkspaceMode === 'new' ? '' : 'none';
+  document.getElementById('destWsError').style.display = 'none';
+  if (_destWorkspaceMode === 'new') {
+    document.getElementById('destNewWsName').focus();
+  }
+  updateStartButton();
+}
+
 // -- Card 1: Source --
 var _sourceMode = 'import'; // 'import' or 'collection'
 var _copyMode = false;
 var _sourceWasReady = false;
 var _sourceFolders = [];
+
+// -- Import preview state --
+var _previewData = null;       // response from /api/import/folder-preview
+var _previewSelected = {};     // { filePath: true/false }
+var _previewAbort = null;      // AbortController for in-flight request
+
+function fetchFolderPreview() {
+  // Cancel any in-flight request
+  if (_previewAbort) _previewAbort.abort();
+
+  var folders = _sourceFolders;
+  if (!folders.length || _sourceMode !== 'import') {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  var fileTypes = getIngestFileTypes();
+  if (!fileTypes.length) {
+    showPreviewPlaceholder();
+    return;
+  }
+
+  showPreviewLoading();
+  _previewAbort = new AbortController();
+
+  fetch('/api/import/folder-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folders: folders, file_types: fileTypes }),
+    signal: _previewAbort.signal,
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _previewData = data;
+      // Initialize selection: all checked by default, duplicates unchecked
+      _previewSelected = {};
+      data.files.forEach(function(f) {
+        _previewSelected[f.path] = !f.duplicate;
+      });
+      renderPreview();
+    })
+    .catch(function(err) {
+      if (err.name === 'AbortError') return;
+      showPreviewError('Failed to load preview: ' + err.message);
+    });
+}
+
+function showPreviewPlaceholder() {
+  document.getElementById('previewPlaceholder').style.display = '';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  _previewData = null;
+}
+
+function showPreviewLoading() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = '';
+  document.getElementById('previewError').style.display = 'none';
+}
+
+function showPreviewError(msg) {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewContent').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  var errEl = document.getElementById('previewError');
+  errEl.style.display = '';
+  errEl.textContent = msg;
+}
+
+function renderPreview() {
+  document.getElementById('previewPlaceholder').style.display = 'none';
+  document.getElementById('previewLoading').style.display = 'none';
+  document.getElementById('previewError').style.display = 'none';
+  document.getElementById('previewContent').style.display = '';
+
+  var data = _previewData;
+  if (!data) return;
+
+  // Summary bar
+  var summary = document.getElementById('previewSummary');
+  var sizeStr = formatBytes(data.total_size);
+  var typeStrs = Object.keys(data.type_breakdown).map(function(ext) {
+    return data.type_breakdown[ext] + ' ' + ext.replace('.', '').toUpperCase();
+  });
+  summary.innerHTML =
+    '<span class="stat"><span class="stat-value">' + data.total_count + '</span> photos</span>' +
+    '<span class="stat"><span class="stat-value">' + sizeStr + '</span></span>' +
+    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>' +
+    (data.duplicate_count > 0 ? '<span class="stat"><span class="stat-value">' + data.duplicate_count + '</span> already imported</span>' : '');
+
+  // Group files by subfolder
+  var groups = {};
+  data.files.forEach(function(f) {
+    var key = f.subfolder;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  // Render grid
+  var grid = document.getElementById('previewGrid');
+  grid.innerHTML = '';
+
+  Object.keys(groups).sort().forEach(function(subfolder) {
+    var files = groups[subfolder];
+    var groupEl = document.createElement('div');
+    groupEl.className = 'preview-folder-group';
+
+    // Folder header with checkbox
+    var header = document.createElement('div');
+    header.className = 'preview-folder-header';
+    var folderCheck = document.createElement('input');
+    folderCheck.type = 'checkbox';
+    folderCheck.checked = files.some(function(f) { return _previewSelected[f.path]; });
+    folderCheck.style.accentColor = 'var(--accent)';
+    folderCheck.onchange = function() {
+      files.forEach(function(f) { _previewSelected[f.path] = folderCheck.checked; });
+      renderPreview();
+    };
+    header.appendChild(folderCheck);
+    header.appendChild(document.createTextNode(' ' + subfolder + ' (' + files.length + ')'));
+    groupEl.appendChild(header);
+
+    // Thumbnail grid
+    var thumbsEl = document.createElement('div');
+    thumbsEl.className = 'preview-thumbs';
+    files.forEach(function(f) {
+      var thumb = document.createElement('div');
+      thumb.className = 'preview-thumb skeleton' + (f.duplicate ? ' duplicate' : '');
+      thumb.dataset.path = f.path;
+
+      var check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'thumb-check';
+      check.checked = !!_previewSelected[f.path];
+      check.onchange = function(e) {
+        e.stopPropagation();
+        _previewSelected[f.path] = check.checked;
+        updatePreviewCounts();
+      };
+      thumb.appendChild(check);
+
+      var img = document.createElement('img');
+      img.alt = f.filename;
+      img.loading = 'lazy';
+      thumb.appendChild(img);
+
+      thumbsEl.appendChild(thumb);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+
+  // Set up IntersectionObserver for lazy thumbnail loading
+  setupThumbnailObserver();
+  updatePreviewCounts();
+}
+
+function setupThumbnailObserver() {
+  var grid = document.getElementById('previewGrid');
+  var thumbs = grid.querySelectorAll('.preview-thumb.skeleton');
+
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (!entry.isIntersecting) return;
+      var el = entry.target;
+      var path = el.dataset.path;
+      var img = el.querySelector('img');
+      img.onload = function() { el.classList.remove('skeleton'); };
+      img.onerror = function() { el.classList.remove('skeleton'); };
+      img.src = '/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path);
+      observer.unobserve(el);
+    });
+  }, { root: grid, rootMargin: '200px' });
+
+  thumbs.forEach(function(t) { observer.observe(t); });
+}
+
+function updatePreviewCounts() {
+  if (!_previewData) return;
+  var selected = 0;
+  var total = _previewData.files.length;
+  _previewData.files.forEach(function(f) {
+    if (_previewSelected[f.path]) selected++;
+  });
+  var countEl = document.getElementById('previewSelectedCount');
+  if (selected === total) {
+    countEl.textContent = '';
+  } else {
+    countEl.textContent = selected + ' of ' + total + ' selected';
+  }
+  // Update select-all checkbox
+  var chkAll = document.getElementById('chkSelectAll');
+  chkAll.checked = selected === total;
+  chkAll.indeterminate = selected > 0 && selected < total;
+}
+
+function toggleSelectAll() {
+  var checked = document.getElementById('chkSelectAll').checked;
+  if (_previewData) {
+    _previewData.files.forEach(function(f) { _previewSelected[f.path] = checked; });
+    renderPreview();
+  }
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  var k = 1024;
+  var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
 
 function addSourceFolder() {
   var input = document.getElementById('cfgSourceInput');
@@ -695,12 +1159,14 @@ function addSourceFolder() {
   input.value = '';
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function removeSourceFolder(idx) {
   _sourceFolders.splice(idx, 1);
   renderSourceFolders();
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function renderSourceFolders() {
@@ -715,17 +1181,11 @@ function renderSourceFolders() {
 function onCopyModeChange() {
   _copyMode = document.getElementById('chkCopyPhotos').checked;
   var copyFields = document.getElementById('copyOnlyFields');
-  var skipDup = document.getElementById('skipDuplicatesItem');
-  var lbl = document.getElementById('lblFolder');
 
   if (_copyMode) {
     copyFields.style.display = '';
-    skipDup.style.display = '';
-    lbl.textContent = 'Source Folders';
   } else {
     copyFields.style.display = 'none';
-    skipDup.style.display = 'none';
-    lbl.textContent = 'Folders';
   }
   updateStartButton();
 }
@@ -745,6 +1205,17 @@ function selectSourceMode(mode) {
     importBody.classList.add('dimmed');
     collBody.classList.remove('dimmed');
   }
+
+  var copySection = document.getElementById('destCopySection');
+  var copyNote = document.getElementById('destCopyDisabledNote');
+  if (mode === 'collection') {
+    copySection.classList.add('dimmed');
+    copyNote.style.display = '';
+  } else {
+    copySection.classList.remove('dimmed');
+    copyNote.style.display = 'none';
+  }
+
   updateStartButton();
 }
 
@@ -782,6 +1253,7 @@ function onGroupToggle(group) {
   var children = document.querySelectorAll('input[data-group="' + group + '"]');
   children.forEach(function(cb) { cb.checked = checked; });
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function onExtToggle(group) {
@@ -797,6 +1269,7 @@ function onExtToggle(group) {
   parent.checked = allChecked;
   parent.indeterminate = anyChecked && !allChecked;
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function getIngestFileTypes() {
@@ -819,15 +1292,22 @@ function updateStartButton() {
   if (_sourceMode === 'import') {
     var hasFolders = _sourceFolders.length > 0;
     var anyType = getIngestFileTypes().length > 0;
-    if (_copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      btn.disabled = !hasFolders || !dest || !anyType;
-    } else {
-      btn.disabled = !hasFolders || !anyType;
-    }
+    btn.disabled = !hasFolders || !anyType;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
+  }
+
+  // Destination card validation
+  if (!btn.disabled) {
+    if (_destWorkspaceMode === 'new') {
+      var wsName = document.getElementById('destNewWsName').value.trim();
+      if (!wsName) btn.disabled = true;
+    }
+    if (_sourceMode === 'import' && _copyMode) {
+      var dest = document.getElementById('cfgDestination').value.trim();
+      if (!dest) btn.disabled = true;
+    }
   }
 
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
@@ -836,7 +1316,7 @@ function updateStartButton() {
   if (sourceReady) {
     numSource.classList.add('complete');
     if (!_sourceWasReady) {
-      document.getElementById('card-scan').classList.add('expanded');
+      document.getElementById('card-destination').classList.add('expanded');
     }
   } else {
     numSource.className = 'stage-num';
@@ -881,6 +1361,39 @@ async function startPipeline() {
   _pipelineAbort = false;
   document.getElementById('modelWarningBanner').style.display = 'none';
 
+  // Create new workspace if requested
+  if (_destWorkspaceMode === 'new') {
+    var wsName = document.getElementById('destNewWsName').value.trim();
+    if (!wsName) {
+      document.getElementById('destWsError').textContent = 'Name is required';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+    try {
+      var wsData = await safeFetch('/api/workspaces', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name: wsName })
+      }, { toast: false });
+      // Activate the new workspace
+      await safeFetch('/api/workspaces/' + wsData.id + '/activate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ current_path: window.location.pathname })
+      });
+      // Update the navbar workspace display
+      var wsBtn = document.getElementById('wsDropdownBtn');
+      if (wsBtn) wsBtn.textContent = wsName;
+      document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
+    } catch(e) {
+      document.getElementById('destWsError').textContent = e.message || 'Failed to create workspace';
+      document.getElementById('destWsError').style.display = '';
+      _pipelineRunning = false;
+      return;
+    }
+  }
+
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
   btn.onclick = stopPipeline;
@@ -894,6 +1407,14 @@ async function startPipeline() {
       body.sources = _sourceFolders;
     }
     body.file_types = getIngestFileTypes();
+    // Add excluded paths from preview selection
+    if (_previewData && _previewSelected) {
+      var excluded = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excluded.push(f.path);
+      });
+      if (excluded.length > 0) body.exclude_paths = excluded;
+    }
     if (_copyMode) {
       body.destination = document.getElementById('cfgDestination').value.trim();
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
@@ -935,10 +1456,14 @@ async function startPipeline() {
   }
 
   // Reset all stage cards to pending state
-  ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
+
+  // Destination is a config-only card — mark complete immediately since
+  // workspace creation and copy settings are already resolved at this point.
+  document.getElementById('numDestination').classList.add('complete');
 
   try {
     var data = await safeFetch('/api/jobs/pipeline', {
@@ -1666,6 +2191,7 @@ async function browseForFolder() {
       _sourceFolders.push(path);
       renderSourceFolders();
       updateStartButton();
+      fetchFolderPreview();
       return;
     }
   }
@@ -1810,6 +2336,7 @@ function selectFolder() {
     document.getElementById('cfgDestination').value = _fbSelectedDir;
   }
   updateStartButton();
+  fetchFolderPreview();
   closeFolderBrowser();
 }
 

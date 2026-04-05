@@ -359,3 +359,115 @@ def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
         assert "job_id" in data
         assert "model_warning" in data
         assert "skipped" in data["model_warning"].lower() or "no model" in data["model_warning"].lower()
+
+
+def test_update_step_current_file(app_and_db):
+    """update_step supports current_file field on steps."""
+    from jobs import JobRunner
+    runner = JobRunner.__new__(JobRunner)
+    runner._jobs = {}
+    runner._subscribers = {}
+    runner._lock = __import__('threading').Lock()
+    runner._history_db_path = None
+
+    job_id = "test-cf"
+    runner._jobs[job_id] = {
+        "id": job_id,
+        "steps": [
+            {"id": "scan", "label": "Scan", "status": "running"},
+        ],
+    }
+    runner.update_step(job_id, "scan", current_file="DSC_0001.NEF")
+    assert runner._jobs[job_id]["steps"][0]["current_file"] == "DSC_0001.NEF"
+
+
+def test_scan_step_has_progress(app_and_db, tmp_path):
+    """Scan step reports step-level progress with current/total."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'b.jpg'))
+
+    resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(50):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    scan_step = data['steps'][0]
+    assert scan_step['id'] == 'scan'
+    # After completion, progress should have current == total
+    assert 'progress' in scan_step
+    assert scan_step['progress']['current'] == scan_step['progress']['total']
+    assert scan_step['progress']['total'] >= 2
+
+
+def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
+    """Thumbnail step in pipeline reports step-level progress."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
+
+    resp = client.post('/api/jobs/pipeline', json={
+        'source': scan_dir,
+        'skip_classify': True,
+        'skip_extract_masks': True,
+        'skip_regroup': True,
+    })
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(100):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    thumb_step = next(s for s in data['steps'] if s['id'] == 'thumbnails')
+    assert 'progress' in thumb_step
+    assert thumb_step['progress']['current'] > 0
+
+
+def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
+    """Preview step in pipeline reports step-level progress."""
+    import time
+    app, _ = app_and_db
+    client = app.test_client()
+
+    scan_dir = str(tmp_path / "scanme")
+    os.makedirs(scan_dir)
+    Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
+
+    resp = client.post('/api/jobs/pipeline', json={
+        'source': scan_dir,
+        'skip_classify': True,
+        'skip_extract_masks': True,
+        'skip_regroup': True,
+    })
+    job_id = resp.get_json()['job_id']
+
+    for _ in range(100):
+        resp = client.get(f'/api/jobs/{job_id}')
+        data = resp.get_json()
+        if data['status'] in ('completed', 'failed'):
+            break
+        time.sleep(0.1)
+
+    assert data['status'] == 'completed'
+    preview_step = next(s for s in data['steps'] if s['id'] == 'previews')
+    assert 'progress' in preview_step
+    assert preview_step['progress']['total'] > 0

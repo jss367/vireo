@@ -27,6 +27,7 @@ from flask import (
     request,
     send_from_directory,
 )
+from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -381,6 +382,14 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/jobs")
     def jobs_page():
         return render_template("jobs.html")
+
+    @app.route("/move")
+    def move_page():
+        return render_template("move.html")
+
+    @app.route("/highlights")
+    def highlights_page():
+        return render_template("highlights.html")
 
     # -- API routes --
 
@@ -1265,6 +1274,82 @@ def create_app(db_path, thumb_cache_dir=None):
                 "total": total,
             }
         )
+
+    # -- Highlights --
+
+    @app.route("/api/highlights")
+    def api_highlights():
+        db = _get_db()
+
+        folders = db.get_folders_with_quality_data()
+        if not folders:
+            return jsonify({
+                "photos": [],
+                "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
+                "folders": [],
+            })
+
+        folder_id = request.args.get("folder_id", type=int)
+        if folder_id is None:
+            folder_id = folders[0]["id"]  # Most recent
+
+        count = request.args.get("count", type=int)
+        max_per_species = request.args.get("max_per_species", 5, type=int)
+        min_quality = request.args.get("min_quality", 0.0, type=float)
+
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        total_in_folder = db.count_filtered_photos(folder_id=folder_id)
+
+        # Adaptive default: 5% clamped to [10, 50]
+        if count is None:
+            count = max(10, min(50, int(len(candidates) * 0.05))) if candidates else 0
+
+        selected = select_highlights(
+            [dict(r) for r in candidates],
+            count=count,
+            max_per_species=max_per_species,
+        )
+
+        # Build species breakdown
+        species_counts = {}
+        for p in selected:
+            sp = p.get("species") or "Unidentified"
+            species_counts[sp] = species_counts.get(sp, 0) + 1
+
+        # Strip binary fields before JSON response
+        photo_list = []
+        for p in selected:
+            out = {k: v for k, v in p.items()
+                   if k not in ("dino_subject_embedding", "dino_global_embedding")}
+            photo_list.append(out)
+
+        return jsonify({
+            "photos": photo_list,
+            "meta": {
+                "total_in_folder": total_in_folder,
+                "eligible": len(candidates),
+                "species_breakdown": species_counts,
+                "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
+            },
+            "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+        })
+
+    @app.route("/api/highlights/save", methods=["POST"])
+    def api_highlights_save():
+        db = _get_db()
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        name = body.get("name", "").strip()
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not name:
+            return json_error("name required")
+
+        rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
+        cid = db.add_collection(name, rules)
+        return jsonify({"ok": True, "id": cid})
 
     # -- Workspace API routes --
 
@@ -2357,6 +2442,54 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error(str(e), 500)
         return jsonify({"name": os.path.basename(path), "path": path})
 
+    # -- Move rules API --
+
+    @app.route("/api/move-rules", methods=["GET"])
+    def api_list_move_rules():
+        db = _get_db()
+        rules = db.list_move_rules()
+        return jsonify([dict(r) for r in rules])
+
+    @app.route("/api/move-rules", methods=["POST"])
+    def api_create_move_rule():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        destination = body.get("destination", "").strip()
+        criteria = body.get("criteria", {})
+        if not name or not destination:
+            return json_error("name and destination required")
+        rule_id = db.create_move_rule(name, destination, criteria)
+        return jsonify({"ok": True, "id": rule_id})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
+    def api_update_move_rule(rule_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs = {}
+        if "name" in body:
+            kwargs["name"] = body["name"]
+        if "destination" in body:
+            kwargs["destination"] = body["destination"]
+        if "criteria" in body:
+            kwargs["criteria"] = body["criteria"]
+        db.update_move_rule(rule_id, **kwargs)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
+    def api_delete_move_rule(rule_id):
+        db = _get_db()
+        db.delete_move_rule(rule_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/preview", methods=["POST"])
+    def api_move_rule_preview():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        criteria = body.get("criteria", {})
+        photo_ids = db.query_move_rule_matches(criteria)
+        return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
@@ -2373,6 +2506,103 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify(result)
         except Exception as e:
             return json_error(str(e), 500)
+
+    @app.route("/api/import/folder-preview", methods=["POST"])
+    def api_import_folder_preview():
+        """Discover files in source folders and return metadata for preview."""
+        body = request.get_json(silent=True) or {}
+        folders = body.get("folders", [])
+        file_types = body.get("file_types", [])
+        if not folders:
+            return json_error("folders required", 400)
+
+        from ingest import discover_source_files
+
+        all_files = []
+        multi_source = len(folders) > 1
+
+        # Compute unique display names for each source folder.
+        # Use shortest trailing path segments that are unique across
+        # all sources (e.g. /mnt/cardA/DCIM and /mnt/cardB/DCIM
+        # become cardA/DCIM and cardB/DCIM).
+        root_names = {}
+        if multi_source:
+            parts = [Path(f).parts for f in folders]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for folder_path, suffix in zip(folders, suffixes, strict=True):
+                        root_names[folder_path] = suffix
+                    break
+            else:
+                for folder_path in folders:
+                    root_names[folder_path] = folder_path
+
+        for folder in folders:
+            root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
+            for f in discovered:
+                stat = f.stat()
+                # Determine subfolder relative to the source root
+                try:
+                    rel = f.parent.relative_to(folder)
+                    subfolder = str(rel) if str(rel) != "." else root_name
+                except ValueError:
+                    subfolder = root_name
+                # Prefix with source root name when multiple sources to
+                # prevent collisions (e.g. two cards with DCIM/100CANON)
+                if multi_source and subfolder != root_name:
+                    subfolder = os.path.join(root_name, subfolder)
+
+                all_files.append({
+                    "path": str(f),
+                    "filename": f.name,
+                    "subfolder": subfolder,
+                    "size": stat.st_size,
+                    "extension": f.suffix.lower(),
+                    "mtime": stat.st_mtime,
+                })
+
+        # Build summary
+        type_breakdown = {}
+        total_size = 0
+        for f in all_files:
+            ext = f["extension"]
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += f["size"]
+
+        return jsonify({
+            "total_count": len(all_files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": all_files,
+        })
+
+    @app.route("/api/import/folder-preview/thumbnail")
+    def api_import_folder_preview_thumbnail():
+        """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return json_error("path parameter required", 400)
+        if not os.path.isfile(file_path):
+            return "", 404
+
+        from image_loader import load_image
+        img = load_image(file_path, max_size=200)
+        if img is None:
+            return "", 404
+
+        import io
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        buf.seek(0)
+
+        resp = make_response(buf.read())
+        resp.content_type = "image/jpeg"
+        resp.cache_control.public = True
+        resp.cache_control.max_age = 300  # 5 min — these are ephemeral
+        return resp
 
     # -- Audit API routes --
 
@@ -3544,6 +3774,8 @@ def create_app(db_path, thumb_cache_dir=None):
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(
                     job["id"],
                     "progress",
@@ -3791,6 +4023,118 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify({"job_id": job_id})
 
+    # -- Move job routes --
+
+    @app.route("/api/jobs/move-photos", methods=["POST"])
+    def api_job_move_photos():
+        """Move selected photos to a destination directory."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        destination = body.get("destination", "")
+        rule_id = body.get("rule_id")
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from move import move_photos
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "rate": round(
+                        current / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Moving photos",
+                })
+
+            result = move_photos(
+                db=thread_db,
+                photo_ids=photo_ids,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+            if rule_id:
+                thread_db.touch_move_rule(rule_id)
+
+            return result
+
+        job_id = runner.start(
+            "move-photos", work,
+            config={"photo_ids": photo_ids, "destination": destination},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/move-folder", methods=["POST"])
+    def api_job_move_folder():
+        """Move an entire folder to a destination."""
+        body = request.get_json(silent=True) or {}
+        folder_id = body.get("folder_id")
+        destination = body.get("destination", "")
+
+        if not folder_id:
+            return json_error("folder_id required")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from move import move_folder
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "phase": "Moving folder",
+                })
+
+            return move_folder(
+                db=thread_db,
+                folder_id=folder_id,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+        job_id = runner.start(
+            "move-folder", work,
+            config={"folder_id": folder_id, "destination": destination},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/import-full", methods=["POST"])
     def api_job_import_full():
         """Full-chain import: copy files -> scan -> create collection."""
@@ -3801,6 +4145,7 @@ def create_app(db_path, thumb_cache_dir=None):
         folder_template = body.get("folder_template", "%Y/%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
         copy = body.get("copy", True)
+        exclude_paths = set(body.get("exclude_paths", []))
 
         if not source:
             return json_error("source is required")
@@ -3862,6 +4207,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     folder_template=folder_template,
                     skip_duplicates=skip_duplicates,
                     progress_callback=ingest_cb,
+                    skip_paths=exclude_paths or None,
                 )
                 copied_paths = ingest_result.get("copied_paths", [])
                 scan_target = destination
@@ -3880,7 +4226,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb)
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
@@ -4930,6 +5276,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
+            exclude_paths=set(body.get("exclude_paths", [])) or None,
         )
 
         # Auto-skip classify stages if no model is available

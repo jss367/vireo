@@ -34,6 +34,7 @@ const linuxVersion = '0.6.20';
           label="Download for Windows"
           href={`${releaseUrl(windowsVersion)}/Vireo_${windowsVersion}_x64-setup.exe`}
           version={windowsVersion}
+          note="Not actively supported"
         />
         <DownloadButton
           platform="linux"
@@ -77,6 +78,10 @@ const linuxVersion = '0.6.20';
             <li>4 GB RAM minimum</li>
             <li>500 MB disk space</li>
           </ul>
+          <p class="sysreq__note">
+            Windows is not actively supported at the moment. The installer is available but you may encounter issues.
+            <a href="https://github.com/jss367/vireo/issues/334" target="_blank" rel="noopener">Upvote this issue</a> if you'd like Windows support prioritized.
+          </p>
         </div>
         <div class="sysreq__card">
           <h3>Linux</h3>
@@ -234,6 +239,20 @@ const linuxVersion = '0.6.20';
 
   .sysreq__card li:last-child {
     border-bottom: none;
+  }
+
+  .sysreq__note {
+    font-size: var(--text-sm);
+    color: #64748b;
+    margin-top: var(--space-md);
+    padding-top: var(--space-md);
+    border-top: 1px solid #e2e8f0;
+    line-height: var(--leading-normal);
+  }
+
+  .sysreq__note a {
+    color: var(--color-accent-hover);
+    text-decoration: underline;
   }
 
   /* Quick Start */
