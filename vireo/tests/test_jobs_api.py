@@ -275,6 +275,48 @@ def test_jobs_list_includes_workspace_names(app_and_db):
     assert len(data['workspace_names']) >= 1
 
 
+def test_readiness_includes_exiftool_status(app_and_db):
+    """Readiness endpoint should report exiftool installation status."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.get("/api/classify/readiness")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "exiftool" in data
+        assert "installed" in data["exiftool"]
+        assert "brew_available" in data["exiftool"]
+        assert isinstance(data["exiftool"]["installed"], bool)
+        assert isinstance(data["exiftool"]["brew_available"], bool)
+
+
+def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
+    """Install-exiftool endpoint should exist and return JSON."""
+    import shutil
+    import subprocess
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data.get("success") is True
+
+
+def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
+    """Install endpoint should fail gracefully when brew is not available."""
+    import shutil
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        data = resp.get_json()
+        assert data.get("success") is False
+        assert "brew" in data.get("error", "").lower()
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
@@ -297,6 +339,30 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
         data = resp.get_json()
         assert "job_id" in data
         assert data["job_id"].startswith("pipeline-")
+
+
+def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
+    """Pipeline should auto-skip classify/extract/regroup when no model is available."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+    col_id = db.add_collection("Test", json.dumps([]))
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            # Don't set skip_classify — let the auto-skip kick in
+        })
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "job_id" in data
+        assert "model_warning" in data
+        assert "skipped" in data["model_warning"].lower() or "no model" in data["model_warning"].lower()
 
 
 def test_update_step_current_file(app_and_db):

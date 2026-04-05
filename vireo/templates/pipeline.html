@@ -789,6 +789,10 @@ body { padding-bottom: 36px; }
       Start Pipeline
     </button>
   </div>
+  <div id="modelWarningBanner" style="display:none;background:var(--warning,#f0c040);color:#000;padding:8px 14px;border-radius:6px;margin:8px 0;font-size:13px;">
+    <span id="modelWarningText"></span>
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:0 4px;">&times;</button>
+  </div>
 </div><!-- end pipeline-left -->
 
 <div class="pipeline-right">
@@ -1355,6 +1359,7 @@ async function startPipeline() {
   if (_pipelineRunning) return;
   _pipelineRunning = true;
   _pipelineAbort = false;
+  document.getElementById('modelWarningBanner').style.display = 'none';
 
   // Create new workspace if requested
   if (_destWorkspaceMode === 'new') {
@@ -1472,6 +1477,13 @@ async function startPipeline() {
       return;
     }
 
+    // Show model warning banner if returned
+    if (data.model_warning) {
+      var banner = document.getElementById('modelWarningBanner');
+      document.getElementById('modelWarningText').textContent = data.model_warning;
+      banner.style.display = '';
+    }
+
     // Show progress on all cards
     document.getElementById('card-source').classList.add('expanded');
 
@@ -1526,6 +1538,14 @@ var _stageToProgress = {
   regroup: 'Group',
 };
 
+function _formatETA(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.round((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -1570,8 +1590,15 @@ function _updatePipelineStageUI(p) {
 
     var parts = [];
     if (p.phase) parts.push(p.phase);
-    if (p.current > 0) parts.push(p.current + '/' + p.total);
-    if (p.rate) parts.push(p.rate + '/s');
+    if (p.total > 0 && p.current > 0) {
+      parts.push(p.current.toLocaleString() + ' / ' + p.total.toLocaleString());
+    }
+    if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
+    if (p.eta_seconds != null && p.eta_seconds > 0) {
+      parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
+    } else if (p.current > 0 && p.current < 10) {
+      parts.push('Estimating...');
+    }
     if (p.current_file) parts.push(p.current_file);
     var label = parts.join(' \u2014 ');
     if (text) text.textContent = label;
@@ -1875,10 +1902,47 @@ async function updateReadiness() {
       }
     }
 
+    // ExifTool status
+    if (r.exiftool && !r.exiftool.installed) {
+      var exifMsg = '<span style="color:var(--warning,#f0c040);">&#9679;</span> ExifTool: not installed — metadata extraction will be skipped and scanning will be slower. ';
+      if (r.exiftool.brew_available) {
+        exifMsg += '<button onclick="installExiftool(this)" style="background:var(--accent,#24E5CA);color:#000;border:none;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:12px;">Install</button>';
+      } else {
+        exifMsg += 'Install <a href="https://brew.sh" target="_blank" style="color:var(--accent,#24E5CA);">Homebrew</a>, then run <code>brew install exiftool</code>';
+      }
+      items.push(exifMsg);
+    }
+
     panel.innerHTML = items.join('<br>');
     panel.style.display = items.length > 0 ? '' : 'none';
   } catch(e) {
     panel.style.display = 'none';
+  }
+}
+
+async function installExiftool(btn) {
+  var origText = btn.textContent;
+  btn.textContent = 'Installing...';
+  btn.disabled = true;
+  try {
+    var r = await safeFetch('/api/system/install-exiftool', { method: 'POST' }, { toast: false });
+    if (r.success) {
+      btn.textContent = 'Installed!';
+      btn.style.background = 'var(--accent,#24E5CA)';
+      setTimeout(function() { updateReadiness(); }, 1000);
+    } else {
+      btn.textContent = 'Failed';
+      btn.style.background = 'var(--danger,#e74c3c)';
+      btn.title = r.error || 'Installation failed';
+      setTimeout(function() {
+        btn.textContent = 'Retry';
+        btn.disabled = false;
+        btn.style.background = 'var(--accent,#24E5CA)';
+      }, 3000);
+    }
+  } catch(e) {
+    btn.textContent = 'Error';
+    btn.disabled = false;
   }
 }
 

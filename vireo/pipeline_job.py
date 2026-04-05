@@ -157,12 +157,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                elapsed = time.time() - job["_start_time"]
+                rate = round(current / max(elapsed, 0.01) * 60, 1)  # files/min
+                remaining = total - current
+                rate_per_sec = current / max(elapsed, 0.01)
+                eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and current >= 10 else None
                 runner.update_step(job["id"], "scan",
                                    progress={"current": current, "total": total})
                 runner.push_event(job["id"], "progress", {
                     "phase": "Scanning photos",
                     "current": current,
                     "total": total,
+                    "rate": rate,
+                    "eta_seconds": eta,
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
@@ -415,7 +422,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "total": total,
                     "current_file": photo["filename"],
                     "rate": round(
-                        (i + 1) / max(time.time() - job["_start_time"], 0.01), 1
+                        (i + 1) / max(time.time() - job["_start_time"], 0.01) * 60, 1
                     ),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
@@ -613,7 +620,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "phase": "Classifying species",
                     "current": batch_idx,
                     "total": total,
-                    "rate": round(batch_idx / max(time.time() - start_time, 0.01), 1),
+                    "rate": round(batch_idx / max(time.time() - start_time, 0.01) * 60, 1),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
                 stages["classify"]["count"] = batch_idx
@@ -824,7 +831,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "phase": "Extracting features (SAM2 + DINOv2)",
                     "current": i + 1,
                     "total": total,
-                    "rate": round((i + 1) / max(time.time() - start_time, 0.01), 1),
+                    "rate": round((i + 1) / max(time.time() - start_time, 0.01) * 60, 1),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
