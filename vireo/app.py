@@ -3600,6 +3600,8 @@ def create_app(db_path, thumb_cache_dir=None):
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(
                     job["id"],
                     "progress",
