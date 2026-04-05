@@ -73,6 +73,7 @@ def ingest(
     progress_callback=None,
     extra_known_hashes=None,
     skip_paths=None,
+    recursive=True,
 ):
     """Copy and organize photos from source to destination.
 
@@ -93,7 +94,7 @@ def ingest(
     Returns:
         dict with counts: copied, skipped_duplicate, failed, total
     """
-    files = discover_source_files(source_dir, file_types)
+    files = discover_source_files(source_dir, file_types, recursive=recursive)
     if skip_paths:
         files = [f for f in files if str(f) not in skip_paths]
     total = len(files)

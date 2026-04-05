@@ -2540,7 +2540,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         for folder in folders:
             root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
-            discovered = discover_source_files(folder, file_types=file_types if file_types else "both")
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both", recursive=body.get("recursive", True))
             for f in discovered:
                 stat = f.stat()
                 # Determine subfolder relative to the source root
@@ -5274,6 +5274,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
+            recursive=body.get("recursive", True),
         )
 
         # Auto-skip classify stages if no model is available

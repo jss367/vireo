@@ -45,6 +45,7 @@ class PipelineParams:
     download_taxonomy: bool = True
     preview_max_size: int = 1920
     exclude_paths: set | None = None
+    recursive: bool = True
 
 
 def _should_abort(abort_event):
@@ -209,6 +210,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         progress_callback=ingest_cb,
                         extra_known_hashes=accumulated_hashes,
                         skip_paths=params.exclude_paths,
+                        recursive=params.recursive,
                     )
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
@@ -225,6 +227,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
+                    recursive=params.recursive,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -236,6 +239,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                         photo_callback=photo_cb,
                         skip_paths=params.exclude_paths,
+                        recursive=params.recursive,
                     )
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
