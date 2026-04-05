@@ -1701,6 +1701,13 @@ def create_app(db_path, thumb_cache_dir=None):
             model_source.startswith("hf-hub:") or model_source == "timm"
         )
 
+        import shutil
+
+        exiftool_status = {
+            "installed": shutil.which("exiftool") is not None,
+            "brew_available": shutil.which("brew") is not None,
+        }
+
         # timm models have a fixed class set — no labels needed
         if model_type == "timm":
             return jsonify(
@@ -1713,6 +1720,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "labels_count": 10000,
                     "use_tol": False,
                     "embeddings_cached": True,  # no embeddings to compute
+                    "exiftool": exiftool_status,
                 }
             )
 
@@ -1783,6 +1791,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "labels_count": label_count,
                 "use_tol": use_tol,
                 "embeddings_cached": embeddings_cached,
+                "exiftool": exiftool_status,
             }
         )
 

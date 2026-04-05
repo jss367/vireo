@@ -275,6 +275,20 @@ def test_jobs_list_includes_workspace_names(app_and_db):
     assert len(data['workspace_names']) >= 1
 
 
+def test_readiness_includes_exiftool_status(app_and_db):
+    """Readiness endpoint should report exiftool installation status."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.get("/api/classify/readiness")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "exiftool" in data
+        assert "installed" in data["exiftool"]
+        assert "brew_available" in data["exiftool"]
+        assert isinstance(data["exiftool"]["installed"], bool)
+        assert isinstance(data["exiftool"]["brew_available"], bool)
+
+
 def test_pipeline_job_with_collection_returns_job_id(app_and_db):
     """Pipeline with collection_id should start and return job_id."""
     import json
