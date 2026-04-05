@@ -1361,6 +1361,23 @@ def test_api_browse_photo_counts_skips_missing(app_and_db, tmp_path):
     assert data["counts"][missing] == 0
 
 
+def test_api_browse_photo_counts_skips_non_string_entries(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts skips non-string path entries (no 500)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(real), {}, [], 42, None],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"] == {str(real): 1}
+
+
 def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
     """POST /api/browse/photo-counts only counts files matching requested types."""
     d = tmp_path / "mixed"

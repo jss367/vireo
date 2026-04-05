@@ -2446,7 +2446,11 @@ def create_app(db_path, thumb_cache_dir=None):
         ft = file_types if file_types else "both"
         counts = {}
         for p in paths:
-            if not isinstance(p, str) or not os.path.isdir(p):
+            # Non-string entries (dicts, lists, numbers) can't be dict keys
+            # and aren't valid paths — skip them rather than 500.
+            if not isinstance(p, str):
+                continue
+            if not os.path.isdir(p):
                 counts[p] = 0
                 continue
             try:
