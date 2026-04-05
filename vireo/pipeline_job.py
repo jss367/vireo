@@ -326,7 +326,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
                 processed = generated + skipped + failed
-                scan_total = stages["scan"].get("count", 0) if stages["scan"]["status"] == "completed" else 0
+                # Use scan count directly regardless of whether scan has
+                # completed yet — this avoids the total staying at 0/? when
+                # the thumbnail worker catches up with scan before scan's
+                # status flips to "completed".
+                scan_total = stages["scan"].get("count", 0)
                 runner.update_step(job["id"], "thumbnails",
                                    current_file=os.path.basename(photo_path),
                                    progress={"current": processed, "total": scan_total})
