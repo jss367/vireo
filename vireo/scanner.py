@@ -234,7 +234,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -247,6 +247,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         skip_paths: optional set of absolute path strings to exclude from scanning
         status_callback: optional callable(message) for phase status updates
         recursive: if True (default), scan subfolders; if False, only scan root directory
+        restrict_dirs: optional list of directory paths to scan instead of the
+            full tree. When provided, only files in these directories are
+            discovered (non-recursively), but ``root`` is still used as the
+            folder hierarchy root so parent links are preserved correctly.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -258,15 +262,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     if status_callback:
         status_callback("Discovering files...")
     image_files = []
-    candidates = root_path.rglob("*") if recursive else root_path.iterdir()
-    for checked, f in enumerate(candidates, 1):
-        if checked % 500 == 0 and status_callback:
-            status_callback(f"Discovering files... ({len(image_files)} found)")
-        if (f.is_file()
-                and f.suffix.lower() in SUPPORTED_EXTENSIONS
-                and not f.name.startswith(".")
-                and (skip_paths is None or str(f) not in skip_paths)):
-            image_files.append(f)
+    if restrict_dirs is not None:
+        # Only enumerate files in the specified directories (non-recursive).
+        # root is still used as the folder hierarchy root for _ensure_folder.
+        for d in restrict_dirs:
+            dp = Path(d)
+            if dp.is_dir():
+                for f in dp.iterdir():
+                    if (f.is_file()
+                            and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                            and not f.name.startswith(".")
+                            and (skip_paths is None or str(f) not in skip_paths)):
+                        image_files.append(f)
+    else:
+        candidates = root_path.rglob("*") if recursive else root_path.iterdir()
+        for checked, f in enumerate(candidates, 1):
+            if checked % 500 == 0 and status_callback:
+                status_callback(f"Discovering files... ({len(image_files)} found)")
+            if (f.is_file()
+                    and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                    and not f.name.startswith(".")
+                    and (skip_paths is None or str(f) not in skip_paths)):
+                image_files.append(f)
     image_files.sort()
 
     total = len(image_files)

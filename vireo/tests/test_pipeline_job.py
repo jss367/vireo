@@ -824,7 +824,8 @@ def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatc
 
 
 def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
-    """After ingest, scan should target only destination subfolders, not the entire tree."""
+    """After ingest, scan should use restrict_dirs to target only subfolders
+    that received files, while keeping the destination as root for folder hierarchy."""
     import config as cfg
     from db import Database
     from PIL import Image
@@ -863,25 +864,28 @@ def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
     runner = FakeRunner()
     job = _make_job()
 
-    # Track what roots scan() is called with
-    scan_roots = []
+    # Track scan() calls
+    scan_calls = []
     from unittest.mock import patch
 
     import scanner as scanner_mod
     original_scan = scanner_mod.scan
 
     def tracking_scan(root, *args, **kwargs):
-        scan_roots.append(str(root))
+        scan_calls.append({"root": str(root), "restrict_dirs": kwargs.get("restrict_dirs")})
         return original_scan(root, *args, **kwargs)
 
     with patch.object(scanner_mod, "scan", tracking_scan):
         run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # Scan should NOT have been called with the full destination
-    assert str(dest) not in scan_roots, \
-        f"Scan should target subfolders, not the full destination. Roots: {scan_roots}"
-    # Scan should have been called with subfolder(s) that received copied files
-    assert len(scan_roots) > 0, "Scan should have been called at least once"
-    for root in scan_roots:
-        assert root.startswith(str(dest)), \
-            f"Scan root {root} should be under destination {dest}"
+    # Scan should be called with the destination as root (for folder hierarchy)
+    assert len(scan_calls) > 0, "Scan should have been called"
+    assert scan_calls[-1]["root"] == str(dest), \
+        f"Scan root should be the destination, got: {scan_calls[-1]['root']}"
+    # restrict_dirs should be set to only the subfolders that received files
+    restrict = scan_calls[-1]["restrict_dirs"]
+    assert restrict is not None, "restrict_dirs should be set when files were copied"
+    # The restrict dirs should NOT include the existing subfolder
+    for d in restrict:
+        assert str(existing_folder) != d, \
+            f"restrict_dirs should not include pre-existing folder {existing_folder}"
