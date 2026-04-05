@@ -253,18 +253,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         log.warning("Root path does not exist or is not a directory: %s", root)
         return
 
-    # Discover all image files
+    # Discover all image files (incremental enumeration for progress reporting)
+    log.info("Discovering files in %s ...", root)
     if status_callback:
         status_callback("Discovering files...")
+    image_files = []
     candidates = root_path.rglob("*") if recursive else root_path.iterdir()
-    image_files = sorted(
-        f
-        for f in candidates
-        if f.is_file()
-        and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        and not f.name.startswith(".")
-        and (skip_paths is None or str(f) not in skip_paths)
-    )
+    for checked, f in enumerate(candidates, 1):
+        if checked % 500 == 0 and status_callback:
+            status_callback(f"Discovering files... ({len(image_files)} found)")
+        if (f.is_file()
+                and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                and not f.name.startswith(".")
+                and (skip_paths is None or str(f) not in skip_paths)):
+            image_files.append(f)
+    image_files.sort()
 
     total = len(image_files)
     log.info("Found %d images in %s", total, root)

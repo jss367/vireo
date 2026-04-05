@@ -66,7 +66,7 @@ def _update_stages(runner, job_id, stages):
 def _current_phase(stages):
     """Determine the primary phase label from stage statuses."""
     for name in ["regroup", "extract_masks", "classify", "model_loader",
-                 "previews", "thumbnails", "scan"]:
+                 "previews", "thumbnails", "scan", "ingest"]:
         info = stages.get(name, {})
         if info.get("status") == "running":
             return info.get("label", name)
@@ -91,6 +91,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     errors = job["errors"]  # shared list, append is thread-safe
 
     stages = {
+        "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
         "scan": {"status": "pending", "count": 0, "label": "Scanning photos"},
         "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
         "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
@@ -101,11 +102,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     }
 
     # Define step tracking for the jobs page
-    step_defs = [
+    step_defs = []
+    if params.destination:
+        step_defs.append({"id": "ingest", "label": "Import photos"})
+    step_defs.extend([
         {"id": "scan", "label": "Scan photos"},
         {"id": "thumbnails", "label": "Generate thumbnails"},
         {"id": "previews", "label": "Generate previews"},
-    ]
+    ])
     if not params.skip_classify:
         step_defs.append({"id": "model_loader", "label": "Load models"})
         step_defs.append({"id": "classify", "label": "Classify species"})
@@ -124,6 +128,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     loaded_models = {}  # populated by model_loader thread
 
     skip_scan = collection_id is not None
+
+    # Mark ingest as skipped when not in copy mode so SSE events
+    # don't show a perpetually-pending stage.
+    if not params.destination:
+        stages["ingest"]["status"] = "skipped"
 
     # --- Stage functions ---
 
@@ -187,10 +196,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             sources = params.sources or ([params.source] if params.source else [])
 
             if params.destination:
+                from pathlib import Path
+
                 from ingest import ingest as do_ingest
 
                 def ingest_cb(current, total, filename):
-                    runner.update_step(job["id"], "scan",
+                    stages["ingest"]["count"] = current
+                    runner.update_step(job["id"], "ingest",
                                        current_file=filename,
                                        progress={"current": current, "total": total})
                     runner.push_event(job["id"], "progress", {
@@ -202,15 +214,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     })
 
             if params.destination:
-                # Copy mode: ingest all sources first, then scan destination once.
-                # Scanning inside the loop would rescan the entire destination on
-                # each iteration, re-queuing unchanged files and inflating counts.
-                #
-                # Preserve cross-source duplicate detection: files copied from
-                # earlier sources are not yet in the DB (the scan hasn't run),
-                # so we accumulate their hashes in a shared set and pass it to
-                # each subsequent ingest() call via extra_known_hashes.
+                # Copy mode: ingest all sources first, then scan destination
+                # subfolders that received files.
+                stages["ingest"]["status"] = "running"
+                runner.update_step(job["id"], "ingest", status="running")
+                _update_stages(runner, job["id"], stages)
+
                 accumulated_hashes: set = set()
+                all_copied_paths: list = []
+                total_copied = 0
+                total_skipped = 0
                 for src_folder in sources:
                     result_info = do_ingest(
                         source_dir=src_folder,
@@ -224,6 +237,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         skip_paths=params.exclude_paths,
                         recursive=params.recursive,
                     )
+                    all_copied_paths.extend(result_info.get("copied_paths", []))
+                    total_copied += result_info.get("copied", 0)
+                    total_skipped += result_info.get("skipped_duplicate", 0)
                     # Collect hashes of files just copied so the next source
                     # iteration treats them as known even before the DB scan.
                     if params.skip_duplicates:
@@ -233,14 +249,45 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         for path in result_info.get("copied_paths", []):
                             with contextlib.suppress(Exception):
                                 accumulated_hashes.add(compute_file_hash(path))
-                do_scan(
-                    params.destination, thread_db,
-                    progress_callback=progress_cb,
-                    incremental=True,
-                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                    photo_callback=photo_cb,
-                    status_callback=status_cb,
-                )
+
+                # Mark ingest complete
+                parts = []
+                if total_copied:
+                    parts.append(f"{total_copied} copied")
+                if total_skipped:
+                    parts.append(f"{total_skipped} skipped")
+                stages["ingest"]["status"] = "completed"
+                runner.update_step(job["id"], "ingest", status="completed",
+                                   summary=", ".join(parts) or "0 files")
+                _update_stages(runner, job["id"], stages)
+
+                # Scan only the destination subfolders that received files,
+                # not the entire destination tree.
+                if all_copied_paths:
+                    dest_subfolders = sorted({
+                        str(Path(p).parent) for p in all_copied_paths
+                    })
+                    for subfolder in dest_subfolders:
+                        do_scan(
+                            subfolder, thread_db,
+                            progress_callback=progress_cb,
+                            incremental=True,
+                            extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                            photo_callback=photo_cb,
+                            status_callback=status_cb,
+                            recursive=False,
+                        )
+                else:
+                    # No files copied (all duplicates) — scan full destination
+                    # to pick up existing files.
+                    do_scan(
+                        params.destination, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=True,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        photo_callback=photo_cb,
+                        status_callback=status_cb,
+                    )
             else:
                 # Scan-in-place: scan each source folder independently.
                 for src_folder in sources:
