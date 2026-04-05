@@ -50,6 +50,11 @@ echo "==> Updating Cargo.lock..."
 (cd src-tauri && cargo generate-lockfile)
 echo ""
 
+# --- Run E2E tests ---
+echo "==> Running E2E tests..."
+python -m pytest tests/e2e/ -v
+echo ""
+
 # --- Local build (only when NOT publishing — CI handles publish builds) ---
 if ! $PUBLISH; then
     # Check if full signing credentials are available
