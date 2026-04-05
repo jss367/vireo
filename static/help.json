@@ -1,0 +1,122 @@
+[
+  {
+    "question": "How do I add photos to Vireo?",
+    "category": "Getting Started",
+    "keywords": ["scan", "import", "add", "folder", "photos", "directory"],
+    "answer": "Open Settings and add a folder under Scan Roots. Then go to the Jobs page and click Scan. Vireo will find all supported image files in that folder and its subfolders. First runs download AI models (~500 MB), so give it a few minutes."
+  },
+  {
+    "question": "How do I classify my photos?",
+    "category": "Getting Started",
+    "keywords": ["classify", "identify", "species", "scan", "pipeline", "AI"],
+    "answer": "Run a scan from the Jobs page. The classification pipeline detects subjects, identifies species, and scores quality for every photo. Progress streams in real time in the log panel."
+  },
+  {
+    "question": "How do I review scan results?",
+    "category": "Getting Started",
+    "keywords": ["review", "results", "cull", "keep", "reject", "triage"],
+    "answer": "After a scan completes, every photo gets a label: keep, review, or reject. Open the Cull page to rapidly sort through them using keyboard shortcuts."
+  },
+  {
+    "question": "How do I save my decisions to my photo files?",
+    "category": "Getting Started",
+    "keywords": ["sync", "xmp", "sidecar", "save", "export", "metadata", "lightroom"],
+    "answer": "Use the Sync feature to write changes to XMP sidecar files. This writes standard metadata that Lightroom, Darktable, and other tools can read. Your original image files are never modified."
+  },
+  {
+    "question": "Where are my photos stored?",
+    "category": "Photos",
+    "keywords": ["storage", "location", "files", "disk", "move", "copy"],
+    "answer": "On your filesystem, exactly where you put them. Vireo reads photos in place and never moves, copies, or uploads them. The database is just a cache \u2014 you can rebuild it anytime from your files."
+  },
+  {
+    "question": "Does Vireo modify my original photo files?",
+    "category": "Photos",
+    "keywords": ["modify", "original", "raw", "change", "alter", "safe"],
+    "answer": "No. Metadata is written to XMP sidecar files (.xmp) alongside your photos. Your original image files are never touched."
+  },
+  {
+    "question": "How do I delete or remove a photo?",
+    "category": "Photos",
+    "keywords": ["delete", "remove", "trash", "discard"],
+    "answer": "In Browse view, select a photo and use the reject action. This marks the photo for rejection but does not delete the file from disk. Vireo never deletes your files."
+  },
+  {
+    "question": "How do I move photos to a different folder?",
+    "category": "Photos",
+    "keywords": ["move", "relocate", "organize", "folder", "destination"],
+    "answer": "Use the Move page to relocate photos to a different folder. Select photos and choose a destination. Vireo moves the actual files on disk and updates its database."
+  },
+  {
+    "question": "What is the Pipeline page?",
+    "category": "Classification",
+    "keywords": ["pipeline", "steps", "detection", "classification", "quality", "scoring"],
+    "answer": "The Pipeline page shows you exactly how Vireo processes each photo: subject detection, species classification, and quality scoring. You can see bounding boxes, confidence scores, and quality metrics for any photo."
+  },
+  {
+    "question": "What species can Vireo identify?",
+    "category": "Classification",
+    "keywords": ["species", "identify", "model", "iNaturalist", "birds", "animals"],
+    "answer": "Over 10,000 species, depending on the model. The iNaturalist-trained classifier covers the broadest range. You can run multiple models and compare predictions."
+  },
+  {
+    "question": "How does culling work?",
+    "category": "Culling",
+    "keywords": ["cull", "triage", "sort", "keep", "reject", "review", "quality"],
+    "answer": "The Cull page groups similar photos and lets you quickly decide which to keep. Vireo scores photos on focus, exposure, composition, and noise to suggest the best shots. Use keyboard shortcuts to move through photos rapidly."
+  },
+  {
+    "question": "How do I add keywords to photos?",
+    "category": "Keywords",
+    "keywords": ["keyword", "tag", "label", "taxonomy", "hierarchy"],
+    "answer": "Open the Keywords page to manage your keyword hierarchy. You can add keywords to individual photos or in bulk. Keywords are global \u2014 they're shared across all workspaces."
+  },
+  {
+    "question": "Can I import keywords from Lightroom?",
+    "category": "Keywords",
+    "keywords": ["lightroom", "import", "lrcat", "catalog", "keyword", "hierarchy"],
+    "answer": "Yes. Vireo can import keyword hierarchies from Lightroom catalog files (.lrcat). Your XMP sidecars are also compatible with Lightroom, so you can use both tools on the same library."
+  },
+  {
+    "question": "What are collections?",
+    "category": "Collections",
+    "keywords": ["collection", "group", "album", "organize", "set"],
+    "answer": "Collections let you group photos together regardless of which folder they're in. Collections are workspace-scoped, so each workspace has its own set."
+  },
+  {
+    "question": "What are workspaces?",
+    "category": "Workspaces",
+    "keywords": ["workspace", "scope", "separate", "project", "session"],
+    "answer": "Workspaces let you organize your work into separate contexts. Each workspace has its own predictions, collections, and pending changes. Photos and keywords are shared across all workspaces. A Default workspace is created automatically."
+  },
+  {
+    "question": "How do I create a new workspace?",
+    "category": "Workspaces",
+    "keywords": ["create", "new", "workspace", "add"],
+    "answer": "Go to the Workspace page and click the button to create a new workspace. Give it a name and it's ready to use. You can switch between workspaces from the workspace switcher."
+  },
+  {
+    "question": "Do I need an internet connection?",
+    "category": "Settings",
+    "keywords": ["internet", "offline", "connection", "cloud", "upload", "network"],
+    "answer": "Only for downloading AI models on first use. After that, everything runs locally on your machine. No cloud processing, no uploads, no accounts."
+  },
+  {
+    "question": "Do I need a GPU?",
+    "category": "Settings",
+    "keywords": ["gpu", "cuda", "nvidia", "cpu", "speed", "performance", "hardware"],
+    "answer": "No, but it helps. Classification runs on CPU if no GPU is available \u2014 it's just slower. A CUDA-compatible NVIDIA GPU will significantly speed up large scans."
+  },
+  {
+    "question": "How do I use Vireo with Darktable?",
+    "category": "Settings",
+    "keywords": ["darktable", "editor", "external", "develop", "raw", "processing"],
+    "answer": "Configure the Darktable binary path in Settings. You can then send photos to Darktable for editing, apply styles, and export processed versions."
+  },
+  {
+    "question": "Is Vireo free?",
+    "category": "Settings",
+    "keywords": ["free", "cost", "price", "license", "open source", "MIT"],
+    "answer": "Yes. Vireo is free and open source under the MIT license. You can use it, modify it, and contribute to it."
+  }
+]
