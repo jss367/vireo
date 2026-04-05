@@ -334,8 +334,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             stages["thumbnails"]["status"] = "completed"
             from thumbnails import format_summary as thumb_summary
             thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
+            processed = generated + skipped + failed
             runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
+                               summary=thumb_summary(thumb_result),
+                               progress={"current": processed, "total": processed})
             result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
             errors.append(f"[thumbnails] Fatal: {e}")
