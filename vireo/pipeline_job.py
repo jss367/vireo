@@ -155,6 +155,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 runner.update_step(job["id"], "scan",
                                    current_file=os.path.basename(path))
 
+            def status_cb(message):
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "stages": {k: dict(v) for k, v in stages.items()},
+                })
+
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -181,6 +190,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 from ingest import ingest as do_ingest
 
                 def ingest_cb(current, total, filename):
+                    runner.update_step(job["id"], "scan",
+                                       current_file=filename,
+                                       progress={"current": current, "total": total})
                     runner.push_event(job["id"], "progress", {
                         "phase": "Importing photos",
                         "current": current,
@@ -227,6 +239,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     incremental=True,
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     photo_callback=photo_cb,
+                    status_callback=status_cb,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -238,6 +251,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                         photo_callback=photo_cb,
                         skip_paths=params.exclude_paths,
+                        status_callback=status_cb,
                         recursive=params.recursive,
                     )
             stages["scan"]["status"] = "completed"

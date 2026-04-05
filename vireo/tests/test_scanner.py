@@ -141,7 +141,8 @@ def test_scan_progress_callback(tmp_path):
     progress = []
     scan(root, db, progress_callback=lambda cur, tot: progress.append((cur, tot)))
 
-    assert len(progress) == 3
+    assert len(progress) == 4
+    assert progress[0] == (0, 3)   # initial discovery report
     assert progress[-1] == (3, 3)
 
 
