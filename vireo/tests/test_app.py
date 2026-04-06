@@ -1485,6 +1485,28 @@ def test_api_folder_relocate(app_and_db, tmp_path):
     assert row["path"] == new_path
 
 
+def test_api_folder_relocate_duplicate_path(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate returns 409 when target path is already tracked."""
+    app, db = app_and_db
+
+    # Create two folders with real disk paths
+    dir_a = str(tmp_path / "folder_a")
+    dir_b = str(tmp_path / "folder_b")
+    os.makedirs(dir_a)
+    os.makedirs(dir_b)
+
+    fid_a = db.add_folder(dir_a, name="a")
+    db.add_folder(dir_b, name="b")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
+    db.conn.commit()
+
+    # Try to relocate folder_a to folder_b's path
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid_a}/relocate", json={"path": dir_b})
+    assert resp.status_code == 409
+    assert "already tracked" in resp.get_json()["error"]
+
+
 def test_api_folder_delete(app_and_db):
     """DELETE /api/folders/<id> removes folder and its photos."""
     app, db = app_and_db

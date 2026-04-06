@@ -508,7 +508,10 @@ def create_app(db_path, thumb_cache_dir=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
-        cascaded = db.relocate_folder(folder_id, new_path)
+        try:
+            cascaded = db.relocate_folder(folder_id, new_path)
+        except ValueError as e:
+            return json_error(str(e), 409)
         return jsonify({
             "status": "ok",
             "cascaded": cascaded,
