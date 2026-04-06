@@ -1,6 +1,6 @@
 """Shared ONNX Runtime utilities for model inference.
 
-Provides session creation with automatic hardware provider selection,
+Provides ONNX session creation with automatic hardware provider selection,
 image preprocessing, and common post-processing operations.
 """
 
