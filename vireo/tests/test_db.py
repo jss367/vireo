@@ -1927,6 +1927,38 @@ def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     assert row["status"] == "missing"
 
 
+def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
+    """relocate_folder skips descendants when their ancestor's path conflicts."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/old/root", name="root")
+    child = db.add_folder("/old/root/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/old/root/sub/grand", name="grand", parent_id=child)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    grand_target = os.path.join(new_root, "sub", "grand")
+    os.makedirs(grand_target)  # creates child_target too
+
+    # Add a folder that conflicts with the child's target path
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    # Neither child nor grandchild should be cascaded
+    assert len(cascaded) == 0
+
+    # Both should remain unchanged
+    for fid, expected_path in [(child, "/old/root/sub"), (grand, "/old/root/sub/grand")]:
+        row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+        assert row["path"] == expected_path
+        assert row["status"] == "missing"
+
+
 def test_delete_folder(tmp_path):
     """delete_folder removes folder and its photos from the database."""
     from db import Database
