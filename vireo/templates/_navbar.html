@@ -3098,7 +3098,10 @@ function startRelocate(folderId) {
   browseRelocate(null);
 }
 
+let _quickAccessGen = 0;
+
 async function loadRelocateQuickAccess() {
+  const gen = ++_quickAccessGen;
   const container = document.getElementById('relocateQuickAccess');
   container.innerHTML = '';
 
@@ -3115,6 +3118,7 @@ async function loadRelocateQuickAccess() {
 
   try {
     const data = await safeFetch('/api/browse?path=/Volumes', undefined, {toast: false});
+    if (gen !== _quickAccessGen) return;
     if (data && data.dirs && data.dirs.length > 0) {
       data.dirs.forEach(function(d) {
         container.appendChild(makeQuickBtn('\u{1F4BD} ' + d.name, d.path));
