@@ -837,7 +837,18 @@ class Database:
         under new_path. If they do, relocates them too.
 
         Returns list of child folder dicts that were also relocated.
+        Raises ValueError if new_path is already tracked by another folder.
         """
+        # Check for duplicate path
+        conflict = self.conn.execute(
+            "SELECT id FROM folders WHERE path = ? AND id != ?",
+            (new_path, folder_id),
+        ).fetchone()
+        if conflict:
+            raise ValueError(
+                f"Path is already tracked as folder {conflict['id']}"
+            )
+
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
         ).fetchone()
@@ -858,6 +869,13 @@ class Database:
             relative = child["path"][len(old_path):]  # e.g. "/sub/dir"
             candidate = new_path + relative
             if os.path.exists(candidate):
+                # Skip if another folder already has this path
+                child_conflict = self.conn.execute(
+                    "SELECT id FROM folders WHERE path = ? AND id != ?",
+                    (candidate, child["id"]),
+                ).fetchone()
+                if child_conflict:
+                    continue
                 self.conn.execute(
                     "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
                     (candidate, child["id"]),
