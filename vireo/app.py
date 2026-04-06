@@ -1866,7 +1866,9 @@ def create_app(db_path, thumb_cache_dir=None):
         # Check embedding cache
         embeddings_cached = False
         if model and not use_tol and labels:
-            cache_path = _embedding_cache_path(labels, model.get("model_str", ""))
+            cache_path = _embedding_cache_path(
+                labels, model.get("model_str", ""), model.get("weights_path")
+            )
             embeddings_cached = os.path.exists(cache_path)
 
         return jsonify(
@@ -2278,7 +2280,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 "models": {},
             }
             for m in models:
-                cache_path = _embedding_cache_path(labels, m["model_str"])
+                cache_path = _embedding_cache_path(
+                    labels, m["model_str"], m.get("weights_path")
+                )
                 row["models"][m["id"]] = {
                     "cached": os.path.exists(cache_path),
                     "model_name": m["name"],
@@ -3003,7 +3007,9 @@ def create_app(db_path, thumb_cache_dir=None):
                     from classifier import _embedding_cache_path
 
                     cache_path = _embedding_cache_path(
-                        list(set(species)), active_model["model_str"]
+                        list(set(species)),
+                        active_model["model_str"],
+                        active_model.get("weights_path"),
                     )
                     if not os.path.exists(cache_path):
                         progress_cb(
