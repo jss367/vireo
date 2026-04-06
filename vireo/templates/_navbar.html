@@ -971,6 +971,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <div class="modal-overlay" id="relocateBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select New Location</h3>
+    <div id="relocateOriginalPath" style="font-size:0.85em;color:var(--text-secondary);margin-bottom:8px;word-break:break-all;">Looking for: <strong id="relocateOriginalPathText"></strong></div>
     <div class="relocate-quick-access" id="relocateQuickAccess"></div>
     <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
     <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
@@ -3083,16 +3084,17 @@ async function loadMissingFolders() {
       <div class="missing-folder-path" title="${f.path}">${f.path}</div>
       <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
       <div class="missing-folder-actions">
-        <button onclick="startRelocate(${f.id})">Relocate</button>
+        <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')}')">Relocate</button>
         <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
       </div>
     </div>
   `).join('');
 }
 
-function startRelocate(folderId) {
+function startRelocate(folderId, originalPath) {
   _relocatingFolderId = folderId;
   _relocateBrowserPath = '';
+  document.getElementById('relocateOriginalPathText').textContent = originalPath || '';
   document.getElementById('relocateBrowserModal').classList.add('open');
   loadRelocateQuickAccess();
   browseRelocate(null);
