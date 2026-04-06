@@ -861,11 +861,15 @@ class Database:
 
         # Check missing children for cascade
         cascaded = []
+        skipped_prefixes = []
         children = self.conn.execute(
-            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ?",
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ORDER BY path",
             (old_path + "/%",),
         ).fetchall()
         for child in children:
+            # Skip descendants of conflicted folders
+            if any(child["path"].startswith(p + "/") for p in skipped_prefixes):
+                continue
             relative = child["path"][len(old_path):]  # e.g. "/sub/dir"
             candidate = new_path + relative
             if os.path.exists(candidate):
@@ -875,6 +879,7 @@ class Database:
                     (candidate, child["id"]),
                 ).fetchone()
                 if child_conflict:
+                    skipped_prefixes.append(child["path"])
                     continue
                 self.conn.execute(
                     "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
