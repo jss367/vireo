@@ -134,9 +134,15 @@ def _save_manifest(manifest):
         json.dump(manifest, f, indent=2)
 
 
-def _embedding_cache_path(labels, model_str):
-    """Build a cache file path based on a hash of the labels and model."""
-    key = model_str + "\n" + "\n".join(labels)
+def _embedding_cache_path(labels, model_str, model_dir=None):
+    """Build a cache file path based on a hash of the labels, model, and weights path.
+
+    ``model_dir`` is included so that two models sharing the same ``model_str``
+    but loaded from different directories (e.g. a default install vs. a custom
+    ``weights_path``) produce distinct cache entries and never share embeddings
+    computed with different encoder weights.
+    """
+    key = model_str + "\n" + (model_dir or "") + "\n" + "\n".join(labels)
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
     return os.path.join(CACHE_DIR, f"{digest}.npy")
 
@@ -319,7 +325,7 @@ class Classifier:
 
             self._classes = [cls.strip() for cls in labels]
 
-            cache_path = _embedding_cache_path(labels, model_str)
+            cache_path = _embedding_cache_path(labels, model_str, self._model_dir)
 
             if os.path.exists(cache_path):
                 log.info(
@@ -353,6 +359,7 @@ class Classifier:
                 manifest = _load_manifest()
                 manifest[os.path.basename(cache_path)] = {
                     "model": model_str,
+                    "model_dir": self._model_dir,
                     "label_count": len(labels),
                     "created": datetime.now().isoformat(timespec="seconds"),
                 }
