@@ -3100,17 +3100,27 @@ function startRelocate(folderId) {
 
 async function loadRelocateQuickAccess() {
   const container = document.getElementById('relocateQuickAccess');
-  let html = '<button class="relocate-quick-btn" onclick="browseRelocate(null)">Home</button>';
-  html += '<button class="relocate-quick-btn" onclick="browseRelocate(\'/\')">/ (Root)</button>';
+  container.innerHTML = '';
+
+  function makeQuickBtn(label, path) {
+    const btn = document.createElement('button');
+    btn.className = 'relocate-quick-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', function() { browseRelocate(path); });
+    return btn;
+  }
+
+  container.appendChild(makeQuickBtn('Home', null));
+  container.appendChild(makeQuickBtn('/ (Root)', '/'));
+
   try {
-    const data = await safeFetch('/api/browse?path=/Volumes');
+    const data = await safeFetch('/api/browse?path=/Volumes', {}, { toast: false });
     if (data && data.dirs && data.dirs.length > 0) {
-      html += data.dirs.map(d =>
-        `<button class="relocate-quick-btn" onclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4BD} ${d.name}</button>`
-      ).join('');
+      data.dirs.forEach(function(d) {
+        container.appendChild(makeQuickBtn('\u{1F4BD} ' + d.name, d.path));
+      });
     }
   } catch (e) { /* /Volumes may not exist on non-macOS */ }
-  container.innerHTML = html;
 }
 
 function closeRelocateBrowser() {
