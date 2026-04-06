@@ -168,13 +168,16 @@ def get_models():
     for mid, m in registered.items():
         if not any(km["id"] == mid for km in KNOWN_MODELS):
             path = m.get("weights_path", "")
-            # Custom models: check for any .onnx file in the directory
+            # Custom models: require a .onnx file AND config.json so that
+            # a partial download (missing metadata) is not reported as ready.
             downloaded = False
             if path and os.path.isdir(path):
-                downloaded = any(
+                has_onnx = any(
                     f.endswith(".onnx")
                     for f in os.listdir(path)
                 )
+                has_config = os.path.isfile(os.path.join(path, "config.json"))
+                downloaded = has_onnx and has_config
             elif path and os.path.isfile(path) and path.endswith(".onnx"):
                 downloaded = True
             result.append(

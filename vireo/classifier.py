@@ -260,6 +260,13 @@ class Classifier:
         if pretrained_str and os.path.isdir(pretrained_str):
             self._model_dir = pretrained_str
         else:
+            if pretrained_str:
+                log.warning(
+                    "pretrained_str %r is not a directory; falling back to "
+                    "default model directory for model_str=%r",
+                    pretrained_str,
+                    model_str,
+                )
             dir_name = _MODEL_DIR_MAP.get(model_str)
             if dir_name is None:
                 raise ValueError(
