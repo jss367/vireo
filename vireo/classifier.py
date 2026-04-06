@@ -134,6 +134,33 @@ def _save_manifest(manifest):
         json.dump(manifest, f, indent=2)
 
 
+def _resolve_model_dir(model_str, pretrained_str=None):
+    """Resolve the model directory for a given model_str and optional pretrained_str.
+
+    Mirrors the logic in ``Classifier.__init__`` so callers outside of
+    ``Classifier`` (e.g. app.py cache-status checks) can compute a model
+    directory that exactly matches the one ``Classifier`` would use, ensuring
+    that ``_embedding_cache_path`` produces the same key in both places.
+
+    Args:
+        model_str: model identifier (e.g. ``"ViT-B-16"``).
+        pretrained_str: optional configured ``weights_path`` from the model
+            registry.  When it points to an existing directory it is used as-is,
+            just like ``Classifier.__init__`` does.
+
+    Returns:
+        Resolved absolute path to the model directory, or ``None`` if
+        ``model_str`` is not recognised and ``pretrained_str`` is not a valid
+        directory.
+    """
+    if pretrained_str and os.path.isdir(pretrained_str):
+        return pretrained_str
+    dir_name = _MODEL_DIR_MAP.get(model_str)
+    if dir_name is None:
+        return None
+    return os.path.join(_MODELS_ROOT, dir_name)
+
+
 def _embedding_cache_path(labels, model_str, model_dir=None):
     """Build a cache file path based on a hash of the labels, model, and weights path.
 
