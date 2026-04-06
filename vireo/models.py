@@ -26,6 +26,7 @@ KNOWN_MODELS = [
         "name": "BioCLIP",
         "model_type": "bioclip",
         "model_str": "ViT-B-16",
+        "source": "hf-hub:imageomics/bioclip",
         "hf_subdir": "bioclip-vit-b-16",
         "files": [
             "image_encoder.onnx",
@@ -43,6 +44,7 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "source": "hf-hub:imageomics/bioclip-2",
         "hf_subdir": "bioclip-2",
         "files": [
             "image_encoder.onnx",
@@ -62,6 +64,7 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2.5",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+        "source": "hf-hub:imageomics/bioclip-2.5-vith14",
         "hf_subdir": "bioclip-2.5-vith14",
         "files": [
             "image_encoder.onnx",
@@ -81,6 +84,7 @@ KNOWN_MODELS = [
         "name": "iNat21 (EVA-02 Large)",
         "model_type": "timm",
         "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+        "source": "timm",
         "hf_subdir": "timm-eva02-large-inat21",
         "files": [
             "model.onnx",
