@@ -115,22 +115,20 @@ def _save_config(config):
 
 
 def _check_onnx_downloaded(model_dir, files):
-    """Check if all required ONNX files exist in a model directory.
+    """Check if all required model files exist in a model directory.
 
     Args:
         model_dir: path to the model directory
         files: list of filenames that must be present
 
     Returns:
-        True if the directory exists and contains at least the ONNX files
+        True if the directory exists and contains all required files
     """
     if not os.path.isdir(model_dir):
         return False
-    # At minimum, check that the .onnx files exist
-    onnx_files = [f for f in files if f.endswith(".onnx")]
     return all(
         os.path.isfile(os.path.join(model_dir, f))
-        for f in onnx_files
+        for f in files
     )
 
 
@@ -156,9 +154,11 @@ def get_models():
             reg = registered[km["id"]]
             reg_path = reg.get("weights_path", "")
             if reg_path and os.path.isdir(reg_path):
-                # Check if ONNX files exist at the registered path
-                onnx_files = [f for f in km.get("files", []) if f.endswith(".onnx")]
-                if all(os.path.isfile(os.path.join(reg_path, f)) for f in onnx_files):
+                # Check if all required files exist at the registered path
+                if all(
+                    os.path.isfile(os.path.join(reg_path, f))
+                    for f in km.get("files", [])
+                ):
                     entry["downloaded"] = True
                     entry["weights_path"] = reg_path
 

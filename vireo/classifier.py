@@ -237,8 +237,11 @@ class Classifier:
         labels: list of species/label strings for custom labels mode.
                 If None, uses Tree of Life mode with pre-computed embeddings.
         model_str: model identifier (e.g. "ViT-B-16", "hf-hub:imageomics/bioclip-2")
-        pretrained_str: accepted for API compatibility but ignored (model_str
-                        determines the model directory)
+        pretrained_str: optional path to the model directory. When provided and
+                        pointing to an existing directory it takes precedence over
+                        the default ``~/.vireo/models/<mapped-id>`` location, so
+                        models registered at a custom ``weights_path`` are loaded
+                        from the correct place.
         embedding_progress_callback: optional callable(current, total) for
                                      embedding computation progress
     """
@@ -247,18 +250,23 @@ class Classifier:
         self,
         labels=None,
         model_str="ViT-B-16",
-        pretrained_str=None,  # kept for backward compatibility, not used
+        pretrained_str=None,
         embedding_progress_callback=None,
     ):
-        # Resolve model directory
-        dir_name = _MODEL_DIR_MAP.get(model_str)
-        if dir_name is None:
-            raise ValueError(
-                f"Unknown BioCLIP model: {model_str}. "
-                f"Known models: {list(_MODEL_DIR_MAP.keys())}"
-            )
-
-        self._model_dir = os.path.join(_MODELS_ROOT, dir_name)
+        # Resolve model directory.
+        # pretrained_str may be a configured weights_path (e.g. from a custom
+        # model registration).  Use it directly when it points to an existing
+        # directory so that non-default install locations are respected.
+        if pretrained_str and os.path.isdir(pretrained_str):
+            self._model_dir = pretrained_str
+        else:
+            dir_name = _MODEL_DIR_MAP.get(model_str)
+            if dir_name is None:
+                raise ValueError(
+                    f"Unknown BioCLIP model: {model_str}. "
+                    f"Known models: {list(_MODEL_DIR_MAP.keys())}"
+                )
+            self._model_dir = os.path.join(_MODELS_ROOT, dir_name)
         image_encoder_path = os.path.join(self._model_dir, "image_encoder.onnx")
         text_encoder_path = os.path.join(self._model_dir, "text_encoder.onnx")
         tokenizer_path = os.path.join(self._model_dir, "tokenizer.json")
