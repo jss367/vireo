@@ -1583,7 +1583,6 @@ class Database:
             f"""SELECT f.id as folder_id, f.name, COUNT(DISTINCT p.id) as count
                 FROM photos p
                 {join_clause}
-                JOIN folders f ON f.id = p.folder_id
                 {where}
                 GROUP BY f.id
                 ORDER BY count DESC""",
