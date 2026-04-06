@@ -838,6 +838,27 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   margin-bottom: 8px;
   word-break: break-all;
 }
+.relocate-quick-access {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.relocate-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary, var(--bg));
+  color: var(--text);
+  cursor: pointer;
+}
+.relocate-quick-btn:hover {
+  background: var(--bg-hover);
+}
 .relocate-folder-item {
   padding: 6px 10px;
   cursor: pointer;
@@ -950,6 +971,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <div class="modal-overlay" id="relocateBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select New Location</h3>
+    <div class="relocate-quick-access" id="relocateQuickAccess"></div>
     <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
     <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
     <div class="modal-actions">
@@ -3072,7 +3094,37 @@ function startRelocate(folderId) {
   _relocatingFolderId = folderId;
   _relocateBrowserPath = '';
   document.getElementById('relocateBrowserModal').classList.add('open');
+  loadRelocateQuickAccess();
   browseRelocate(null);
+}
+
+let _quickAccessGen = 0;
+
+async function loadRelocateQuickAccess() {
+  const gen = ++_quickAccessGen;
+  const container = document.getElementById('relocateQuickAccess');
+  container.innerHTML = '';
+
+  function makeQuickBtn(label, path) {
+    const btn = document.createElement('button');
+    btn.className = 'relocate-quick-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', function() { browseRelocate(path); });
+    return btn;
+  }
+
+  container.appendChild(makeQuickBtn('Home', null));
+  container.appendChild(makeQuickBtn('/ (Root)', '/'));
+
+  try {
+    const data = await safeFetch('/api/browse?path=/Volumes', undefined, {toast: false});
+    if (gen !== _quickAccessGen) return;
+    if (data && data.dirs && data.dirs.length > 0) {
+      data.dirs.forEach(function(d) {
+        container.appendChild(makeQuickBtn('\u{1F4BD} ' + d.name, d.path));
+      });
+    }
+  } catch (e) { /* /Volumes may not exist on non-macOS */ }
 }
 
 function closeRelocateBrowser() {
