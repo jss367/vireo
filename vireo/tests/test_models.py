@@ -140,24 +140,18 @@ def test_get_models_includes_custom(tmp_path, monkeypatch):
 
 
 def test_get_models_downloaded_flag(tmp_path, monkeypatch):
-    """A model with existing weights_path is marked as downloaded."""
+    """A model with existing ONNX files is marked as downloaded."""
     import models
 
     cfg_path = str(tmp_path / "models.json")
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    weights = tmp_path / "weights.bin"
-    weights.write_bytes(b"fake weights")
-
-    models._save_config({
-        "models": [{
-            "id": "bioclip-vit-b-16",
-            "name": "BioCLIP",
-            "model_str": "ViT-B-16",
-            "weights_path": str(weights),
-        }],
-        "active_model": None,
-    })
+    # Create model directory with required ONNX files
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx").write_bytes(b"fake")
 
     result = models.get_models()
     bioclip = [m for m in result if m["id"] == "bioclip-vit-b-16"]
@@ -184,19 +178,13 @@ def test_set_and_get_active_model(tmp_path, monkeypatch):
 
     cfg_path = str(tmp_path / "models.json")
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    # Create a "downloaded" model
-    weights = tmp_path / "weights.bin"
-    weights.write_bytes(b"fake")
-    models._save_config({
-        "models": [{
-            "id": "bioclip-vit-b-16",
-            "name": "BioCLIP",
-            "model_str": "ViT-B-16",
-            "weights_path": str(weights),
-        }],
-        "active_model": None,
-    })
+    # Create model directory with required ONNX files
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx").write_bytes(b"fake")
 
     models.set_active_model("bioclip-vit-b-16")
     active = models.get_active_model()
@@ -210,16 +198,16 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
 
     cfg_path = str(tmp_path / "models.json")
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    weights = tmp_path / "weights.bin"
-    weights.write_bytes(b"fake")
+    # Create model directory with required ONNX files
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+
     models._save_config({
-        "models": [{
-            "id": "bioclip-vit-b-16",
-            "name": "BioCLIP",
-            "model_str": "ViT-B-16",
-            "weights_path": str(weights),
-        }],
+        "models": [],
         "active_model": "nonexistent-model",
     })
 
