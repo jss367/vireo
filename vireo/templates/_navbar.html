@@ -838,6 +838,27 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   margin-bottom: 8px;
   word-break: break-all;
 }
+.relocate-quick-access {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.relocate-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary, var(--bg));
+  color: var(--text);
+  cursor: pointer;
+}
+.relocate-quick-btn:hover {
+  background: var(--bg-hover);
+}
 .relocate-folder-item {
   padding: 6px 10px;
   cursor: pointer;
@@ -950,6 +971,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 <div class="modal-overlay" id="relocateBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select New Location</h3>
+    <div class="relocate-quick-access" id="relocateQuickAccess"></div>
     <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
     <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
     <div class="modal-actions">
@@ -3072,7 +3094,23 @@ function startRelocate(folderId) {
   _relocatingFolderId = folderId;
   _relocateBrowserPath = '';
   document.getElementById('relocateBrowserModal').classList.add('open');
+  loadRelocateQuickAccess();
   browseRelocate(null);
+}
+
+async function loadRelocateQuickAccess() {
+  const container = document.getElementById('relocateQuickAccess');
+  let html = '<button class="relocate-quick-btn" onclick="browseRelocate(null)">Home</button>';
+  html += '<button class="relocate-quick-btn" onclick="browseRelocate(\'/\')">/ (Root)</button>';
+  try {
+    const data = await safeFetch('/api/browse?path=/Volumes');
+    if (data && data.dirs && data.dirs.length > 0) {
+      html += data.dirs.map(d =>
+        `<button class="relocate-quick-btn" onclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4BD} ${d.name}</button>`
+      ).join('');
+    }
+  } catch (e) { /* /Volumes may not exist on non-macOS */ }
+  container.innerHTML = html;
 }
 
 function closeRelocateBrowser() {
