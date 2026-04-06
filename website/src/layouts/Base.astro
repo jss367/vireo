@@ -15,10 +15,16 @@ const base = import.meta.env.BASE_URL;
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script is:inline>
+    (function() {
+      var theme = localStorage.getItem('vireo-website-theme');
+      if (theme) document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content={description} />
-  <meta name="theme-color" content="#001B29" />
+  <meta name="theme-color" content="#171410" />
 
   <link rel="icon" type="image/png" href={`${base}favicon.png`} />
   <link rel="apple-touch-icon" href={`${base}apple-touch-icon.png`} />

@@ -48,6 +48,8 @@ fn build_about_metadata() -> tauri::menu::AboutMetadata<'static> {
         .name(Some("Vireo"))
         .version(Some(env!("CARGO_PKG_VERSION")))
         .comments(Some("AI-powered wildlife photo organizer"))
+        .website(Some("https://github.com/jss367/vireo"))
+        .website_label(Some("GitHub"))
         .license(Some("MIT"))
         .build()
 }

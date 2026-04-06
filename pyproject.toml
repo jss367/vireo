@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vireo"
-version = "0.6.4"
+version = "0.6.26"
 description = "AI-powered wildlife photo organizer"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,6 +17,7 @@ dependencies = [
     "rawpy>=0.26.1",
     "requests>=2.32.0",
     "scipy>=1.17.1",
+    "send2trash>=1.8.0",
     "tokenizers>=0.21.0",
 ]
 
@@ -33,6 +34,7 @@ export = [
 dev = [
     "pytest>=9.0",
     "pytest-cov>=6.0",
+    "pytest-playwright>=0.7",
     "ruff>=0.11",
 ]
 
@@ -41,6 +43,8 @@ include = ["vireo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "vireo/tests"]
+markers = ["e2e: end-to-end browser tests (require Playwright)"]
+addopts = "--ignore=tests/e2e"
 
 [tool.ruff]
 target-version = "py311"
@@ -66,6 +70,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "vireo/tests/*" = ["E402", "B011", "F841", "SIM115", "SIM117"]
 "tests/*" = ["E402", "B017", "F841"]
+"tests/e2e/*" = ["E402", "B017", "F841"]
 # -- production code: pre-existing violations, fix in dedicated cleanup PR --
 "vireo/app.py" = ["B007", "F841", "SIM105", "SIM118"]
 "vireo/classifier.py" = ["B905"]

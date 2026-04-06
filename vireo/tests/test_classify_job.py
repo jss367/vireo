@@ -39,6 +39,12 @@ class FakeRunner:
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
 
+    def set_steps(self, job_id, steps):
+        pass
+
+    def update_step(self, job_id, step_id, **kwargs):
+        pass
+
 
 def _make_job(job_id="classify-test"):
     return {
@@ -173,8 +179,7 @@ def test_detect_subjects_returns_detection_map(tmp_path):
     img.save(img_path)
 
     photos = [
-        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
-         "detection_box": None, "detection_conf": None},
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10},
     ]
     folders = {10: str(tmp_path)}
 
@@ -183,6 +188,10 @@ def test_detect_subjects_returns_detection_map(tmp_path):
         "confidence": 0.95,
         "category": "animal",
     }
+
+    mock_db = MagicMock()
+    mock_db.get_existing_detection_photo_ids.return_value = set()
+    mock_db.save_detections.return_value = [101]
 
     with patch("classify_job.detect_animals", return_value=[fake_detection]), \
          patch("classify_job.get_primary_detection", return_value=fake_detection), \
@@ -193,17 +202,20 @@ def test_detect_subjects_returns_detection_map(tmp_path):
             runner=runner,
             job=job,
             reclassify=False,
-            db=MagicMock(),
+            db=mock_db,
         )
 
     assert detected == 1
     assert 1 in detection_map
-    assert detection_map[1]["confidence"] == 0.95
+    # detection_map now returns a list of detection dicts per photo
+    assert isinstance(detection_map[1], list)
+    assert len(detection_map[1]) == 1
+    assert detection_map[1][0]["confidence"] == 0.95
+    assert detection_map[1][0]["id"] == 101
 
 
 def test_detect_subjects_skips_existing_detections(tmp_path):
-    """Phase 5: skips photos that already have detection_box (unless reclassify)."""
-    import json as _json
+    """Phase 5: skips photos that already have detections in the DB (unless reclassify)."""
     from unittest.mock import MagicMock, patch
 
     from classify_job import _detect_subjects
@@ -212,13 +224,19 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
     job = _make_job()
 
     photos = [
-        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
-         "detection_box": _json.dumps({"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}),
-         "detection_conf": 0.9},
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10},
     ]
     folders = {10: str(tmp_path)}
 
-    # detect_animals should NOT be called since photo already has detection
+    mock_db = MagicMock()
+    # Photo 1 already has detections in the database
+    mock_db.get_existing_detection_photo_ids.return_value = {1}
+    mock_db.get_detections.return_value = [
+        {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
+         "detector_confidence": 0.9, "category": "animal"},
+    ]
+
+    # detect_animals should NOT be called since photo already has detections
     with patch("classify_job.detect_animals") as mock_detect:
         detection_map, detected = _detect_subjects(
             photos=photos,
@@ -226,12 +244,14 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
             runner=runner,
             job=job,
             reclassify=False,
-            db=MagicMock(),
+            db=mock_db,
         )
 
     mock_detect.assert_not_called()
     assert detected == 1
     assert 1 in detection_map
+    assert isinstance(detection_map[1], list)
+    assert detection_map[1][0]["id"] == 101
 
 
 def test_detect_subjects_graceful_on_import_error():
@@ -256,7 +276,147 @@ def test_detect_subjects_graceful_on_import_error():
     assert detected == 0
 
 
-# ── Task 4: _classify_photos tests ───────────────────────────────────────────
+# ── Task 4: Multi-detection pipeline tests ───────────────────────────────────
+
+
+def test_detect_batch_stores_all_detections(tmp_path):
+    """_detect_batch should store all detections, not just the primary."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "multi.jpg", ".jpg", 1000, 1234567890.0)
+    # Verify that save_detections stores all detections
+    detections_list = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
+        {"box": {"x": 0.3, "y": 0.5, "w": 0.15, "h": 0.2}, "confidence": 0.60, "category": "animal"},
+    ]
+    det_ids = db.save_detections(pid, detections_list, detector_model="MDV6")
+    assert len(det_ids) == 3
+    stored = db.get_detections(pid)
+    assert len(stored) == 3
+
+
+def test_detect_batch_returns_all_detections(tmp_path):
+    """_detect_batch should return a list of all detections per photo, not just primary."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_batch
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Create a real test image
+    img = Image.new("RGB", (200, 200), color="green")
+    img_path = str(tmp_path / "bird.jpg")
+    img.save(img_path)
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10},
+    ]
+    folders = {10: str(tmp_path)}
+
+    fake_detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.80, "category": "animal"},
+    ]
+
+    mock_db = MagicMock()
+    mock_db.save_detections.return_value = [101, 102]
+
+    with patch("classify_job.detect_animals", return_value=fake_detections), \
+         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.compute_sharpness", return_value=50.0):
+        detection_map, detected = _detect_batch(
+            photos=photos,
+            folders=folders,
+            runner=runner,
+            job=job,
+            reclassify=False,
+            db=mock_db,
+            already_detected_ids=set(),
+        )
+
+    assert detected == 1
+    assert 1 in detection_map
+    assert isinstance(detection_map[1], list)
+    assert len(detection_map[1]) == 2
+    assert detection_map[1][0]["id"] == 101
+    assert detection_map[1][0]["box_x"] == 0.1
+    assert detection_map[1][1]["id"] == 102
+    assert detection_map[1][1]["box_x"] == 0.5
+    mock_db.save_detections.assert_called_once()
+
+
+def test_classify_photos_iterates_over_detections(tmp_path):
+    """_classify_photos should classify each detection independently."""
+    from unittest.mock import MagicMock, patch
+
+    import numpy as np
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Create a test image
+    img = Image.new("RGB", (200, 200), color="red")
+    img_path = tmp_path / "multi.jpg"
+    img.save(str(img_path))
+
+    photos = [
+        {"id": 1, "filename": "multi.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+    # Two detections for photo 1
+    detection_map = {
+        1: [
+            {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.3, "box_h": 0.3,
+             "confidence": 0.95, "category": "animal"},
+            {"id": 102, "box_x": 0.5, "box_y": 0.5, "box_w": 0.2, "box_h": 0.2,
+             "confidence": 0.80, "category": "animal"},
+        ]
+    }
+    existing_preds = set()
+
+    fake_embedding = np.ones(512, dtype=np.float32)
+    fake_preds_1 = [{"species": "Northern Cardinal", "score": 0.95, "taxonomy": None}]
+    fake_preds_2 = [{"species": "Blue Jay", "score": 0.88, "taxonomy": None}]
+
+    mock_clf = MagicMock()
+    mock_clf.classify_batch_with_embedding.return_value = [
+        (fake_preds_1, fake_embedding),
+        (fake_preds_2, fake_embedding),
+    ]
+
+    mock_db = MagicMock()
+    mock_db.get_photo_embedding.return_value = None
+
+    with patch("classify_job.load_image", return_value=Image.new("RGB", (200, 200))):
+        raw_results, failed, skipped = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=existing_preds,
+            clf=mock_clf,
+            model_type="bioclip",
+            model_name="BioCLIP",
+            runner=runner,
+            job=job,
+            db=mock_db,
+        )
+
+    assert len(raw_results) == 2
+    assert raw_results[0]["detection_id"] == 101
+    assert raw_results[0]["prediction"] == "Northern Cardinal"
+    assert raw_results[1]["detection_id"] == 102
+    assert raw_results[1]["prediction"] == "Blue Jay"
+    assert failed == 0
+    assert skipped == 0
+
+
+# ── _classify_photos tests ──────────────────────────────────────────────────
 
 
 def test_classify_photos_new_photo(tmp_path):
@@ -335,6 +495,7 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_db.get_prediction_for_photo.return_value = {
         "species": "Northern Cardinal",
         "confidence": 0.95,
+        "detection_id": 101,
     }
     mock_db.get_photo_embedding.return_value = None
 
@@ -357,7 +518,177 @@ def test_classify_photos_skips_existing(tmp_path):
     mock_clf.classify_with_embedding.assert_not_called()
 
 
-# ── Task 5: _store_grouped_predictions tests ─────────────────────────────────
+# ── Top-N predictions tests ────────────────────────────────────────────────
+
+
+def test_flush_batch_stores_top_n_predictions(tmp_path):
+    """_flush_batch keeps top_k predictions per image, not just top-1."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    # Classifier returns 5 ranked predictions
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+        {"species": "Finch", "score": 0.10, "taxonomy": None},
+        {"species": "Wren", "score": 0.03, "taxonomy": None},
+        {"species": "Jay", "score": 0.02, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results, top_k=3)
+    assert failed == 0
+    assert len(raw_results) == 1
+
+    item = raw_results[0]
+    # Should have top prediction as before
+    assert item["prediction"] == "Robin"
+    assert item["confidence"] == 0.70
+    # Should also have alternatives list
+    assert "alternatives" in item
+    assert len(item["alternatives"]) == 2
+    assert item["alternatives"][0]["species"] == "Sparrow"
+    assert item["alternatives"][1]["species"] == "Finch"
+
+
+def test_flush_batch_top_k_1_has_empty_alternatives():
+    """_flush_batch with top_k=1 (default) produces empty alternatives list."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    failed = _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert failed == 0
+    assert len(raw_results) == 1
+    assert raw_results[0]["alternatives"] == []
+
+
+def test_flush_batch_default_top_k_is_one():
+    """Default top_k=1 preserves backward-compatible behavior (no alternatives)."""
+    from unittest.mock import MagicMock
+
+    from classify_job import _flush_batch
+
+    db = MagicMock()
+    raw_results = []
+
+    all_preds = [
+        {"species": "Robin", "score": 0.70, "taxonomy": None},
+        {"species": "Sparrow", "score": 0.15, "taxonomy": None},
+    ]
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [(all_preds, None)]
+
+    batch = [{
+        "photo": {"id": 1, "filename": "bird.jpg", "timestamp": None},
+        "detection_id": 10,
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "img": MagicMock(),
+    }]
+
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+    assert len(raw_results) == 1
+    assert raw_results[0]["prediction"] == "Robin"
+    assert raw_results[0]["alternatives"] == []
+
+
+# ── Top-N: _store_grouped_predictions alternatives tests ─────────────────────
+
+
+def test_store_grouped_predictions_saves_alternatives(tmp_path):
+    """_store_grouped_predictions stores alternatives with status='alternative'."""
+    from unittest.mock import patch
+
+    from classify_job import _store_grouped_predictions
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+
+    raw_results = [{
+        "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},
+        "detection_id": det_ids[0],
+        "folder_path": "/photos",
+        "image_path": "/photos/bird.jpg",
+        "prediction": "Robin",
+        "confidence": 0.85,
+        "timestamp": None,
+        "filename": "bird.jpg",
+        "embedding": None,
+        "taxonomy": None,
+        "alternatives": [
+            {"species": "Sparrow", "confidence": 0.10, "taxonomy": None},
+            {"species": "Finch", "confidence": 0.05, "taxonomy": None},
+        ],
+    }]
+
+    with patch("xmp.read_keywords", return_value=[]), \
+         patch("compare.categorize", return_value="new"):
+        result = _store_grouped_predictions(
+            raw_results=raw_results,
+            job_id="test-job-123456",
+            model_name="test-model",
+            grouping_window=10,
+            similarity_threshold=0.85,
+            tax=None,
+            db=db,
+        )
+
+    assert result["predictions_stored"] == 1
+
+    all_preds = db.get_predictions()
+    assert len(all_preds) == 3  # 1 pending + 2 alternatives
+
+    pending = db.get_predictions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["species"] == "Robin"
+
+    alts = db.get_predictions(status="alternative")
+    assert len(alts) == 2
+    alt_species = {p["species"] for p in alts}
+    assert alt_species == {"Sparrow", "Finch"}
+
+
+# ── _store_grouped_predictions tests ─────────────────────────────────────────
 
 
 def test_store_grouped_predictions_single_photo():
@@ -371,6 +702,7 @@ def test_store_grouped_predictions_single_photo():
     raw_results = [
         {
             "photo": {"id": 1, "filename": "bird.jpg"},
+            "detection_id": 101,
             "folder_path": "/photos",
             "prediction": "Northern Cardinal",
             "confidence": 0.95,
@@ -396,7 +728,7 @@ def test_store_grouped_predictions_single_photo():
     mock_db.add_prediction.assert_called_once()
     call_kwargs = mock_db.add_prediction.call_args[1]
     assert call_kwargs["species"] == "Northern Cardinal"
-    assert call_kwargs["photo_id"] == 1
+    assert call_kwargs["detection_id"] == 101
 
 
 def test_store_grouped_predictions_burst_group():
@@ -411,6 +743,7 @@ def test_store_grouped_predictions_burst_group():
     raw_results = [
         {
             "photo": {"id": 1, "filename": "bird1.jpg"},
+            "detection_id": 101,
             "folder_path": "/photos",
             "prediction": "Northern Cardinal",
             "confidence": 0.95,
@@ -421,6 +754,7 @@ def test_store_grouped_predictions_burst_group():
         },
         {
             "photo": {"id": 2, "filename": "bird2.jpg"},
+            "detection_id": 102,
             "folder_path": "/photos",
             "prediction": "Northern Cardinal",
             "confidence": 0.90,
@@ -468,8 +802,7 @@ def test_run_classify_job_full_pipeline(tmp_path):
     mock_db_instance = MagicMock()
     mock_db_instance.get_collection_photos.return_value = [
         {"id": 1, "filename": "bird.jpg", "folder_id": 10,
-         "timestamp": "2024-01-15T10:00:00",
-         "detection_box": None, "detection_conf": None},
+         "timestamp": "2024-01-15T10:00:00"},
     ]
     mock_db_instance.get_folder_tree.return_value = [
         {"id": 10, "path": str(tmp_path), "name": "test"},

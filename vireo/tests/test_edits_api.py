@@ -334,8 +334,11 @@ def test_accept_prediction_records_history(app_and_db):
     photos = db.get_photos()
     pid = photos[0]['id']
 
-    db.add_prediction(pid, 'Blue Jay', 0.95, 'test-model')
-    preds = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchall()
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Blue Jay', 0.95, 'test-model')
+    preds = db.get_predictions(photo_ids=[pid])
     pred_id = preds[0]['id']
 
     resp = client.post(f'/api/predictions/{pred_id}/accept')
@@ -354,8 +357,11 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     photos = db.get_photos()
     pid = photos[0]['id']
 
-    db.add_prediction(pid, 'Blue Jay', 0.95, 'test-model')
-    pred = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchone()
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Blue Jay', 0.95, 'test-model')
+    pred = db.get_predictions(photo_ids=[pid])[0]
     pred_id = pred['id']
 
     # Accept
@@ -392,8 +398,9 @@ def test_reject_prediction_records_history(app_and_db):
     photos = db.get_photos()
     pid = photos[0]['id']
 
-    db.add_prediction(pid, 'House Sparrow', 0.60, 'test-model')
-    preds = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchall()
+    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'House Sparrow', 0.60, 'test-model')
+    preds = db.get_predictions(photo_ids=[pid])
     pred_id = preds[0]['id']
 
     resp = client.post(f'/api/predictions/{pred_id}/reject')
@@ -527,9 +534,10 @@ def test_undo_skips_non_undoable_entries(app_and_db):
     assert db.get_photo(pid)['rating'] == 5
 
     # Create a non-undoable entry (reject prediction)
-    db.add_prediction(pid, 'House Sparrow', 0.60, 'test-model')
-    pred = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchall()[-1]
-    client.post(f'/api/predictions/{pred["id"]}/reject')
+    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'House Sparrow', 0.60, 'test-model')
+    preds = db.get_predictions(photo_ids=[pid])
+    client.post(f'/api/predictions/{preds[-1]["id"]}/reject')
 
     # History has 2 entries: prediction_reject (most recent) and rating
     history = db.get_edit_history()
@@ -557,9 +565,10 @@ def test_undo_status_skips_non_undoable(app_and_db):
     client.post(f'/api/photos/{pid}/rating', json={'rating': 5})
 
     # Create a non-undoable entry on top
-    db.add_prediction(pid, 'Crow', 0.50, 'test-model')
-    pred = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchall()[-1]
-    client.post(f'/api/predictions/{pred["id"]}/reject')
+    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Crow', 0.50, 'test-model')
+    preds = db.get_predictions(photo_ids=[pid])
+    client.post(f'/api/predictions/{preds[-1]["id"]}/reject')
 
     # Undo status should show the rating edit, not the reject
     resp = client.get('/api/undo/status')
@@ -577,9 +586,10 @@ def test_undo_nothing_when_only_non_undoable(app_and_db):
     pid = photos[0]['id']
 
     # Only non-undoable entries
-    db.add_prediction(pid, 'Robin', 0.70, 'test-model')
-    pred = db.conn.execute("SELECT id FROM predictions WHERE photo_id = ?", (pid,)).fetchone()
-    client.post(f'/api/predictions/{pred["id"]}/reject')
+    det_ids = db.save_detections(pid, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Robin', 0.70, 'test-model')
+    preds = db.get_predictions(photo_ids=[pid])
+    client.post(f'/api/predictions/{preds[0]["id"]}/reject')
 
     resp = client.post('/api/undo')
     assert resp.status_code == 400  # "nothing to undo"

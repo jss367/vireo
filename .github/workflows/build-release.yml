@@ -13,10 +13,13 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 env:
   PYTHON_VERSION: "3.14"
   NODE_VERSION: "20"
+  # Limit parallel Rust compilation to avoid OOM on 7GB GitHub runners
+  CARGO_BUILD_JOBS: "3"
 
 jobs:
   build:
@@ -27,7 +30,7 @@ jobs:
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             label: macos-arm64
-          - os: macos-13
+          - os: macos-15-intel
             rust-target: x86_64-apple-darwin
             label: macos-x86_64
           - os: windows-latest
@@ -38,6 +41,7 @@ jobs:
             label: linux-x86_64
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     name: Build (${{ matrix.label }})
 
     steps:
@@ -57,14 +61,26 @@ jobs:
           python scripts/sync_version.py "$TAG"
 
       # ── Python & sidecar ──────────────────────────────────
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          # Windows: PyInstaller --onefile DLL loading bug with 3.14
+          # macOS x86: last PyTorch x86_64 macOS wheel (2.2.2) requires Python <=3.12
+          python-version: ${{ matrix.label == 'macos-x86_64' && '3.12' || (runner.os == 'Windows' && '3.13' || env.PYTHON_VERSION) }}
           cache: pip
 
       - name: Install PyTorch (CPU only)
-        run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        shell: bash
+        run: |
+          if [ "${{ matrix.label }}" = "macos-x86_64" ]; then
+            # PyTorch dropped macOS x86_64 after 2.2.2 — pin to last available wheels
+            pip install torch==2.2.2 torchvision==0.17.2
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # Default PyPI serves CPU-only builds for Mac arm64
+            pip install torch torchvision
+          else
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          fi
 
       - name: Install Python dependencies
         run: |
@@ -72,8 +88,33 @@ jobs:
           pip install pyinstaller
           pip install -e ".[dev]"
 
+      - name: Check macOS signing environment
+        if: runner.os == 'macOS'
+        run: |
+          echo "::group::Signing environment"
+          echo "APPLE_CERTIFICATE set: ${{ secrets.APPLE_CERTIFICATE != '' }}"
+          echo "APPLE_SIGNING_IDENTITY set: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}"
+          echo "APPLE_ID set: ${{ secrets.APPLE_ID != '' }}"
+          echo "APPLE_PASSWORD set: ${{ secrets.APPLE_PASSWORD != '' }}"
+          echo "APPLE_TEAM_ID set: ${{ secrets.APPLE_TEAM_ID != '' }}"
+          echo "macOS version: $(sw_vers -productVersion)"
+          echo "Xcode path: $(xcode-select -p)"
+          echo "codesign version: $(codesign --version 2>&1 || true)"
+          echo "::endgroup::"
+
       - name: Build sidecar binary
         run: python scripts/build_sidecar.py --ci
+
+      - name: Check sidecar signing status
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          TRIPLE=$(rustc --print host-tuple)
+          SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}"
+          echo "::group::Sidecar signature"
+          echo "Sidecar: $SIDECAR ($(du -h "$SIDECAR" | cut -f1))"
+          codesign --display --verbose=2 "$SIDECAR" 2>&1 || echo "Not signed (expected — Tauri will sign during bundling)"
+          echo "::endgroup::"
 
       - name: Smoke-test sidecar binary
         shell: bash
@@ -140,30 +181,207 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             librsvg2-dev \
             patchelf \
             libssl-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev
 
+      # ── Swap & resource monitor (Linux only) ────────────────
+      # Rust/Tauri release builds can exceed the 7GB RAM on GitHub runners
+      # during linking. A swap file prevents the OOM killer from cancelling
+      # the build.
+      - name: Create swap file
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Newer ubuntu-22.04 runner images ship with an active /swapfile,
+          # so fallocate would fail with "Text file busy". Disable and remove
+          # any existing one before creating our larger 10G swap.
+          if [ -e /swapfile ]; then
+            sudo swapoff /swapfile || true
+            sudo rm -f /swapfile
+          fi
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap enabled:"
+          free -h
+
+      - name: Start resource monitor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "=== System info ==="
+          nproc && free -h && df -h /
+          # Log memory/CPU every 30s in background
+          while true; do
+            echo "--- $(date -u '+%H:%M:%S') ---"
+            free -h | grep Mem
+            free -h | grep Swap
+            ps -eo pid,pcpu,pmem,rss,comm --sort=-rss | head -6
+            echo ""
+            sleep 30
+          done > /tmp/resource-monitor.log 2>&1 &
+          echo $! > /tmp/resource-monitor.pid
+
       # ── Tauri build ───────────────────────────────────────
-      - name: Build Tauri app
+      # macOS: Build with signing. No fallback — if signing fails, the
+      # build fails. Shipping unsigned builds causes the "damaged" error.
+      - name: Build Tauri app (macOS, signed)
+        if: runner.os == 'macOS'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing (optional — builds succeed without these)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Intentionally omitting APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID
+          # so Tauri does NOT attempt notarization. We notarize the DMG
+          # explicitly in the next step (Tauri only notarizes the .app,
+          # which isn't sufficient for Gatekeeper on downloaded DMGs).
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
+
+      # Log what Tauri produced and how it was signed, so we have
+      # full diagnostics if notarization fails or the app is "damaged".
+      - name: Inspect signing after Tauri build
+        if: runner.os == 'macOS'
+        run: |
+          APP="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Vireo.app"
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
+
+          echo "::group::Build artifacts"
+          echo "--- .app bundle ---"
+          if [ -d "$APP" ]; then
+            echo "  Size: $(du -sh "$APP" | cut -f1)"
+            echo "  Sidecar: $(ls -lh "$APP/Contents/MacOS/vireo-server" 2>/dev/null | awk '{print $5}' || echo 'NOT FOUND')"
+          else
+            echo "  ::error::.app not found at $APP"
+          fi
+          echo ""
+          echo "--- DMG ---"
+          if [ -n "$DMG" ]; then
+            echo "  Path: $DMG"
+            echo "  Size: $(du -h "$DMG" | cut -f1)"
+          else
+            echo "  ::error::No DMG found"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::.app code signature"
+          codesign --display --verbose=2 "$APP" 2>&1
+          echo ""
+          echo "--- Deep verification ---"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 && echo "PASS" || echo "::warning::FAIL"
+          echo "::endgroup::"
+
+          echo "::group::Sidecar signature (inside bundle)"
+          codesign --display --verbose=2 "$APP/Contents/MacOS/vireo-server" 2>&1
+          echo "::endgroup::"
+
+          echo "::group::Entitlements"
+          codesign --display --entitlements - "$APP" 2>&1
+          echo "::endgroup::"
+
+      # Notarize the DMG itself (not just the .app inside it).
+      # Gatekeeper checks the downloaded DMG — an unnotarized DMG
+      # triggers "damaged and can't be opened" even if the .app is fine.
+      - name: Notarize and staple DMG
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
+          if [ -z "$DMG" ]; then
+            echo "::error::No DMG found in $DMG_DIR"
+            exit 1
+          fi
+          echo "Submitting for notarization: $DMG"
+          echo "  File: $DMG"
+          echo "  Size: $(du -h "$DMG" | cut -f1)"
+          echo "  SHA-256: $(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+          echo ""
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --verbose
+          echo ""
+          echo "Stapling notarization ticket to DMG..."
+          xcrun stapler staple "$DMG"
+          echo ""
+          echo "Stapler validation:"
+          xcrun stapler validate "$DMG"
+
+      - name: Verify macOS code signing
+        if: runner.os == 'macOS'
+        run: |
+          DMG_DIR="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          DMG=$(find "$DMG_DIR" -name "*.dmg" 2>/dev/null | head -1 || true)
+          APP="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Vireo.app"
+
+          echo "::group::Final .app verification"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1
+          echo "::endgroup::"
+
+          echo "::group::DMG Gatekeeper assessment"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG" 2>&1
+          echo "::endgroup::"
+
+          echo "::group::Artifact checksums (compare with release downloads)"
+          echo "DMG SHA-256: $(shasum -a 256 "$DMG")"
+          echo "::endgroup::"
+
+          echo ""
+          echo "=== All verifications passed ==="
+
+      # Linux: build directly so cargo output streams to logs in real time.
+      # The tauri-action is a black box — if it hangs we get no diagnostics.
+      # Skip RPM — the Tauri RPM bundler hangs indefinitely on large sidecar
+      # binaries (PyInstaller + PyTorch). deb + AppImage cover Linux users.
+      - name: Build Tauri app (Linux direct)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # Override global CARGO_BUILD_JOBS — Linux runners have only 7GB RAM
+          # and linking Tauri with 3 parallel jobs can OOM even with swap.
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          echo "=== Starting Tauri build at $(date -u) ==="
+          cd src-tauri
+          npx tauri build --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
+          echo "=== Tauri build finished at $(date -u) ==="
+
+      # Windows: no signing needed, use tauri-action.
+      # continue-on-error because Tauri can exit non-zero after producing
+      # valid installers (e.g. post-bundle steps fail). The upload step
+      # must still run to capture .msi artifacts.
+      - name: Build Tauri app (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npx tauri
+          args: --target ${{ matrix.rust-target }}
+
+      # ── Dump resource monitor (Linux only) ─────────────────
+      - name: Dump resource monitor log
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          kill "$(cat /tmp/resource-monitor.pid)" 2>/dev/null || true
+          echo "=== Resource usage during build ==="
+          cat /tmp/resource-monitor.log
 
       # ── Upload artifacts ──────────────────────────────────
       - name: Upload build artifacts
@@ -177,14 +395,15 @@ jobs:
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
   # ── Release job ─────────────────────────────────────────
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != ''
+    # Run even if some builds failed — release whatever succeeded
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
 
     steps:
       - name: Download all artifacts
@@ -219,9 +438,75 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: Vireo ${{ steps.tag.outputs.tag }}
-          draft: true
+          draft: false
           prerelease: false
           generate_release_notes: true
           files: release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Update website download links ───────────────────────
+  # Updates only the platforms that successfully built and produced artifacts.
+  update-website:
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    if: "!cancelled() && needs.release.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "ver=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ver=${{ github.event.inputs.tag_name }}" | sed 's/^v//' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update download links for successful platforms
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          # Check which artifacts exist (only uploaded by successful builds)
+          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts --jq '.artifacts[].name' 2>/dev/null || true)
+          echo "Available artifacts: $ARTIFACTS"
+          UPDATED=false
+          for artifact in $ARTIFACTS; do
+            case "$artifact" in
+              vireo-macos-arm64)    python scripts/sync_version.py "$VER" --platform macos-arm64 && UPDATED=true ;;
+              vireo-macos-x86_64)   python scripts/sync_version.py "$VER" --platform macos-x86_64 && UPDATED=true ;;
+              vireo-windows-x86_64) python scripts/sync_version.py "$VER" --platform windows-x86_64 && UPDATED=true ;;
+              vireo-linux-x86_64)   python scripts/sync_version.py "$VER" --platform linux-x86_64 && UPDATED=true ;;
+            esac
+          done
+          if ! $UPDATED; then
+            echo "No successful platform builds — skipping website update"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit and push
+        id: push-website
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add website/src/pages/download.astro
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "website: update download links for v${{ steps.version.outputs.ver }}"
+          git push
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger website deploy
+        if: steps.push-website.outputs.pushed == 'true'
+        run: gh workflow run deploy-website.yml --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

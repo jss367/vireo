@@ -253,9 +253,9 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
-             '/review', '/cull', '/pipeline/review', '/map']
+             '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
@@ -293,11 +293,17 @@ def test_compare_predictions_api(app_and_db):
     rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
     cid = db.add_collection("Test Collection", rules)
 
-    # Add predictions from two models
-    db.add_prediction(photo_ids[0], "Cardinal", 0.95, "model-a")
-    db.add_prediction(photo_ids[0], "Blue Jay", 0.80, "model-b")
-    db.add_prediction(photo_ids[1], "Sparrow", 0.90, "model-a")
-    db.add_prediction(photo_ids[1], "Sparrow", 0.88, "model-b")
+    # Create detections, then add predictions from two models
+    det_ids_0 = db.save_detections(photo_ids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    det_ids_1 = db.save_detections(photo_ids[1], [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.4, "h": 0.4}, "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids_0[0], "Cardinal", 0.95, "model-a")
+    db.add_prediction(det_ids_0[0], "Blue Jay", 0.80, "model-b")
+    db.add_prediction(det_ids_1[0], "Sparrow", 0.90, "model-a")
+    db.add_prediction(det_ids_1[0], "Sparrow", 0.88, "model-b")
 
     client = app.test_client()
     resp = client.get(f"/api/predictions/compare?collection_id={cid}")
@@ -315,6 +321,98 @@ def test_compare_predictions_api(app_and_db):
     assert "filename" in photo
     assert "predictions" in photo
     assert isinstance(photo["predictions"], dict)  # keyed by model name
+    # Each model maps to a list of predictions (multi-detection support)
+    for model_preds in photo["predictions"].values():
+        assert isinstance(model_preds, list)
+        assert len(model_preds) >= 1
+        assert "species" in model_preds[0]
+        assert "confidence" in model_preds[0]
+
+
+def test_api_predictions_include_bounding_box(app_and_db):
+    """GET /api/predictions should return bounding box data from detections."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get("/api/predictions")
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["box_x"] == 0.1
+    assert data[0]["box_y"] == 0.2
+    assert data[0]["box_w"] == 0.3
+    assert data[0]["box_h"] == 0.4
+    assert data[0]["photo_id"] == pid
+
+
+def test_api_predictions_multiple_detections(app_and_db):
+    """GET /api/predictions should return one prediction per detection."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.3}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
+    db.add_prediction(det_ids[1], species="Magpie", confidence=0.85, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get("/api/predictions")
+    data = resp.get_json()
+    assert len(data) == 2
+    species = {d["species"] for d in data}
+    assert species == {"Elk", "Magpie"}
+
+
+def test_api_detections_endpoint(app_and_db):
+    """GET /api/detections/<photo_id> returns all detections for a photo."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.1}, "confidence": 0.7, "category": "animal"},
+    ], detector_model="MDV6")
+
+    client = app.test_client()
+    resp = client.get(f"/api/detections/{pid}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 2
+    # Sorted by confidence descending
+    assert data[0]["detector_confidence"] >= data[1]["detector_confidence"]
+    assert data[0]["box_x"] == 0.1
+
+
+def test_api_photo_pipeline_detections(app_and_db):
+    """GET /api/photos/<id>/pipeline returns detections and predictions with box data."""
+    app, db = app_and_db
+    photos = db.conn.execute("SELECT id FROM photos").fetchall()
+    pid = photos[0]["id"]
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Robin", confidence=0.88, model="bioclip")
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "detections" in data
+    assert len(data["detections"]) == 1
+    assert data["detections"][0]["box_x"] == 0.1
+    assert "predictions" in data
+    assert len(data["predictions"]) == 1
+    assert data["predictions"][0]["species"] == "Robin"
+    assert data["predictions"][0]["box_x"] == 0.1
+    # crop_box should be computed from primary detection
+    assert "crop_box" in data
 
 
 def test_compare_predictions_api_requires_collection(app_and_db):
@@ -351,7 +449,7 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -373,7 +471,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/import', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -510,6 +608,51 @@ def test_text_search_no_active_model(app_and_db):
     data = resp.get_json()
     assert data["results"] == []
     assert data["total_matches"] == 0
+
+
+def test_text_search_timm_model_returns_unsupported(app_and_db, monkeypatch):
+    """Text search returns error when active model is timm (no CLIP embeddings)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "iNat21 (EVA-02 Large)",
+            "model_type": "timm",
+            "model_str": "hf-hub:timm/eva02",
+            "downloaded": True,
+        },
+    )
+    resp = client.get("/api/photos/search?q=bird+on+water")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total_matches"] == 0
+    # Should indicate text search is not supported for this model type
+    assert data.get("reason") == "model_no_text_search"
+
+
+def test_text_search_no_embeddings_returns_reason(app_and_db, monkeypatch):
+    """Text search explains when no embeddings exist for the active model."""
+    app, _ = app_and_db
+    client = app.test_client()
+    monkeypatch.setattr(
+        "models.get_active_model",
+        lambda: {
+            "name": "BioCLIP-2",
+            "model_type": "bioclip",
+            "model_str": "hf-hub:imageomics/bioclip-2",
+            "weights_path": "/fake/path",
+            "downloaded": True,
+        },
+    )
+    resp = client.get("/api/photos/search?q=bird+on+water")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["results"] == []
+    assert data["total_matches"] == 0
+    # Should indicate no embeddings exist for this model
+    assert data.get("reason") == "no_embeddings"
 
 
 def test_settings_has_edit_history_config(app_and_db):
@@ -678,6 +821,44 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "sparrow" not in dupe_names
 
 
+def test_all_keywords_scoped_by_workspace(app_and_db):
+    """GET /api/keywords/all only returns keywords used in the active workspace, plus ancestors."""
+    app, db = app_and_db
+    ws_a = db._active_workspace_id
+
+    # Create parent keyword "Birds" and child "Hawk" under it
+    k_birds = db.add_keyword("Birds")
+    k_hawk = db.add_keyword("Hawk", parent_id=k_birds)
+    # Tag a photo in workspace A with the child only
+    photos_a = db.get_photos()
+    db.tag_photo(photos_a[0]["id"], k_hawk)
+
+    # Create workspace B with its own folder, photo, and keyword "Penguin"
+    ws_b = db.create_workspace("B")
+    db.set_active_workspace(ws_b)
+    fid_b = db.add_folder("/photos/b", name="b")
+    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    k_penguin = db.add_keyword("Penguin")
+    db.tag_photo(pid_b, k_penguin)
+
+    # Switch back to workspace A
+    db.set_active_workspace(ws_a)
+
+    with app.test_client() as c:
+        resp = c.get("/api/keywords/all")
+        data = resp.get_json()
+        names = [k["name"] for k in data]
+        # Child keyword tagged in workspace A — present
+        assert "Hawk" in names
+        # Parent keyword not tagged but is ancestor of Hawk — present with photo_count=0
+        assert "Birds" in names
+        birds = next(k for k in data if k["name"] == "Birds")
+        assert birds["photo_count"] == 0
+        # Keyword only in workspace B — absent
+        assert "Penguin" not in names
+
+
 def test_set_active_labels_scoped_to_workspace(app_and_db, tmp_path):
     """Setting active labels stores them in workspace config_overrides, not global file."""
     app, db = app_and_db
@@ -785,23 +966,23 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
 
 
 def test_get_all_keywords(app_and_db):
-    """GET /api/keywords/all returns all keywords with photo counts."""
+    """GET /api/keywords/all returns only keywords used in the active workspace."""
     app, db = app_and_db
     client = app.test_client()
     # conftest already created 'Cardinal' (tagged to p1) and 'Sparrow' (tagged to p2)
-    # Add an untagged keyword to verify photo_count=0
+    # Add an untagged keyword — should NOT appear since it has no photos in workspace
     db.add_keyword("favorite")
 
     resp = client.get("/api/keywords/all")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert len(data) >= 3
+    names = [k["name"] for k in data]
+    assert "Cardinal" in names
+    assert "Sparrow" in names
+    assert "favorite" not in names
     cardinal = next(k for k in data if k["name"] == "Cardinal")
     assert cardinal["photo_count"] >= 1
     assert "type" in cardinal
-    favorite = next(k for k in data if k["name"] == "favorite")
-    assert favorite["photo_count"] == 0
-    assert favorite["type"] == "general"
 
 
 def test_update_keyword_type(app_and_db):
@@ -981,3 +1162,644 @@ def test_delete_keyword_queues_for_all_workspaces(app_and_db):
         (p_ws2, ws2),
     ).fetchall()
     assert any(c["change_type"] == "keyword_remove" and c["value"] == "SharedDelete" for c in ws2_changes)
+
+
+def test_shortcuts_page(app_and_db):
+    """GET /shortcuts returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert resp.status_code == 200
+
+
+def test_shortcuts_link_in_navbar(app_and_db):
+    """The navbar includes a link to /shortcuts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/shortcuts')
+    assert b'/shortcuts' in resp.data
+    assert b'Shortcuts' in resp.data
+
+
+def test_settings_no_shortcuts_editor(app_and_db):
+    """Settings page no longer contains the shortcuts editor."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    html = resp.data.decode()
+    assert 'shortcutsEditor' not in html
+
+
+def test_shortcuts_cheat_sheet_in_navbar(app_and_db):
+    """Every page includes the shortcuts cheat sheet overlay."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/browse')
+    html = resp.data.decode()
+    assert 'shortcutsCheatSheet' in html
+
+
+def test_api_browse_home(app_and_db, tmp_path, monkeypatch):
+    """GET /api/browse without path returns home directory listing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sub = tmp_path / "Documents"
+    sub.mkdir()
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/browse')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['path'] == str(tmp_path)
+    names = [d['name'] for d in data['dirs']]
+    assert 'Documents' in names
+
+
+def test_api_browse_with_path(app_and_db, tmp_path):
+    """GET /api/browse?path=... returns subdirectories."""
+    parent = tmp_path / "photos"
+    parent.mkdir()
+    (parent / "2024").mkdir()
+    (parent / "2025").mkdir()
+    (parent / "file.txt").write_text("hi")  # should not appear
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={parent}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['path'] == str(parent)
+    names = [d['name'] for d in data['dirs']]
+    assert '2024' in names
+    assert '2025' in names
+    assert 'file.txt' not in names
+
+
+def test_api_browse_hides_dotfiles(app_and_db, tmp_path):
+    """GET /api/browse hides dot-prefixed directories."""
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "visible").mkdir()
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get(f'/api/browse?path={tmp_path}')
+    data = resp.get_json()
+    names = [d['name'] for d in data['dirs']]
+    assert 'visible' in names
+    assert '.hidden' not in names
+
+
+def test_api_browse_invalid_path(app_and_db):
+    """GET /api/browse with invalid path returns 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/browse?path=/nonexistent/path/xyz')
+    assert resp.status_code == 400
+
+
+def test_api_browse_mkdir(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates a new directory."""
+    new_dir = str(tmp_path / "new_folder")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data['name'] == 'new_folder'
+    assert data['path'] == new_dir
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_nested(app_and_db, tmp_path):
+    """POST /api/browse/mkdir creates nested directories."""
+    new_dir = str(tmp_path / "a" / "b" / "c")
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": new_dir},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert os.path.isdir(new_dir)
+
+
+def test_api_browse_mkdir_relative_path(app_and_db):
+    """POST /api/browse/mkdir rejects relative paths."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={"path": "relative/path"},
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_api_browse_mkdir_missing_path(app_and_db):
+    """POST /api/browse/mkdir rejects missing path."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/mkdir',
+                       json={},
+                       content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_api_browse_photo_counts_recursive(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts returns recursive photo counts per path."""
+    # Folder with photos at root
+    a = tmp_path / "a"
+    a.mkdir()
+    (a / "one.jpg").write_bytes(b"x")
+    (a / "two.jpg").write_bytes(b"x")
+    # Folder with photos only in subfolder (recursive must find them)
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "nested").mkdir()
+    (b / "nested" / "deep.jpg").write_bytes(b"x")
+    # Folder with no photos
+    c = tmp_path / "c"
+    c.mkdir()
+    (c / "readme.txt").write_text("hi")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(a), str(b), str(c)],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(a)] == 2
+    assert data["counts"][str(b)] == 1
+    assert data["counts"][str(c)] == 0
+
+
+def test_api_browse_photo_counts_empty_paths(app_and_db):
+    """POST /api/browse/photo-counts with empty paths returns empty counts."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [], "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert resp.get_json()["counts"] == {}
+
+
+def test_api_browse_photo_counts_skips_missing(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts tolerates paths that don't exist."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+    missing = str(tmp_path / "does_not_exist")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(real), missing],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"][str(real)] == 1
+    assert data["counts"][missing] == 0
+
+
+def test_api_browse_photo_counts_skips_non_string_entries(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts skips non-string path entries (no 500)."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "img.jpg").write_bytes(b"x")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(real), {}, [], 42, None],
+                             "file_types": [".jpg"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["counts"] == {str(real): 1}
+
+
+def test_api_browse_photo_counts_respects_file_types(app_and_db, tmp_path):
+    """POST /api/browse/photo-counts only counts files matching requested types."""
+    d = tmp_path / "mixed"
+    d.mkdir()
+    (d / "a.jpg").write_bytes(b"x")
+    (d / "b.nef").write_bytes(b"x")
+    (d / "c.txt").write_text("hi")
+
+    app, _ = app_and_db
+    client = app.test_client()
+    # Only request .nef
+    resp = client.post('/api/browse/photo-counts',
+                       json={"paths": [str(d)], "file_types": [".nef"]},
+                       content_type='application/json')
+    assert resp.status_code == 200
+    assert resp.get_json()["counts"][str(d)] == 1
+
+
+def test_nav_order_save_and_load(app_and_db):
+    """PUT /api/workspaces/active/nav-order saves and returns nav order."""
+    app, db = app_and_db
+    client = app.test_client()
+    order = ["browse", "pipeline", "cull", "review"]
+    resp = client.put('/api/workspaces/active/nav-order',
+                      json={"nav_order": order},
+                      content_type='application/json')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["nav_order"] == order
+
+    # Verify it persists in config overrides
+    resp2 = client.get('/api/workspaces/active/config')
+    assert resp2.status_code == 200
+    assert resp2.get_json()["nav_order"] == order
+
+
+def test_nav_order_rejects_non_list(app_and_db):
+    """PUT /api/workspaces/active/nav-order rejects non-list input."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.put('/api/workspaces/active/nav-order',
+                      json={"nav_order": "not-a-list"},
+                      content_type='application/json')
+    assert resp.status_code == 400
+
+
+def test_workspace_page_no_scan_button(app_and_db):
+    """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
+    app, _ = app_and_db
+    with app.test_client() as c:
+        resp = c.get('/workspace')
+        assert resp.status_code == 200
+        html = resp.data.decode()
+        assert 'Scan &amp; Add' not in html
+        assert 'scanAndAddFolder' not in html
+
+
+def test_workspace_page_has_add_folder_link(app_and_db):
+    """Workspace page should have an Add Folder button linking to Pipeline."""
+    app, _ = app_and_db
+    with app.test_client() as c:
+        resp = c.get('/workspace')
+        assert resp.status_code == 200
+        html = resp.data.decode()
+        assert 'href="/pipeline"' in html
+        assert 'Add Folder' in html
+
+
+# -- Missing folder API tests --
+
+
+def test_api_folders_missing(app_and_db):
+    """GET /api/folders/missing returns missing folders with counts."""
+    app, db = app_and_db
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE path = '/photos/2024'")
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get("/api/folders/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data) == 1
+    assert data[0]["path"] == "/photos/2024"
+    assert data[0]["photo_count"] >= 1
+
+
+def test_api_folder_relocate(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate updates path and status."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024'").fetchone()["id"]
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    new_path = str(tmp_path / "relocated")
+    os.makedirs(new_path)
+
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid}/relocate", json={"path": new_path})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+
+    row = db.conn.execute("SELECT status, path FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["status"] == "ok"
+    assert row["path"] == new_path
+
+
+def test_api_folder_relocate_duplicate_path(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate returns 409 when target path is already tracked."""
+    app, db = app_and_db
+
+    # Create two folders with real disk paths
+    dir_a = str(tmp_path / "folder_a")
+    dir_b = str(tmp_path / "folder_b")
+    os.makedirs(dir_a)
+    os.makedirs(dir_b)
+
+    fid_a = db.add_folder(dir_a, name="a")
+    db.add_folder(dir_b, name="b")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
+    db.conn.commit()
+
+    # Try to relocate folder_a to folder_b's path
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid_a}/relocate", json={"path": dir_b})
+    assert resp.status_code == 409
+    assert "already tracked" in resp.get_json()["error"]
+
+
+def test_api_folder_delete(app_and_db):
+    """DELETE /api/folders/<id> removes folder and its photos."""
+    app, db = app_and_db
+    fid = db.conn.execute("SELECT id FROM folders WHERE path = '/photos/2024/January'").fetchone()["id"]
+    photo_count_before = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE folder_id = ?", (fid,)
+    ).fetchone()[0]
+    assert photo_count_before > 0
+
+    client = app.test_client()
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted_photos"] == photo_count_before
+
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+
+
+def test_folder_health_check_runs_at_startup(app_and_db):
+    """The app marks non-existent folders as missing after startup."""
+    app, db = app_and_db
+    # Folders in test fixture use fake paths that don't exist on disk.
+    # The health check should mark them missing.
+    changed = db.check_folder_health()
+    assert changed >= 1  # /photos/2024 and /photos/2024/January don't exist
+
+    missing = db.get_missing_folders()
+    assert len(missing) >= 1
+
+
+def test_highlights_page(app_and_db):
+    """GET /highlights returns 200."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/highlights")
+    assert resp.status_code == 200
+
+
+def test_highlights_get_empty(app_and_db):
+    """GET /api/highlights returns empty when no quality data exists."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photos"] == []
+    assert "folders" in data
+    assert "meta" in data
+
+
+def test_highlights_get_with_data(app_and_db):
+    """GET /api/highlights returns highlight photos for a folder with quality data."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/highlights_test', 'highlights_test', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    for i in range(20):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, ?, ?, 'none')",
+            (fid, f"img{i}.jpg", 0.9 - i * 0.03),
+        )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&count=5")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert len(data["photos"]) == 5
+    assert data["meta"]["total_in_folder"] == 20
+
+
+def test_highlights_save(app_and_db):
+    """POST /api/highlights/save creates a static collection."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/save_test', 'save_test', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score) VALUES (?, 'a.jpg', 0.8)",
+        (fid,),
+    ).lastrowid
+    db.conn.commit()
+
+    resp = client.post("/api/highlights/save", json={
+        "photo_ids": [pid],
+        "name": "Highlights - save_test",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert "id" in data
+
+    # Verify collection was created
+    collections = db.get_collections()
+    names = [c["name"] for c in collections]
+    assert "Highlights - save_test" in names
+
+
+def test_api_import_folder_preview(app_and_db, tmp_path):
+    """POST /api/import/folder-preview returns file discovery results."""
+    app, db = app_and_db
+
+    # Create test images in a temp folder
+    source = tmp_path / "source_photos"
+    source.mkdir()
+    from PIL import Image
+    for name in ["a.jpg", "b.jpg", "c.png"]:
+        Image.new("RGB", (200, 150)).save(str(source / name))
+    # Non-image file should be excluded
+    (source / "readme.txt").write_text("ignore me")
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg", ".png"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["total_count"] == 3
+    assert data["total_size"] > 0
+    assert ".jpg" in data["type_breakdown"]
+    assert data["type_breakdown"][".jpg"] == 2
+    assert data["type_breakdown"][".png"] == 1
+    assert len(data["files"]) == 3
+    assert data["duplicate_count"] == 0
+
+
+def test_api_import_folder_preview_duplicate_count_deferred(app_and_db, tmp_path):
+    """Folder preview returns duplicate_count=0 (duplicate detection deferred)."""
+    app, db = app_and_db
+
+    source = tmp_path / "source_dupes"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "bird1.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "newbird.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 2
+    assert data["duplicate_count"] == 0
+
+
+def test_api_import_folder_preview_no_folders(app_and_db):
+    """Folder preview returns error when no folders provided."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={})
+    assert resp.status_code == 400
+
+
+def test_api_import_folder_preview_nonexistent(app_and_db):
+    """Folder preview returns error for non-existent folder."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": ["/nonexistent/path/xyz"],
+        "file_types": [".jpg"],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 0
+
+
+def test_api_import_folder_preview_subfolders(app_and_db, tmp_path):
+    """Folder preview groups files by subfolder."""
+    app, _ = app_and_db
+
+    source = tmp_path / "nested"
+    (source / "sub1").mkdir(parents=True)
+    (source / "sub2").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "root.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "sub1" / "a.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "sub2" / "b.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    data = resp.get_json()
+    assert data["total_count"] == 3
+
+    # Files should have subfolder info
+    subfolders = set()
+    for f in data["files"]:
+        subfolders.add(f["subfolder"])
+    assert len(subfolders) == 3  # root, sub1, sub2
+
+
+def test_api_import_folder_preview_multi_source_same_basename(app_and_db, tmp_path):
+    """Multi-source preview disambiguates folders with same basename."""
+    app, _ = app_and_db
+
+    # Two sources with identical leaf names and overlapping subfolders
+    card_a = tmp_path / "mnt" / "cardA" / "DCIM"
+    card_b = tmp_path / "mnt" / "cardB" / "DCIM"
+    (card_a / "100CANON").mkdir(parents=True)
+    (card_b / "100CANON").mkdir(parents=True)
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(card_a / "100CANON" / "a.jpg"))
+    Image.new("RGB", (100, 100)).save(str(card_b / "100CANON" / "b.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(card_a), str(card_b)],
+        "file_types": [".jpg", ".jpeg"],
+    })
+    data = resp.get_json()
+    assert data["total_count"] == 2
+
+    # Subfolders must be distinct even though both have 100CANON
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2
+    # Should use parent to disambiguate: cardA/DCIM/100CANON vs cardB/DCIM/100CANON
+    for sf in subfolders:
+        assert "DCIM" in sf
+        assert "100CANON" in sf
+
+
+def test_api_import_folder_preview_thumbnail(app_and_db, tmp_path):
+    """GET /api/import/folder-preview/thumbnail returns a JPEG thumbnail."""
+    app, _ = app_and_db
+
+    # Create a test image
+    source = tmp_path / "thumb_test"
+    source.mkdir()
+    from PIL import Image
+    img = Image.new("RGB", (800, 600), color=(255, 0, 0))
+    img_path = source / "photo.jpg"
+    img.save(str(img_path))
+
+    client = app.test_client()
+    resp = client.get(f"/api/import/folder-preview/thumbnail?path={img_path}")
+    assert resp.status_code == 200
+    assert resp.content_type == "image/jpeg"
+    assert len(resp.data) > 0
+
+    # Verify the returned image is resized (200px long edge)
+    import io
+    thumb = Image.open(io.BytesIO(resp.data))
+    assert max(thumb.size) == 200
+
+
+def test_api_import_folder_preview_thumbnail_missing(app_and_db):
+    """Thumbnail endpoint returns 404 for non-existent file."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail?path=/no/such/file.jpg")
+    assert resp.status_code == 404
+
+
+def test_api_import_folder_preview_thumbnail_no_path(app_and_db):
+    """Thumbnail endpoint returns 400 when path param is missing."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/import/folder-preview/thumbnail")
+    assert resp.status_code == 400
+
+
+def test_api_import_full_accepts_exclude_paths(app_and_db, tmp_path):
+    """POST /api/jobs/import-full accepts exclude_paths parameter."""
+    app, _ = app_and_db
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "keep.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "skip.jpg"))
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source),
+        "copy": False,
+        "file_types": [".jpg", ".jpeg"],
+        "exclude_paths": [str(source / "skip.jpg")],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data

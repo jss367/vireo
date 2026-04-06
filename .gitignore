@@ -207,6 +207,8 @@ marimo/_lsp/
 __marimo__/
 vireo/taxonomy.json
 /.vscode
+.claude/
 .worktrees/
+docs/plans/
 node_modules/
 */.DS_Store

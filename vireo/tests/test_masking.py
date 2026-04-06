@@ -197,14 +197,18 @@ def test_get_photos_missing_masks(tmp_path):
 
     # Photo with detection, no mask — should appear
     pid1 = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
-    db.update_photo_quality(pid1, detection_box={"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, detection_conf=0.9)
+    db.save_detections(pid1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9},
+    ], detector_model="megadetector")
 
     # Photo with no detection — should NOT appear
     pid2 = db.add_photo(fid, "b.jpg", ".jpg", 100, 1.0)
 
     # Photo with detection AND mask — should NOT appear
     pid3 = db.add_photo(fid, "c.jpg", ".jpg", 100, 1.0)
-    db.update_photo_quality(pid3, detection_box={"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, detection_conf=0.8)
+    db.save_detections(pid3, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3}, "confidence": 0.8},
+    ], detector_model="megadetector")
     db.update_photo_mask(pid3, "/masks/3.png")
 
     photos = db.get_photos_missing_masks()

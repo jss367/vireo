@@ -55,6 +55,16 @@ class JobRunner:
         db.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_history_workspace ON job_history(workspace_id)"
         )
+        # Migration: add tree column
+        try:
+            db.conn.execute("SELECT tree FROM job_history LIMIT 0")
+        except Exception:
+            db.conn.execute("ALTER TABLE job_history ADD COLUMN tree TEXT")
+        # Migration: add summary column
+        try:
+            db.conn.execute("SELECT summary FROM job_history LIMIT 0")
+        except Exception:
+            db.conn.execute("ALTER TABLE job_history ADD COLUMN summary TEXT DEFAULT ''")
 
     def start(self, job_type, work_fn, config=None, workspace_id=None):
         """Start a background job.
@@ -83,6 +93,7 @@ class JobRunner:
             "errors": [],
             "config": config or {},
             "workspace_id": workspace_id,
+            "steps": [],
         }
 
         with self._lock:
@@ -133,6 +144,9 @@ class JobRunner:
         if job["status"] == "failed" and job["errors"]:
             result_data = {"error": job["errors"][0]}
 
+        tree_json = json.dumps(job.get("steps", []))
+        summary = self._build_summary(job)
+
         params = (
             job["id"],
             job["type"],
@@ -144,6 +158,8 @@ class JobRunner:
             len(job["errors"]),
             json.dumps(job["config"]),
             job.get("workspace_id"),
+            tree_json,
+            summary,
         )
 
         for attempt in range(3):
@@ -152,10 +168,21 @@ class JobRunner:
                 conn.execute(
                     """INSERT OR REPLACE INTO job_history
                        (id, type, status, started_at, finished_at, duration,
-                        result, error_count, config, workspace_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        result, error_count, config, workspace_id, tree, summary)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     params,
                 )
+                ws_id = job.get("workspace_id")
+                if ws_id is not None:
+                    conn.execute(
+                        """DELETE FROM job_history
+                           WHERE workspace_id = ? AND id NOT IN (
+                               SELECT id FROM job_history
+                               WHERE workspace_id = ?
+                               ORDER BY started_at DESC LIMIT 100
+                           )""",
+                        (ws_id, ws_id),
+                    )
                 conn.commit()
                 conn.close()
                 return
@@ -167,6 +194,31 @@ class JobRunner:
                         "Failed to persist job history for %s after 3 attempts",
                         job["id"],
                     )
+
+    def _build_summary(self, job):
+        """Build a one-line summary from job steps or result."""
+        steps = job.get("steps", [])
+        if steps:
+            parts = []
+            for s in steps:
+                if s.get("summary"):
+                    parts.append(s["summary"])
+            if parts:
+                return ", ".join(parts)
+
+        result = job.get("result")
+        if result and isinstance(result, dict):
+            if result.get("summary"):
+                return result["summary"]
+            parts = []
+            for k, v in result.items():
+                if isinstance(v, dict):
+                    continue
+                parts.append(f"{k}: {v}")
+            if parts:
+                return ", ".join(parts[:3])
+
+        return job["type"] + " " + job["status"]
 
     def get(self, job_id):
         """Get a job by id."""
@@ -196,12 +248,27 @@ class JobRunner:
                     "SELECT * FROM job_history ORDER BY started_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            result = []
+            for r in rows:
+                d = dict(r)
+                for field in ("tree", "result", "config"):
+                    if d.get(field) and isinstance(d[field], str):
+                        try:
+                            d[field] = json.loads(d[field])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                result.append(d)
+            return result
         except Exception:
             return []
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
+        if event_type == "progress":
+            job = self._jobs.get(job_id)
+            if job and job.get("steps"):
+                data = dict(data)
+                data["steps"] = [dict(s) for s in job["steps"]]
         event = {"type": event_type, "data": data, "time": time.time()}
         with self._lock:
             if job_id in self._events:
@@ -232,6 +299,53 @@ class JobRunner:
             subs = self._subscribers.get(job_id, [])
             if q in subs:
                 subs.remove(q)
+
+    def set_steps(self, job_id, steps):
+        """Define the execution plan for a job.
+
+        Args:
+            job_id: job identifier
+            steps: list of dicts with at least 'id' and 'label' keys
+        """
+        full_steps = []
+        for s in steps:
+            full_steps.append({
+                "id": s["id"],
+                "label": s["label"],
+                "status": "pending",
+                "progress": {"current": 0, "total": 0},
+                "started_at": None,
+                "finished_at": None,
+                "duration": None,
+                "summary": None,
+                "error": None,
+            })
+        job = self._jobs.get(job_id)
+        if job:
+            job["steps"] = full_steps
+
+    def update_step(self, job_id, step_id, **kwargs):
+        """Update a step's fields (status, progress, summary, error).
+
+        Automatically sets started_at/finished_at/duration timestamps.
+        """
+        job = self._jobs.get(job_id)
+        if not job or "steps" not in job:
+            return
+        for step in job["steps"]:
+            if step["id"] == step_id:
+                new_status = kwargs.get("status")
+                if new_status == "running" and step["status"] == "pending":
+                    step["started_at"] = datetime.now().isoformat()
+                if new_status in ("completed", "failed") and step["started_at"]:
+                    step["finished_at"] = datetime.now().isoformat()
+                    start = datetime.fromisoformat(step["started_at"])
+                    end = datetime.fromisoformat(step["finished_at"])
+                    step["duration"] = round((end - start).total_seconds(), 1)
+                for key in ("status", "summary", "error", "progress", "current_file"):
+                    if key in kwargs:
+                        step[key] = kwargs[key]
+                break
 
 
 class LogBroadcaster(logging.Handler):

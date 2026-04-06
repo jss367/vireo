@@ -3,11 +3,12 @@
   "type": "module",
   "version": "0.0.1",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
+    "dev": "node -e \"require('fs').copyFileSync('../static/help.json','public/help.json')\" && astro dev",
+    "build": "node -e \"require('fs').copyFileSync('../static/help.json','public/help.json')\" && astro build",
     "preview": "astro preview"
   },
   "dependencies": {
-    "astro": "^5.0.0"
+    "astro": "^5.0.0",
+    "fuse.js": "^7.0.0"
   }
 }

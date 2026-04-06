@@ -73,6 +73,26 @@ def test_scan_discovers_photos(tmp_path):
     assert filenames == {'img1.jpg', 'img2.jpg', 'img3.jpg'}
 
 
+def test_scan_non_recursive_only_finds_root_photos(tmp_path):
+    """scan(recursive=False) only finds photos in the root folder, not subfolders."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['root.jpg'],
+        'sub': ['sub.jpg'],
+        'sub/deep': ['deep.jpg'],
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db, recursive=False)
+
+    photos = db.get_photos(per_page=100)
+    filenames = {p['filename'] for p in photos}
+    assert filenames == {'root.jpg'}
+
+
 def test_scan_reads_dimensions(tmp_path):
     """scan() reads image dimensions."""
     from db import Database
@@ -121,7 +141,8 @@ def test_scan_progress_callback(tmp_path):
     progress = []
     scan(root, db, progress_callback=lambda cur, tot: progress.append((cur, tot)))
 
-    assert len(progress) == 3
+    assert len(progress) == 4
+    assert progress[0] == (0, 3)   # initial discovery report
     assert progress[-1] == (3, 3)
 
 
@@ -414,13 +435,11 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
     jpeg_id = db.conn.execute("SELECT id FROM photos").fetchone()["id"]
 
-    # Classify the JPEG — add a prediction
-    db.add_prediction(
-        photo_id=jpeg_id,
-        species="Robin",
-        confidence=0.85,
-        model="bioclip",
-    )
+    # Classify the JPEG — create detection then add a prediction
+    det_ids = db.save_detections(jpeg_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.85, "bioclip")
 
     # Now add the raw file and rescan — this creates a new photo record for the raw,
     # then the classify job also runs on the raw (simulated here)
@@ -437,7 +456,9 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
     raw_id = photos[0]["id"]
     preds = db.conn.execute(
-        "SELECT species, confidence FROM predictions WHERE photo_id = ?",
+        """SELECT pr.species, pr.confidence FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""",
         (raw_id,),
     ).fetchall()
     assert len(preds) == 1
@@ -445,7 +466,7 @@ def test_pairing_merges_predictions_without_unique_violation(tmp_path):
 
 
 def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
-    """When both raw and JPEG have predictions for the same model, keep higher confidence."""
+    """When both raw and JPEG have predictions, both detections transfer to primary."""
     from db import Database
 
     img_dir = tmp_path / "photos"
@@ -470,8 +491,14 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
                           file_size=2000, file_mtime=1.0)
 
     # Both classified with same model — JPEG has higher confidence
-    db.add_prediction(photo_id=jpeg_id, species="Robin", confidence=0.95, model="bioclip")
-    db.add_prediction(photo_id=raw_id, species="Robin", confidence=0.70, model="bioclip")
+    jpeg_det = db.save_detections(jpeg_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    raw_det = db.save_detections(raw_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(jpeg_det[0], "Robin", 0.95, "bioclip")
+    db.add_prediction(raw_det[0], "Robin", 0.70, "bioclip")
 
     # Run pairing — should NOT raise IntegrityError
     _pair_raw_jpeg_companions(db)
@@ -481,12 +508,16 @@ def test_pairing_merges_duplicate_predictions_keeps_higher_confidence(tmp_path):
     assert photos[0]["filename"] == "IMG_001.cr3"
 
     preds = db.conn.execute(
-        "SELECT species, confidence FROM predictions WHERE photo_id = ?",
+        """SELECT pr.species, pr.confidence FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""",
         (photos[0]["id"],),
     ).fetchall()
-    # Should keep the higher-confidence prediction
-    assert len(preds) == 1
-    assert preds[0]["confidence"] == 0.95
+    # Both detections (and their predictions) transfer to the primary photo.
+    # UNIQUE(detection_id, model) doesn't conflict since detection IDs differ.
+    assert len(preds) == 2
+    confidences = sorted(p["confidence"] for p in preds)
+    assert confidences == [0.70, 0.95]
 
 
 def test_pairing_transfers_inat_submissions(tmp_path):
@@ -586,3 +617,198 @@ def test_scan_stores_file_hash(tmp_path):
     photo = db.conn.execute("SELECT file_hash FROM photos LIMIT 1").fetchone()
     assert photo["file_hash"] is not None
     assert len(photo["file_hash"]) == 64  # SHA-256 hex digest length
+
+
+def test_extract_dimensions_raw_skips_exif_thumbnail_size():
+    """For RAW files, ExifImageWidth/Height is the embedded JPEG thumbnail (e.g. 160x120),
+    not the actual image. _extract_dimensions should return the real dimensions from
+    File:ImageWidth/Height instead."""
+    from scanner import _extract_dimensions
+
+    # Simulate ExifTool output for a Nikon NEF file:
+    # EXIF:ExifImageWidth/Height = 160x120 (embedded thumbnail)
+    # File:ImageWidth/Height = 8256x5504 (actual RAW image)
+    exif_group = {
+        "ExifImageWidth": 160,
+        "ExifImageHeight": 120,
+        "ImageWidth": 160,
+        "ImageHeight": 120,
+    }
+    file_group = {
+        "ImageWidth": 8256,
+        "ImageHeight": 5504,
+    }
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".nef")
+
+    assert width == 8256, f"Expected actual RAW width 8256, got {width} (embedded thumbnail)"
+    assert height == 5504, f"Expected actual RAW height 5504, got {height} (embedded thumbnail)"
+
+
+def test_extract_dimensions_jpeg_still_uses_exif():
+    """For JPEG files, ExifImageWidth/Height should still be the first priority."""
+    from scanner import _extract_dimensions
+
+    exif_group = {
+        "ExifImageWidth": 6000,
+        "ExifImageHeight": 4000,
+    }
+    file_group = {
+        "ImageWidth": 6000,
+        "ImageHeight": 4000,
+    }
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".jpg")
+
+    assert width == 6000
+    assert height == 4000
+
+
+def test_extract_dimensions_raw_falls_back_to_exif_imagewidth():
+    """For RAW files without File dimensions, EXIF:ImageWidth (non-ExifImageWidth) is used."""
+    from scanner import _extract_dimensions
+
+    exif_group = {
+        "ExifImageWidth": 160,
+        "ExifImageHeight": 120,
+        "ImageWidth": 8256,
+        "ImageHeight": 5504,
+    }
+    file_group = {}
+
+    width, height = _extract_dimensions(exif_group, file_group, extension=".nef")
+
+    # Should skip ExifImageWidth (thumbnail) but still find ImageWidth
+    assert width == 8256
+    assert height == 5504
+
+
+def test_extract_dimensions_all_raw_extensions():
+    """All supported RAW extensions should skip ExifImageWidth/Height."""
+    from scanner import _extract_dimensions
+
+    raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
+
+    for ext in raw_exts:
+        exif_group = {"ExifImageWidth": 160, "ExifImageHeight": 120}
+        file_group = {"ImageWidth": 8256, "ImageHeight": 5504}
+
+        width, height = _extract_dimensions(exif_group, file_group, extension=ext)
+        assert width == 8256, f"Failed for {ext}: got width {width}"
+        assert height == 5504, f"Failed for {ext}: got height {height}"
+
+
+def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
+    """Pairing raw+JPEG transfers GPS, exif_data, and focal_length from companion."""
+    import json
+
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # JPEG has GPS and metadata, RAW does not
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+                          file_size=25000000, file_mtime=1.0)
+
+    exif_json = json.dumps({"EXIF": {"Make": "Nikon", "Model": "Z9", "ISO": 400}})
+    db.conn.execute(
+        "UPDATE photos SET latitude=32.88, longitude=-117.25, exif_data=?, focal_length=400.0 WHERE id=?",
+        (exif_json, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT filename, latitude, longitude, exif_data, focal_length FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG.nef"
+    assert photo["latitude"] == 32.88
+    assert photo["longitude"] == -117.25
+    assert photo["focal_length"] == 400.0
+    meta = json.loads(photo["exif_data"])
+    assert meta["EXIF"]["Make"] == "Nikon"
+
+
+def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
+    """If RAW already has GPS, companion GPS is not overwritten."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    # Both have GPS but different coords — primary should keep its own
+    db.conn.execute(
+        "UPDATE photos SET latitude=40.0, longitude=-74.0 WHERE id=?", (jpeg_id,))
+    db.conn.execute(
+        "UPDATE photos SET latitude=32.0, longitude=-117.0 WHERE id=?", (raw_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
+    assert photo["latitude"] == 32.0
+    assert photo["longitude"] == -117.0
+
+
+def test_pair_raw_jpeg_transfers_zero_gps_from_companion(tmp_path):
+    """A companion with latitude=0.0 (equator) should be transferred to a RAW that has no GPS."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.nef", extension=".nef",
+                          file_size=25000000, file_mtime=1.0)
+
+    # JPEG is on the equator/prime meridian (0.0, 0.0) — falsy but valid
+    db.conn.execute(
+        "UPDATE photos SET latitude=0.0, longitude=0.0 WHERE id=?", (jpeg_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT filename, latitude, longitude FROM photos").fetchone()
+    assert photo["filename"] == "IMG.nef"
+    assert photo["latitude"] == 0.0
+    assert photo["longitude"] == 0.0
+
+
+def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
+    """A RAW with latitude=0.0 (equator) should NOT be overwritten by companion GPS."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    # JPEG has non-zero GPS, RAW sits at equator (0.0, 0.0) — must not be overwritten
+    db.conn.execute(
+        "UPDATE photos SET latitude=51.5, longitude=-0.1 WHERE id=?", (jpeg_id,))
+    db.conn.execute(
+        "UPDATE photos SET latitude=0.0, longitude=0.0 WHERE id=?", (raw_id,))
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
+    assert photo["latitude"] == 0.0
+    assert photo["longitude"] == 0.0

@@ -22,7 +22,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- Parse args ---
-BUMP="${1:?Usage: release.sh <patch|minor|major|X.Y.Z> [--publish]}"
+BUMP="${1:-patch}"
 PUBLISH=false
 if [[ "${2:-}" == "--publish" ]]; then
     PUBLISH=true
@@ -46,6 +46,13 @@ echo ""
 # --- Sync version across all manifests ---
 echo "==> Syncing version..."
 python scripts/sync_version.py "$NEW_VERSION"
+echo "==> Updating Cargo.lock..."
+(cd src-tauri && cargo generate-lockfile)
+echo ""
+
+# --- Run E2E tests ---
+echo "==> Running E2E tests..."
+python -m pytest tests/e2e/ -v
 echo ""
 
 # --- Local build (only when NOT publishing — CI handles publish builds) ---
@@ -108,7 +115,7 @@ fi
 
 # --- Commit version bump ---
 echo "==> Committing version bump..."
-git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock website/src/pages/download.astro
+git add pyproject.toml package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "release: v$NEW_VERSION" || true
 echo ""
 

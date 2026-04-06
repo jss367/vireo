@@ -159,15 +159,147 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     return labels, use_tol
 
 
-def _detect_subjects(photos, folders, runner, job, reclassify, db):
-    """Run MegaDetector on photos, storing quality metrics.
+def _detect_batch(photos, folders, runner, job, reclassify, db,
+                   det_conf_threshold=None, already_detected_ids=None):
+    """Run MegaDetector on a batch of photos.
+
+    Same interface as _detect_subjects but designed to be called with
+    partial photo lists for interleaved detect+classify in the streaming
+    pipeline.  Does NOT push progress events — that is the caller's
+    responsibility.
+
+    Args:
+        det_conf_threshold: Detection confidence threshold. If None,
+            loaded from config (fallback for callers that don't pre-load).
+        already_detected_ids: Set of photo IDs that already have detections
+            in the database. Used for skip-if-already-detected logic.
 
     Returns:
         (detection_map, detected_count) where detection_map is
-        {photo_id: detection_dict} and detected_count is total detected.
+        {photo_id: [list_of_detection_dicts]} and detected_count is total
+        photos with at least one detection.
     """
     detected = 0
     detection_map = {}
+    if already_detected_ids is None:
+        already_detected_ids = set()
+
+    try:
+        if detect_animals is None or get_primary_detection is None:
+            return detection_map, detected
+
+        if det_conf_threshold is None:
+            import config as cfg
+            det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
+
+        for photo in photos:
+            folder_path = folders.get(photo["folder_id"], "")
+            image_path = os.path.join(folder_path, photo["filename"])
+
+            # Skip if already detected (unless reclassifying)
+            if not reclassify and photo["id"] in already_detected_ids:
+                existing_dets = db.get_detections(photo["id"])
+                if existing_dets:
+                    det_list = []
+                    for d in existing_dets:
+                        det_list.append({
+                            "id": d["id"],
+                            "box_x": d["box_x"],
+                            "box_y": d["box_y"],
+                            "box_w": d["box_w"],
+                            "box_h": d["box_h"],
+                            "confidence": d["detector_confidence"],
+                            "category": d["category"],
+                        })
+                    detection_map[photo["id"]] = det_list
+                    detected += 1
+                    continue
+
+            detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
+
+            if detections:
+                detected += 1
+
+                # Store ALL detections in the database
+                det_ids = db.save_detections(
+                    photo["id"], detections, detector_model="MegaDetector"
+                )
+
+                # Build detection list with database IDs
+                det_list = []
+                for det, det_id in zip(detections, det_ids, strict=True):
+                    det_list.append({
+                        "id": det_id,
+                        "box_x": det["box"]["x"],
+                        "box_y": det["box"]["y"],
+                        "box_w": det["box"]["w"],
+                        "box_h": det["box"]["h"],
+                        "confidence": det["confidence"],
+                        "category": det.get("category", "animal"),
+                    })
+                detection_map[photo["id"]] = det_list
+
+                # Use highest-confidence detection as primary for quality scoring
+                primary = get_primary_detection(detections)
+                if primary:
+                    det_box = primary["box"]
+                    subject_size = det_box["w"] * det_box["h"]
+
+                    if compute_sharpness is not None:
+                        overall_sharpness = compute_sharpness(image_path)
+                        subject_sharpness = None
+                        quality = 0
+
+                        try:
+                            from PIL import Image
+
+                            img = Image.open(image_path)
+                            iw, ih = img.size
+                            px = int(det_box["x"] * iw)
+                            py = int(det_box["y"] * ih)
+                            pw = int(det_box["w"] * iw)
+                            ph = int(det_box["h"] * ih)
+                            subject_sharpness = compute_sharpness(
+                                image_path, region=(px, py, pw, ph)
+                            )
+                        except Exception:
+                            subject_sharpness = overall_sharpness
+
+                        if subject_sharpness is not None and subject_size is not None:
+                            norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
+                            norm_size = min(1.0, subject_size * 4)
+                            quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
+
+                        db.update_photo_quality(
+                            photo["id"],
+                            subject_sharpness=subject_sharpness,
+                            subject_size=subject_size,
+                            quality_score=quality,
+                            sharpness=overall_sharpness,
+                        )
+                    else:
+                        db.update_photo_quality(
+                            photo["id"],
+                        )
+
+    except (ImportError, RuntimeError):
+        pass
+    except Exception:
+        log.warning("Detection failed for batch (non-fatal)", exc_info=True)
+
+    return detection_map, detected
+
+
+def _detect_subjects(photos, folders, runner, job, reclassify, db):
+    """Run MegaDetector on photos, storing quality metrics.
+
+    Wraps _detect_batch with progress reporting for the standalone classify job.
+
+    Returns:
+        (detection_map, detected_count) where detection_map is
+        {photo_id: [list_of_detection_dicts]} and detected_count is total
+        photos with at least one detection.
+    """
     total = len(photos)
 
     try:
@@ -188,15 +320,24 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
 
+        # Load config once for the entire detection loop
         import config as cfg
         det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
 
-        start_time = job.get("_start_time", time.time())
-        skipped_det = 0
-        for i, photo in enumerate(photos):
-            folder_path = folders.get(photo["folder_id"], "")
-            image_path = os.path.join(folder_path, photo["filename"])
+        # Get set of photo IDs that already have detections in the database
+        already_detected_ids = db.get_existing_detection_photo_ids() if not reclassify else set()
 
+        # Process one photo at a time so we can report per-photo progress
+        detection_map = {}
+        detected = 0
+        skipped_det = 0
+        start_time = job.get("_start_time", time.time())
+
+        for i, photo in enumerate(photos):
+            runner.update_step(
+                job["id"], "detect",
+                progress={"current": i + 1, "total": total},
+            )
             runner.push_event(
                 job["id"],
                 "progress",
@@ -211,71 +352,21 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 },
             )
 
-            # Skip if already detected (unless reclassifying)
-            if not reclassify and photo["detection_box"]:
-                det_box = photo["detection_box"]
-                if isinstance(det_box, str):
-                    det_box = json.loads(det_box)
-                detection_map[photo["id"]] = {
-                    "box": det_box,
-                    "confidence": photo["detection_conf"] or 0,
-                    "category": "animal",
-                }
-                detected += 1
+            was_cached = (
+                not reclassify
+                and photo["id"] in already_detected_ids
+            )
+
+            batch_map, batch_detected = _detect_batch(
+                [photo], folders, runner, job, reclassify, db,
+                det_conf_threshold=det_conf_threshold,
+                already_detected_ids=already_detected_ids,
+            )
+            detection_map.update(batch_map)
+            detected += batch_detected
+
+            if was_cached and batch_detected:
                 skipped_det += 1
-                continue
-
-            detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
-            primary = get_primary_detection(detections)
-
-            if primary:
-                detected += 1
-                detection_map[photo["id"]] = primary
-
-                det_box = primary["box"]
-                det_conf = primary["confidence"]
-                subject_size = det_box["w"] * det_box["h"]
-
-                if compute_sharpness is not None:
-                    overall_sharpness = compute_sharpness(image_path)
-                    subject_sharpness = None
-                    quality = 0
-
-                    try:
-                        from PIL import Image
-
-                        img = Image.open(image_path)
-                        iw, ih = img.size
-                        px = int(det_box["x"] * iw)
-                        py = int(det_box["y"] * ih)
-                        pw = int(det_box["w"] * iw)
-                        ph = int(det_box["h"] * ih)
-                        subject_sharpness = compute_sharpness(
-                            image_path, region=(px, py, pw, ph)
-                        )
-                    except Exception:
-                        subject_sharpness = overall_sharpness
-
-                    if subject_sharpness is not None and subject_size is not None:
-                        norm_sharp = min(1.0, math.log1p(subject_sharpness) / 10.0)
-                        norm_size = min(1.0, subject_size * 4)
-                        quality = round(0.7 * norm_sharp + 0.3 * norm_size, 4)
-
-                    db.update_photo_quality(
-                        photo["id"],
-                        detection_box=det_box,
-                        detection_conf=det_conf,
-                        subject_sharpness=subject_sharpness,
-                        subject_size=subject_size,
-                        quality_score=quality,
-                        sharpness=overall_sharpness,
-                    )
-                else:
-                    db.update_photo_quality(
-                        photo["id"],
-                        detection_box=det_box,
-                        detection_conf=det_conf,
-                    )
 
         log.info(
             "Detection done: %d animals detected out of %d photos (%d skipped, already detected)",
@@ -312,6 +403,8 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 },
             )
             job["errors"].append(f"Detection unavailable: {msg[:200]}")
+        detection_map = {}
+        detected = 0
     except Exception as e:
         log.warning(
             "Detection failed (non-fatal) — classifying full images", exc_info=True
@@ -327,6 +420,8 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
         job["errors"].append(f"Detection failed: {str(e)[:200]}")
+        detection_map = {}
+        detected = 0
 
     return detection_map, detected
 
@@ -334,10 +429,17 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
 _BATCH_SIZE = 16
 
 
-def _prepare_image(photo, folders, detection_map):
-    """Load, crop, and resize a photo for classification.
+def _prepare_image(photo, folders, detection):
+    """Load and crop a photo to a specific detection's bounding box.
 
-    Returns (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
+    Args:
+        photo: photo dict
+        folders: {folder_id: path} mapping
+        detection: detection dict with box_x, box_y, box_w, box_h keys
+            (or None for full image classification)
+
+    Returns:
+        (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
     """
     from PIL import Image
 
@@ -348,17 +450,15 @@ def _prepare_image(photo, folders, detection_map):
     if img is None:
         return None, folder_path, image_path
 
-    # Crop to detected subject with padding
-    primary = detection_map.get(photo["id"])
-    if primary:
+    # Crop to detection bounding box with padding
+    if detection:
         iw, ih = img.size
-        box = primary["box"]
-        pad_w = box["w"] * 0.2
-        pad_h = box["h"] * 0.2
-        x1 = max(0, int((box["x"] - pad_w) * iw))
-        y1 = max(0, int((box["y"] - pad_h) * ih))
-        x2 = min(iw, int((box["x"] + box["w"] + pad_w) * iw))
-        y2 = min(ih, int((box["y"] + box["h"] + pad_h) * ih))
+        pad_w = detection["box_w"] * 0.2
+        pad_h = detection["box_h"] * 0.2
+        x1 = max(0, int((detection["box_x"] - pad_w) * iw))
+        y1 = max(0, int((detection["box_y"] - pad_h) * ih))
+        x2 = min(iw, int((detection["box_x"] + detection["box_w"] + pad_w) * iw))
+        y2 = min(ih, int((detection["box_y"] + detection["box_h"] + pad_h) * ih))
         crop = img.crop((x1, y1, x2, y2))
         if crop.size[0] >= 50 and crop.size[1] >= 50:
             img = crop
@@ -367,7 +467,7 @@ def _prepare_image(photo, folders, detection_map):
     return img, folder_path, image_path
 
 
-def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
+def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     """Classify a batch of prepared images and append results.
 
     Returns the number of failures within this batch.
@@ -427,9 +527,19 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
             except Exception:
                 pass
 
+        # Build alternatives list (predictions 2..top_k)
+        alternatives = []
+        for alt_pred in all_preds[1:top_k]:
+            alternatives.append({
+                "species": alt_pred["species"],
+                "confidence": alt_pred["score"],
+                "taxonomy": alt_pred.get("taxonomy"),
+            })
+
         raw_results.append(
             {
                 "photo": entry["photo"],
+                "detection_id": entry.get("detection_id"),
                 "folder_path": entry["folder_path"],
                 "image_path": entry["image_path"],
                 "prediction": top["species"],
@@ -438,6 +548,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
                 "filename": entry["photo"]["filename"],
                 "embedding": embedding,
                 "taxonomy": top.get("taxonomy"),
+                "alternatives": alternatives,
             }
         )
 
@@ -446,9 +557,13 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results):
 
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
-    model_name, runner, job, db,
+    model_name, runner, job, db, top_k=1,
 ):
-    """Classify photos in batches, cropping to detected subject when available.
+    """Classify detections in batches, cropping to each detection's bounding box.
+
+    For each photo, iterates over all detections (from detection_map) and
+    classifies each one independently. Photos without detections are
+    classified as full images.
 
     Images are passed directly to classifiers as PIL objects (no temp file I/O).
     Multiple images are batched into a single forward pass for throughput.
@@ -472,6 +587,10 @@ def _classify_photos(
     for i, photo in enumerate(photos):
         job["progress"]["current"] = i + 1
         job["progress"]["current_file"] = photo["filename"]
+        runner.update_step(
+            job["id"], "classify",
+            progress={"current": i + 1, "total": total},
+        )
         runner.push_event(
             job["id"],
             "progress",
@@ -490,7 +609,7 @@ def _classify_photos(
         if photo["id"] in existing_preds:
             # Flush pending batch to preserve photo ordering in raw_results
             if batch:
-                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
                 batch = []
             skipped_existing += 1
             pred_row = db.get_prediction_for_photo(photo["id"], model_name)
@@ -511,6 +630,7 @@ def _classify_photos(
                 raw_results.append(
                     {
                         "photo": photo,
+                        "detection_id": pred_row["detection_id"],
                         "folder_path": folder_path,
                         "image_path": image_path,
                         "prediction": pred_row["species"],
@@ -519,30 +639,62 @@ def _classify_photos(
                         "filename": photo["filename"],
                         "embedding": embedding,
                         "taxonomy": None,
+                        "alternatives": [],
                         "_existing": True,
                     }
                 )
             continue
 
-        img, folder_path, image_path = _prepare_image(photo, folders, detection_map)
-        if img is None:
-            failed += 1
-            continue
+        # Get detections for this photo (list of detection dicts with IDs)
+        photo_detections = detection_map.get(photo["id"], [])
 
-        batch.append({
-            "photo": photo,
-            "folder_path": folder_path,
-            "image_path": image_path,
-            "img": img,
-        })
+        if photo_detections:
+            # Classify each detection independently
+            for detection in photo_detections:
+                img, det_folder_path, det_image_path = _prepare_image(
+                    photo, folders, detection
+                )
+                if img is None:
+                    failed += 1
+                    continue
 
-        if len(batch) >= _BATCH_SIZE:
-            failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
-            batch = []
+                batch.append({
+                    "photo": photo,
+                    "detection_id": detection["id"],
+                    "folder_path": det_folder_path,
+                    "image_path": det_image_path,
+                    "img": img,
+                })
+
+                if len(batch) >= _BATCH_SIZE:
+                    failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                    batch = []
+        else:
+            # No detections — create a full-image detection and classify it
+            full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                               "confidence": 0, "category": "animal"}]
+            full_det_ids = db.save_detections(photo["id"], full_image_det,
+                                              detector_model="full-image")
+            img, folder_path, image_path = _prepare_image(photo, folders, None)
+            if img is None:
+                failed += 1
+                continue
+
+            batch.append({
+                "photo": photo,
+                "detection_id": full_det_ids[0],
+                "folder_path": folder_path,
+                "image_path": image_path,
+                "img": img,
+            })
+
+            if len(batch) >= _BATCH_SIZE:
+                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                batch = []
 
     # Flush remaining images
     if batch:
-        failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results)
+        failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
 
     return raw_results, failed, skipped_existing
 
@@ -594,13 +746,27 @@ def _store_grouped_predictions(
                 tax.get_hierarchy(item["prediction"]) if tax else {}
             )
             db.add_prediction(
-                photo_id=photo["id"],
+                detection_id=item["detection_id"],
                 species=item["prediction"],
                 confidence=round(item["confidence"], 4),
                 model=model_name,
                 category=category,
                 taxonomy=tax_hierarchy,
             )
+            # Store alternative predictions
+            for alt in item.get("alternatives", []):
+                alt_tax = alt.get("taxonomy") or (
+                    tax.get_hierarchy(alt["species"]) if tax else {}
+                )
+                db.add_prediction(
+                    detection_id=item["detection_id"],
+                    species=alt["species"],
+                    confidence=round(alt["confidence"], 4),
+                    model=model_name,
+                    category=category,
+                    status="alternative",
+                    taxonomy=alt_tax,
+                )
             predictions_stored += 1
         else:
             group_count += 1
@@ -639,7 +805,7 @@ def _store_grouped_predictions(
             for item in group:
                 if item.get("_existing"):
                     db.update_prediction_group_info(
-                        photo_id=item["photo"]["id"],
+                        detection_id=item["detection_id"],
                         model=model_name,
                         group_id=gid,
                         vote_count=cons["vote_count"],
@@ -648,7 +814,7 @@ def _store_grouped_predictions(
                     )
                 else:
                     db.add_prediction(
-                        photo_id=item["photo"]["id"],
+                        detection_id=item["detection_id"],
                         species=item["prediction"],
                         confidence=round(item["confidence"], 4),
                         model=model_name,
@@ -659,6 +825,20 @@ def _store_grouped_predictions(
                         individual=individual_json,
                         taxonomy=item.get("taxonomy") or cons_hierarchy,
                     )
+                    # Store alternative predictions for this group member
+                    for alt in item.get("alternatives", []):
+                        alt_tax = alt.get("taxonomy") or (
+                            tax.get_hierarchy(alt["species"]) if tax else {}
+                        )
+                        db.add_prediction(
+                            detection_id=item["detection_id"],
+                            species=alt["species"],
+                            confidence=round(alt["confidence"], 4),
+                            model=model_name,
+                            category=category,
+                            status="alternative",
+                            taxonomy=alt_tax,
+                        )
             predictions_stored += len(group)
 
     singles = len([g for g in groups if len(g) == 1])
@@ -694,6 +874,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     thread_db.set_active_workspace(workspace_id)
     job["_start_time"] = time.time()
 
+    runner.set_steps(job["id"], [
+        {"id": "load_taxonomy", "label": "Load taxonomy"},
+        {"id": "load_photos", "label": "Load photos"},
+        {"id": "load_model", "label": "Load model"},
+        {"id": "detect", "label": "Detect subjects"},
+        {"id": "classify", "label": "Classify species"},
+        {"id": "finalize", "label": "Finalize results"},
+    ])
+
     # Resolve model
     if params.model_id:
         all_models = get_models()
@@ -717,6 +906,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     model_name = params.model_name or effective_name
 
     # Phase 1: Load taxonomy
+    runner.update_step(job["id"], "load_taxonomy", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -739,8 +929,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         labels_files=params.labels_files,
         db=thread_db,
     )
+    tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+    labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
+    runner.update_step(
+        job["id"], "load_taxonomy", status="completed",
+        summary=f"{tax_summary}, {labels_summary}",
+    )
 
     # Phase 3: Get photos from collection
+    runner.update_step(job["id"], "load_photos", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -756,6 +953,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
     total = len(photos)
     job["progress"]["total"] = total
+    runner.update_step(
+        job["id"], "load_photos", status="completed",
+        summary=f"{total} photos",
+    )
 
     log.info(
         "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
@@ -764,13 +965,17 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
     if params.reclassify:
         photo_ids = [p["id"] for p in photos]
         thread_db.clear_predictions(model=effective_name, collection_photo_ids=photo_ids)
+        # Also clear existing detections so they get re-detected
+        for pid in photo_ids:
+            thread_db.clear_detections(pid)
         log.info(
-            "Cleared existing predictions for %d photos, model=%s (re-classify)",
+            "Cleared existing predictions and detections for %d photos, model=%s (re-classify)",
             len(photo_ids),
             effective_name,
         )
 
     # Phase 4: Initialize classifier
+    runner.update_step(job["id"], "load_model", status="running")
     if model_type == "timm":
         phase_msg = f"Loading {effective_name} timm model..."
     elif use_tol:
@@ -794,6 +999,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         clf = TimmClassifier(model_str, taxonomy=tax)
     else:
         def _emb_progress(current, emb_total):
+            runner.update_step(
+                job["id"], "load_model",
+                progress={"current": current, "total": emb_total},
+            )
             runner.push_event(
                 job["id"],
                 "progress",
@@ -812,8 +1021,13 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
             pretrained_str=weights_path,
             embedding_progress_callback=_emb_progress,
         )
+    runner.update_step(
+        job["id"], "load_model", status="completed",
+        summary=effective_name,
+    )
 
     # Phase 5: Detect subjects
+    runner.update_step(job["id"], "detect", status="running")
     detection_map, detected = _detect_subjects(
         photos=photos,
         folders=folders,
@@ -821,6 +1035,10 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         job=job,
         reclassify=params.reclassify,
         db=thread_db,
+    )
+    runner.update_step(
+        job["id"], "detect", status="completed",
+        summary=f"{detected} animals detected in {total} photos",
     )
 
     # Phase 6: Classify each photo
@@ -836,6 +1054,11 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
 
     job["_start_time"] = time.time()  # reset rate timer for classification phase
 
+    import config as cfg
+    effective_cfg = thread_db.get_effective_config(cfg.load())
+    top_k = effective_cfg.get("top_k_predictions", 5)
+
+    runner.update_step(job["id"], "classify", status="running")
     raw_results, failed, skipped_existing = _classify_photos(
         photos=photos,
         folders=folders,
@@ -847,9 +1070,21 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         runner=runner,
         job=job,
         db=thread_db,
+        top_k=top_k,
+    )
+    classified_count = len(raw_results) - skipped_existing
+    parts = [f"{classified_count} classified"]
+    if skipped_existing:
+        parts.append(f"{skipped_existing} cached")
+    if failed:
+        parts.append(f"{failed} failed")
+    runner.update_step(
+        job["id"], "classify", status="completed",
+        summary=", ".join(parts),
     )
 
     # Phase 7: Group and store predictions
+    runner.update_step(job["id"], "finalize", status="running")
     runner.push_event(
         job["id"],
         "progress",
@@ -870,6 +1105,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         similarity_threshold=params.similarity_threshold,
         tax=tax,
         db=thread_db,
+    )
+    finalize_parts = [f"{group_result['predictions_stored']} predictions"]
+    if group_result["burst_groups"]:
+        finalize_parts.append(f"{group_result['burst_groups']} burst groups")
+    if group_result["already_labeled"]:
+        finalize_parts.append(f"{group_result['already_labeled']} already labeled")
+    runner.update_step(
+        job["id"], "finalize", status="completed",
+        summary=", ".join(finalize_parts),
     )
 
     log.info(

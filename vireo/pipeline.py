@@ -22,13 +22,14 @@ log = logging.getLogger(__name__)
 _PIPELINE_PHOTO_COLS = """
     p.id, p.folder_id, p.filename, p.timestamp,
     p.width, p.height, p.latitude, p.longitude,
-    p.detection_box, p.detection_conf, p.subject_size,
+    p.subject_size,
     p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
     p.crop_complete, p.bg_separation,
     p.subject_clip_high, p.subject_clip_low, p.subject_y_median,
     p.phash_crop,
     p.dino_subject_embedding, p.dino_global_embedding,
-    p.focal_length, p.burst_id, p.noise_estimate
+    p.focal_length, p.burst_id, p.noise_estimate,
+    p.flag, p.rating
 """
 
 
@@ -94,14 +95,17 @@ def load_photo_features(db, collection_id=None, config=None):
             (ws_id,),
         ).fetchall()
 
-    # Load species predictions (top-5 per photo, ordered by confidence)
+    # Load species predictions (top-5 per photo, ordered by confidence).
+    # Predictions reference detections (not photos directly), so JOIN through
+    # the detections table to get photo_id.
     pred_rows = db.conn.execute(
-        """SELECT pr.photo_id, pr.species, pr.confidence, pr.model
+        """SELECT d.photo_id, pr.species, pr.confidence, pr.model
            FROM predictions pr
-           JOIN photos p ON p.id = pr.photo_id
+           JOIN detections d ON d.id = pr.detection_id
+           JOIN photos p ON p.id = d.photo_id
            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-           WHERE pr.workspace_id = ? AND wf.workspace_id = ?
-           ORDER BY pr.photo_id, pr.confidence DESC""",
+           WHERE d.workspace_id = ? AND wf.workspace_id = ?
+           ORDER BY d.photo_id, pr.confidence DESC""",
         (ws_id, ws_id),
     ).fetchall()
 
@@ -112,6 +116,30 @@ def load_photo_features(db, collection_id=None, config=None):
         pid = pr["photo_id"]
         if len(species_by_photo[pid]) < top_k:
             species_by_photo[pid].append((pr["species"], pr["confidence"], pr["model"]))
+
+    # Load primary detection per photo (highest confidence) from detections table.
+    # This replaces the old photos.detection_box / photos.detection_conf columns.
+    det_rows = db.conn.execute(
+        """SELECT d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+                  d.detector_confidence
+           FROM detections d
+           JOIN photos p ON p.id = d.photo_id
+           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+           WHERE d.workspace_id = ? AND wf.workspace_id = ?
+           ORDER BY d.photo_id, d.detector_confidence DESC""",
+        (ws_id, ws_id),
+    ).fetchall()
+    primary_det_by_photo = {}
+    for dr in det_rows:
+        pid = dr["photo_id"]
+        if pid not in primary_det_by_photo:
+            primary_det_by_photo[pid] = {
+                "x": dr["box_x"],
+                "y": dr["box_y"],
+                "w": dr["box_w"],
+                "h": dr["box_h"],
+                "detection_conf": dr["detector_confidence"],
+            }
 
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
@@ -139,6 +167,14 @@ def load_photo_features(db, collection_id=None, config=None):
         if row["dino_global_embedding"]:
             global_emb = np.frombuffer(row["dino_global_embedding"], dtype=np.float32)
 
+        det = primary_det_by_photo.get(pid)
+        det_box = None
+        det_conf = None
+        if det:
+            det_box = {"x": det["x"], "y": det["y"],
+                       "w": det["w"], "h": det["h"]}
+            det_conf = det["detection_conf"]
+
         photos.append({
             "id": pid,
             "folder_id": row["folder_id"],
@@ -148,8 +184,8 @@ def load_photo_features(db, collection_id=None, config=None):
             "height": row["height"],
             "latitude": row["latitude"],
             "longitude": row["longitude"],
-            "detection_box": row["detection_box"],
-            "detection_conf": row["detection_conf"],
+            "detection_box": det_box,
+            "detection_conf": det_conf,
             "subject_size": row["subject_size"],
             "mask_path": row["mask_path"],
             "subject_tenengrad": row["subject_tenengrad"],
@@ -167,6 +203,8 @@ def load_photo_features(db, collection_id=None, config=None):
             "focal_length": row["focal_length"],
             "burst_id": row["burst_id"],
             "noise_estimate": row["noise_estimate"],
+            "flag": row["flag"],
+            "rating": row["rating"],
         })
 
     log.info("Loaded %d photos with pipeline features", len(photos))

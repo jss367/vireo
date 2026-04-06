@@ -134,8 +134,12 @@ def main():
             "--exclude-module", "torch",
             "--exclude-module", "torchvision",
             "--exclude-module", "lightning",
-            "--strip",
         ]
+        # --strip only on macOS (Mach-O). On Windows it corrupts system
+        # DLLs; on Linux it breaks ELF page alignment of scipy's bundled
+        # OpenBLAS (libscipy_openblas64_), causing ImportError at startup.
+        if platform.system() == "Darwin":
+            pyinstaller_args.append("--strip")
 
     pyinstaller_args.append(os.path.join(repo_root, "vireo", "app.py"))
 

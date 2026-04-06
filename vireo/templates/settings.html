@@ -21,42 +21,6 @@
   .btn-sm.btn-danger { border-color: var(--danger); color: var(--danger); }
   .btn-sm.btn-danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); }
 
-  .shortcut-context-title {
-    font-size: 13px; font-weight: 600; color: var(--text-secondary);
-    margin: 16px 0 8px 0; padding-bottom: 6px;
-    border-bottom: 1px solid var(--border-primary);
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .shortcut-context-title:first-child { margin-top: 0; }
-  .shortcut-row {
-    display: flex; align-items: center; padding: 8px 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 50%, transparent);
-  }
-  .shortcut-row:last-child { border-bottom: none; }
-  .shortcut-action { flex: 1; font-size: 13px; color: var(--text-secondary); }
-  .shortcut-key-btn {
-    background: var(--bg-tertiary); color: var(--accent); border: 1px solid var(--border-secondary);
-    border-radius: 4px; padding: 4px 14px; font-size: 13px;
-    font-family: monospace; cursor: pointer; min-width: 70px;
-    text-align: center; transition: border-color 0.2s;
-  }
-  .shortcut-key-btn:hover { border-color: var(--accent); }
-  .shortcut-key-btn.capturing {
-    border-color: var(--warning); color: var(--warning); animation: pulse 1s infinite;
-  }
-  .shortcut-default-hint {
-    font-size: 11px; color: var(--text-ghost); margin-left: 8px; min-width: 80px;
-  }
-  .shortcut-reset-btn {
-    background: none; border: none; color: var(--text-ghost); cursor: pointer;
-    font-size: 14px; margin-left: 6px; padding: 2px 6px;
-  }
-  .shortcut-reset-btn:hover { color: var(--danger); }
-  .shortcut-conflict { font-size: 11px; color: var(--danger); margin-left: 8px; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-  }
   .collapsible-header {
     display: flex; justify-content: space-between; align-items: center;
     cursor: pointer; user-select: none;
@@ -92,6 +56,7 @@
                style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:1;">
         <input type="text" id="customModelPath" placeholder="/path/to/weights.bin"
                style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;flex:2;">
+        <button onclick="browseForWeights()" class="tauri-only" style="display:none;background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;white-space:nowrap;">Browse&hellip;</button>
         <button onclick="addCustomModel()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Add</button>
       </div>
     </div>
@@ -164,6 +129,18 @@
         <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgThresholdVal">40%</span>
       </div>
     </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_classification_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="range" id="wsVal_classification_threshold" min="1" max="99"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWsConfig()">
+        <span id="wsThresholdVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
+      </div>
+    </div>
     <div class="setting-row">
       <div class="setting-label">
         Grouping window
@@ -173,6 +150,18 @@
         <input type="number" id="cfgGroupingWindow" min="1" max="120" value="10"
                style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
+        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
+      </div>
+    </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_grouping_window_seconds" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120"
+               style="width:60px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveWsConfig()">
         <span style="font-size:13px;color:var(--text-dim);">seconds</span>
       </div>
     </div>
@@ -187,6 +176,18 @@
                oninput="document.getElementById('cfgSimilarityVal').textContent=this.value+'%'"
                onchange="saveConfig()">
         <span id="cfgSimilarityVal" style="font-size:13px;color:var(--text-primary);min-width:30px;">85%</span>
+      </div>
+    </div>
+    <div class="setting-row" style="padding:0 0 8px 16px;">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+        <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')" style="accent-color:var(--accent);">
+        Override for "<span class="ws-override-name">…</span>"
+      </label>
+      <div id="wsOverrideCtrl_similarity_threshold" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+        <input type="range" id="wsVal_similarity_threshold" min="50" max="99"
+               style="width:120px;accent-color:var(--accent);"
+               oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWsConfig()">
+        <span id="wsSimilarityVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
       </div>
     </div>
     <div class="setting-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;">
@@ -275,6 +276,23 @@
                style="width:120px;accent-color:var(--accent);"
                oninput="document.getElementById('cfgBrowseThumbVal').textContent = this.value + 'px'; saveConfig()">
         <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgBrowseThumbVal">220px</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Browse Grid -->
+  <div class="section">
+    <div class="section-title collapsible-header" onclick="toggleSection(this)">
+      Browse Grid
+      <span class="toggle-icon">&#9654;</span>
+    </div>
+    <div class="collapsible-body">
+      <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+        <div class="setting-label">
+          Card overlay fields
+          <small>Choose which fields appear below each thumbnail in the browse grid.</small>
+        </div>
+        <div id="cfgCardFieldsContainer" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;width:100%;"></div>
       </div>
     </div>
   </div>
@@ -634,6 +652,23 @@
     <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
   </div>
 
+  <!-- External Editor -->
+  <div class="section">
+    <div class="section-title">External Editor</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Application used when clicking "Open in Editor" in the browse tab. Leave empty to use your OS default.
+    </p>
+    <div class="setting-row">
+      <div class="setting-label">
+        Editor path
+        <small>Full path to the editor executable (e.g. /usr/bin/darktable, /Applications/RawTherapee.app). Leave empty to open with your OS default application.</small>
+      </div>
+      <input type="text" id="cfgExternalEditor" placeholder="OS default"
+             style="width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+             onchange="saveConfig()">
+    </div>
+  </div>
+
   <!-- darktable Development -->
   <div class="section">
     <div class="section-title">RAW Development (darktable)</div>
@@ -775,15 +810,6 @@
     </div>
   </div>
 
-  <!-- Keyboard Shortcuts -->
-  <div class="section">
-    <div class="section-title">Keyboard Shortcuts</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Click a key to change it. Shortcuts are grouped by page context.</p>
-    <div id="shortcutsEditor">
-      <span style="color:var(--text-ghost);font-size:13px;">Loading...</span>
-    </div>
-  </div>
-
   <!-- Advanced -->
   <div class="section">
     <div class="section-title" style="cursor:pointer;" onclick="document.getElementById('advancedContent').style.display = document.getElementById('advancedContent').style.display === 'none' ? '' : 'none'; this.querySelector('span').textContent = document.getElementById('advancedContent').style.display === 'none' ? '\u25B6' : '\u25BC';">
@@ -803,24 +829,11 @@
     </div>
   </div>
 
-  <!-- About -->
-  <div class="section">
-    <div class="section-title">About</div>
-    <div class="setting-row">
-      <div class="setting-label">Vireo</div>
-      <span class="setting-value" id="appVersion">-</span>
-    </div>
-    <div style="font-size:12px;color:var(--text-faint);margin-top:8px;">
-      AI-powered wildlife photo organizer.
-      <a href="https://github.com/jss367/vireo" style="color:var(--accent);text-decoration:none;">GitHub</a>
-    </div>
-  </div>
-
   <!-- About & Updates -->
   <div class="section" id="updateSection" style="display:none;">
     <div class="section-title">About & Updates</div>
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <span style="font-size:13px;color:var(--text-secondary);">Vireo v<span id="currentVersion">0.1.0</span></span>
+      <span style="font-size:13px;color:var(--text-secondary);">Vireo v<span id="currentVersion">-</span></span>
       <button class="btn-sm" id="checkUpdateBtn" onclick="doCheckForUpdate()">Check for Updates</button>
       <span id="updateStatus" style="font-size:12px;color:var(--text-dim);"></span>
     </div>
@@ -843,6 +856,7 @@ loadModels();
 loadTaxonomy();
 loadSystemInfo();
 loadConfig();
+loadWsOverrides();
 loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
@@ -852,6 +866,84 @@ function toggleSection(header) {
   header.classList.toggle('open');
   var body = header.nextElementSibling;
   body.classList.toggle('open');
+}
+
+/* ---------- Workspace Config Overrides ---------- */
+async function loadWsOverrides() {
+  try {
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    if (ws && ws.name) {
+      document.querySelectorAll('.ws-override-name').forEach(function(el) { el.textContent = ws.name; });
+    }
+    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
+      var checkbox = document.getElementById('wsOverride_' + key);
+      var input = document.getElementById('wsVal_' + key);
+      var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+      if (!checkbox || !input || !ctrl) return;
+      if (overrides[key] !== undefined) {
+        checkbox.checked = true;
+        ctrl.style.display = 'flex';
+        if (key === 'classification_threshold' || key === 'similarity_threshold') {
+          input.value = Math.round(overrides[key] * 100);
+        } else {
+          input.value = overrides[key];
+        }
+        updateWsLabel(key);
+      }
+    });
+  } catch(e) {}
+}
+
+function updateWsLabel(key) {
+  var input = document.getElementById('wsVal_' + key);
+  if (!input) return;
+  if (key === 'classification_threshold') {
+    document.getElementById('wsThresholdVal').textContent = input.value + '%';
+  } else if (key === 'similarity_threshold') {
+    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
+  }
+}
+
+function toggleWsOverride(key) {
+  var checkbox = document.getElementById('wsOverride_' + key);
+  var input = document.getElementById('wsVal_' + key);
+  var ctrl = document.getElementById('wsOverrideCtrl_' + key);
+  if (!checkbox || !input || !ctrl) return;
+  ctrl.style.display = checkbox.checked ? 'flex' : 'none';
+  if (checkbox.checked && !input.value) {
+    if (key === 'classification_threshold') input.value = 40;
+    else if (key === 'grouping_window_seconds') input.value = 10;
+    else if (key === 'similarity_threshold') input.value = 85;
+    updateWsLabel(key);
+  }
+  saveWsConfig();
+}
+
+var _wsSaveTimer = null;
+function saveWsConfig() {
+  clearTimeout(_wsSaveTimer);
+  _wsSaveTimer = setTimeout(async function() {
+    var overrides = {};
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
+      var checkbox = document.getElementById('wsOverride_' + key);
+      var input = document.getElementById('wsVal_' + key);
+      if (checkbox && checkbox.checked && input) {
+        if (key === 'classification_threshold' || key === 'similarity_threshold') {
+          overrides[key] = parseInt(input.value) / 100;
+        } else {
+          overrides[key] = parseInt(input.value);
+        }
+      }
+    });
+    try {
+      await safeFetch('/api/workspaces/active/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(overrides)
+      });
+    } catch(e) {}
+  }, 500);
 }
 
 var _saveTimer = null;
@@ -871,6 +963,7 @@ async function loadConfig() {
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
     // Load darktable settings
+    document.getElementById('cfgExternalEditor').value = cfg.external_editor || '';
     document.getElementById('cfgDarktableBin').value = cfg.darktable_bin || '';
     document.getElementById('cfgDarktableStyle').value = cfg.darktable_style || '';
     document.getElementById('cfgDarktableFormat').value = cfg.darktable_output_format || 'jpg';
@@ -890,6 +983,8 @@ async function loadConfig() {
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
+    // Load browse card fields
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
@@ -967,10 +1062,43 @@ async function loadConfig() {
     document.getElementById('cfgMergeScore').value = ms;
     document.getElementById('cfgMergeScoreVal').textContent = ms + '%';
     document.getElementById('cfgMergeMaxGap').value = p.merge_max_gap != null ? p.merge_max_gap : 60;
-    // Load keyboard shortcuts
-    currentShortcuts = cfg.keyboard_shortcuts || JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS));
-    renderShortcutsEditor();
   } catch(e) {}
+}
+
+var CARD_FIELD_OPTIONS = [
+  { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'rating', label: 'Rating', desc: 'Star rating' },
+  { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
+  { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
+  { id: 'species', label: 'Species', desc: 'Species identification badges' },
+  { id: 'dimensions', label: 'Dimensions', desc: 'Image width \u00d7 height' },
+  { id: 'file_size', label: 'File size', desc: 'e.g. "4.2 MB"' },
+  { id: 'capture_date', label: 'Capture date', desc: 'Date photo was taken' },
+  { id: 'extension', label: 'Extension', desc: 'File type (JPG, RAW, etc.)' },
+  { id: 'quality_score', label: 'Quality score', desc: 'Pipeline quality score' },
+];
+
+function loadCardFieldCheckboxes(activeFields) {
+  var container = document.getElementById('cfgCardFieldsContainer');
+  container.innerHTML = '';
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var checked = activeFields.indexOf(opt.id) !== -1 ? ' checked' : '';
+    container.innerHTML += '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);cursor:pointer;">' +
+      '<input type="checkbox" id="cfgCardField_' + opt.id + '" value="' + opt.id + '"' + checked +
+      ' onchange="saveConfig()" style="accent-color:var(--accent);">' +
+      '<span>' + opt.label + '</span>' +
+      '<span style="color:var(--text-dim);font-size:11px;">' + opt.desc + '</span>' +
+    '</label>';
+  });
+}
+
+function getSelectedCardFields() {
+  var fields = [];
+  CARD_FIELD_OPTIONS.forEach(function(opt) {
+    var cb = document.getElementById('cfgCardField_' + opt.id);
+    if (cb && cb.checked) fields.push(opt.id);
+  });
+  return fields;
 }
 
 function saveConfig() {
@@ -996,6 +1124,7 @@ function saveConfig() {
           max_edit_history: maxEditHistory,
           hf_token: hfToken,
           inat_token: document.getElementById('cfgInatToken').value.trim(),
+          external_editor: document.getElementById('cfgExternalEditor').value.trim(),
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
           darktable_output_format: document.getElementById('cfgDarktableFormat').value,
@@ -1005,6 +1134,7 @@ function saveConfig() {
           thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
           preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
+          browse_card_fields: getSelectedCardFields(),
           detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
           detection_padding: parseInt(document.getElementById('cfgDetectionPadding').value, 10) / 100,
           top_k_predictions: parseInt(document.getElementById('cfgTopK').value, 10) || 5,
@@ -1097,156 +1227,6 @@ async function validateInatToken() {
   } catch(e) {
     status.innerHTML = '<span style="color:var(--danger);">&#10007; ' + escapeHtml(e.message) + '</span>';
   }
-}
-
-/* ---------- Keyboard Shortcuts Editor ---------- */
-var SHORTCUT_LABELS = {
-  review: {
-    _title: 'Review (Classify page)',
-    accept: 'Accept prediction',
-    skip: 'Skip / reject prediction',
-  },
-  browse: {
-    _title: 'Browse',
-    rate_0: 'Rate 0 (clear)',
-    rate_1: 'Rate 1',
-    rate_2: 'Rate 2',
-    rate_3: 'Rate 3',
-    rate_4: 'Rate 4',
-    rate_5: 'Rate 5',
-    flag: 'Flag photo',
-    reject: 'Reject photo',
-    unflag: 'Unflag photo',
-    undo: 'Undo last action',
-    select_all: 'Select all photos',
-    zoom: 'Toggle zoom (lightbox)',
-  },
-};
-
-var SHORTCUT_DEFAULTS = {
-  review: { accept: 'a', skip: 's' },
-  browse: {
-    rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
-    rate_4: '4', rate_5: '5',
-    flag: 'p', reject: 'x', unflag: 'u',
-    undo: 'ctrl+z', select_all: 'ctrl+a', zoom: 'z',
-  },
-};
-
-var currentShortcuts = null;
-var capturingBtn = null;
-
-function renderShortcutsEditor() {
-  if (!currentShortcuts) return;
-  var html = '';
-  for (var ctx in SHORTCUT_LABELS) {
-    var labels = SHORTCUT_LABELS[ctx];
-    var values = currentShortcuts[ctx] || {};
-    var defaults = SHORTCUT_DEFAULTS[ctx] || {};
-    html += '<div class="shortcut-context-title">' + labels._title +
-      '<button onclick="resetContext(\'' + ctx + '\')" ' +
-      'style="background:none;border:1px solid var(--text-ghost);color:var(--text-dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;">Reset All</button></div>';
-    for (var action in labels) {
-      if (action === '_title') continue;
-      var current = values[action] || defaults[action] || '';
-      var isDefault = current === defaults[action];
-      var conflict = findConflict(ctx, action, current);
-      html += '<div class="shortcut-row">';
-      html += '<span class="shortcut-action">' + labels[action] + '</span>';
-      html += '<button class="shortcut-key-btn" onclick="startCapture(this, \'' + ctx + '\', \'' + action + '\')">' +
-        formatShortcut(current) + '</button>';
-      html += '<span class="shortcut-default-hint">' + (isDefault ? '' : 'default: ' + formatShortcut(defaults[action])) + '</span>';
-      if (!isDefault) {
-        html += '<button class="shortcut-reset-btn" onclick="resetShortcut(\'' + ctx + '\', \'' + action + '\')" title="Reset to default">&times;</button>';
-      }
-      if (conflict) {
-        html += '<span class="shortcut-conflict">Conflict: ' + SHORTCUT_LABELS[ctx][conflict] + '</span>';
-      }
-      html += '</div>';
-    }
-  }
-  document.getElementById('shortcutsEditor').innerHTML = html;
-}
-
-function findConflict(ctx, action, keyStr) {
-  if (!currentShortcuts[ctx]) return null;
-  for (var other in currentShortcuts[ctx]) {
-    if (other === action) continue;
-    if (currentShortcuts[ctx][other] === keyStr) return other;
-  }
-  return null;
-}
-
-function startCapture(btn, ctx, action) {
-  if (capturingBtn) capturingBtn.classList.remove('capturing');
-  capturingBtn = btn;
-  btn.classList.add('capturing');
-  btn.textContent = 'Press a key...';
-
-  function onKey(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (['Control', 'Shift', 'Alt', 'Meta'].indexOf(e.key) !== -1) return;
-
-    var parts = [];
-    if (e.ctrlKey || e.metaKey) parts.push('ctrl');
-    if (e.shiftKey) parts.push('shift');
-    if (e.altKey) parts.push('alt');
-    parts.push(e.key.toLowerCase());
-    var keyStr = parts.join('+');
-
-    var conflict = findConflict(ctx, action, keyStr);
-    if (conflict) {
-      btn.classList.remove('capturing');
-      capturingBtn = null;
-      document.removeEventListener('keydown', onKey, true);
-      btn.textContent = 'Conflict: ' + SHORTCUT_LABELS[ctx][conflict];
-      btn.style.borderColor = 'var(--danger)';
-      btn.style.color = 'var(--danger)';
-      setTimeout(function() { renderShortcutsEditor(); }, 1500);
-      return;
-    }
-
-    currentShortcuts[ctx][action] = keyStr;
-    btn.classList.remove('capturing');
-    capturingBtn = null;
-    document.removeEventListener('keydown', onKey, true);
-    renderShortcutsEditor();
-    saveShortcuts();
-  }
-
-  document.addEventListener('keydown', onKey, true);
-
-  function onBlur() {
-    if (capturingBtn === btn) {
-      btn.classList.remove('capturing');
-      capturingBtn = null;
-      document.removeEventListener('keydown', onKey, true);
-      renderShortcutsEditor();
-    }
-    btn.removeEventListener('blur', onBlur);
-  }
-  btn.addEventListener('blur', onBlur);
-}
-
-function resetShortcut(ctx, action) {
-  currentShortcuts[ctx][action] = SHORTCUT_DEFAULTS[ctx][action];
-  renderShortcutsEditor();
-  saveShortcuts();
-}
-
-function resetContext(ctx) {
-  currentShortcuts[ctx] = JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS[ctx]));
-  renderShortcutsEditor();
-  saveShortcuts();
-}
-
-function saveShortcuts() {
-  safeFetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ keyboard_shortcuts: currentShortcuts }),
-  }).catch(function() {});
 }
 
 async function loadDarktableStatus() {
@@ -1593,11 +1573,15 @@ async function fetchLabels() {
 }
 
 /* ---------- Models ---------- */
+var _modelsById = {};
 async function loadModels() {
   try {
     var data = await safeFetch('/api/models', {}, { toast: false });
     var models = data.models || [];
     var activeId = data.active_id;
+
+    _modelsById = {};
+    models.forEach(function(m) { _modelsById[m.id] = m; });
 
     if (models.length === 0) {
       document.getElementById('modelsContent').innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No models available.</span>';
@@ -1631,7 +1615,7 @@ async function loadModels() {
       if (!m.downloaded && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
-      if (m.downloaded && !isActive) {
+      if (!isActive) {
         html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
       if (m.downloaded) {
@@ -1709,6 +1693,61 @@ async function removeModel(modelId) {
 }
 
 async function setActiveModel(modelId) {
+  var m = _modelsById[modelId];
+  if (m && !m.downloaded) {
+    var sizeStr = m.size_mb ? (m.size_mb >= 1000 ? (m.size_mb / 1000).toFixed(1) + ' GB' : m.size_mb + ' MB') : '';
+    showToast('Model not downloaded — downloading' + (sizeStr ? ' (~' + sizeStr + ')' : '') + '...', 'success');
+    try {
+      var data = await safeFetch('/api/jobs/download-model', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model_id: modelId}),
+      }, { toast: false });
+
+      var progressDiv = document.getElementById('modelProgress-' + modelId);
+      var progressFill = document.getElementById('modelProgressFill-' + modelId);
+      var progressText = document.getElementById('modelProgressText-' + modelId);
+      if (progressDiv) progressDiv.style.display = '';
+
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          if (progressFill && p.total > 0 && p.current > 0) {
+            var pct = Math.round((p.current / p.total) * 100);
+            progressFill.style.width = pct + '%';
+          }
+          if (progressText && p.current_file) {
+            progressText.textContent = p.current_file;
+          }
+        },
+        onComplete: function(result) {
+          if (result.status === 'completed') {
+            if (progressText) progressText.textContent = 'Download complete!';
+            if (progressFill) progressFill.style.width = '100%';
+            // Now set as active
+            safeFetch('/api/models/active', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({model_id: modelId}),
+            }).catch(function(){});
+            setTimeout(loadModels, 1000);
+          } else {
+            if (progressText) {
+              progressText.textContent = 'Failed: ' + (result.errors || []).join(', ');
+              progressText.style.color = 'var(--danger)';
+            }
+            setTimeout(loadModels, 1000);
+          }
+        },
+        onError: function() {
+          if (progressText) {
+            progressText.textContent = 'Connection lost';
+            progressText.style.color = 'var(--danger)';
+          }
+        }
+      });
+    } catch(e) {}
+    return;
+  }
   try {
     await safeFetch('/api/models/active', {
       method: 'POST',
@@ -1795,7 +1834,8 @@ async function loadTaxonomy() {
       html += '</div>';
     } else {
       html += '<div style="margin-bottom:8px;">';
-      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded. The taxonomy is used for species classification and keyword categorization.</div>';
+      html += '<div style="font-size:13px;color:var(--text-dim);">No taxonomy downloaded.</div>';
+      html += '<div style="font-size:12px;color:var(--text-dim);margin-top:4px;">The taxonomy adds taxonomic hierarchy to predictions (order, family, genus), enables filtering by group (e.g. Raptors, Waterfowl), and categorizes keywords as species. Classification works without it — if you don\'t need these features, you can skip this.</div>';
       html += '</div>';
       html += '<button onclick="downloadTaxonomy()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:8px 20px;font-size:13px;cursor:pointer;">Download iNaturalist Taxonomy</button>';
     }
@@ -1984,8 +2024,6 @@ async function cleanKeywords() {
 async function loadVersion() {
   try {
     var d = await safeFetch('/api/version', {}, { toast: false });
-    var ver = 'v' + d.version;
-    document.getElementById('appVersion').textContent = ver;
     var cv = document.getElementById('currentVersion');
     if (cv) cv.textContent = d.version;
   } catch(e) {}
@@ -2038,13 +2076,15 @@ async function browseForOutputDir() {
   }
 }
 
-/* ---------- Auto-Update (Tauri only) ---------- */
-(function() {
-  if (typeof isTauri === 'function' && isTauri()) {
-    var section = document.getElementById('updateSection');
-    if (section) section.style.display = '';
+async function browseForWeights() {
+  var path = await pickFile({ title: 'Select model weights file' });
+  if (path) {
+    document.getElementById('customModelPath').value = path;
   }
-})();
+}
+
+/* ---------- Auto-Update (Tauri only) ---------- */
+/* Updater disabled — no update commands registered. Section stays hidden. */
 
 async function doCheckForUpdate() {
   var btn = document.getElementById('checkUpdateBtn');

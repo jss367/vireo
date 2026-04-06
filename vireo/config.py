@@ -20,10 +20,12 @@ DEFAULTS = {
     "scan_roots": [],
     "setup_complete": False,
     "darktable_bin": "",
+    "external_editor": "",
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
     # --- Display ---
+    "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,
@@ -69,11 +71,28 @@ DEFAULTS = {
     },
     # --- Ingest (import from external source) ---
     "ingest": {
-        "folder_template": "%Y/%m-%d",
+        "folder_template": "%Y/%Y-%m-%d",
         "skip_duplicates": True,
         "file_types": "both",
     },
     "keyboard_shortcuts": {
+        "navigation": {
+            "import": "i",
+            "pipeline": "p",
+            "pipeline_review": "e",
+            "review": "r",
+            "cull": "c",
+            "browse": "b",
+            "map": "m",
+            "variants": "v",
+            "dashboard": "d",
+            "audit": "a",
+            "compare": "o",
+            "workspace": "w",
+            "shortcuts": "/",
+            "settings": ",",
+            "keywords": "k",
+        },
         "review": {
             "accept": "a",
             "skip": "s",

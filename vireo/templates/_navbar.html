@@ -53,6 +53,28 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .navbar a:hover { color: var(--text-primary); }
 .navbar a.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.navbar a[data-nav-id].dragging {
+  opacity: 0.4;
+}
+.navbar .nav-drop-indicator {
+  width: 2px;
+  height: 24px;
+  background: var(--accent);
+  align-self: center;
+  flex-shrink: 0;
+  pointer-events: none;
+  margin: 0 -1px;
+}
+.navbar a .hk {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--text-ghost);
+}
+.navbar a .hk-suffix {
+  color: var(--text-ghost);
+  font-size: 11px;
+  margin-left: 2px;
+}
 .navbar .nav-spacer { flex: 1; }
 .navbar .nav-icon {
   color: var(--text-ghost);
@@ -78,9 +100,97 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   animation: pulse 1.5s ease-in-out infinite;
 }
 .activity-dot.active { display: block; }
+.nav-job-badge {
+  margin-left: 2px; font-size: 11px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+/* ---------- Help Modal ---------- */
+.help-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.5);
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 10vh;
+}
+.help-overlay.active { display: flex; }
+.help-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  width: 520px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+.help-search {
+  padding: 16px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.help-search input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  outline: none;
+  box-sizing: border-box;
+}
+.help-search input:focus { border-color: var(--accent); }
+.help-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 16px 16px;
+}
+.help-category {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-ghost);
+  margin: 16px 0 8px;
+}
+.help-category:first-child { margin-top: 8px; }
+.help-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.help-item:last-child { border-bottom: none; }
+.help-question {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.help-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.help-answer {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.help-empty {
+  text-align: center;
+  color: var(--text-ghost);
+  padding: 32px 0;
+  font-size: 13px;
 }
 
 /* ---------- Bottom Panel ---------- */
@@ -304,6 +414,24 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   z-index: 10000;
 }
 .lightbox-close:hover { opacity: 1; }
+.lb-detection-box {
+  position: absolute;
+  border: 2px solid;
+  border-radius: 2px;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+.lb-detection-label {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 0 0 3px 0;
+  white-space: nowrap;
+  line-height: 1.4;
+}
 .lightbox-filename {
   position: absolute;
   bottom: 16px;
@@ -543,6 +671,62 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
+/* ---------- Shortcuts Cheat Sheet ---------- */
+.shortcuts-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 500;
+  justify-content: center;
+  align-items: center;
+}
+.shortcuts-overlay.open { display: flex; }
+.shortcuts-sheet {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 24px;
+  width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.shortcuts-sheet h3 {
+  font-size: 16px; margin: 0 0 16px 0; color: var(--text-primary);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.shortcuts-sheet-close {
+  background: none; border: none; color: var(--text-ghost);
+  font-size: 20px; cursor: pointer; padding: 0 4px;
+}
+.shortcuts-sheet-close:hover { color: var(--text-primary); }
+.sc-group-title {
+  font-size: 12px; font-weight: 600; color: var(--text-dim);
+  margin: 14px 0 6px 0; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.sc-group-title:first-child { margin-top: 0; }
+.sc-row {
+  display: flex; align-items: center; padding: 4px 0;
+}
+.sc-key {
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 2px 8px; font-size: 12px;
+  font-family: monospace; color: var(--accent); min-width: 50px;
+  text-align: center; display: inline-block;
+}
+.sc-label {
+  font-size: 13px; color: var(--text-secondary); margin-left: 12px;
+}
+.sc-footer {
+  margin-top: 16px; padding-top: 12px;
+  border-top: 1px solid var(--border-primary);
+  text-align: center;
+}
+.sc-footer a {
+  font-size: 12px; color: var(--accent); text-decoration: none;
+}
+.sc-footer a:hover { text-decoration: underline; }
+
 /* ---------- iNat Submission Modal ---------- */
 .inat-modal { width: 560px; }
 .inat-card {
@@ -612,12 +796,108 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   color: var(--accent);
 }
 .ws-menu-action:hover { background: var(--bg-tertiary); }
+
+/* ---------- Missing Folders ---------- */
+.missing-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.missing-folder-row:last-child { border-bottom: none; }
+.missing-folder-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+.missing-folder-count {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.missing-folder-actions { display: flex; gap: 6px; }
+.missing-folder-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+.missing-folder-actions button.danger {
+  color: var(--danger, #dc3545);
+  border-color: var(--danger, #dc3545);
+}
+.relocate-breadcrumb {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+.relocate-quick-access {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.relocate-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary, var(--bg));
+  color: var(--text);
+  cursor: pointer;
+}
+.relocate-quick-btn:hover {
+  background: var(--bg-hover);
+}
+.relocate-folder-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.relocate-folder-item:hover { background: var(--bg-hover); }
+.missing-folders-banner {
+  background: var(--warning-bg, #fff3cd);
+  color: var(--warning-text, #856404);
+  padding: 6px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--warning-border, #ffc107);
+}
+.missing-folders-banner a {
+  color: var(--warning-text, #856404);
+  font-weight: 600;
+  text-decoration: underline;
+}
+.banner-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--warning-text, #856404);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+}
 </style>
 
 <nav class="navbar">
   <a class="brand" href="/browse"><img src="/static/favicon.png" alt="" style="height:22px;width:22px;vertical-align:middle;margin-right:6px;border-radius:4px;">Vireo</a>
   <div class="ws-dropdown" id="wsDropdown">
-    <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn">
+    <button class="ws-current" onclick="toggleWsDropdown()" id="wsCurrentBtn" data-testid="workspace-dropdown">
       <span id="wsCurrentName">Default</span>
       <span class="ws-arrow">&#9662;</span>
     </button>
@@ -628,21 +908,25 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
       <button class="ws-menu-action" onclick="showCreateWorkspaceModal()">+ New Workspace</button>
     </div>
   </div>
-  <a href="/import">Import</a>
-  <a href="/pipeline">Pipeline</a>
-  <a href="/pipeline/review">Pipeline Review</a>
-  <a href="/review">Review</a>
-  <a href="/cull">Cull</a>
-  <a href="/browse">Browse</a>
-  <a href="/map">Map</a>
-  <a href="/variants">Variants</a>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/audit">Audit</a>
-  <a href="/compare">Compare</a>
-  <a href="/workspace">Workspace</a>
-  <a href="/settings">Settings</a>
-  <a href="/keywords">Keywords</a>
+  <a href="/pipeline" data-nav-id="pipeline" data-testid="nav-pipeline">Pipeline</a>
+  <a href="/lightroom" data-nav-id="lightroom">Lightroom</a>
+  <a href="/jobs" data-nav-id="jobs" data-testid="nav-jobs">Jobs<span class="nav-job-badge" id="navJobBadge" data-testid="job-badge"></span></a>
+  <a href="/pipeline/review" data-nav-id="pipeline-review">Pipeline Review</a>
+  <a href="/review" data-nav-id="review" data-testid="nav-review">Review</a>
+  <a href="/cull" data-nav-id="cull">Cull</a>
+  <a href="/highlights" data-nav-id="highlights">Highlights</a>
+  <a href="/browse" data-nav-id="browse" data-testid="nav-browse">Browse</a>
+  <a href="/map" data-nav-id="map">Map</a>
+  <a href="/variants" data-nav-id="variants">Variants</a>
+  <a href="/dashboard" data-nav-id="dashboard">Dashboard</a>
+  <a href="/audit" data-nav-id="audit">Audit</a>
+  <a href="/compare" data-nav-id="compare">Compare</a>
+  <a href="/workspace" data-nav-id="workspace">Workspace</a>
+  <a href="/keywords" data-nav-id="keywords">Keywords</a>
+  <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
+  <a href="/settings" data-nav-id="settings">Settings</a>
   <span class="nav-spacer"></span>
+  <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
   <span class="nav-icon" onclick="toggleBottomPanel()" title="Toggle panel">
@@ -652,6 +936,64 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a class="nav-icon" href="/logs" title="Full log viewer">&#9776;</a>
 </nav>
 
+<!-- Help Modal -->
+<div class="help-overlay" id="helpModal">
+  <div class="help-modal">
+    <div class="help-search">
+      <input type="text" id="helpSearchInput" placeholder="Search help..." autocomplete="off">
+    </div>
+    <div class="help-results" id="helpResults"></div>
+  </div>
+</div>
+
+<!-- Missing Folders Banner -->
+<div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
+  <span id="missingFoldersMsg"></span>
+  <a href="#" onclick="openMissingFoldersModal(); return false;">Review</a>
+  <button class="banner-dismiss" onclick="dismissMissingBanner()">&times;</button>
+</div>
+
+<!-- Missing Folders Modal -->
+<div class="modal-overlay" id="missingFoldersModal">
+  <div class="modal" style="max-width:700px;width:90%;">
+    <h3>Missing Folders</h3>
+    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px;">
+      These folders can't be found on disk. Relocate them to a new path or remove them from Vireo.
+    </p>
+    <div id="missingFoldersList"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Relocate Folder Browser Modal -->
+<div class="modal-overlay" id="relocateBrowserModal" style="z-index:1001;">
+  <div class="modal" style="max-width:600px;width:85%;">
+    <h3>Select New Location</h3>
+    <div id="relocateOriginalPath" style="font-size:0.85em;color:var(--text-secondary);margin-bottom:8px;word-break:break-all;">Looking for: <strong id="relocateOriginalPathText"></strong></div>
+    <div class="relocate-quick-access" id="relocateQuickAccess"></div>
+    <div class="folder-browser-breadcrumb" id="relocateBreadcrumb"></div>
+    <div class="folder-browser-list" id="relocateFolderList" style="height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-bottom:12px;"></div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" id="relocateSelectBtn" onclick="confirmRelocate()">Select This Folder</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeRelocateBrowser()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Subfolder Cascade Confirm Modal -->
+<div class="modal-overlay" id="cascadeConfirmModal" style="z-index:1002;">
+  <div class="modal">
+    <h3>Subfolders Found</h3>
+    <p id="cascadeMsg"></p>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmCascade()">Re-link All</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeCascadeConfirm()">Skip</button>
+    </div>
+  </div>
+</div>
+
 <!-- Create Workspace Modal -->
 <div class="modal-overlay" id="createWsModal">
   <div class="modal">
@@ -659,11 +1001,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <div style="margin-bottom:12px;">
       <label class="modal-label">Name</label>
       <input class="modal-input" id="newWsName" placeholder="e.g. Kenya 2025">
-    </div>
-    <div style="margin-bottom:16px;">
-      <label class="modal-label">Folders</label>
-      <div id="newWsFolderList" style="max-height:200px; overflow-y:auto; border:1px solid var(--border-primary); border-radius:4px; padding:4px;"></div>
-      <div class="modal-hint">Select which folders to include. You can change this later.</div>
     </div>
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="createWorkspace()">Create</button>
@@ -673,11 +1010,136 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   </div>
 </div>
 
+<!-- Shortcuts Cheat Sheet Overlay -->
+<div class="shortcuts-overlay" id="shortcutsCheatSheet" onclick="if(event.target===this)closeShortcutsSheet()">
+  <div class="shortcuts-sheet">
+    <h3>Keyboard Shortcuts <button class="shortcuts-sheet-close" onclick="closeShortcutsSheet()">&times;</button></h3>
+    <div id="shortcutsSheetContent"></div>
+    <div class="sc-footer"><a href="/shortcuts">Edit shortcuts &rarr;</a></div>
+  </div>
+</div>
+
 <script>
-/* ---------- Active page highlighting ---------- */
+/* ---------- Nav reorder + Active page highlighting ---------- */
 (function() {
+  // Reorder nav links from workspace config
+  function reorderNavLinks(order) {
+    var navbar = document.querySelector('.navbar');
+    var spacer = navbar.querySelector('.nav-spacer');
+    var links = {};
+    navbar.querySelectorAll('a[data-nav-id]').forEach(function(a) {
+      links[a.dataset.navId] = a;
+    });
+    // Move ordered links before the spacer
+    order.forEach(function(id) {
+      if (links[id]) {
+        navbar.insertBefore(links[id], spacer);
+        delete links[id];
+      }
+    });
+    // Append any remaining links not in the saved order (new pages)
+    Object.keys(links).forEach(function(id) {
+      navbar.insertBefore(links[id], spacer);
+    });
+  }
+
+  fetch('/api/workspaces/active/config')
+    .then(function(r) { return r.json(); })
+    .then(function(cfg) {
+      if (cfg.nav_order && Array.isArray(cfg.nav_order)) {
+        reorderNavLinks(cfg.nav_order);
+      }
+    })
+    .catch(function() {}); // silently ignore — default order is fine
+
+  // Drag-and-drop reordering
+  (function initNavDragDrop() {
+    var navbar = document.querySelector('.navbar');
+    var draggedEl = null;
+    var indicator = null;
+
+    function getNavLinks() {
+      return Array.from(navbar.querySelectorAll('a[data-nav-id]'));
+    }
+
+    function createIndicator() {
+      var el = document.createElement('span');
+      el.className = 'nav-drop-indicator';
+      return el;
+    }
+
+    function removeIndicator() {
+      if (indicator && indicator.parentNode) {
+        indicator.parentNode.removeChild(indicator);
+      }
+      indicator = null;
+    }
+
+    function saveOrder() {
+      var order = getNavLinks().map(function(a) { return a.dataset.navId; });
+      fetch('/api/workspaces/active/nav-order', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({nav_order: order})
+      });
+    }
+
+    getNavLinks().forEach(function(link) {
+      link.draggable = true;
+
+      link.addEventListener('dragstart', function(e) {
+        draggedEl = this;
+        this.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', this.dataset.navId);
+      });
+
+      link.addEventListener('dragend', function() {
+        this.classList.remove('dragging');
+        removeIndicator();
+        draggedEl = null;
+      });
+
+      link.addEventListener('dragover', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        removeIndicator();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        indicator = createIndicator();
+        if (e.clientX < midX) {
+          navbar.insertBefore(indicator, this);
+        } else {
+          navbar.insertBefore(indicator, this.nextSibling);
+        }
+      });
+
+      link.addEventListener('drop', function(e) {
+        if (!draggedEl || draggedEl === this) return;
+        e.preventDefault();
+        var rect = this.getBoundingClientRect();
+        var midX = rect.left + rect.width / 2;
+        if (e.clientX < midX) {
+          navbar.insertBefore(draggedEl, this);
+        } else {
+          navbar.insertBefore(draggedEl, this.nextSibling);
+        }
+        removeIndicator();
+        saveOrder();
+      });
+    });
+
+    // Remove indicator when dragging leaves the navbar
+    navbar.addEventListener('dragleave', function(e) {
+      if (!navbar.contains(e.relatedTarget)) {
+        removeIndicator();
+      }
+    });
+  })();
+
+  // Active page highlighting
   var path = location.pathname;
-  // Skip the brand anchor (.brand) — only highlight actual nav items
   var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand)');
   var exactMatch = null;
   for (var i = 0; i < navLinks.length; i++) {
@@ -689,7 +1151,6 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   if (exactMatch) {
     exactMatch.classList.add('active');
   } else {
-    // Fallback: longest prefix match
     var best = null;
     var bestLen = 0;
     for (var i = 0; i < navLinks.length; i++) {
@@ -701,6 +1162,204 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     }
     if (best) best.classList.add('active');
   }
+})();
+
+/* ---------- Navigation Hotkeys ---------- */
+(function() {
+  // Map from navigation shortcut key → href path
+  var NAV_ROUTES = {
+    pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
+    review: '/review', cull: '/cull', browse: '/browse', map: '/map',
+    variants: '/variants', dashboard: '/dashboard', audit: '/audit',
+    compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
+    settings: '/settings', keywords: '/keywords'
+  };
+
+  var NAV_DEFAULTS = {
+    pipeline: 'i', lightroom: 'l', pipeline_review: 'e', review: 'r',
+    cull: 'c', browse: 'b', map: 'm', variants: 'v',
+    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+    shortcuts: '/', settings: ',', keywords: 'k'
+  };
+
+  // Build reverse map: href → shortcut action name
+  var hrefToAction = {};
+  for (var action in NAV_ROUTES) hrefToAction[NAV_ROUTES[action]] = action;
+
+  function applyHotkeyHints(navShortcuts) {
+    var navLinks = document.querySelectorAll('.navbar > a[href]:not(.brand):not(.nav-icon)');
+    for (var i = 0; i < navLinks.length; i++) {
+      var link = navLinks[i];
+      var href = link.getAttribute('href');
+      var action = hrefToAction[href];
+      if (!action) continue;
+      var keyStr = navShortcuts[action];
+      if (!keyStr) continue;
+
+      var label = link.textContent.trim();
+      var sc = parseShortcut(keyStr);
+      // Only do inline highlight for single bare keys (no modifiers)
+      if (!sc.ctrl && !sc.meta && !sc.shift && !sc.alt && sc.key.length === 1) {
+        var idx = label.toLowerCase().indexOf(sc.key.toLowerCase());
+        if (idx !== -1) {
+          // Inline highlight: wrap first occurrence of the letter
+          link.innerHTML = escapeHtml(label.substring(0, idx)) +
+            '<span class="hk">' + escapeHtml(label.charAt(idx)) + '</span>' +
+            escapeHtml(label.substring(idx + 1));
+          continue;
+        }
+      }
+      // Suffix: append (key) after label
+      link.innerHTML = escapeHtml(label) + ' <span class="hk-suffix">(' +
+        escapeHtml(formatShortcut(keyStr)) + ')</span>';
+    }
+  }
+
+  function setupNavKeydown(navShortcuts) {
+    var keyToHref = {};
+    for (var action in navShortcuts) {
+      if (NAV_ROUTES[action]) keyToHref[navShortcuts[action]] = NAV_ROUTES[action];
+    }
+
+    var path = location.pathname;
+    var pageCtx = null;
+    if (path === '/browse') pageCtx = 'browse';
+    else if (path === '/review') pageCtx = 'review';
+
+    document.addEventListener('keydown', function(e) {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      // Skip if any overlay or modal is open
+      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active')) return;
+
+      for (var shortcutStr in keyToHref) {
+        if (matchesShortcut(e, shortcutStr)) {
+          // Live check: does the current page claim this key?
+          if (pageCtx && window._vireoShortcuts && window._vireoShortcuts[pageCtx]) {
+            var pageShortcuts = window._vireoShortcuts[pageCtx];
+            for (var a in pageShortcuts) {
+              if (pageShortcuts[a] === shortcutStr) return; // page wins
+            }
+          }
+          if (keyToHref[shortcutStr] === path) return;
+          e.preventDefault();
+          window.location.href = keyToHref[shortcutStr];
+          return;
+        }
+      }
+    });
+  }
+
+  // Fetch config and apply
+  fetch('/api/config')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(cfg) {
+      if (!cfg) return;
+      var shortcuts = cfg.keyboard_shortcuts || {};
+      var navShortcuts = {};
+      // Merge defaults with user overrides
+      for (var key in NAV_DEFAULTS) navShortcuts[key] = NAV_DEFAULTS[key];
+      if (shortcuts.navigation) {
+        for (var key in shortcuts.navigation) navShortcuts[key] = shortcuts.navigation[key];
+      }
+      // Store for other scripts to access
+      if (!window._vireoShortcuts) window._vireoShortcuts = shortcuts;
+      window._vireoShortcuts.navigation = navShortcuts;
+
+      applyHotkeyHints(navShortcuts);
+      setupNavKeydown(navShortcuts);
+    })
+    .catch(function() {});
+})();
+
+/* ---------- Shortcuts Cheat Sheet (?) ---------- */
+(function() {
+  var SC_LABELS = {
+    navigation: {
+      _title: 'Navigation',
+      import: 'Import', pipeline: 'Pipeline', pipeline_review: 'Pipeline Review',
+      review: 'Review', cull: 'Cull', browse: 'Browse', map: 'Map',
+      variants: 'Variants', dashboard: 'Dashboard', audit: 'Audit',
+      compare: 'Compare', workspace: 'Workspace', keywords: 'Keywords',
+      shortcuts: 'Shortcuts', settings: 'Settings',
+    },
+    review: {
+      _title: 'Review',
+      accept: 'Accept prediction', skip: 'Skip / reject',
+    },
+    browse: {
+      _title: 'Browse',
+      rate_0: 'Clear rating', rate_1: 'Rate 1', rate_2: 'Rate 2',
+      rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
+      flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
+      undo: 'Undo', redo: 'Redo', select_all: 'Select all', zoom: 'Toggle zoom',
+    },
+  };
+
+  var SC_DEFAULTS = {
+    navigation: {
+      import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+      cull: 'c', browse: 'b', map: 'm', variants: 'v',
+      dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+      shortcuts: '/', settings: ',', keywords: 'k',
+    },
+    review: { accept: 'a', skip: 's' },
+    browse: {
+      rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
+      rate_4: '4', rate_5: '5',
+      flag: 'p', reject: 'x', unflag: 'u',
+      undo: 'ctrl+z', redo: 'ctrl+shift+z', select_all: 'ctrl+a', zoom: 'z',
+    },
+  };
+
+  function renderSheet() {
+    var shortcuts = window._vireoShortcuts || {};
+    var html = '';
+    for (var ctx in SC_LABELS) {
+      var labels = SC_LABELS[ctx];
+      var values = shortcuts[ctx] || SC_DEFAULTS[ctx] || {};
+      var defaults = SC_DEFAULTS[ctx] || {};
+      html += '<div class="sc-group-title">' + labels._title + '</div>';
+      for (var action in labels) {
+        if (action === '_title') continue;
+        var key = values[action] || defaults[action] || '';
+        html += '<div class="sc-row">' +
+          '<span class="sc-key">' + formatShortcut(key) + '</span>' +
+          '<span class="sc-label">' + labels[action] + '</span>' +
+          '</div>';
+      }
+    }
+    document.getElementById('shortcutsSheetContent').innerHTML = html;
+  }
+
+  window.openShortcutsSheet = function() {
+    renderSheet();
+    document.getElementById('shortcutsCheatSheet').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  };
+
+  window.closeShortcutsSheet = function() {
+    document.getElementById('shortcutsCheatSheet').classList.remove('open');
+    document.body.style.overflow = '';
+  };
+
+  // Listen for ? key
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .help-overlay.active')) return;
+    // When overlay is open, consume ALL key events so page handlers don't fire
+    if (document.getElementById('shortcutsCheatSheet').classList.contains('open')) {
+      if (e.key === 'Escape') {
+        closeShortcutsSheet();
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      openShortcutsSheet();
+    }
+  });
 })();
 
 /* ---------- Load active workspace name ---------- */
@@ -789,28 +1448,9 @@ async function switchWorkspace(wsId, wsName) {
 }
 
 /* ---------- Create Workspace modal ---------- */
-async function showCreateWorkspaceModal() {
+function showCreateWorkspaceModal() {
   document.getElementById('wsMenu').classList.remove('open');
   _wsDropdownOpen = false;
-
-  try {
-    var folders = await safeFetch('/api/folders', {}, { toast: false });
-    var list = document.getElementById('newWsFolderList');
-    list.innerHTML = '';
-    if (folders.length === 0) {
-      list.innerHTML = '<div style="padding:8px; color:var(--text-muted); font-size:13px;">No folders scanned yet</div>';
-    } else {
-      folders.forEach(function(f) {
-        var label = document.createElement('label');
-        label.style.cssText = 'display:flex; align-items:center; gap:6px; padding:4px 6px; font-size:13px; color:var(--text-secondary); cursor:pointer;';
-        label.innerHTML = '<input type="checkbox" value="' + f.id + '" checked> ' + wsEscapeHtml(f.path);
-        list.appendChild(label);
-      });
-    }
-  } catch(e) {
-    console.error(e);
-  }
-
   document.getElementById('newWsName').value = '';
   document.getElementById('newWsError').style.display = 'none';
   document.getElementById('createWsModal').classList.add('open');
@@ -829,17 +1469,21 @@ async function createWorkspace() {
     return;
   }
 
-  var checkboxes = document.querySelectorAll('#newWsFolderList input[type=checkbox]:checked');
-  var folderIds = Array.from(checkboxes).map(function(cb) { return parseInt(cb.value); });
-
   try {
     var data = await safeFetch('/api/workspaces', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: name, folder_ids: folderIds })
+      body: JSON.stringify({ name: name })
     }, { toast: false });
     hideCreateWsModal();
-    await switchWorkspace(data.id, data.name);
+    // Activate the new workspace, then go straight to pipeline
+    await safeFetch('/api/workspaces/' + data.id + '/activate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ current_path: window.location.pathname })
+    });
+    sessionStorage.setItem('vireo_ws_switched', '1');
+    window.location.href = '/pipeline';
   } catch(e) {
     document.getElementById('newWsError').textContent = e.message || 'Failed to create';
     document.getElementById('newWsError').style.display = 'block';
@@ -879,6 +1523,7 @@ async function createWorkspace() {
   <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed') && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <img id="lightboxImg" src="" alt="">
+    <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
@@ -892,6 +1537,37 @@ async function createWorkspace() {
     <button id="lightboxInspect" onclick="" style="background:rgba(0,0,0,0.6);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       Inspect Pipeline
     </button>
+    <button id="lightboxOpenEditor" onclick="" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
+      Open in Editor
+    </button>
+    <button onclick="lightboxDelete()" style="background:var(--danger);color:white;border:none;padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;" title="Delete photo">Delete</button>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="modal-overlay" id="deleteModal">
+  <div class="modal" style="max-width:420px;">
+    <h3 id="deleteModalTitle">Delete photo?</h3>
+    <div style="margin:12px 0 16px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">
+        <input type="radio" name="deleteMode" value="vireo" checked>
+        <span>Remove from Vireo<br><small style="color:var(--text-secondary);">Removes from the database. Files on disk are untouched.</small></span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:6px 0;">
+        <input type="radio" name="deleteMode" value="disk">
+        <span style="color:var(--danger);">Delete from disk<br><small style="color:var(--text-secondary);">Moves files to Trash. Falls back to permanent deletion if Trash is unavailable.</small></span>
+      </label>
+    </div>
+    <div id="deleteCompanionRow" style="display:none;margin-bottom:12px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="deleteCompanionCheck" checked>
+        <span id="deleteCompanionLabel">Also delete companion files</span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="hideDeleteModal()">Cancel</button>
+      <button class="modal-btn" id="deleteConfirmBtn" onclick="confirmDelete()" style="background:var(--danger);color:white;">Delete</button>
+    </div>
   </div>
 </div>
 
@@ -915,6 +1591,48 @@ async function createWorkspace() {
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lightboxCurrentId = null;
 
+/* Species color palette for lightbox bounding boxes */
+var _lbSpeciesColors = {};
+var _lbColorPalette = [
+  '#24E5CA', '#f0c040', '#e74c3c', '#3498db', '#9b59b6',
+  '#1abc9c', '#e67e22', '#2ecc71', '#e84393', '#00cec9'
+];
+var _lbNextColorIdx = 0;
+
+function _lbGetSpeciesColor(species) {
+  if (!_lbSpeciesColors[species]) {
+    _lbSpeciesColors[species] = _lbColorPalette[_lbNextColorIdx % _lbColorPalette.length];
+    _lbNextColorIdx++;
+  }
+  return _lbSpeciesColors[species];
+}
+
+function _lbLoadDetections(photoId) {
+  var container = document.getElementById('lightboxDetections');
+  if (!container) return;
+  container.innerHTML = '';
+  fetch('/api/detections/' + photoId)
+    .then(function(r) { return r.json(); })
+    .then(function(detections) {
+      if (!detections || detections.length === 0) return;
+      // Only render if still viewing the same photo
+      if (_lightboxCurrentId !== photoId) return;
+      detections.forEach(function(det) {
+        if (det.box_x == null || det.box_y == null) return;
+        var color = _lbGetSpeciesColor(det.category || 'animal');
+        var box = document.createElement('div');
+        box.className = 'lb-detection-box';
+        box.style.cssText = 'left:' + (det.box_x * 100).toFixed(2) + '%;top:' + (det.box_y * 100).toFixed(2) + '%;width:' + (det.box_w * 100).toFixed(2) + '%;height:' + (det.box_h * 100).toFixed(2) + '%;border-color:' + color + ';';
+        var conf = det.detector_confidence ? Math.round(det.detector_confidence * 100) + '%' : '';
+        if (conf) {
+          box.innerHTML = '<span class="lb-detection-label" style="background:' + color + ';color:#0A1F2E;">' + conf + '</span>';
+        }
+        container.appendChild(box);
+      });
+    })
+    .catch(function() {});
+}
+
 function openLightbox(photoId, filename, photoList) {
   _lightboxCurrentId = photoId;
   if (photoList) _lightboxPhotoList = photoList;
@@ -931,13 +1649,28 @@ function openLightbox(photoId, filename, photoList) {
   wrap.scrollTop = 0;
   wrap.scrollLeft = 0;
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  // Clear previous detection overlays
+  var detContainer = document.getElementById('lightboxDetections');
+  if (detContainer) detContainer.innerHTML = '';
   img.src = '/photos/' + photoId + '/full';
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
+  var editorBtn = document.getElementById('lightboxOpenEditor');
+  if (editorBtn) {
+    if (typeof openInEditor === 'function') {
+      editorBtn.style.display = '';
+      editorBtn.onclick = function() { openInEditor([photoId]); };
+    } else {
+      editorBtn.style.display = 'none';
+    }
+  }
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
+
+  // Fetch and render detection bounding boxes
+  _lbLoadDetections(photoId);
 
   // Show position indicator if navigating a list
   var counter = document.getElementById('lightboxCounter');
@@ -966,10 +1699,12 @@ function toggleLightboxZoom(e) {
   var badge = document.getElementById('lightboxZoomBadge');
   var isZoomed = wrap.classList.contains('zoomed');
 
+  var detOverlay = document.getElementById('lightboxDetections');
   if (isZoomed) {
     // Zoom out — switch back to preview image
     wrap.classList.remove('zoomed');
     badge.style.display = 'none';
+    if (detOverlay) detOverlay.style.display = '';
     wrap.scrollTop = 0;
     wrap.scrollLeft = 0;
     if (_lightboxCurrentId) {
@@ -984,6 +1719,7 @@ function toggleLightboxZoom(e) {
 
     wrap.classList.add('zoomed');
     badge.style.display = '';
+    if (detOverlay) detOverlay.style.display = 'none';
 
     if (_lightboxCurrentId) {
       img.src = '/photos/' + _lightboxCurrentId + '/original';
@@ -1047,7 +1783,109 @@ function closeLightbox(e) {
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
+  var detContainer = document.getElementById('lightboxDetections');
+  if (detContainer) detContainer.innerHTML = '';
   document.body.style.overflow = '';
+}
+/* ---------- Delete Confirmation ---------- */
+var _deletePhotoIds = [];
+var _deleteCallback = null;
+
+function showDeleteDialog(photoIds, companionCount, callback) {
+  _deletePhotoIds = photoIds;
+  _deleteCallback = callback;
+  var count = photoIds.length;
+  document.getElementById('deleteModalTitle').textContent =
+    count === 1 ? 'Delete photo?' : 'Delete ' + count + ' photos?';
+  var compRow = document.getElementById('deleteCompanionRow');
+  if (companionCount > 0) {
+    compRow.style.display = '';
+    document.getElementById('deleteCompanionLabel').textContent =
+      'Also delete ' + companionCount + ' companion file' + (companionCount === 1 ? '' : 's');
+    document.getElementById('deleteCompanionCheck').checked = true;
+  } else {
+    compRow.style.display = 'none';
+  }
+  document.querySelector('input[name="deleteMode"][value="vireo"]').checked = true;
+  document.getElementById('deleteModal').classList.add('open');
+}
+
+function hideDeleteModal() {
+  document.getElementById('deleteModal').classList.remove('open');
+  _deletePhotoIds = [];
+  _deleteCallback = null;
+}
+
+async function confirmDelete() {
+  var mode = document.querySelector('input[name="deleteMode"]:checked').value;
+  var includeCompanions = document.getElementById('deleteCompanionCheck').checked &&
+    document.getElementById('deleteCompanionRow').style.display !== 'none';
+  var savedIds = _deletePhotoIds.slice();
+  var savedCallback = _deleteCallback;
+  hideDeleteModal();
+  try {
+    var data = await safeFetch('/api/batch/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        photo_ids: savedIds,
+        mode: mode,
+        include_companions: includeCompanions,
+      }),
+    });
+  } catch(e) { return; }
+
+  if (data.trash_failed && data.trash_failed.length > 0) {
+    var paths = data.trash_failed.map(function(f) { return f.path; });
+    if (confirm('Trash not available for ' + paths.length + ' file(s):\n' +
+        paths.slice(0, 5).join('\n') +
+        (paths.length > 5 ? '\n... and ' + (paths.length - 5) + ' more' : '') +
+        '\n\nPermanently delete instead?')) {
+      try {
+        await safeFetch('/api/batch/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({paths: paths, mode: 'disk_permanent'}),
+        });
+      } catch(e) { /* already removed from DB */ }
+    }
+  }
+
+  var msg = mode === 'vireo'
+    ? data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' removed'
+    : data.deleted + ' photo' + (data.deleted === 1 ? '' : 's') + ' moved to Trash';
+  showToast(msg, 'success');
+
+  if (savedCallback) savedCallback(data);
+}
+
+function lightboxDelete() {
+  if (!_lightboxCurrentId) return;
+  var currentId = _lightboxCurrentId;
+  var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
+  var companionCount = (p && p.companion_path) ? 1 : 0;
+
+  showDeleteDialog([currentId], companionCount, function(data) {
+    // Remove from lightbox photo list
+    var idx = _lightboxPhotoList.findIndex(function(x) { return x.id === currentId; });
+    _lightboxPhotoList.splice(idx, 1);
+
+    if (_lightboxPhotoList.length === 0) {
+      closeLightbox(null);
+    } else {
+      var nextIdx = Math.min(idx, _lightboxPhotoList.length - 1);
+      var next = _lightboxPhotoList[nextIdx];
+      openLightbox(next.id, next.filename, _lightboxPhotoList);
+    }
+
+    // Also update browse grid if we're on the browse page
+    if (typeof photos !== 'undefined' && typeof renderGrid === 'function') {
+      photos = photos.filter(function(x) { return x.id !== currentId; });
+      selectedPhotos.delete(currentId);
+      if (selectedPhotoId === currentId) selectedPhotoId = null;
+      renderGrid();
+    }
+  });
 }
 /* ---------- iNat Submission ---------- */
 var inatQueue = [];  // [{photo_id, taxon_name, observed_on, latitude, longitude, description, geoprivacy, filename, already_submitted, existing_url}]
@@ -1217,7 +2055,7 @@ async function inatDoSubmit() {
 // If adding JS-based navigation shortcuts, guard with:
 //   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); }
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
@@ -1497,7 +2335,7 @@ function closeSimilar() {
     </div>
     <!-- History Pane -->
     <div class="bp-pane" id="bpHistory">
-      <div class="bp-history-list" id="bpHistoryList" style="overflow-y:auto;flex:1;"
+      <div class="bp-history-list" id="bpHistoryList" style="overflow-y:auto;flex:1;">
         <div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>
       </div>
     </div>
@@ -1569,6 +2407,21 @@ async function safeFetch(url, opts, options) {
   return JSON.parse(text);
 }
 
+/* ---------- Open in External Editor ---------- */
+async function openInEditor(photoIds) {
+  if (!photoIds || !photoIds.length) return;
+  try {
+    var data = await safeFetch('/api/photos/open-external', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: photoIds}),
+    });
+    showToast('Opened ' + data.opened + ' photo(s) in editor', 'success');
+  } catch(e) {
+    showToast(e.message || 'Failed to open in editor');
+  }
+}
+
 /* ---------- Safe EventSource ---------- */
 function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
@@ -1608,8 +2461,10 @@ function formatDuration(seconds) {
   var lpSource = null;
   var lpMaxLines = 200;
   var activeJobs = [];
+  var _activeWsId = null;
   var currentBpTab = 'jobs';
   var _jobPollTimer = null;
+  var _navJobPollTimer = null;
 
   // Theme system
   var THEMES = [
@@ -1712,6 +2567,7 @@ function formatDuration(seconds) {
         // Kill SSE and polling NOW so threads are freed for the next page
         if (lpSource) { lpSource.close(); lpSource = null; }
         if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+        if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
       }
     });
 
@@ -1758,10 +2614,15 @@ function formatDuration(seconds) {
         });
     }
 
-    // Poll jobs — only when panel is open
+    // Always poll once for navbar badge
+    pollJobs();
+
     if (panelOpen) {
-      pollJobs();
+      // Fast poll when panel is open; no slow poll needed
       _jobPollTimer = setInterval(pollJobs, 2000);
+    } else {
+      // Slow background poll keeps navbar badge current
+      _navJobPollTimer = setInterval(pollJobs, 15000);
     }
   }
 
@@ -1787,11 +2648,26 @@ function formatDuration(seconds) {
     var list = document.getElementById('bpHistoryList');
     if (!list) return;
     var offset = append ? list.querySelectorAll('.bp-history-row').length : 0;
-    safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false})
-      .then(function(data) {
+    var historyPromise = safeFetch('/api/edit-history?limit=50&offset=' + offset, {}, {toast: false});
+    var redoPromise = !append ? safeFetch('/api/redo/status', {}, {toast: false}).catch(function() { return null; }) : Promise.resolve(null);
+    Promise.all([historyPromise, redoPromise])
+      .then(function(results) {
+        var data = results[0];
+        var redoStatus = results[1];
         if (!append) list.innerHTML = '';
+        // Show redo banner if there's something to redo
+        if (!append && redoStatus && redoStatus.available) {
+          var redoRow = document.createElement('div');
+          redoRow.className = 'bp-history-redo';
+          redoRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;font-size:12px;border-bottom:1px solid var(--border-subtle);color:var(--text-muted);font-style:italic;';
+          redoRow.innerHTML = '<span style="opacity:0.5;min-width:70px;">redo</span>'
+            + '<span style="min-width:16px;text-align:center;">\u21B6</span>'
+            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(redoStatus.description) + '</span>'
+            + '<button onclick="doRedo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Redo</button>';
+          list.appendChild(redoRow);
+        }
         if (!data || data.length === 0) {
-          if (!append) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
+          if (!append && !list.querySelector('.bp-history-redo')) list.innerHTML = '<div class="bp-history-empty" style="color:var(--text-muted);padding:12px;font-size:12px;">No edits yet</div>';
           return;
         }
         var mostRecentId = null;
@@ -1812,9 +2688,9 @@ function formatDuration(seconds) {
 
           row.innerHTML = '<span style="opacity:0.5;min-width:70px;">' + ago + '</span>'
             + '<span style="min-width:16px;text-align:center;">' + icon + '</span>'
-            + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
-            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Undo</button>'
-                       : '<span style="min-width:42px;"></span>');
+            + '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + _escapeHtml(entry.description) + '</span>'
+            + (isFirst ? '<button onclick="doUndo(this)" style="background:none;border:1px solid var(--border-primary);color:var(--text-secondary);border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px;">Undo</button>'
+                       : '');
           list.appendChild(row);
         });
       })
@@ -1829,17 +2705,31 @@ function formatDuration(seconds) {
   }
 
   window.doUndo = function(btn) {
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
     safeFetch('/api/undo', {method: 'POST'})
       .then(function(data) {
         if (data && data.ok) {
-          showToast('Undone: ' + data.undone, 'success');
+          showToast('Undone: ' + data.undone + ' — press Ctrl+Shift+Z to redo', 'success');
           _historySessionCount = Math.max(0, _historySessionCount - 1);
           document.getElementById('historyBadge').textContent = _historySessionCount || '';
           loadEditHistory();
         }
       })
-      .catch(function() { btn.disabled = false; });
+      .catch(function() { if (btn) btn.disabled = false; });
+  };
+
+  window.doRedo = function(btn) {
+    if (btn) btn.disabled = true;
+    safeFetch('/api/redo', {method: 'POST'})
+      .then(function(data) {
+        if (data && data.ok) {
+          showToast('Redone: ' + data.redone, 'success');
+          _historySessionCount++;
+          document.getElementById('historyBadge').textContent = _historySessionCount || '';
+          loadEditHistory();
+        }
+      })
+      .catch(function() { if (btn) btn.disabled = false; });
   };
 
   function _bumpHistoryBadge() {
@@ -1885,10 +2775,14 @@ function formatDuration(seconds) {
     // Start/stop SSE and polling based on panel visibility
     if (isOpen) {
       startLogStream();
+      // Fast poll while panel open; pause slow nav poll to avoid double-polling
+      if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
       if (!_jobPollTimer) { pollJobs(); _jobPollTimer = setInterval(pollJobs, 2000); }
     } else {
       stopLogStream();
       if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+      // Resume slow poll for navbar badge
+      if (!_navJobPollTimer) { _navJobPollTimer = setInterval(pollJobs, 15000); }
     }
     setTimeout(function() { panel.classList.remove('animating'); }, 200);
   };
@@ -1955,6 +2849,7 @@ function formatDuration(seconds) {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         activeJobs = data.active || [];
+        _activeWsId = data.active_workspace_id || null;
         renderJobs();
         updateSummary();
         updateActivityDot();
@@ -1964,83 +2859,73 @@ function formatDuration(seconds) {
 
   function renderJobs() {
     var container = document.getElementById('bpJobsList');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
-    var recent = activeJobs.filter(function(j) { return j.status !== 'running'; }).slice(0, 5);
-    var all = running.concat(recent);
+    var allRunning = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var thisWs = allRunning.filter(function(j) { return j.workspace_id === _activeWsId; });
+    var otherWs = allRunning.filter(function(j) { return j.workspace_id !== _activeWsId; });
 
-    document.getElementById('jobsBadge').textContent = running.length;
+    // Badge counts only current workspace
+    document.getElementById('jobsBadge').textContent = thisWs.length;
+    var navBadge = document.getElementById('navJobBadge');
+    navBadge.textContent = thisWs.length > 0 ? ' (' + thisWs.length + ')' : '';
 
-    if (all.length === 0) {
-      container.innerHTML = '<div class="bp-jobs-empty">No jobs running</div>';
+    if (allRunning.length === 0) {
+      var lastDone = activeJobs.filter(function(j) { return j.status !== 'running'; })[0];
+      if (lastDone) {
+        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. Last run: ' +
+          bpEscape(lastDone.type) + ' ' + (lastDone.status === 'completed' ? '\u2713' : '\u2717') +
+          ' <a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
+      } else {
+        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No active jobs. ' +
+          '<a href="/jobs" style="color:var(--accent);text-decoration:none;">View history \u2192</a></div>';
+      }
       return;
     }
 
     var html = '';
-    all.forEach(function(j) {
-      var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
-      var statusClass = j.status;
-      var elapsed = '';
-      if (j.started_at) {
-        var secs = (Date.now() - new Date(j.started_at).getTime()) / 1000;
-        if (j.finished_at) secs = (new Date(j.finished_at).getTime() - new Date(j.started_at).getTime()) / 1000;
-        elapsed = formatElapsed(secs);
-      }
 
-      html += '<div class="bp-job">';
-      html += '<div class="bp-job-header">';
-      html += '<span class="bp-job-type">' + bpEscape(j.type) + '</span>';
-      html += '<span class="bp-job-status ' + statusClass + '">' + j.status + '</span>';
-      html += '<span class="bp-job-elapsed">' + elapsed + '</span>';
+    // Current workspace jobs
+    if (thisWs.length > 0) {
+      html += renderJobList(thisWs);
+    } else if (otherWs.length > 0) {
+      html += '<div style="font-size:12px;color:var(--text-muted);padding:4px 0;">No jobs in this workspace.</div>';
+    }
+
+    // Other workspace jobs
+    if (otherWs.length > 0) {
+      html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-color);">';
+      html += '<div style="font-size:11px;color:var(--text-invisible);margin-bottom:4px;">Other Workspaces</div>';
+      html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Jobs can be long-running, so Vireo lets you change workspaces while your jobs run. You can still view them here.</div>';
+      html += renderJobList(otherWs);
       html += '</div>';
+    }
 
-      if (j.status === 'running') {
-        if (j.progress && j.progress.phase) {
-          html += '<div class="bp-job-detail" style="color:var(--accent);font-weight:500;margin-bottom:2px;">' + bpEscape(j.progress.phase) + '</div>';
-        }
-        html += '<div class="bp-job-progress"><div class="bp-job-progress-fill" style="width:' + pct + '%"></div></div>';
-        var detail = '';
-        var isBytes = j.type && j.type.indexOf('download') !== -1 && j.progress && j.progress.total > 1000000;
-        if (j.progress && j.progress.current > 0) {
-          if (isBytes) {
-            detail = (j.progress.current / (1024*1024)).toFixed(0) + ' MB';
-            if (j.progress.total > 0) detail += ' / ' + (j.progress.total / (1024*1024)).toFixed(0) + ' MB';
-          } else {
-            detail = j.progress.current.toLocaleString();
-            if (j.progress.total > 0) detail += ' / ' + j.progress.total.toLocaleString();
-          }
-        }
-        if (j.progress && j.progress.rate > 0) {
-          detail += ' \u2014 ' + (j.progress.rate / (1024*1024)).toFixed(1) + ' MB/s';
-        }
-        if (j.progress && j.progress.current_file) {
-          detail += (detail ? ' ' : '') + bpEscape(j.progress.current_file);
-        }
-        html += '<div class="bp-job-detail">' + detail + '</div>';
-      } else if (j.status === 'completed' && j.result) {
-        var parts = [];
-        for (var k in j.result) {
-          var v = j.result[k];
-          if (v && typeof v === 'object') {
-            var sub = [];
-            for (var sk in v) sub.push(sk + ': ' + v[sk]);
-            parts.push(k + ' (' + sub.join(', ') + ')');
-          } else {
-            parts.push(k + ': ' + v);
-          }
-        }
-        html += '<div class="bp-job-detail">' + bpEscape(parts.join(', ')) + '</div>';
-      } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
-        html += '<div class="bp-job-detail" style="color:var(--danger);">' + bpEscape(j.errors[0]) + '</div>';
+    container.innerHTML = html;
+  }
+
+  function renderJobList(jobs) {
+    var html = '';
+    jobs.forEach(function(j) {
+      var pct = j.progress && j.progress.total > 0 ? Math.round((j.progress.current / j.progress.total) * 100) : 0;
+      var phase = j.progress && j.progress.phase ? j.progress.phase : '';
+      var detail = '';
+      if (j.progress && j.progress.total > 0) {
+        detail = j.progress.current.toLocaleString() + '/' + j.progress.total.toLocaleString();
+        if (pct > 0) detail += ' (' + pct + '%)';
       }
-
+      html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
+      html += '<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0;"></span>';
+      html += '<span style="font-weight:600;text-transform:capitalize;">' + bpEscape(j.type) + '</span>';
+      if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
+      if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
+      html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
       html += '</div>';
     });
-    container.innerHTML = html;
+    return html;
   }
 
   function updateSummary() {
     var summary = document.getElementById('jobSummary');
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
 
     if (running.length === 0) {
       summary.textContent = 'No active jobs';
@@ -2076,7 +2961,7 @@ function formatDuration(seconds) {
   }
 
   function updateActivityDot() {
-    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var running = activeJobs.filter(function(j) { return j.status === 'running' && j.workspace_id === _activeWsId; });
     var dot = document.getElementById('navActivityDot');
     if (dot) dot.classList.toggle('active', running.length > 0);
   }
@@ -2139,10 +3024,171 @@ function formatDuration(seconds) {
   }
 })();
 </script>
+<script>
+/* ---------- Missing Folders Banner ---------- */
+let _missingBannerDismissedCount = 0;
+
+async function checkMissingFolders() {
+  try {
+    const resp = await fetch('/api/folders/missing');
+    if (!resp.ok) return;
+    const folders = await resp.json();
+    const banner = document.getElementById('missingFoldersBanner');
+    const msg = document.getElementById('missingFoldersMsg');
+    if (folders.length > 0 && folders.length !== _missingBannerDismissedCount) {
+      const s = folders.length === 1 ? '' : 's';
+      msg.textContent = `${folders.length} folder${s} can\u2019t be found on disk.`;
+      banner.style.display = 'flex';
+    } else if (folders.length === 0) {
+      banner.style.display = 'none';
+      _missingBannerDismissedCount = 0;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function dismissMissingBanner() {
+  document.getElementById('missingFoldersBanner').style.display = 'none';
+  const msg = document.getElementById('missingFoldersMsg').textContent;
+  const match = msg.match(/^(\d+)/);
+  if (match) _missingBannerDismissedCount = parseInt(match[1]);
+}
+
+// Check on page load and every 10 minutes
+checkMissingFolders();
+setInterval(checkMissingFolders, 600000);
+
+/* ---------- Missing Folders Modal ---------- */
+let _relocatingFolderId = null;
+let _relocateBrowserPath = '';
+let _pendingCascaded = [];
+
+function openMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.add('open');
+  loadMissingFolders();
+}
+
+function closeMissingFoldersModal() {
+  document.getElementById('missingFoldersModal').classList.remove('open');
+  checkMissingFolders();
+}
+
+async function loadMissingFolders() {
+  const folders = await safeFetch('/api/folders/missing');
+  const container = document.getElementById('missingFoldersList');
+  if (folders.length === 0) {
+    container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
+    return;
+  }
+  container.innerHTML = folders.map(f => `
+    <div class="missing-folder-row">
+      <div class="missing-folder-path" title="${f.path}">${f.path}</div>
+      <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
+      <div class="missing-folder-actions">
+        <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')}')">Relocate</button>
+        <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function startRelocate(folderId, originalPath) {
+  _relocatingFolderId = folderId;
+  _relocateBrowserPath = '';
+  document.getElementById('relocateOriginalPathText').textContent = originalPath || '';
+  document.getElementById('relocateBrowserModal').classList.add('open');
+  loadRelocateQuickAccess();
+  browseRelocate(null);
+}
+
+let _quickAccessGen = 0;
+
+async function loadRelocateQuickAccess() {
+  const gen = ++_quickAccessGen;
+  const container = document.getElementById('relocateQuickAccess');
+  container.innerHTML = '';
+
+  function makeQuickBtn(label, path) {
+    const btn = document.createElement('button');
+    btn.className = 'relocate-quick-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', function() { browseRelocate(path); });
+    return btn;
+  }
+
+  container.appendChild(makeQuickBtn('Home', null));
+  container.appendChild(makeQuickBtn('/ (Root)', '/'));
+
+  try {
+    const data = await safeFetch('/api/browse?path=/Volumes', undefined, {toast: false});
+    if (gen !== _quickAccessGen) return;
+    if (data && data.dirs && data.dirs.length > 0) {
+      data.dirs.forEach(function(d) {
+        container.appendChild(makeQuickBtn('\u{1F4BD} ' + d.name, d.path));
+      });
+    }
+  } catch (e) { /* /Volumes may not exist on non-macOS */ }
+}
+
+function closeRelocateBrowser() {
+  document.getElementById('relocateBrowserModal').classList.remove('open');
+  _relocatingFolderId = null;
+}
+
+async function browseRelocate(path) {
+  const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+  const data = await safeFetch(url);
+  _relocateBrowserPath = data.path;
+
+  document.getElementById('relocateBreadcrumb').textContent = data.path;
+
+  const list = document.getElementById('relocateFolderList');
+  let html = '';
+  const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  if (data.path !== '/') {
+    html += `<div class="relocate-folder-item" ondblclick="browseRelocate('${parent.replace(/'/g, "\\'")}')">\u{1F4C2} ..</div>`;
+  }
+  html += data.dirs.map(d =>
+    `<div class="relocate-folder-item" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
+  ).join('');
+  list.innerHTML = html;
+}
+
+async function confirmRelocate() {
+  if (!_relocatingFolderId || !_relocateBrowserPath) return;
+  const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({path: _relocateBrowserPath}),
+  });
+  closeRelocateBrowser();
+
+  if (data.cascaded && data.cascaded.length > 0) {
+    _pendingCascaded = data.cascaded;
+    document.getElementById('cascadeMsg').textContent =
+      `${data.cascaded.length} subfolder${data.cascaded.length !== 1 ? 's were' : ' was'} also found at the new location and re-linked.`;
+    document.getElementById('cascadeConfirmModal').classList.add('open');
+  } else {
+    loadMissingFolders();
+  }
+}
+
+function closeCascadeConfirm() {
+  document.getElementById('cascadeConfirmModal').classList.remove('open');
+  _pendingCascaded = [];
+  loadMissingFolders();
+}
+function confirmCascade() { closeCascadeConfirm(); }
+
+async function startRemoveFolder(folderId, path, photoCount) {
+  if (!confirm(`This will remove ${photoCount} photo${photoCount !== 1 ? 's' : ''} from Vireo.\n\nThe files on disk (if they still exist) won't be touched.\n\nRemove "${path}"?`)) return;
+  await safeFetch(`/api/folders/${folderId}`, {method: 'DELETE'});
+  loadMissingFolders();
+}
+</script>
 <script src="/static/vireo-utils.js"></script>
 <script src="/static/tauri-bridge.js"></script>
 <script>
-  if (typeof startupUpdateCheck === 'function') {
-    startupUpdateCheck(24);
-  }
+  /* Updater disabled — startupUpdateCheck skipped until updater is configured */
 </script>
+<script src="/static/vendor/fuse.min.js"></script>
+<script src="/static/help.js"></script>

@@ -226,10 +226,25 @@ body {
   border-left: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 16px;
-  display: none;
+  display: block;
   flex-shrink: 0;
 }
-.detail-panel.open { display: block; }
+.summary-panel { display: block; }
+.summary-panel.hidden { display: none; }
+.detail-content { display: none; }
+.detail-content.visible { display: block; }
+.summary-stat { margin-bottom: 16px; }
+.summary-stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.summary-stat-value { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+.summary-stat-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.summary-section { margin-bottom: 16px; }
+.summary-section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.summary-species-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
+.summary-species-name { color: var(--text-primary); }
+.summary-species-count { color: var(--text-muted); font-size: 12px; }
+.summary-folder-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+.summary-folder-name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; margin-right: 8px; }
+.summary-folder-count { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
 .detail-close {
   float: right;
   background: none;
@@ -619,6 +634,22 @@ body {
   font-size: 9px; padding: 1px 5px; border-radius: 3px;
   pointer-events: none; z-index: 2;
 }
+.species-badges {
+  position: absolute; bottom: 4px; left: 4px; right: 4px;
+  display: flex; flex-wrap: wrap; gap: 2px;
+  pointer-events: none; z-index: 2;
+}
+.species-badge {
+  background: rgba(0,0,0,0.7); color: #24E5CA;
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.species-badge-overflow {
+  background: rgba(0,0,0,0.7); color: var(--text-muted);
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -728,7 +759,9 @@ body {
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
+      <button onclick="openInEditorBatch()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
     </div>
 
@@ -743,7 +776,7 @@ body {
           To get started, import your photos. You can scan a folder of images
           (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
         </p>
-        <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
+        <a href="/pipeline" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
       <div class="loading-state" id="loadingState">Loading...</div>
     </div>
@@ -751,57 +784,85 @@ body {
 
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
-    <button class="detail-close" onclick="closeDetail()">&times;</button>
-    <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
-    <div class="detail-filename" id="detailFilename"></div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Rating</div>
-      <div class="detail-rating" id="detailRating"></div>
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">Flag</div>
-      <div class="detail-flags" id="detailFlags">
-        <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
-        <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
-        <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+    <!-- Summary Dashboard (shown when no photo selected) -->
+    <div class="summary-panel" id="summaryPanel">
+      <div class="summary-stat">
+        <div class="summary-stat-label">Photos</div>
+        <div class="summary-stat-value" id="summaryPhotoCount">—</div>
+        <div class="summary-stat-sub" id="summaryFilterNote"></div>
+      </div>
+      <div class="summary-stat">
+        <div class="summary-stat-label">Classification</div>
+        <div class="summary-stat-value" id="summaryClassified">—</div>
+        <div class="summary-stat-sub" id="summaryUnclassified"></div>
+      </div>
+      <div class="summary-section" id="summarySpeciesSection" style="display:none;">
+        <div class="summary-section-title">Top Species</div>
+        <div id="summarySpeciesList"></div>
+      </div>
+      <div class="summary-section" id="summaryFoldersSection" style="display:none;">
+        <div class="summary-section-title">Folders</div>
+        <div id="summaryFolderList"></div>
       </div>
     </div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">Keywords</div>
-      <div id="detailKeywords"></div>
-      <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
-    </div>
+    <!-- Photo Detail (shown when a photo is selected) -->
+    <div class="detail-content" id="detailContent">
+      <button class="detail-close" onclick="closeDetail()">&times;</button>
+      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
+      <div class="detail-filename" id="detailFilename"></div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">XMP Sidecar</div>
-      <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Rating</div>
+        <div class="detail-rating" id="detailRating"></div>
+      </div>
 
-    <div class="detail-section">
-      <div class="detail-section-title">Info</div>
-      <div class="detail-summary" id="detailSummary"></div>
-      <div class="detail-path" id="detailPath"></div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Flag</div>
+        <div class="detail-flags" id="detailFlags">
+          <button class="detail-flag-btn" onclick="setFlag('none')">None</button>
+          <button class="detail-flag-btn" onclick="setFlag('flagged')">Flag (P)</button>
+          <button class="detail-flag-btn" onclick="setFlag('rejected')">Reject (X)</button>
+        </div>
+      </div>
 
-    <div class="detail-section" id="detailMetadataSection" style="display:none;">
-      <div class="detail-section-title">All Metadata</div>
-      <input type="text" id="metadataSearch" class="add-kw-input"
-             placeholder="Search metadata..."
-             oninput="filterMetadata(this.value)"
-             style="margin-bottom:8px;">
-      <div id="metadataGroups"></div>
-    </div>
+      <div class="detail-section">
+        <div class="detail-section-title">Keywords</div>
+        <div id="detailKeywords"></div>
+        <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
+      </div>
 
-    <div class="detail-section" style="display:flex;gap:8px;">
-      <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-        Find Similar
-      </button>
-      <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
-        Inspect Pipeline
-      </button>
+      <div class="detail-section">
+        <div class="detail-section-title">XMP Sidecar</div>
+        <div id="detailXmp" style="font-size:12px;color:var(--text-dim);">—</div>
+      </div>
+
+      <div class="detail-section">
+        <div class="detail-section-title">Info</div>
+        <div class="detail-summary" id="detailSummary"></div>
+        <div class="detail-path" id="detailPath"></div>
+      </div>
+
+      <div class="detail-section" id="detailMetadataSection" style="display:none;">
+        <div class="detail-section-title">All Metadata</div>
+        <input type="text" id="metadataSearch" class="add-kw-input"
+               placeholder="Search metadata..."
+               oninput="filterMetadata(this.value)"
+               style="margin-bottom:8px;">
+        <div id="metadataGroups"></div>
+      </div>
+
+      <div class="detail-section" style="display:flex;gap:8px;">
+        <button onclick="findSimilar(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--info);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Find Similar
+        </button>
+        <button onclick="openPipeline(window._detailPhotoId)" style="flex:1;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Inspect Pipeline
+        </button>
+        <button onclick="openInEditor([window._detailPhotoId])" style="flex:1;background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:8px;font-size:12px;cursor:pointer;">
+          Open in Editor
+        </button>
+      </div>
     </div>
 
   </div>
@@ -822,6 +883,31 @@ body {
   </div>
 </div>
 
+<!-- Batch Keyword Modal -->
+<div class="modal-overlay" id="batchKeywordModal">
+  <div class="modal">
+    <h3 id="batchKeywordTitle">Add Keyword</h3>
+    <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" onkeydown="if(event.key==='Enter')confirmBatchKeyword()">
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmBatchKeyword()">Add</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideBatchKeywordModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Batch Add-to-Collection Modal -->
+<div class="modal-overlay" id="batchCollectionModal">
+  <div class="modal">
+    <h3 id="batchCollectionTitle">Add to Collection</h3>
+    <div id="batchCollectionList" style="margin-bottom:12px;max-height:200px;overflow-y:auto;"></div>
+    <input class="modal-input" id="batchCollectionNewName" placeholder="Or type a name to create new collection" onkeydown="if(event.key==='Enter')confirmBatchCollection()">
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
+      <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
 
 <script>
 /* ---------- State ---------- */
@@ -835,10 +921,12 @@ var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
 var showDetectionBoxes = false;
+var cardFields = ["filename", "rating", "flag", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
+var activeCollectionId = null;
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
@@ -846,17 +934,17 @@ var calendarData = null;
 var clipSearchActive = false;
 
 var _shortcuts = null;
+var _BROWSE_SC_DEFAULTS = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
+  flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',redo:'ctrl+shift+z',select_all:'ctrl+a',zoom:'z'};
 var _cfgPromise = (async function() {
   try {
     var cfg = await safeFetch('/api/config', {}, { toast: false });
-    _shortcuts = (cfg.keyboard_shortcuts || {}).browse || {
-      rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
+    var saved = (cfg.keyboard_shortcuts || {}).browse || {};
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS, saved);
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
     return cfg;
   } catch(e) {
-    _shortcuts = {rate_0:'0',rate_1:'1',rate_2:'2',rate_3:'3',rate_4:'4',rate_5:'5',
-      flag:'p',reject:'x',unflag:'u',undo:'ctrl+z',select_all:'ctrl+a',zoom:'z'};
+    _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS);
     return null;
   }
 })();
@@ -871,6 +959,70 @@ function applyBrowseConfig(cfg) {
       slider.dispatchEvent(new Event('input'));
     }
   }
+  if (Array.isArray(cfg.browse_card_fields)) cardFields = cfg.browse_card_fields;
+}
+
+function formatFileSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(1) + ' GB';
+}
+
+function renderCardField(field, p) {
+  switch (field) {
+    case 'filename':
+      return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'rating':
+      if (p.rating > 0) {
+        var stars = '';
+        for (var i = 0; i < p.rating; i++) stars += '&#9733;';
+        return '<span class="grid-card-rating">' + stars + '</span>';
+      }
+      return '';
+    case 'flag':
+      if (p.flag === 'flagged') return '<span class="grid-card-flag flag-flagged">P</span>';
+      if (p.flag === 'rejected') return '<span class="grid-card-flag flag-rejected">X</span>';
+      return '';
+    case 'sharpness':
+      if (p.sharpness != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>';
+      return '';
+    case 'species':
+      if (p.species && p.species.length > 0) {
+        var maxShow = 3;
+        var html = '<div class="species-badges" style="position:static;padding:0;">';
+        p.species.slice(0, maxShow).forEach(function(s) {
+          html += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+        });
+        if (p.species.length > maxShow) {
+          html += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+        }
+        html += '</div>';
+        return html;
+      }
+      return '';
+    case 'dimensions':
+      if (p.width && p.height) return '<span style="font-size:10px;color:var(--text-ghost);">' + p.width + ' \u00d7 ' + p.height + '</span>';
+      return '';
+    case 'file_size':
+      if (p.file_size) return '<span style="font-size:10px;color:var(--text-ghost);">' + formatFileSize(p.file_size) + '</span>';
+      return '';
+    case 'capture_date':
+      if (p.timestamp) {
+        var d = p.timestamp.replace('T', ' ').substring(0, 16);
+        return '<span style="font-size:10px;color:var(--text-ghost);" title="' + escapeAttr(p.timestamp) + '">' + d + '</span>';
+      }
+      return '';
+    case 'extension':
+      if (p.extension) return '<span style="font-size:10px;color:var(--text-ghost);">' + escapeHtml(p.extension.toUpperCase()) + '</span>';
+      return '';
+    case 'quality_score':
+      if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    default:
+      return '';
+  }
 }
 
 /* ---------- Bootstrap ---------- */
@@ -879,6 +1031,8 @@ bootstrapBrowse();
 async function bootstrapBrowse() {
   // If deep-linking to a specific photo, skip normal bootstrap — the deep-link handler takes over
   if (new URLSearchParams(window.location.search).get('photo_id')) return;
+  // Prevent the IntersectionObserver from triggering loadPhotos() while bootstrap is in flight
+  loading = true;
   try {
     applyBrowseConfig(await _cfgPromise);
     var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
@@ -892,20 +1046,27 @@ async function bootstrapBrowse() {
     renderFolderTree(data.folders || []);
     renderKeywordTree(data.keywords || []);
     renderCollectionList(data.collections || []);
+    loadCollectionCounts();
     renderGrid();
     updateFilterSummary();
+    loadSummary();
 
     document.getElementById('loadingState').style.display = 'none';
+    // Lazy-load collection photo counts to avoid N+1 on init
+    loadCollectionCounts();
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
+  loading = false;
 }
 
 function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
+    var count = c.photo_count != null ? c.photo_count : '';
     html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
-      '<span>' + escapeHtml(c.name) + '</span></div>';
+      '<span>' + escapeHtml(c.name) + '</span>' +
+      '<span class="count">' + count + '</span></div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
@@ -966,6 +1127,7 @@ function filterByFolder(folderId) {
     activeFolderId = folderId;
   }
   activeKeyword = null;
+  activeCollectionId = null;
   if (timelineMode) loadCalendarData();
   resetAndLoad();
   // Update active state
@@ -1023,6 +1185,7 @@ function filterByKeyword(name) {
     activeKeyword = name;
   }
   activeFolderId = null;
+  activeCollectionId = null;
   document.getElementById('searchInput').value = activeKeyword || '';
   if (timelineMode) loadCalendarData();
   resetAndLoad();
@@ -1036,13 +1199,34 @@ async function loadCollections() {
   } catch(e) {}
 }
 
+async function loadCollectionCounts() {
+  try {
+    var data = await safeFetch('/api/collections', {}, { toast: false });
+    if (!data) return;
+    var items = document.querySelectorAll('#collectionList .tree-item');
+    var countsById = {};
+    data.forEach(function(c) { countsById[c.id] = c.photo_count; });
+    items.forEach(function(el) {
+      var onclick = el.getAttribute('onclick') || '';
+      var m = onclick.match(/filterByCollection\((\d+)\)/);
+      if (m) {
+        var id = parseInt(m[1], 10);
+        var span = el.querySelector('.count');
+        if (span && countsById[id] != null) span.textContent = countsById[id];
+      }
+    });
+  } catch(e) {}
+}
+
 async function filterByCollection(id) {
   activeFolderId = null;
   activeKeyword = null;
+  activeCollectionId = id;
   photos = [];
   currentPage = 1;
   allLoaded = true;  // collections handle their own pagination
   document.getElementById('grid').innerHTML = '';
+  closeDetail();
 
   try {
     var data = await safeFetch('/api/collections/' + id + '/photos?per_page=200', {}, { toast: false });
@@ -1141,6 +1325,9 @@ function resetAndLoad() {
   allLoaded = false;
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Leaving collection mode when applying non-collection filters (sort, rating,
+  // date, keyword, folder) so the summary stays in sync with the visible grid.
+  activeCollectionId = null;
   closeDetail();
   document.getElementById('grid').innerHTML = '';
   loadPhotos();
@@ -1390,7 +1577,10 @@ function toggleDetectionBoxes() {
 
 async function runClipSearch() {
   var query = document.getElementById('clipSearchInput').value.trim();
-  if (!query) return;
+  if (!query) {
+    if (clipSearchActive) clearClipSearch();
+    return;
+  }
 
   photos = [];
   allLoaded = true;
@@ -1410,6 +1600,16 @@ async function runClipSearch() {
     params.set('limit', 100);
     params.set('threshold', 0.15);
     var data = await safeFetch('/api/photos/search?' + params.toString());
+
+    if (data.reason) {
+      var msg = {
+        'model_no_text_search': 'Text search is not supported by ' + (data.model_used || 'this model') + '. Switch to a BioCLIP model in Settings.',
+        'no_embeddings': 'No search index found for ' + (data.model_used || 'this model') + '. Run classification first to enable text search.',
+        'no_model': 'No model available. Download one in Settings.'
+      }[data.reason] || 'Search returned no results.';
+      document.getElementById('loadingState').textContent = msg;
+      return;
+    }
 
     photos = data.results.map(function(r) {
       var p = r.photo;
@@ -1511,13 +1711,6 @@ function renderGrid() {
   var html = '';
   photos.forEach(function(p, idx) {
     var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
-    var stars = '';
-    if (p.rating > 0) {
-      for (var i = 0; i < p.rating; i++) stars += '&#9733;';
-    }
-    var flagHtml = '';
-    if (p.flag === 'flagged') flagHtml = '<span class="grid-card-flag flag-flagged">P</span>';
-    else if (p.flag === 'rejected') flagHtml = '<span class="grid-card-flag flag-rejected">X</span>';
 
     // Detection box overlay
     var boxHtml = '';
@@ -1537,20 +1730,37 @@ function renderGrid() {
     }
     var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
 
+    // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
+    var speciesBadgeHtml = '';
+    if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
+      var maxShow = 3;
+      var shown = p.species.slice(0, maxShow);
+      speciesBadgeHtml = '<div class="species-badges">';
+      shown.forEach(function(s) {
+        speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
+      });
+      if (p.species.length > maxShow) {
+        speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
+      }
+      speciesBadgeHtml += '</div>';
+    }
+
+    // Build info area from configured card fields
+    var infoHtml = '';
+    cardFields.forEach(function(field) {
+      infoHtml += renderCardField(field, p);
+    });
+
     html += '<div class="grid-card' + selectedClass + '" data-id="' + p.id + '" data-idx="' + idx + '" onclick="selectPhoto(event,' + p.id + ',' + idx + ')" ondblclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/\x27/g, '\\&#39;') + '\')">' +
       '<div class="grid-card-img-wrap">' +
         '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename) + '">' +
         clipBadge +
         boxHtml +
         inatBadge +
+        speciesBadgeHtml +
       '</div>' +
       '<div class="grid-card-info">' +
-        '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>' +
-        '<div class="grid-card-meta">' +
-          (stars ? '<span class="grid-card-rating">' + stars + '</span>' : '') +
-          flagHtml +
-          (p.sharpness != null ? '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>' : '') +
-        '</div>' +
+        infoHtml +
       '</div>' +
     '</div>';
   });
@@ -1646,50 +1856,105 @@ async function batchSetFlag(flag) {
   showUndoToast();
 }
 
-async function batchAddKeyword() {
-  var name = prompt('Keyword to add to ' + selectedPhotos.size + ' photos:');
+function batchAddKeyword() {
+  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + selectedPhotos.size + ' photos';
+  document.getElementById('batchKeywordInput').value = '';
+  document.getElementById('batchKeywordModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
+}
+
+function hideBatchKeywordModal() {
+  document.getElementById('batchKeywordModal').classList.remove('open');
+}
+
+async function confirmBatchKeyword() {
+  var name = document.getElementById('batchKeywordInput').value.trim();
   if (!name) return;
+  hideBatchKeywordModal();
   var ids = Array.from(selectedPhotos);
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({photo_ids: ids, name: name.trim()}),
+      body: JSON.stringify({photo_ids: ids, name: name}),
     });
   } catch(e) { return; }
   showUndoToast();
 }
 
+function batchDelete() {
+  var ids = Array.from(selectedPhotos);
+  if (ids.length === 0) return;
+  var companionCount = 0;
+  ids.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (p && p.companion_path) companionCount++;
+  });
+  showDeleteDialog(ids, companionCount, function(data) {
+    // Remove deleted photos from local array
+    var deletedSet = new Set(ids);
+    photos = photos.filter(function(p) { return !deletedSet.has(p.id); });
+    selectedPhotos.clear();
+    selectedPhotoId = null;
+    document.getElementById('batchBar').style.display = 'none';
+    renderGrid();
+    // Update total count display
+    var countEl = document.getElementById('photoCount');
+    if (countEl) {
+      var current = parseInt(countEl.textContent) || 0;
+      countEl.textContent = (current - data.deleted);
+    }
+  });
+}
+
+var _batchCollections = [];
+var _batchCollectionSelectedId = null;
+
 async function addToCollection() {
   if (selectedPhotos.size === 0) return;
 
-  // Build a picker: existing collections + option to create new
   var collections;
   try {
     collections = await safeFetch('/api/collections', {}, { toast: false });
   } catch(e) { return; }
 
-  var options = collections.map(function(c) { return c.name + ' (id:' + c.id + ')'; });
-  var choiceStr = 'Add ' + selectedPhotos.size + ' photo(s) to which collection?\n\n';
-  options.forEach(function(o, i) { choiceStr += (i + 1) + '. ' + o + '\n'; });
-  choiceStr += '\nEnter a number to add to existing, or type a new name to create one:';
+  _batchCollections = collections;
+  _batchCollectionSelectedId = null;
+  document.getElementById('batchCollectionTitle').textContent = 'Add ' + selectedPhotos.size + ' photo(s) to collection';
 
-  var choice = prompt(choiceStr);
-  if (!choice) return;
-  choice = choice.trim();
-  if (!choice) return;
+  var listHtml = '';
+  collections.forEach(function(c) {
+    listHtml += '<div class="batch-coll-item" data-id="' + c.id + '" onclick="pickBatchCollection(' + c.id + ')" style="padding:6px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:var(--text-primary);">' + escapeHtml(c.name) + '</div>';
+  });
+  if (collections.length === 0) {
+    listHtml = '<div style="font-size:12px;color:var(--text-dim);padding:4px 10px;">No collections yet</div>';
+  }
+  document.getElementById('batchCollectionList').innerHTML = listHtml;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.getElementById('batchCollectionModal').classList.add('open');
+  setTimeout(function() { document.getElementById('batchCollectionNewName').focus(); }, 50);
+}
 
+function pickBatchCollection(id) {
+  _batchCollectionSelectedId = id;
+  document.getElementById('batchCollectionNewName').value = '';
+  document.querySelectorAll('.batch-coll-item').forEach(function(el) {
+    el.style.background = parseInt(el.dataset.id) === id ? 'var(--bg-tertiary)' : '';
+  });
+}
+
+function hideBatchCollectionModal() {
+  document.getElementById('batchCollectionModal').classList.remove('open');
+}
+
+async function confirmBatchCollection() {
+  var newName = document.getElementById('batchCollectionNewName').value.trim();
   var ids = Array.from(selectedPhotos);
-  var collectionId = null;
+  var collectionId = _batchCollectionSelectedId;
   var collectionName = '';
 
-  // Check if user entered a number
-  var num = parseInt(choice);
-  if (!isNaN(num) && num >= 1 && num <= collections.length) {
-    collectionId = collections[num - 1].id;
-    collectionName = collections[num - 1].name;
-  } else {
+  if (newName) {
     // Create a new static collection
-    collectionName = choice;
+    collectionName = newName;
     try {
       var createData = await safeFetch('/api/collections', {
         method: 'POST',
@@ -1701,7 +1966,14 @@ async function addToCollection() {
       });
       collectionId = createData.id;
     } catch(e) { return; }
+  } else if (collectionId != null) {
+    var match = _batchCollections.find(function(c) { return c.id === collectionId; });
+    collectionName = match ? match.name : '';
+  } else {
+    return; // nothing selected
   }
+
+  hideBatchCollectionModal();
 
   // Add photos to the collection
   try {
@@ -1725,12 +1997,19 @@ function clearSelection() {
   updateBatchBar();
 }
 
-/* ---------- Undo ---------- */
+/* ---------- Undo / Redo ---------- */
 async function undoLast() {
   try {
     var data = await safeFetch('/api/undo', { method: 'POST' });
-    showToast('Undone: ' + data.undone);
-    // Refresh grid
+    showToast('Undone: ' + data.undone + ' — Ctrl+Shift+Z to redo');
+    resetAndLoad();
+  } catch(e) {}
+}
+
+async function redoLast() {
+  try {
+    var data = await safeFetch('/api/redo', { method: 'POST' });
+    showToast('Redone: ' + data.redone);
     resetAndLoad();
   } catch(e) {}
 }
@@ -1745,8 +2024,8 @@ async function showUndoToast() {
 /* showToast is now provided globally by _navbar.html */
 
 async function loadDetail(id) {
-  var panel = document.getElementById('detailPanel');
-  panel.classList.add('open');
+  document.getElementById('summaryPanel').classList.add('hidden');
+  document.getElementById('detailContent').classList.add('visible');
 
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
@@ -1859,7 +2138,10 @@ function renderDetail(photo) {
   // Date, dimensions, file size (always from photo fields)
   if (photo.timestamp) summary += 'Date: ' + photo.timestamp + '<br>';
   if (photo.width && photo.height) summary += 'Size: ' + photo.width + ' x ' + photo.height + '<br>';
-  if (photo.file_size) summary += 'File: ' + Math.round(photo.file_size / 1024) + ' KB<br>';
+  if (photo.file_size) {
+    var sz = photo.file_size;
+    summary += 'File: ' + (sz >= 1048576 ? (sz / 1048576).toFixed(1) + ' MB' : Math.round(sz / 1024) + ' KB') + '<br>';
+  }
   document.getElementById('detailSummary').innerHTML = summary;
 
   // Path
@@ -1976,12 +2258,74 @@ function filterMetadata(query) {
 }
 
 function closeDetail() {
-  document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('detailContent').classList.remove('visible');
+  document.getElementById('summaryPanel').classList.remove('hidden');
   selectedPhotoId = null;
   selectedIndex = -1;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
+  loadSummary();
+}
+
+async function loadSummary() {
+  var params = new URLSearchParams();
+  if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (filterRating > 0) params.set('rating_min', filterRating);
+  var dateFrom = document.getElementById('dateFrom').value;
+  var dateTo = document.getElementById('dateTo').value;
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+  var search = document.getElementById('searchInput').value.trim();
+  if (search) params.set('keyword', search);
+  if (activeKeyword) params.set('keyword', activeKeyword);
+  if (activeCollectionId) params.set('collection_id', activeCollectionId);
+
+  try {
+    var data = await safeFetch('/api/browse/summary?' + params.toString(), {}, { toast: false });
+    renderSummary(data);
+  } catch(e) {}
+}
+
+function renderSummary(data) {
+  var isFiltered = data.filtered_total !== data.total;
+
+  document.getElementById('summaryPhotoCount').textContent = data.filtered_total.toLocaleString();
+  document.getElementById('summaryFilterNote').textContent =
+    isFiltered ? 'of ' + data.total.toLocaleString() + ' total' : '';
+
+  document.getElementById('summaryClassified').textContent = data.classified.toLocaleString() + ' classified';
+  document.getElementById('summaryUnclassified').textContent = data.unclassified.toLocaleString() + ' unclassified';
+
+  // Top species
+  var speciesSection = document.getElementById('summarySpeciesSection');
+  var speciesHtml = '';
+  if (data.top_species && data.top_species.length > 0) {
+    data.top_species.forEach(function(s) {
+      speciesHtml += '<div class="summary-species-row">' +
+        '<span class="summary-species-name">' + escapeHtml(s.species) + '</span>' +
+        '<span class="summary-species-count">' + s.count + '</span></div>';
+    });
+    speciesSection.style.display = '';
+  } else {
+    speciesSection.style.display = 'none';
+  }
+  document.getElementById('summarySpeciesList').innerHTML = speciesHtml;
+
+  // Folder breakdown
+  var foldersSection = document.getElementById('summaryFoldersSection');
+  var folderHtml = '';
+  if (data.folder_counts && data.folder_counts.length > 0) {
+    data.folder_counts.forEach(function(f) {
+      folderHtml += '<div class="summary-folder-row">' +
+        '<span class="summary-folder-name">' + escapeHtml(f.name) + '</span>' +
+        '<span class="summary-folder-count">' + f.count + '</span></div>';
+    });
+    foldersSection.style.display = '';
+  } else {
+    foldersSection.style.display = 'none';
+  }
+  document.getElementById('summaryFolderList').innerHTML = folderHtml;
 }
 
 /* ---------- Edit Actions ---------- */
@@ -2078,6 +2422,13 @@ document.addEventListener('click', function(e) {
 
 /* ---------- Keyboard Shortcuts ---------- */
 document.addEventListener('keydown', function(e) {
+  // Suppress browse shortcuts while any modal is open
+  var openModal = document.querySelector('.modal-overlay.open');
+  if (openModal) {
+    if (e.key === 'Escape') { openModal.classList.remove('open'); }
+    return;
+  }
+
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   if (e.key === 'Escape') {
@@ -2092,6 +2443,13 @@ document.addEventListener('keydown', function(e) {
   if (matchesShortcut(e, _shortcuts.undo)) {
     e.preventDefault();
     undoLast();
+    return;
+  }
+
+  // Redo
+  if (matchesShortcut(e, _shortcuts.redo)) {
+    e.preventDefault();
+    redoLast();
     return;
   }
 
@@ -2179,6 +2537,15 @@ async function developSelected() {
   }
 }
 
+function openInEditorBatch() {
+  var ids = Array.from(selectedPhotos);
+  if (!ids.length) return;
+  if (ids.length > 20) {
+    if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
+  }
+  openInEditor(ids);
+}
+
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
 (async function() {
   var params = new URLSearchParams(window.location.search);
@@ -2187,14 +2554,17 @@ async function developSelected() {
   photoId = parseInt(photoId, 10);
   if (isNaN(photoId)) return;
 
+  // Prevent the IntersectionObserver from triggering loadPhotos() while deep-link is loading
+  loading = true;
   try {
     applyBrowseConfig(await _cfgPromise);
     var photo = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
-    if (!photo || !photo.folder_id) return;
+    if (!photo || !photo.folder_id) { loading = false; return; }
 
     // Navigate to the photo's folder
     activeFolderId = photo.folder_id;
     activeKeyword = null;
+    activeCollectionId = null;
     photos = [];
     currentPage = 1;
     allLoaded = false;
@@ -2210,6 +2580,7 @@ async function developSelected() {
       renderFolderTree(initData.folders || []);
       renderKeywordTree(initData.keywords || []);
       renderCollectionList(initData.collections || []);
+      loadCollectionCounts();
       photos = initData.photos || [];
       totalPhotos = initData.total || 0;
       currentPage = 2;
@@ -2241,6 +2612,7 @@ async function developSelected() {
       }, 2000);
     }
   } catch(e) { /* ignore deep-link errors silently */ }
+  loading = false;
 })();
 </script>
 

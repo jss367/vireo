@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Shortcuts</title>
+<style>
+  body { padding-bottom: 36px; }
+  .content { max-width: 800px; }
+
+  .shortcut-context-title {
+    font-size: 13px; font-weight: 600; color: var(--text-secondary);
+    margin: 16px 0 8px 0; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-primary);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .shortcut-context-title:first-child { margin-top: 0; }
+  .shortcut-row {
+    display: flex; align-items: center; padding: 8px 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 50%, transparent);
+  }
+  .shortcut-row:last-child { border-bottom: none; }
+  .shortcut-action { flex: 1; font-size: 13px; color: var(--text-secondary); }
+  .shortcut-key-btn {
+    background: var(--bg-tertiary); color: var(--accent); border: 1px solid var(--border-secondary);
+    border-radius: 4px; padding: 4px 14px; font-size: 13px;
+    font-family: monospace; cursor: pointer; min-width: 70px;
+    text-align: center; transition: border-color 0.2s;
+  }
+  .shortcut-key-btn:hover { border-color: var(--accent); }
+  .shortcut-key-btn.capturing {
+    border-color: var(--warning); color: var(--warning); animation: sc-pulse 1s infinite;
+  }
+  .shortcut-default-hint {
+    font-size: 11px; color: var(--text-ghost); margin-left: 8px; min-width: 80px;
+  }
+  .shortcut-reset-btn {
+    background: none; border: none; color: var(--text-ghost); cursor: pointer;
+    font-size: 14px; margin-left: 6px; padding: 2px 6px;
+  }
+  .shortcut-reset-btn:hover { color: var(--danger); }
+  .shortcut-conflict { font-size: 11px; color: var(--danger); margin-left: 8px; }
+  @keyframes sc-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="content">
+  <div class="section">
+    <div class="section-title">Keyboard Shortcuts</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Click a key to change it. Press <kbd style="background:var(--bg-tertiary);border:1px solid var(--border-secondary);border-radius:3px;padding:1px 5px;font-size:11px;">?</kbd> on any page for a quick reference.</p>
+    <div id="shortcutsEditor">
+      <span style="color:var(--text-ghost);font-size:13px;">Loading...</span>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- Keyboard Shortcuts Editor ---------- */
+var SHORTCUT_LABELS = {
+  navigation: {
+    _title: 'Navigation',
+    import: 'Go to Import',
+    pipeline: 'Go to Pipeline',
+    pipeline_review: 'Go to Pipeline Review',
+    review: 'Go to Review',
+    cull: 'Go to Cull',
+    browse: 'Go to Browse',
+    map: 'Go to Map',
+    variants: 'Go to Variants',
+    dashboard: 'Go to Dashboard',
+    audit: 'Go to Audit',
+    compare: 'Go to Compare',
+    workspace: 'Go to Workspace',
+    shortcuts: 'Go to Shortcuts',
+    settings: 'Go to Settings',
+    keywords: 'Go to Keywords',
+  },
+  review: {
+    _title: 'Review (Classify page)',
+    accept: 'Accept prediction',
+    skip: 'Skip / reject prediction',
+  },
+  browse: {
+    _title: 'Browse',
+    rate_0: 'Rate 0 (clear)',
+    rate_1: 'Rate 1',
+    rate_2: 'Rate 2',
+    rate_3: 'Rate 3',
+    rate_4: 'Rate 4',
+    rate_5: 'Rate 5',
+    flag: 'Flag photo',
+    reject: 'Reject photo',
+    unflag: 'Unflag photo',
+    undo: 'Undo last action',
+    redo: 'Redo last undo',
+    select_all: 'Select all photos',
+    zoom: 'Toggle zoom (lightbox)',
+  },
+};
+
+var SHORTCUT_DEFAULTS = {
+  navigation: {
+    import: 'i', pipeline: 'p', pipeline_review: 'e', review: 'r',
+    cull: 'c', browse: 'b', map: 'm', variants: 'v',
+    dashboard: 'd', audit: 'a', compare: 'o', workspace: 'w',
+    shortcuts: '/', settings: ',', keywords: 'k',
+  },
+  review: { accept: 'a', skip: 's' },
+  browse: {
+    rate_0: '0', rate_1: '1', rate_2: '2', rate_3: '3',
+    rate_4: '4', rate_5: '5',
+    flag: 'p', reject: 'x', unflag: 'u',
+    undo: 'ctrl+z', select_all: 'ctrl+a', zoom: 'z',
+  },
+};
+
+var currentShortcuts = null;
+var capturingBtn = null;
+
+function renderShortcutsEditor() {
+  if (!currentShortcuts) return;
+  var html = '';
+  for (var ctx in SHORTCUT_LABELS) {
+    var labels = SHORTCUT_LABELS[ctx];
+    var values = currentShortcuts[ctx] || {};
+    var defaults = SHORTCUT_DEFAULTS[ctx] || {};
+    html += '<div class="shortcut-context-title">' + labels._title +
+      '<button onclick="resetContext(\'' + ctx + '\')" ' +
+      'style="background:none;border:1px solid var(--text-ghost);color:var(--text-dim);border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;">Reset All</button></div>';
+    for (var action in labels) {
+      if (action === '_title') continue;
+      var current = values[action] || defaults[action] || '';
+      var isDefault = current === defaults[action];
+      var conflict = findConflict(ctx, action, current);
+      html += '<div class="shortcut-row">';
+      html += '<span class="shortcut-action">' + labels[action] + '</span>';
+      html += '<button class="shortcut-key-btn" onclick="startCapture(this, \'' + ctx + '\', \'' + action + '\')">' +
+        formatShortcut(current) + '</button>';
+      html += '<span class="shortcut-default-hint">' + (isDefault ? '' : 'default: ' + formatShortcut(defaults[action])) + '</span>';
+      if (!isDefault) {
+        html += '<button class="shortcut-reset-btn" onclick="resetShortcut(\'' + ctx + '\', \'' + action + '\')" title="Reset to default">&times;</button>';
+      }
+      if (conflict) {
+        html += '<span class="shortcut-conflict">Conflict: ' + SHORTCUT_LABELS[ctx][conflict] + '</span>';
+      }
+      html += '</div>';
+    }
+  }
+  document.getElementById('shortcutsEditor').innerHTML = html;
+}
+
+function findConflict(ctx, action, keyStr) {
+  if (!currentShortcuts[ctx]) return null;
+  for (var other in currentShortcuts[ctx]) {
+    if (other === action) continue;
+    if (currentShortcuts[ctx][other] === keyStr) return other;
+  }
+  return null;
+}
+
+function startCapture(btn, ctx, action) {
+  if (capturingBtn) capturingBtn.classList.remove('capturing');
+  capturingBtn = btn;
+  btn.classList.add('capturing');
+  btn.textContent = 'Press a key...';
+
+  function onKey(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (['Control', 'Shift', 'Alt', 'Meta'].indexOf(e.key) !== -1) return;
+
+    var parts = [];
+    if (e.ctrlKey || e.metaKey) parts.push('ctrl');
+    if (e.shiftKey) parts.push('shift');
+    if (e.altKey) parts.push('alt');
+    parts.push(e.key.toLowerCase());
+    var keyStr = parts.join('+');
+
+    var conflict = findConflict(ctx, action, keyStr);
+    if (conflict) {
+      btn.classList.remove('capturing');
+      capturingBtn = null;
+      document.removeEventListener('keydown', onKey, true);
+      btn.textContent = 'Conflict: ' + SHORTCUT_LABELS[ctx][conflict];
+      btn.style.borderColor = 'var(--danger)';
+      btn.style.color = 'var(--danger)';
+      setTimeout(function() { renderShortcutsEditor(); }, 1500);
+      return;
+    }
+
+    currentShortcuts[ctx][action] = keyStr;
+    btn.classList.remove('capturing');
+    capturingBtn = null;
+    document.removeEventListener('keydown', onKey, true);
+    renderShortcutsEditor();
+    saveShortcuts();
+  }
+
+  document.addEventListener('keydown', onKey, true);
+
+  function onBlur() {
+    if (capturingBtn === btn) {
+      btn.classList.remove('capturing');
+      capturingBtn = null;
+      document.removeEventListener('keydown', onKey, true);
+      renderShortcutsEditor();
+    }
+    btn.removeEventListener('blur', onBlur);
+  }
+  btn.addEventListener('blur', onBlur);
+}
+
+function resetShortcut(ctx, action) {
+  currentShortcuts[ctx][action] = SHORTCUT_DEFAULTS[ctx][action];
+  renderShortcutsEditor();
+  saveShortcuts();
+}
+
+function resetContext(ctx) {
+  currentShortcuts[ctx] = JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS[ctx]));
+  renderShortcutsEditor();
+  saveShortcuts();
+}
+
+function saveShortcuts() {
+  safeFetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ keyboard_shortcuts: currentShortcuts }),
+  }).catch(function() {});
+}
+
+// Load config and init editor
+safeFetch('/api/config', {}, { toast: false }).then(function(cfg) {
+  currentShortcuts = (cfg && cfg.keyboard_shortcuts) || JSON.parse(JSON.stringify(SHORTCUT_DEFAULTS));
+  // Ensure all default keys exist (for newly added shortcuts)
+  for (var ctx in SHORTCUT_DEFAULTS) {
+    if (!currentShortcuts[ctx]) currentShortcuts[ctx] = {};
+    for (var action in SHORTCUT_DEFAULTS[ctx]) {
+      if (!currentShortcuts[ctx][action]) currentShortcuts[ctx][action] = SHORTCUT_DEFAULTS[ctx][action];
+    }
+  }
+  renderShortcutsEditor();
+}).catch(function() {});
+</script>
+
+</body>
+</html>

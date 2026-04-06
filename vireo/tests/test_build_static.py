@@ -14,7 +14,7 @@ def test_build_static_produces_files():
 
         # Check that output files exist
         expected_pages = [
-            "browse.html", "review.html", "import.html", "audit.html",
+            "browse.html", "review.html", "lightroom.html", "audit.html",
             "cull.html", "pipeline.html", "pipeline_review.html",
             "variants.html", "workspace.html", "compare.html",
             "settings.html", "stats.html", "logs.html",

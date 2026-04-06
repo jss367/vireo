@@ -545,12 +545,19 @@ def test_get_pipeline_feature_counts_empty(tmp_path):
 
 def test_get_pipeline_feature_counts_with_data(tmp_path):
     """Returns correct counts for each pipeline feature."""
-    db, _ = _make_workspace_with_photos(tmp_path, [
-        {'mask_path': '/mask/1.png', 'detection_box': '0,0,100,100', 'subject_tenengrad': 42.0},
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'mask_path': '/mask/1.png', 'subject_tenengrad': 42.0},
         {'mask_path': '/mask/2.png'},
-        {'detection_box': '10,10,50,50'},
+        {},
         {},
     ])
+    # Create detections for first two photos (replaces old detection_box column)
+    db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 100, "h": 100}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.save_detections(pids[2], [
+        {"box": {"x": 10, "y": 10, "w": 50, "h": 50}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
     counts = db.get_pipeline_feature_counts()
     assert counts['masks'] == 2
     assert counts['detections'] == 2
@@ -603,9 +610,9 @@ def test_get_dashboard_stats_with_data(tmp_path):
     """Returns correct aggregations across all stat types."""
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'timestamp': '2024-06-15T10:30:00', 'rating': 3, 'flag': 'flagged',
-         'quality_score': 0.85, 'detection_conf': 0.9},
+         'quality_score': 0.85},
         {'timestamp': '2024-06-20T14:00:00', 'rating': 5, 'flag': 'none',
-         'quality_score': 0.42, 'detection_conf': 0.0},
+         'quality_score': 0.42},
         {'timestamp': '2024-07-01T08:00:00', 'rating': 3, 'flag': 'none'},
     ])
 
@@ -614,8 +621,11 @@ def test_get_dashboard_stats_with_data(tmp_path):
     db.tag_photo(pids[0], kid)
     db.tag_photo(pids[1], kid)
 
-    # Add a prediction
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+    # Add a detection and prediction
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Robin', 0.95, 'test')
 
     stats = db.get_dashboard_stats()
 
@@ -637,7 +647,7 @@ def test_get_dashboard_stats_with_data(tmp_path):
     # classified_count
     assert stats['classified_count'] == 1
 
-    # detected_count (detection_conf > 0)
+    # detected_count (photos with detections)
     assert stats['detected_count'] == 1
 
     # photos_by_hour
@@ -654,9 +664,15 @@ def test_get_group_predictions(tmp_path):
     db, pids = _make_workspace_with_photos(tmp_path, [
         {'quality_score': 0.9}, {'quality_score': 0.5},
     ])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+    det_ids0 = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids1 = db.save_detections(pids[1], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids0[0], species='Robin', confidence=0.95,
                       model='test', group_id='g1')
-    db.add_prediction(photo_id=pids[1], species='Robin', confidence=0.80,
+    db.add_prediction(det_ids1[0], species='Robin', confidence=0.80,
                       model='test', group_id='g1')
 
     results = db.get_group_predictions('g1')
@@ -671,7 +687,10 @@ def test_get_group_predictions(tmp_path):
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='test')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='test')
 
     db.update_predictions_status_by_photo(pids[0], 'accepted')
 
@@ -682,7 +701,10 @@ def test_update_predictions_status_by_photo(tmp_path):
 def test_ungroup_prediction(tmp_path):
     """Removes a prediction from its group."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95,
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95,
                       model='test', group_id='g1')
     pred = db.get_predictions(photo_ids=[pids[0]])[0]
 
@@ -695,7 +717,10 @@ def test_ungroup_prediction(tmp_path):
 def test_get_existing_prediction_photo_ids(tmp_path):
     """Returns set of photo_ids that have predictions for a model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.9, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
 
     result = db.get_existing_prediction_photo_ids('bioclip')
     assert result == {pids[0]}
@@ -707,7 +732,10 @@ def test_get_existing_prediction_photo_ids(tmp_path):
 def test_get_prediction_for_photo(tmp_path):
     """Returns species and confidence for a photo's prediction by model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
 
     row = db.get_prediction_for_photo(pids[0], 'bioclip')
     assert row['species'] == 'Robin'
@@ -731,10 +759,13 @@ def test_get_and_store_photo_embedding(tmp_path):
 def test_update_prediction_group_info(tmp_path):
     """Updates group info on an existing prediction."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
-    db.add_prediction(photo_id=pids[0], species='Robin', confidence=0.95, model='bioclip')
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.95, model='bioclip')
 
     db.update_prediction_group_info(
-        photo_id=pids[0], model='bioclip',
+        detection_id=det_ids[0], model='bioclip',
         group_id='g1', vote_count=3, total_votes=5, individual='[{"species":"Robin"}]',
     )
 
@@ -877,11 +908,15 @@ def test_get_geolocated_photos_with_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     # Accept the prediction
     pred = db.get_predictions(photo_ids=[p1])
     db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pred[0]['id'],))
@@ -912,14 +947,21 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p2, 'Great Blue Heron', 0.90, 'bioclip')
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p2, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -939,6 +981,7 @@ def test_get_accepted_species(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='heron.jpg', extension='.jpg',
@@ -946,8 +989,14 @@ def test_get_accepted_species(tmp_path):
     # Both photos need GPS to appear in species list
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id IN (?,?)", (p1, p2))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p2, 'Great Blue Heron', 0.90, 'bioclip')
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p2, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -964,10 +1013,14 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     # p1 has no GPS coordinates
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
     db.conn.commit()
@@ -981,11 +1034,15 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
+    det_ids = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
 
     species = db.get_accepted_species()
     assert species == []
@@ -996,12 +1053,20 @@ def test_get_accepted_species_uses_top_confidence(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
     p1 = db.add_photo(folder_id=fid, filename='hawk.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
     db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
     db.conn.commit()
-    db.add_prediction(p1, 'Red-tailed Hawk', 0.95, 'bioclip')
-    db.add_prediction(p1, 'Cooper\'s Hawk', 0.60, 'bioclip')
+    # Two detections for the same photo, each with different species
+    det_ids1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    ], detector_model="MDV6")
+    det_ids2 = db.save_detections(p1, [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
         db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
@@ -1470,3 +1535,694 @@ def test_database_supports_in_memory_sqlite():
 
     assert row is not None
     assert row["name"] == "Default"
+
+
+def test_detections_table_exists(tmp_path):
+    """The detections table should exist with expected columns."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='detections'"
+    ).fetchone()
+    assert row is not None
+    schema = row[0].lower()
+    assert "photo_id" in schema
+    assert "workspace_id" in schema
+    assert "box_x" in schema
+    assert "box_y" in schema
+    assert "box_w" in schema
+    assert "box_h" in schema
+    assert "detector_confidence" in schema
+    assert "category" in schema
+    assert "detector_model" in schema
+
+
+def test_predictions_references_detection_id(tmp_path):
+    """The predictions table should reference detection_id, not photo_id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
+    ).fetchone()
+    schema = row[0].lower()
+    assert "detection_id" in schema
+    # photo_id should NOT be a direct column anymore
+    # (it's accessed via JOIN through detections)
+    assert "photo_id" not in schema
+
+
+def test_save_detections(tmp_path):
+    """save_detections should insert rows and return detection IDs."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    detections = [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.6, "w": 0.2, "h": 0.3}, "confidence": 0.80, "category": "animal"},
+    ]
+    ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
+    assert len(ids) == 2
+    rows = db.conn.execute("SELECT * FROM detections WHERE photo_id = ?", (pid,)).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["box_x"] == 0.1
+    assert rows[1]["box_x"] == 0.5
+
+
+def test_get_detections_for_photo(tmp_path):
+    """get_detections should return all detections for a photo in current workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    detections = [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"},
+    ]
+    db.save_detections(pid, detections, detector_model="MDV6")
+    result = db.get_detections(pid)
+    assert len(result) == 1
+    assert result[0]["box_x"] == 0.1
+    assert result[0]["detector_model"] == "MDV6"
+
+
+def test_clear_detections(tmp_path):
+    """clear_detections should remove detections and cascade to predictions."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    # Insert prediction via raw SQL since add_prediction is not yet refactored
+    # for the detection-based schema (Task 3)
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, species, confidence, model, status) VALUES (?, ?, ?, ?, ?)",
+        (det_ids[0], "Elk", 0.9, "bioclip", "pending"),
+    )
+    db.conn.commit()
+    db.clear_detections(pid)
+    assert db.conn.execute("SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,)).fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_add_prediction_with_detection(tmp_path):
+    """add_prediction should accept detection_id and store prediction."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.92, model="bioclip")
+    preds = db.get_predictions()
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Elk"
+    assert preds[0]["confidence"] == 0.92
+
+
+def test_get_predictions_includes_photo_and_box(tmp_path):
+    """get_predictions should include photo filename and bounding box from detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    preds = db.get_predictions()
+    assert preds[0]["filename"] == "elk.jpg"
+    assert preds[0]["box_x"] == 0.1
+    assert preds[0]["photo_id"] == pid
+
+
+def test_accept_prediction_tags_photo(tmp_path):
+    """accept_prediction should add species keyword to the photo."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="Elk", confidence=0.9, model="bioclip")
+    preds = db.get_predictions()
+    result = db.accept_prediction(preds[0]["id"])
+    assert result["species"] == "Elk"
+    kws = db.get_photo_keywords(pid)
+    assert any(k["name"] == "Elk" for k in kws)
+
+
+def test_get_existing_detection_photo_ids(tmp_path):
+    """get_existing_detection_photo_ids returns photo IDs that have detections."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid1 = db.add_photo(folder_id=fid, filename="elk.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    db.save_detections(pid1, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    result = db.get_existing_detection_photo_ids()
+    assert pid1 in result
+    assert pid2 not in result
+
+
+def test_multiple_predictions_per_detection(tmp_path):
+    """Multiple species predictions can be stored for the same detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+
+    db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
+                      model="test-model", category="new")
+    db.add_prediction(detection_id=det_id, species="Sparrow", confidence=0.10,
+                      model="test-model", category="new")
+    db.add_prediction(detection_id=det_id, species="Finch", confidence=0.05,
+                      model="test-model", category="new")
+
+    preds = db.get_predictions()
+    assert len(preds) == 3
+    species = {p["species"] for p in preds}
+    assert species == {"Robin", "Sparrow", "Finch"}
+
+
+def test_alternative_predictions_filtered_from_pending(tmp_path):
+    """get_predictions with status='pending' excludes alternatives."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ])
+    det_id = det_ids[0]
+
+    db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
+                      model="test-model", status="pending")
+    db.add_prediction(detection_id=det_id, species="Sparrow", confidence=0.10,
+                      model="test-model", status="alternative")
+    db.add_prediction(detection_id=det_id, species="Finch", confidence=0.05,
+                      model="test-model", status="alternative")
+
+    # All predictions
+    all_preds = db.get_predictions()
+    assert len(all_preds) == 3
+
+    # Pending only — should return just the top-1
+    pending = db.get_predictions(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["species"] == "Robin"
+
+    # Alternatives only
+    alts = db.get_predictions(status="alternative")
+    assert len(alts) == 2
+
+
+# -- Folder health / missing folder tests --
+
+
+def test_folder_status_column_exists(tmp_path):
+    """Folders table has a status column defaulting to 'ok'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.ensure_default_workspace()
+    db.set_active_workspace(1)
+    fid = db.add_folder("/photos/test", name="test")
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_check_folder_health_marks_missing(tmp_path):
+    """check_folder_health sets status='missing' for non-existent folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    real_dir = str(tmp_path / "real")
+    os.makedirs(real_dir)
+    fid_real = db.add_folder(real_dir, name="real")
+    fid_gone = db.add_folder("/nonexistent/folder", name="gone")
+
+    changed = db.check_folder_health()
+    assert changed == 1
+
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_gone,)).fetchone()
+    assert row["status"] == "missing"
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_real,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_check_folder_health_recovers(tmp_path):
+    """check_folder_health sets status back to 'ok' when folder reappears."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = str(tmp_path / "comeback")
+    fid = db.add_folder(folder, name="comeback")
+    # Mark missing manually
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    # Folder doesn't exist yet -> stays missing
+    db.check_folder_health()
+    assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "missing"
+
+    # Create folder -> recovery
+    os.makedirs(folder)
+    db.check_folder_health()
+    assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
+
+
+def test_get_missing_folders(tmp_path):
+    """get_missing_folders returns missing folders with photo counts."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    missing = db.get_missing_folders()
+    assert len(missing) == 1
+    assert missing[0]["path"] == "/gone/folder"
+    assert missing[0]["photo_count"] == 1
+
+
+def test_relocate_folder(tmp_path):
+    """relocate_folder updates path and sets status to 'ok'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/old/path", name="photos")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    new_path = str(tmp_path / "new_location")
+    os.makedirs(new_path)
+    db.relocate_folder(fid, new_path)
+
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["path"] == new_path
+    assert row["status"] == "ok"
+
+
+def test_relocate_folder_cascade(tmp_path):
+    """relocate_folder returns child folders that also exist at new location."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/old/root", name="root")
+    child = db.add_folder("/old/root/sub", name="sub", parent_id=parent)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    os.makedirs(os.path.join(new_root, "sub"))
+
+    cascaded = db.relocate_folder(parent, new_root)
+    assert len(cascaded) == 1
+    assert cascaded[0]["id"] == child
+
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row["path"] == os.path.join(new_root, "sub")
+    assert row["status"] == "ok"
+
+
+def test_relocate_folder_duplicate_path(tmp_path):
+    """relocate_folder raises ValueError when target path already exists in DB."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid = db.add_folder("/old/path", name="photos")
+    db.add_folder(existing_path, name="existing")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    import pytest
+    with pytest.raises(ValueError, match="already tracked"):
+        db.relocate_folder(fid, existing_path)
+
+    # Verify original folder was NOT modified
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+    assert row["path"] == "/old/path"
+    assert row["status"] == "missing"
+
+
+def test_relocate_folder_cascade_skips_duplicate(tmp_path):
+    """relocate_folder skips cascading a child if its target path is already tracked."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/old/root", name="root")
+    child = db.add_folder("/old/root/sub", name="sub", parent_id=parent)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    os.makedirs(child_target)
+
+    # Add a folder that already occupies the child's target path
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    # Child should NOT be in cascaded list since its target is already taken
+    assert len(cascaded) == 0
+
+    # Child should remain unchanged
+    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (child,)).fetchone()
+    assert row["path"] == "/old/root/sub"
+    assert row["status"] == "missing"
+
+
+def test_relocate_folder_cascade_skips_descendants_of_conflict(tmp_path):
+    """relocate_folder skips descendants when their ancestor's path conflicts."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    parent = db.add_folder("/old/root", name="root")
+    child = db.add_folder("/old/root/sub", name="sub", parent_id=parent)
+    grand = db.add_folder("/old/root/sub/grand", name="grand", parent_id=child)
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    new_root = str(tmp_path / "new_root")
+    child_target = os.path.join(new_root, "sub")
+    grand_target = os.path.join(new_root, "sub", "grand")
+    os.makedirs(grand_target)  # creates child_target too
+
+    # Add a folder that conflicts with the child's target path
+    db.add_folder(child_target, name="conflict")
+
+    cascaded = db.relocate_folder(parent, new_root)
+    # Neither child nor grandchild should be cascaded
+    assert len(cascaded) == 0
+
+    # Both should remain unchanged
+    for fid, expected_path in [(child, "/old/root/sub"), (grand, "/old/root/sub/grand")]:
+        row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
+        assert row["path"] == expected_path
+        assert row["status"] == "missing"
+
+
+def test_delete_folder(tmp_path):
+    """delete_folder removes folder and its photos from the database."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/delete/me", name="me")
+    pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                       file_size=1000, file_mtime=1.0)
+
+    result = db.delete_folder(fid)
+    assert result["deleted_photos"] == 1
+
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid,)).fetchone() is None
+
+
+def test_missing_folder_photos_hidden_from_browse(tmp_path):
+    """Photos in missing folders don't appear in get_photos or count_photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+    db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+    db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+                 file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    # Both visible before marking missing
+    assert db.count_photos() == 2
+    assert len(db.get_photos()) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    # Only one visible after marking missing
+    assert db.count_photos() == 1
+    photos = db.get_photos()
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "visible.jpg"
+
+
+def test_missing_folder_hidden_from_folder_tree(tmp_path):
+    """Missing folders don't appear in get_folder_tree."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+
+    assert len(db.get_folder_tree()) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    tree = db.get_folder_tree()
+    assert len(tree) == 1
+    assert tree[0]["name"] == "ok"
+
+
+def test_missing_folder_hidden_from_collection(tmp_path):
+    """Photos in missing folders don't appear in collection queries."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_ok = db.add_folder("/ok/folder", name="ok")
+    fid_gone = db.add_folder("/gone/folder", name="gone")
+    p1 = db.add_photo(folder_id=fid_ok, filename="visible.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+    p2 = db.add_photo(folder_id=fid_gone, filename="hidden.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0, timestamp="2024-01-01T00:00:00")
+
+    # Create a collection that matches all photos
+    rules = json.dumps([{"field": "photo_ids", "value": [p1, p2]}])
+    db.conn.execute(
+        "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+        ("test", rules, ws),
+    )
+    db.conn.commit()
+    coll_id = db.conn.execute("SELECT id FROM collections WHERE name = 'test'").fetchone()["id"]
+
+    assert db.count_collection_photos(coll_id) == 2
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_gone,))
+    db.conn.commit()
+
+    assert db.count_collection_photos(coll_id) == 1
+    photos = db.get_collection_photos(coll_id)
+    assert len(photos) == 1
+    assert photos[0]["filename"] == "visible.jpg"
+
+
+# -- Move rules --
+
+def test_create_move_rule(db):
+    """Creating a move rule stores name, destination, and criteria."""
+    rule_id = db.create_move_rule("Archive hawks", "/nas/archive", {"rating_min": 3, "species": ["Red-tailed Hawk"]})
+    assert rule_id is not None
+    rule = db.get_move_rule(rule_id)
+    assert rule["name"] == "Archive hawks"
+    assert rule["destination"] == "/nas/archive"
+    import json
+    assert json.loads(rule["criteria"]) == {"rating_min": 3, "species": ["Red-tailed Hawk"]}
+
+
+def test_list_move_rules(db):
+    """Listing rules returns all saved rules."""
+    db.create_move_rule("Rule A", "/dest/a", {})
+    db.create_move_rule("Rule B", "/dest/b", {"flag": "flagged"})
+    rules = db.list_move_rules()
+    assert len(rules) == 2
+    names = {r["name"] for r in rules}
+    assert names == {"Rule A", "Rule B"}
+
+
+def test_update_move_rule(db):
+    """Updating a rule changes its fields."""
+    rid = db.create_move_rule("Old name", "/old", {})
+    db.update_move_rule(rid, name="New name", destination="/new", criteria={"rating_min": 5})
+    rule = db.get_move_rule(rid)
+    assert rule["name"] == "New name"
+    assert rule["destination"] == "/new"
+
+
+def test_delete_move_rule(db):
+    """Deleting a rule removes it."""
+    rid = db.create_move_rule("Temp", "/tmp", {})
+    db.delete_move_rule(rid)
+    assert db.get_move_rule(rid) is None
+
+
+def test_batch_update_photo_folder(db):
+    """batch_update_photo_folder moves photos to a new folder in one transaction."""
+    fid1 = db.add_folder("/src", name="src")
+    fid2 = db.add_folder("/dst", name="dst")
+    p1 = db.add_photo(folder_id=fid1, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid1, filename="b.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    db.batch_update_photo_folder([p1, p2], fid2)
+    photo1 = db.get_photo(p1)
+    photo2 = db.get_photo(p2)
+    assert photo1["folder_id"] == fid2
+    assert photo2["folder_id"] == fid2
+
+
+def test_move_folder_path_cascade(db):
+    """move_folder_path updates parent and all child folder paths."""
+    fid = db.add_folder("/local/2024", name="2024")
+    cid = db.add_folder("/local/2024/march", name="march", parent_id=fid)
+    gcid = db.add_folder("/local/2024/march/birds", name="birds", parent_id=cid)
+    db.move_folder_path(fid, "/nas/photos/2024")
+    parent = db.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
+    child = db.conn.execute("SELECT path FROM folders WHERE id = ?", (cid,)).fetchone()
+    grandchild = db.conn.execute("SELECT path FROM folders WHERE id = ?", (gcid,)).fetchone()
+    assert parent["path"] == "/nas/photos/2024"
+    assert child["path"] == "/nas/photos/2024/march"
+    assert grandchild["path"] == "/nas/photos/2024/march/birds"
+
+
+def test_check_filename_collisions(db):
+    """check_filename_collisions detects conflicts at destination folder."""
+    fid1 = db.add_folder("/src", name="src")
+    fid2 = db.add_folder("/dst", name="dst")
+    db.add_photo(folder_id=fid1, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p_dst = db.add_photo(folder_id=fid2, filename="bird.jpg", extension=".jpg", file_size=200, file_mtime=2.0)
+    p_src = db.conn.execute("SELECT id FROM photos WHERE folder_id = ? AND filename = 'bird.jpg'", (fid1,)).fetchone()["id"]
+    collisions = db.check_filename_collisions([p_src], fid2)
+    assert len(collisions) == 1
+    assert collisions[0]["filename"] == "bird.jpg"
+
+
+# --- Highlights candidates ---
+
+
+def test_get_highlights_candidates(tmp_path):
+    """get_highlights_candidates returns photos with quality scores, species, and embeddings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/test/folder', name='folder')
+    # Insert photos with varying quality scores
+    for i, qs in enumerate([0.9, 0.7, 0.5, 0.3, None]):
+        pid = db.add_photo(
+            folder_id=fid, filename=f'img{i}.jpg', extension='.jpg',
+            file_size=1000, file_mtime=1000.0,
+        )
+        db.conn.execute(
+            "UPDATE photos SET quality_score = ? WHERE id = ?", (qs, pid)
+        )
+        if qs is not None and qs >= 0.5:
+            # Add a detection + accepted prediction for photos with decent quality
+            did = db.conn.execute(
+                "INSERT INTO detections (photo_id, workspace_id, detector_confidence) VALUES (?, ?, 0.9)",
+                (pid, db._ws_id()),
+            ).lastrowid
+            db.conn.execute(
+                "INSERT INTO predictions (detection_id, species, confidence, status) VALUES (?, ?, 0.95, 'accepted')",
+                (did, f"Species{i}"),
+            )
+    db.conn.commit()
+
+    # min_quality=0.5 should return 3 photos (0.9, 0.7, 0.5), excluding None and 0.3
+    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.5)
+    assert len(results) == 3
+    # Should be ordered by quality_score DESC
+    scores = [r["quality_score"] for r in results]
+    assert scores == sorted(scores, reverse=True)
+    # Each result should have species field (may be None for unclassified)
+    assert all("species" in dict(r) for r in results)
+
+
+def test_get_highlights_candidates_excludes_rejected(tmp_path):
+    """Flagged-rejected photos are excluded."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/test/folder', name='folder')
+    good_pid = db.add_photo(
+        folder_id=fid, filename='good.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (good_pid,))
+    bad_pid = db.add_photo(
+        folder_id=fid, filename='bad.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.9, flag = 'rejected' WHERE id = ?", (bad_pid,))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=fid, min_quality=0.0)
+    assert len(results) == 1
+    assert results[0]["filename"] == "good.jpg"
+
+
+# --- Folders with quality data ---
+
+
+def test_get_folders_with_quality_data(tmp_path):
+    """Returns only folders that have photos with quality scores."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Folder with quality data
+    fid1 = db.add_folder('/scored', name='scored')
+    pid1 = db.add_photo(
+        folder_id=fid1, filename='a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid1,))
+    # Folder without quality data
+    fid2 = db.add_folder('/noscores', name='noscores')
+    db.add_photo(
+        folder_id=fid2, filename='b.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1000.0,
+    )
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    assert len(folders) == 1
+    assert folders[0]["name"] == "scored"
+    assert folders[0]["photo_count"] > 0

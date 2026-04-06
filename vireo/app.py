@@ -10,13 +10,16 @@ import logging
 import logging.handlers
 import os
 import queue
+import subprocess
 import time
 import webbrowser
+from pathlib import Path
 
 from db import Database
 from flask import (
     Flask,
     Response,
+    g,
     jsonify,
     make_response,
     redirect,
@@ -24,6 +27,7 @@ from flask import (
     request,
     send_from_directory,
 )
+from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -62,6 +66,30 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
+
+
+def _trash_via_finder(filepath):
+    """Trash a file via Finder using AppleScript.
+
+    Fallback for when send2trash fails (e.g. external volumes where the
+    legacy Carbon API can't locate .Trashes).
+    """
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e", "on run argv",
+            "-e", "set posixPath to item 1 of argv",
+            "-e", "set fileRef to POSIX file posixPath",
+            "-e", "tell application \"Finder\" to delete fileRef",
+            "-e", "end run",
+            "--",
+            filepath,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
 
 
 def create_app(db_path, thumb_cache_dir=None):
@@ -152,10 +180,16 @@ def create_app(db_path, thumb_cache_dir=None):
         return jsonify({"error": msg}), status
 
     def _get_db():
-        """Get a Database instance. Creates a new connection per request."""
-        if not hasattr(app, "_db") or app._db is None:
-            app._db = Database(db_path)
-        return app._db
+        """Get a Database instance. One connection per request via Flask g."""
+        if "db" not in g:
+            g.db = Database(db_path)
+        return g.db
+
+    @app.teardown_appcontext
+    def _close_db(exc):
+        db = g.pop("db", None)
+        if db is not None:
+            db.conn.close()
 
     @app.route("/api/health")
     def api_health():
@@ -244,6 +278,22 @@ def create_app(db_path, thumb_cache_dir=None):
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
+    def _folder_health_loop():
+        """Periodically check folder health."""
+        import time as _time
+        _time.sleep(30)  # Initial delay
+        while True:
+            try:
+                health_db = Database(db_path)
+                changed = health_db.check_folder_health()
+                if changed:
+                    log.info("Folder health check: %d folder(s) changed status", changed)
+            except Exception:
+                log.debug("Folder health check failed", exc_info=True)
+            _time.sleep(600)  # 10 minutes
+
+    threading.Thread(target=_folder_health_loop, daemon=True).start()
+
     app._job_runner = JobRunner(db=init_db)
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
@@ -285,9 +335,9 @@ def create_app(db_path, thumb_cache_dir=None):
     def review():
         return render_template("review.html")
 
-    @app.route("/import")
-    def import_page():
-        return render_template("import.html")
+    @app.route("/lightroom")
+    def lightroom_page():
+        return render_template("lightroom.html")
 
     @app.route("/audit")
     def audit():
@@ -321,11 +371,37 @@ def create_app(db_path, thumb_cache_dir=None):
     def settings():
         return render_template("settings.html")
 
+    @app.route("/shortcuts")
+    def shortcuts_page():
+        return render_template("shortcuts.html")
+
     @app.route("/keywords")
     def keywords_page():
         return render_template("keywords.html")
 
+    @app.route("/jobs")
+    def jobs_page():
+        return render_template("jobs.html")
+
+    @app.route("/move")
+    def move_page():
+        return render_template("move.html")
+
+    @app.route("/highlights")
+    def highlights_page():
+        return render_template("highlights.html")
+
     # -- API routes --
+
+    def _attach_species(db, photo_dicts):
+        """Attach species keyword names to a list of photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts]
+        species_map = db.get_species_keywords_for_photos(ids)
+        for p in photo_dicts:
+            p["species"] = species_map.get(p["id"], [])
+        return photo_dicts
 
     @app.route("/api/browse/init")
     def api_browse_init():
@@ -343,9 +419,12 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -366,6 +445,18 @@ def create_app(db_path, thumb_cache_dir=None):
         from pipeline import load_results
         cache_dir = os.path.dirname(db_path)
         results = load_results(cache_dir, db._active_workspace_id)
+        if results and results.get("photos"):
+            photo_ids = [p["id"] for p in results["photos"]]
+            placeholders = ",".join("?" for _ in photo_ids)
+            rows = db.conn.execute(
+                f"SELECT id, flag, rating FROM photos WHERE id IN ({placeholders})",
+                photo_ids,
+            ).fetchall()
+            flag_map = {r["id"]: (r["flag"], r["rating"]) for r in rows}
+            for p in results["photos"]:
+                f, r = flag_map.get(p["id"], ("none", 0))
+                p["flag"] = f
+                p["rating"] = r
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
@@ -377,11 +468,15 @@ def create_app(db_path, thumb_cache_dir=None):
             except Exception:
                 pass
 
+        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+        taxonomy_available = os.path.exists(taxonomy_path)
+
         return jsonify({
             "total_photos": total_photos,
             "has_detections": pipeline_counts["detections"],
             "has_masks": pipeline_counts["masks"],
             "has_sharpness": pipeline_counts["sharpness"],
+            "taxonomy_available": taxonomy_available,
             "pipeline_config": {
                 "sam2_variant": pipeline_cfg.get("sam2_variant", "sam2-small"),
                 "dinov2_variant": pipeline_cfg.get("dinov2_variant", "vit-b14"),
@@ -396,6 +491,37 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         folders = db.get_folder_tree()
         return jsonify([dict(f) for f in folders])
+
+    @app.route("/api/folders/missing")
+    def api_folders_missing():
+        db = _get_db()
+        missing = db.get_missing_folders()
+        return jsonify([dict(f) for f in missing])
+
+    @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
+    def api_folder_relocate(folder_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        new_path = body.get("path", "")
+        if not new_path:
+            return json_error("path is required")
+        if not os.path.isdir(new_path):
+            return json_error("path does not exist or is not a directory")
+
+        try:
+            cascaded = db.relocate_folder(folder_id, new_path)
+        except ValueError as e:
+            return json_error(str(e), 409)
+        return jsonify({
+            "status": "ok",
+            "cascaded": cascaded,
+        })
+
+    @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
+    def api_folder_delete(folder_id):
+        db = _get_db()
+        result = db.delete_folder(folder_id)
+        return jsonify(result)
 
     @app.route("/api/photos")
     def api_photos():
@@ -434,9 +560,12 @@ def create_app(db_path, thumb_cache_dir=None):
                 keyword=keyword,
             )
 
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -456,6 +585,26 @@ def create_app(db_path, thumb_cache_dir=None):
             year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword
         )
         return jsonify(data)
+
+    @app.route("/api/browse/summary")
+    def api_browse_summary():
+        db = _get_db()
+        folder_id = request.args.get("folder_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        collection_id = request.args.get("collection_id", None, type=int)
+        return jsonify(
+            db.get_browse_summary(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                collection_id=collection_id,
+            )
+        )
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -799,6 +948,97 @@ def create_app(db_path, thumb_cache_dir=None):
                        str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(photo_ids)})
 
+    @app.route("/api/batch/delete", methods=["POST"])
+    def api_batch_delete():
+        """Delete photos from Vireo, optionally moving files to trash."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        if mode == "disk_permanent" and paths:
+            # Retry path: DB already cleaned up, just delete files
+            trashed = 0
+            trash_failed = []
+            for p in paths:
+                if not os.path.isfile(p):
+                    continue
+                try:
+                    os.remove(p)
+                    trashed += 1
+                except OSError:
+                    log.warning("Permanent delete failed for %s", p, exc_info=True)
+                    trash_failed.append({"path": p})
+            return jsonify({
+                "ok": True, "deleted": 0, "trashed": trashed,
+                "trash_failed": trash_failed,
+            })
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+
+        result = db.delete_photos(photo_ids, include_companions=include_companions)
+
+        # Clean up cached files (thumbnails, previews)
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        preview_dir = os.path.join(os.path.dirname(thumb_dir), "previews")
+        for f in result["files"]:
+            pid = f["photo_id"]
+            for d in [thumb_dir, preview_dir]:
+                cached = os.path.join(d, f"{pid}.jpg")
+                if os.path.isfile(cached):
+                    os.remove(cached)
+
+        trashed = 0
+        trash_failed = []
+        if mode in ("disk", "disk_permanent"):
+            for f in result["files"]:
+                # Collect all files to delete: primary + companion
+                file_paths = []
+                primary = os.path.join(f["folder_path"], f["filename"])
+                file_paths.append(primary)
+                if include_companions and f.get("companion_path"):
+                    companion = os.path.join(f["folder_path"], f["companion_path"])
+                    file_paths.append(companion)
+
+                for filepath in file_paths:
+                    if not os.path.isfile(filepath):
+                        log.warning("File already missing: %s", filepath)
+                        continue
+                    if mode == "disk":
+                        try:
+                            from send2trash import send2trash as _trash
+                            _trash(filepath)
+                            trashed += 1
+                        except Exception:
+                            log.debug("send2trash failed for %s, trying Finder", filepath)
+                            try:
+                                _trash_via_finder(filepath)
+                                trashed += 1
+                            except Exception:
+                                log.warning("Trash failed for %s", filepath, exc_info=True)
+                                trash_failed.append({"path": filepath})
+                    else:  # disk_permanent
+                        try:
+                            os.remove(filepath)
+                            trashed += 1
+                        except OSError:
+                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                            trash_failed.append({"path": filepath})
+
+        return jsonify({
+            "ok": True,
+            "deleted": result["deleted"],
+            "trashed": trashed,
+            "trash_failed": trash_failed,
+        })
+
     # -- Undo --
 
     @app.route("/api/undo", methods=["POST"])
@@ -816,20 +1056,46 @@ def create_app(db_path, thumb_cache_dir=None):
         non_undoable = Database._NON_UNDOABLE
         placeholders = ",".join("?" for _ in non_undoable)
         latest = db.conn.execute(
-            f"SELECT * FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders}) "
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders}) "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (db._ws_id(), *non_undoable),
         ).fetchone()
         if not latest:
             return jsonify({"available": False, "description": "", "count": 0})
         total = db.conn.execute(
-            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND action_type NOT IN ({placeholders})",
+            f"SELECT COUNT(*) FROM edit_history WHERE workspace_id = ? AND undone = 0 AND action_type NOT IN ({placeholders})",
             (db._ws_id(), *non_undoable),
         ).fetchone()[0]
         return jsonify({
             "available": True,
             "description": latest["description"],
             "count": total,
+        })
+
+    @app.route("/api/redo", methods=["POST"])
+    def api_redo():
+        db = _get_db()
+        result = db.redo_last_undo()
+        if result is None:
+            return json_error("nothing to redo")
+        return jsonify({"ok": True, "redone": result["description"]})
+
+    @app.route("/api/redo/status")
+    def api_redo_status():
+        db = _get_db()
+        from db import Database
+        non_undoable = Database._NON_UNDOABLE
+        placeholders = ",".join("?" for _ in non_undoable)
+        latest = db.conn.execute(
+            f"SELECT * FROM edit_history WHERE workspace_id = ? AND undone = 1 AND action_type NOT IN ({placeholders}) "
+            "ORDER BY created_at ASC, id ASC LIMIT 1",
+            (db._ws_id(), *non_undoable),
+        ).fetchone()
+        if not latest:
+            return jsonify({"available": False, "description": ""})
+        return jsonify({
+            "available": True,
+            "description": latest["description"],
         })
 
     @app.route("/api/edit-history")
@@ -929,7 +1195,12 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_collections():
         db = _get_db()
         collections = db.get_collections()
-        return jsonify([dict(c) for c in collections])
+        result = []
+        for c in collections:
+            d = dict(c)
+            d["photo_count"] = db.count_collection_photos(c["id"])
+            result.append(d)
+        return jsonify(result)
 
     @app.route("/api/collections", methods=["POST"])
     def api_create_collection():
@@ -1006,6 +1277,82 @@ def create_app(db_path, thumb_cache_dir=None):
                 "total": total,
             }
         )
+
+    # -- Highlights --
+
+    @app.route("/api/highlights")
+    def api_highlights():
+        db = _get_db()
+
+        folders = db.get_folders_with_quality_data()
+        if not folders:
+            return jsonify({
+                "photos": [],
+                "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
+                "folders": [],
+            })
+
+        folder_id = request.args.get("folder_id", type=int)
+        if folder_id is None:
+            folder_id = folders[0]["id"]  # Most recent
+
+        count = request.args.get("count", type=int)
+        max_per_species = request.args.get("max_per_species", 5, type=int)
+        min_quality = request.args.get("min_quality", 0.0, type=float)
+
+        candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
+        total_in_folder = db.count_filtered_photos(folder_id=folder_id)
+
+        # Adaptive default: 5% clamped to [10, 50]
+        if count is None:
+            count = max(10, min(50, int(len(candidates) * 0.05))) if candidates else 0
+
+        selected = select_highlights(
+            [dict(r) for r in candidates],
+            count=count,
+            max_per_species=max_per_species,
+        )
+
+        # Build species breakdown
+        species_counts = {}
+        for p in selected:
+            sp = p.get("species") or "Unidentified"
+            species_counts[sp] = species_counts.get(sp, 0) + 1
+
+        # Strip binary fields before JSON response
+        photo_list = []
+        for p in selected:
+            out = {k: v for k, v in p.items()
+                   if k not in ("dino_subject_embedding", "dino_global_embedding")}
+            photo_list.append(out)
+
+        return jsonify({
+            "photos": photo_list,
+            "meta": {
+                "total_in_folder": total_in_folder,
+                "eligible": len(candidates),
+                "species_breakdown": species_counts,
+                "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
+            },
+            "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+        })
+
+    @app.route("/api/highlights/save", methods=["POST"])
+    def api_highlights_save():
+        db = _get_db()
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        name = body.get("name", "").strip()
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not name:
+            return json_error("name required")
+
+        rules = json.dumps([{"field": "photo_ids", "value": photo_ids}])
+        cid = db.add_collection(name, rules)
+        return jsonify({"ok": True, "id": cid})
 
     # -- Workspace API routes --
 
@@ -1167,6 +1514,25 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
+    @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
+    def api_set_nav_order():
+        """Save navbar link order for the active workspace."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_order = body.get("nav_order")
+        if not isinstance(nav_order, list):
+            return jsonify({"error": "nav_order must be a list"}), 400
+        ws = db.get_workspace(db._active_workspace_id)
+        existing = {}
+        if ws and ws["config_overrides"]:
+            try:
+                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            except Exception:
+                pass
+        existing["nav_order"] = nav_order
+        db.update_workspace(db._active_workspace_id, config_overrides=existing)
+        return jsonify({"ok": True, "nav_order": nav_order})
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
@@ -1185,10 +1551,39 @@ def create_app(db_path, thumb_cache_dir=None):
         else:
             preds = db.get_predictions(status=status)
 
-        # Enrich disagreement/refinement predictions with existing species keywords
+        # Fetch alternatives to attach to their parent predictions
+        alt_preds = []
+        if not status or status == "pending":
+            if collection_id:
+                if photo_ids:
+                    alt_preds = db.get_predictions(photo_ids=photo_ids, status="alternative")
+            else:
+                alt_preds = db.get_predictions(status="alternative")
+
+        # Index alternatives by (detection_id, model)
+        alts_by_key = {}
+        for a in alt_preds:
+            ad = dict(a)
+            key = (ad["detection_id"], ad["model"])
+            alts_by_key.setdefault(key, []).append({
+                "id": ad["id"],
+                "species": ad["species"],
+                "confidence": ad["confidence"],
+                "taxonomy_kingdom": ad.get("taxonomy_kingdom"),
+                "taxonomy_phylum": ad.get("taxonomy_phylum"),
+                "taxonomy_class": ad.get("taxonomy_class"),
+                "taxonomy_order": ad.get("taxonomy_order"),
+                "taxonomy_family": ad.get("taxonomy_family"),
+                "taxonomy_genus": ad.get("taxonomy_genus"),
+                "scientific_name": ad.get("scientific_name"),
+            })
+
+        # Enrich predictions and attach alternatives
         results = []
         for p in preds:
             d = dict(p)
+            if d.get("status") == "alternative":
+                continue  # alternatives are nested, not top-level
             if d.get("category") in ("disagreement", "refinement"):
                 keywords = db.get_photo_keywords(d["photo_id"])
                 existing_species = [
@@ -1196,6 +1591,9 @@ def create_app(db_path, thumb_cache_dir=None):
                     if db.is_keyword_species(k["id"])
                 ]
                 d["existing_species"] = existing_species
+            # Attach alternatives
+            key = (d.get("detection_id"), d.get("model"))
+            d["alternatives"] = alts_by_key.get(key, [])
             results.append(d)
         return jsonify(results)
 
@@ -1214,6 +1612,7 @@ def create_app(db_path, thumb_cache_dir=None):
         preds = db.get_predictions(photo_ids=photo_ids)
 
         # Collect distinct models and build per-photo lookup
+        # With multi-detection, each photo may have multiple predictions per model
         models = set()
         by_photo = {}
         for pr in preds:
@@ -1224,10 +1623,15 @@ def create_app(db_path, thumb_cache_dir=None):
             if pid not in by_photo:
                 by_photo[pid] = {"photo_id": pid, "filename": d["filename"], "predictions": {}}
             if model not in by_photo[pid]["predictions"]:
-                by_photo[pid]["predictions"][model] = {
-                    "species": d["species"],
-                    "confidence": d["confidence"],
-                }
+                by_photo[pid]["predictions"][model] = []
+            by_photo[pid]["predictions"][model].append({
+                "species": d["species"],
+                "confidence": d["confidence"],
+                "box_x": d.get("box_x"),
+                "box_y": d.get("box_y"),
+                "box_w": d.get("box_w"),
+                "box_h": d.get("box_h"),
+            })
 
         return jsonify({
             "models": sorted(models),
@@ -1255,10 +1659,21 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_reject_prediction(pred_id):
         db = _get_db()
         pred = db.conn.execute(
-            "SELECT photo_id, species FROM predictions WHERE id = ?", (pred_id,)
+            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.id = ?""",
+            (pred_id,),
         ).fetchone()
         db.update_prediction_status(pred_id, "rejected")
         if pred:
+            # Also reject sibling alternative predictions
+            db.conn.execute(
+                """UPDATE predictions SET status = 'rejected'
+                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
+                (pred["detection_id"], pred["model"], pred_id),
+            )
+            db.conn.commit()
             db.record_edit('prediction_reject',
                            f'Rejected prediction "{pred["species"]}"',
                            'rejected',
@@ -1337,6 +1752,15 @@ def create_app(db_path, thumb_cache_dir=None):
             db.ungroup_prediction(pred_id)
         return jsonify({"ok": True})
 
+    # -- Detection API routes --
+
+    @app.route("/api/detections/<int:photo_id>")
+    def api_detections(photo_id):
+        """Get all detections for a photo."""
+        db = _get_db()
+        dets = db.get_detections(photo_id)
+        return jsonify([dict(d) for d in dets])
+
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
@@ -1365,6 +1789,13 @@ def create_app(db_path, thumb_cache_dir=None):
             model_source.startswith("hf-hub:") or model_source == "timm"
         )
 
+        import shutil
+
+        exiftool_status = {
+            "installed": shutil.which("exiftool") is not None,
+            "brew_available": shutil.which("brew") is not None,
+        }
+
         # timm models have a fixed class set — no labels needed
         if model_type == "timm":
             return jsonify(
@@ -1377,6 +1808,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "labels_count": 10000,
                     "use_tol": False,
                     "embeddings_cached": True,  # no embeddings to compute
+                    "exiftool": exiftool_status,
                 }
             )
 
@@ -1447,8 +1879,41 @@ def create_app(db_path, thumb_cache_dir=None):
                 "labels_count": label_count,
                 "use_tol": use_tol,
                 "embeddings_cached": embeddings_cached,
+                "exiftool": exiftool_status,
             }
         )
+
+    @app.route("/api/system/install-exiftool", methods=["POST"])
+    def api_install_exiftool():
+        """Install exiftool via Homebrew."""
+        import shutil
+        import subprocess
+
+        if shutil.which("exiftool"):
+            return jsonify({"success": True, "message": "exiftool is already installed"})
+
+        if not shutil.which("brew"):
+            return jsonify({
+                "success": False,
+                "error": "Homebrew is not installed. Install it from https://brew.sh, then run: brew install exiftool",
+            })
+
+        try:
+            result = subprocess.run(
+                ["brew", "install", "exiftool"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0:
+                return jsonify({"success": True, "message": "exiftool installed successfully"})
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"brew install failed: {result.stderr[:500]}",
+                })
+        except subprocess.TimeoutExpired:
+            return jsonify({"success": False, "error": "Installation timed out after 5 minutes"})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
 
     @app.route("/api/classify/config")
     def api_classify_config():
@@ -1533,6 +1998,56 @@ def create_app(db_path, thumb_cache_dir=None):
             "output_format": cfg.get("darktable_output_format"),
             "output_dir": cfg.get("darktable_output_dir"),
         })
+
+    @app.route("/api/photos/open-external", methods=["POST"])
+    def api_photos_open_external():
+        import subprocess
+        import sys
+
+        import config as cfg
+
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return jsonify({"error": "photo_ids required"}), 400
+        if not all(isinstance(pid, int) for pid in photo_ids):
+            return jsonify({"error": "photo_ids must be a list of integers"}), 400
+
+        db = _get_db()
+        folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+        file_paths = []
+        for pid in photo_ids:
+            photo = db.get_photo(pid)
+            if not photo:
+                continue
+            folder_path = folders.get(photo["folder_id"], "")
+            if folder_path:
+                file_paths.append(os.path.join(folder_path, photo["filename"]))
+
+        if not file_paths:
+            return jsonify({"error": "No photos found"}), 404
+
+        editor = cfg.get("external_editor")
+        try:
+            if editor:
+                if sys.platform == "darwin" and editor.endswith(".app"):
+                    subprocess.Popen(["open", "-a", editor] + file_paths)
+                else:
+                    subprocess.Popen([editor] + file_paths)
+            else:
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open"] + file_paths)
+                elif sys.platform == "win32":
+                    for fp in file_paths:
+                        os.startfile(fp)
+                else:
+                    for fp in file_paths:
+                        subprocess.Popen(["xdg-open", fp])
+        except Exception as e:
+            log.warning("Failed to open external editor: %s", e)
+            return jsonify({"error": str(e)}), 500
+
+        return jsonify({"opened": len(file_paths)})
 
     @app.route("/api/storage")
     def api_storage():
@@ -1873,7 +2388,12 @@ def create_app(db_path, thumb_cache_dir=None):
             from importlib.metadata import version as pkg_version
             ver = pkg_version("vireo")
         except Exception:
-            ver = "0.1.0"
+            import tomllib
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                    ver = tomllib.load(f)["project"]["version"]
+            except Exception:
+                ver = "0.0.0"
         return jsonify({"version": ver})
 
     @app.route("/api/volumes", methods=["GET"])
@@ -1892,6 +2412,120 @@ def create_app(db_path, thumb_cache_dir=None):
                     volumes.append({"name": name, "path": path})
         return jsonify(volumes)
 
+    @app.route("/api/browse", methods=["GET"])
+    def api_browse():
+        """List subdirectories at a given path for folder browser."""
+        path = request.args.get("path", os.path.expanduser("~"))
+        if not os.path.isdir(path):
+            return json_error("path is not a valid directory")
+        dirs = []
+        try:
+            for name in sorted(os.listdir(path), key=str.casefold):
+                if name.startswith("."):
+                    continue
+                full = os.path.join(path, name)
+                if os.path.isdir(full):
+                    dirs.append({"name": name, "path": full})
+        except PermissionError:
+            return json_error("permission denied", 403)
+        return jsonify({"path": path, "dirs": dirs})
+
+    @app.route("/api/browse/photo-counts", methods=["POST"])
+    def api_browse_photo_counts():
+        """Return recursive photo-file counts for a list of folder paths.
+
+        Used by the folder browser to show per-folder counts next to each
+        subfolder so users can see which folders contain photos before
+        selecting one.
+        """
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths", [])
+        file_types = body.get("file_types", [])
+        if not isinstance(paths, list):
+            return json_error("paths must be a list", 400)
+
+        from ingest import discover_source_files
+
+        ft = file_types if file_types else "both"
+        counts = {}
+        for p in paths:
+            # Non-string entries (dicts, lists, numbers) can't be dict keys
+            # and aren't valid paths — skip them rather than 500.
+            if not isinstance(p, str):
+                continue
+            if not os.path.isdir(p):
+                counts[p] = 0
+                continue
+            try:
+                discovered = discover_source_files(p, file_types=ft, recursive=True)
+                counts[p] = len(discovered)
+            except (OSError, PermissionError):
+                counts[p] = 0
+        return jsonify({"counts": counts})
+
+    @app.route("/api/browse/mkdir", methods=["POST"])
+    def api_browse_mkdir():
+        """Create a new directory."""
+        body = request.get_json(silent=True) or {}
+        path = body.get("path", "")
+        if not path:
+            return json_error("path is required")
+        if not os.path.isabs(path):
+            return json_error("path must be absolute")
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            return json_error(str(e), 500)
+        return jsonify({"name": os.path.basename(path), "path": path})
+
+    # -- Move rules API --
+
+    @app.route("/api/move-rules", methods=["GET"])
+    def api_list_move_rules():
+        db = _get_db()
+        rules = db.list_move_rules()
+        return jsonify([dict(r) for r in rules])
+
+    @app.route("/api/move-rules", methods=["POST"])
+    def api_create_move_rule():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = body.get("name", "").strip()
+        destination = body.get("destination", "").strip()
+        criteria = body.get("criteria", {})
+        if not name or not destination:
+            return json_error("name and destination required")
+        rule_id = db.create_move_rule(name, destination, criteria)
+        return jsonify({"ok": True, "id": rule_id})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["PUT"])
+    def api_update_move_rule(rule_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs = {}
+        if "name" in body:
+            kwargs["name"] = body["name"]
+        if "destination" in body:
+            kwargs["destination"] = body["destination"]
+        if "criteria" in body:
+            kwargs["criteria"] = body["criteria"]
+        db.update_move_rule(rule_id, **kwargs)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/<int:rule_id>", methods=["DELETE"])
+    def api_delete_move_rule(rule_id):
+        db = _get_db()
+        db.delete_move_rule(rule_id)
+        return jsonify({"ok": True})
+
+    @app.route("/api/move-rules/preview", methods=["POST"])
+    def api_move_rule_preview():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        criteria = body.get("criteria", {})
+        photo_ids = db.query_move_rule_matches(criteria)
+        return jsonify({"count": len(photo_ids), "photo_ids": photo_ids})
+
     # -- Import API routes --
 
     @app.route("/api/import/preview", methods=["POST"])
@@ -1908,6 +2542,103 @@ def create_app(db_path, thumb_cache_dir=None):
             return jsonify(result)
         except Exception as e:
             return json_error(str(e), 500)
+
+    @app.route("/api/import/folder-preview", methods=["POST"])
+    def api_import_folder_preview():
+        """Discover files in source folders and return metadata for preview."""
+        body = request.get_json(silent=True) or {}
+        folders = body.get("folders", [])
+        file_types = body.get("file_types", [])
+        if not folders:
+            return json_error("folders required", 400)
+
+        from ingest import discover_source_files
+
+        all_files = []
+        multi_source = len(folders) > 1
+
+        # Compute unique display names for each source folder.
+        # Use shortest trailing path segments that are unique across
+        # all sources (e.g. /mnt/cardA/DCIM and /mnt/cardB/DCIM
+        # become cardA/DCIM and cardB/DCIM).
+        root_names = {}
+        if multi_source:
+            parts = [Path(f).parts for f in folders]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for folder_path, suffix in zip(folders, suffixes, strict=True):
+                        root_names[folder_path] = suffix
+                    break
+            else:
+                for folder_path in folders:
+                    root_names[folder_path] = folder_path
+
+        for folder in folders:
+            root_name = root_names.get(folder, os.path.basename(folder.rstrip("/")))
+            discovered = discover_source_files(folder, file_types=file_types if file_types else "both", recursive=body.get("recursive", True))
+            for f in discovered:
+                stat = f.stat()
+                # Determine subfolder relative to the source root
+                try:
+                    rel = f.parent.relative_to(folder)
+                    subfolder = str(rel) if str(rel) != "." else root_name
+                except ValueError:
+                    subfolder = root_name
+                # Prefix with source root name when multiple sources to
+                # prevent collisions (e.g. two cards with DCIM/100CANON)
+                if multi_source and subfolder != root_name:
+                    subfolder = os.path.join(root_name, subfolder)
+
+                all_files.append({
+                    "path": str(f),
+                    "filename": f.name,
+                    "subfolder": subfolder,
+                    "size": stat.st_size,
+                    "extension": f.suffix.lower(),
+                    "mtime": stat.st_mtime,
+                })
+
+        # Build summary
+        type_breakdown = {}
+        total_size = 0
+        for f in all_files:
+            ext = f["extension"]
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += f["size"]
+
+        return jsonify({
+            "total_count": len(all_files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": all_files,
+        })
+
+    @app.route("/api/import/folder-preview/thumbnail")
+    def api_import_folder_preview_thumbnail():
+        """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return json_error("path parameter required", 400)
+        if not os.path.isfile(file_path):
+            return "", 404
+
+        from image_loader import load_image
+        img = load_image(file_path, max_size=200)
+        if img is None:
+            return "", 404
+
+        import io
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=70)
+        buf.seek(0)
+
+        resp = make_response(buf.read())
+        resp.content_type = "image/jpeg"
+        resp.cache_control.public = True
+        resp.cache_control.max_age = 300  # 5 min — these are ephemeral
+        return resp
 
     # -- Audit API routes --
 
@@ -2324,7 +3055,11 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         pred = db.conn.execute(
-            "SELECT species, scientific_name, confidence FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+            """SELECT pr.species, pr.scientific_name, pr.confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC LIMIT 1""",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2413,7 +3148,11 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Use overrides from request, or fall back to DB data
         pred = db.conn.execute(
-            "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+            """SELECT pr.species, pr.scientific_name
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC LIMIT 1""",
             (photo_id, db._active_workspace_id),
         ).fetchone()
 
@@ -2477,7 +3216,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 continue
 
             pred = db.conn.execute(
-                "SELECT species, scientific_name FROM predictions WHERE photo_id = ? AND workspace_id = ?",
+                """SELECT pr.species, pr.scientific_name
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   WHERE d.photo_id = ? AND d.workspace_id = ?
+                   ORDER BY pr.confidence DESC LIMIT 1""",
                 (photo_id, db._active_workspace_id),
             ).fetchone()
 
@@ -2926,10 +3669,14 @@ def create_app(db_path, thumb_cache_dir=None):
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
 
             def progress_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
+                runner.update_step(job["id"], "scan",
+                                   progress={"current": current, "total": total})
                 runner.push_event(
                     job["id"],
                     "progress",
@@ -2945,13 +3692,33 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            runner.set_steps(job["id"], [
+                {"id": "scan", "label": "Scan photos"},
+                {"id": "thumbnails", "label": "Generate thumbnails"},
+            ])
+            runner.update_step(job["id"], "scan", status="running")
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            def status_cb(message):
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", {
+                    "phase": message,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": message,
+                    "rate": 0,
+                })
+
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental,
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                status_callback=status_cb,
             )
             photo_count = job["progress"].get("total", 0)
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{photo_count} photos")
+            runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
             from thumbnails import generate_all
@@ -2989,6 +3756,9 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
             )
+            from thumbnails import format_summary as thumb_summary
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=thumb_summary(thumb_result))
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
@@ -3103,7 +3873,7 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source", "")
         destination = body.get("destination", "")
         file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
 
         if not source or not destination:
@@ -3166,20 +3936,20 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify({"job_id": job_id})
 
-    @app.route("/api/jobs/import-full", methods=["POST"])
-    def api_job_import_full():
-        """Full-chain import: copy files -> scan -> create collection."""
-        body = request.get_json(silent=True) or {}
-        source = body.get("source", "")
-        destination = body.get("destination", "")
-        file_types = body.get("file_types", "both")
-        folder_template = body.get("folder_template", "%Y/%m-%d")
-        skip_duplicates = body.get("skip_duplicates", True)
+    # -- Move job routes --
 
-        if not source or not destination:
-            return json_error("source and destination are required")
-        if not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
+    @app.route("/api/jobs/move-photos", methods=["POST"])
+    def api_job_move_photos():
+        """Move selected photos to a destination directory."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        destination = body.get("destination", "")
+        rule_id = body.get("rule_id")
+
+        if not photo_ids:
+            return json_error("photo_ids required")
+        if not destination:
+            return json_error("destination required")
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
@@ -3187,39 +3957,179 @@ def create_app(db_path, thumb_cache_dir=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from ingest import ingest as do_ingest
+            from move import move_photos
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "rate": round(
+                        current / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Moving photos",
+                })
+
+            result = move_photos(
+                db=thread_db,
+                photo_ids=photo_ids,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+            if rule_id:
+                thread_db.touch_move_rule(rule_id)
+
+            return result
+
+        job_id = runner.start(
+            "move-photos", work,
+            config={"photo_ids": photo_ids, "destination": destination},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/move-folder", methods=["POST"])
+    def api_job_move_folder():
+        """Move an entire folder to a destination."""
+        body = request.get_json(silent=True) or {}
+        folder_id = body.get("folder_id")
+        destination = body.get("destination", "")
+
+        if not folder_id:
+            return json_error("folder_id required")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from move import move_folder
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "phase": "Moving folder",
+                })
+
+            return move_folder(
+                db=thread_db,
+                folder_id=folder_id,
+                destination=destination,
+                progress_cb=progress_cb,
+            )
+
+        job_id = runner.start(
+            "move-folder", work,
+            config={"folder_id": folder_id, "destination": destination},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/import-full", methods=["POST"])
+    def api_job_import_full():
+        """Full-chain import: copy files -> scan -> create collection."""
+        body = request.get_json(silent=True) or {}
+        source = body.get("source", "")
+        destination = body.get("destination", "")
+        file_types = body.get("file_types", "both")
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        skip_duplicates = body.get("skip_duplicates", True)
+        copy = body.get("copy", True)
+        exclude_paths = set(body.get("exclude_paths", []))
+
+        if not source:
+            return json_error("source is required")
+        if not os.path.isdir(source):
+            return json_error(f"source directory not found: {source}")
+        if copy:
+            if not destination:
+                return json_error("source and destination are required")
+            if not os.path.isabs(destination):
+                return json_error("destination must be an absolute path")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
             from scanner import scan as do_scan
             from thumbnails import generate_all
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
+            # Check folder health before scanning to prevent duplicate imports
+            thread_db.check_folder_health()
             job["_start_time"] = time.time()
 
-            # Phase 1: Copy files
-            def ingest_cb(current, total, filename):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                job["progress"]["current_file"] = filename
-                runner.push_event(job["id"], "progress", {
-                    "current": current, "total": total,
-                    "current_file": filename,
-                    "phase": "Importing photos",
-                })
+            scan_target = str(Path(source))  # normalize (strips trailing slash)
 
-            ingest_result = do_ingest(
-                source_dir=source,
-                destination_dir=destination,
-                db=thread_db,
-                file_types=file_types,
-                folder_template=folder_template,
-                skip_duplicates=skip_duplicates,
-                progress_callback=ingest_cb,
-            )
+            # Define steps based on whether we're copying
+            steps = []
+            if copy:
+                steps.append({"id": "ingest", "label": "Import photos"})
+            steps.extend([
+                {"id": "scan", "label": "Scan photos"},
+                {"id": "thumbnails", "label": "Generate thumbnails"},
+                {"id": "collection", "label": "Create collection"},
+            ])
+            runner.set_steps(job["id"], steps)
 
-            # Track destination paths of files actually copied
-            copied_paths = ingest_result.get("copied_paths", [])
+            if copy:
+                from ingest import ingest as do_ingest
 
-            # Phase 2: Scan destination to index into DB
+                # Phase 1: Copy files
+                runner.update_step(job["id"], "ingest", status="running")
+
+                def ingest_cb(current, total, filename):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    job["progress"]["current_file"] = filename
+                    runner.push_event(job["id"], "progress", {
+                        "current": current, "total": total,
+                        "current_file": filename,
+                        "phase": "Importing photos",
+                    })
+
+                ingest_result = do_ingest(
+                    source_dir=source,
+                    destination_dir=destination,
+                    db=thread_db,
+                    file_types=file_types,
+                    folder_template=folder_template,
+                    skip_duplicates=skip_duplicates,
+                    progress_callback=ingest_cb,
+                    skip_paths=exclude_paths or None,
+                )
+                copied_paths = ingest_result.get("copied_paths", [])
+                scan_target = destination
+                runner.update_step(job["id"], "ingest", status="completed",
+                                   summary=f"{ingest_result.get('copied', 0)} copied")
+
+            # Phase 2: Scan to index into DB
+            runner.update_step(job["id"], "scan", status="running")
+
             def scan_cb(current, total):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3229,9 +4139,13 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(destination, thread_db, progress_callback=scan_cb)
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
+            scan_count = job["progress"].get("total", 0)
+            runner.update_step(job["id"], "scan", status="completed",
+                               summary=f"{scan_count} photos")
 
             # Phase 3: Generate thumbnails
+            runner.update_step(job["id"], "thumbnails", status="running")
             runner.push_event(job["id"], "progress", {
                 "current": 0, "total": 0,
                 "current_file": "Checking for new thumbnails...",
@@ -3247,32 +4161,45 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Generating thumbnails",
                 })
 
-            generate_all(
+            thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
             )
+            from thumbnails import format_summary as thumb_summary
+            runner.update_step(job["id"], "thumbnails", status="completed",
+                               summary=thumb_summary(thumb_result))
 
-            # Phase 4: Create collection from files actually copied
-            # Use a temp table to avoid SQLite variable-limit issues
-            # and match by exact path (unique per file, unlike hashes)
+            # Phase 4: Create collection
+            runner.update_step(job["id"], "collection", status="running")
             photo_ids = []
-            if copied_paths:
-                thread_db.conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
-                )
-                thread_db.conn.execute("DELETE FROM _imported_paths")
-                thread_db.conn.executemany(
-                    "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
-                    [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
-                )
+            if copy:
+                # Collection from copied files (existing logic)
+                if copied_paths:
+                    thread_db.conn.execute(
+                        "CREATE TEMP TABLE IF NOT EXISTS _imported_paths (dirpath TEXT, fname TEXT)"
+                    )
+                    thread_db.conn.execute("DELETE FROM _imported_paths")
+                    thread_db.conn.executemany(
+                        "INSERT INTO _imported_paths (dirpath, fname) VALUES (?, ?)",
+                        [(os.path.dirname(p), os.path.basename(p)) for p in copied_paths],
+                    )
+                    rows = thread_db.conn.execute(
+                        """SELECT p.id FROM photos p
+                           JOIN folders f ON p.folder_id = f.id
+                           JOIN _imported_paths ip ON f.path = ip.dirpath
+                                                   AND p.filename = ip.fname"""
+                    ).fetchall()
+                    photo_ids = [r["id"] for r in rows]
+                    thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
+            else:
+                # Collection from all photos in the scanned folder
                 rows = thread_db.conn.execute(
                     """SELECT p.id FROM photos p
                        JOIN folders f ON p.folder_id = f.id
-                       JOIN _imported_paths ip ON f.path = ip.dirpath
-                                               AND p.filename = ip.fname"""
+                       WHERE f.path = ? OR f.path LIKE ?""",
+                    (scan_target, scan_target.rstrip("/") + "/%"),
                 ).fetchall()
                 photo_ids = [r["id"] for r in rows]
-                thread_db.conn.execute("DROP TABLE IF EXISTS _imported_paths")
 
             collection_id = None
             collection_name = None
@@ -3284,19 +4211,26 @@ def create_app(db_path, thumb_cache_dir=None):
                     json.dumps([{"field": "photo_ids", "value": photo_ids}]),
                 )
 
-            return {
-                "copied": ingest_result.get("copied", 0),
-                "skipped_duplicate": ingest_result.get("skipped_duplicate", 0),
-                "failed": ingest_result.get("failed", 0),
-                "total": ingest_result.get("total", 0),
+            col_summary = collection_name if collection_name else "no photos"
+            runner.update_step(job["id"], "collection", status="completed",
+                               summary=col_summary)
+
+            result = {
                 "photos_indexed": len(photo_ids),
                 "collection_id": collection_id,
                 "collection_name": collection_name,
             }
+            if copy:
+                result["copied"] = ingest_result.get("copied", 0)
+                result["skipped_duplicate"] = ingest_result.get("skipped_duplicate", 0)
+                result["failed"] = ingest_result.get("failed", 0)
+                result["total"] = ingest_result.get("total", 0)
+
+            return result
 
         job_id = runner.start(
             "import-full", work,
-            config={"source": source, "destination": destination, "file_types": file_types},
+            config={"source": source, "destination": destination, "copy": copy, "file_types": file_types},
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
@@ -3388,6 +4322,12 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db.set_active_workspace(active_ws)
             job["_start_time"] = time.time()
 
+            runner.set_steps(job["id"], [
+                {"id": "score", "label": "Score sharpness"},
+                {"id": "save", "label": "Save results & auto-flag"},
+            ])
+            runner.update_step(job["id"], "score", status="running")
+
             def progress_cb(current, total, msg):
                 job["progress"]["current"] = current
                 job["progress"]["total"] = total
@@ -3411,8 +4351,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 collection_id,
                 progress_callback=progress_cb,
             )
+            runner.update_step(job["id"], "score", status="completed",
+                               summary=f"{len(result['results'])} scored")
 
             # Save scores to database
+            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -3435,6 +4378,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     best_count += 1
 
             result["auto_flagged"] = best_count
+            runner.update_step(job["id"], "save", status="completed",
+                               summary=f"{best_count} flagged")
             # Don't return the full results list (could be huge)
             del result["results"]
             return result
@@ -3499,7 +4444,14 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         active = runner.list_jobs()
         history = runner.get_history(db, limit=10)
-        return jsonify({"active": active, "history": history})
+        ws_rows = db.get_workspaces()
+        ws_names = {w["id"]: w["name"] for w in ws_rows}
+        return jsonify({
+            "active": active,
+            "history": history,
+            "active_workspace_id": db._active_workspace_id,
+            "workspace_names": ws_names,
+        })
 
     @app.route("/api/jobs/<job_id>")
     def api_job_status(job_id):
@@ -3647,11 +4599,12 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # Find all photos with this species prediction
         rows = db.conn.execute(
-            """SELECT pr.photo_id, p.embedding, p.filename, p.thumb_path,
+            """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
-               JOIN photos p ON p.id = pr.photo_id
-               WHERE pr.species = ? AND pr.workspace_id = ? AND p.embedding IS NOT NULL""",
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               WHERE pr.species = ? AND d.workspace_id = ? AND p.embedding IS NOT NULL""",
             (species_name, db._active_workspace_id),
         ).fetchall()
 
@@ -3757,17 +4710,18 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Labeled %d photos as '%s'", len(photo_ids), label)
         return jsonify({"ok": True, "updated": len(photo_ids), "keyword_id": kid})
 
-    @app.route("/api/species")
+    @app.route("/api/species/summary")
     def api_species_list():
         """List all species with prediction counts, for the variant explorer."""
         db = _get_db()
         rows = db.conn.execute(
-            """SELECT species, COUNT(*) as photo_count,
-                      taxonomy_order, taxonomy_family, taxonomy_genus,
-                      scientific_name
-               FROM predictions
-               WHERE status != 'rejected' AND workspace_id = ?
-               GROUP BY species
+            """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
+                      pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
+                      pr.scientific_name
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE pr.status != 'rejected' AND d.workspace_id = ?
+               GROUP BY pr.species
                ORDER BY photo_count DESC""",
             (db._active_workspace_id,),
         ).fetchall()
@@ -3942,7 +4896,7 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_extract_masks():
         """Run SAM2 mask extraction as a background job.
 
-        Requires MegaDetector detection_box to already be computed (run classify first).
+        Requires MegaDetector detections to already be computed (run classify first).
         For each photo with a detection but no mask, loads a working-resolution proxy,
         runs SAM2 to refine the bounding box into a pixel mask, and saves it.
         """
@@ -3979,16 +4933,33 @@ def create_app(db_path, thumb_cache_dir=None):
 
             # Get photos that have detections but no masks
             if collection_id:
-                photos = thread_db.get_collection_photos(
+                coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                photos = [
-                    p
-                    for p in photos
-                    if p["detection_box"] and not thread_db.conn.execute(
-                        "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
-                    ).fetchone()[0]
-                ]
+                # Filter to photos with detections but no masks
+                ws_id = thread_db._active_workspace_id
+                photos = []
+                for p in coll_photos:
+                    if p["mask_path"]:
+                        continue
+                    det = thread_db.conn.execute(
+                        """SELECT box_x, box_y, box_w, box_h, detector_confidence
+                           FROM detections
+                           WHERE photo_id = ? AND workspace_id = ?
+                           ORDER BY detector_confidence DESC LIMIT 1""",
+                        (p["id"], ws_id),
+                    ).fetchone()
+                    if det:
+                        photos.append({
+                            "id": p["id"],
+                            "folder_id": p["folder_id"],
+                            "filename": p["filename"],
+                            "detection_box": json.dumps({
+                                "x": det["box_x"], "y": det["box_y"],
+                                "w": det["box_w"], "h": det["box_h"],
+                            }),
+                            "detection_conf": det["detector_confidence"],
+                        })
             else:
                 photos = thread_db.get_photos_missing_masks()
 
@@ -4123,6 +5094,13 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
 
+            runner.set_steps(job["id"], [
+                {"id": "load", "label": "Load features"},
+                {"id": "group", "label": "Group encounters & bursts"},
+                {"id": "save", "label": "Save results"},
+            ])
+
+            runner.update_step(job["id"], "load", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4131,8 +5109,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
             photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
             if not photos:
+                runner.update_step(job["id"], "load", status="failed",
+                                   error="No photos with pipeline features found")
                 return {"error": "No photos with pipeline features found. Run extract-masks first."}
+            runner.update_step(job["id"], "load", status="completed",
+                               summary=f"{len(photos)} photos")
 
+            runner.update_step(job["id"], "group", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4140,7 +5123,11 @@ def create_app(db_path, thumb_cache_dir=None):
             )
 
             results = run_full_pipeline(photos, config=pipeline_cfg)
+            summary = results.get("summary", {})
+            runner.update_step(job["id"], "group", status="completed",
+                               summary=f"{summary.get('encounters', 0)} encounters")
 
+            runner.update_step(job["id"], "save", status="running")
             runner.push_event(
                 job["id"],
                 "progress",
@@ -4149,11 +5136,102 @@ def create_app(db_path, thumb_cache_dir=None):
 
             cache_dir = os.path.dirname(db_path)
             save_results(results, cache_dir, active_ws)
+            runner.update_step(job["id"], "save", status="completed")
 
             return results["summary"]
 
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/jobs/pipeline", methods=["POST"])
+    def api_job_pipeline():
+        """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
+
+        Overlaps I/O stages and interleaves detection with classification.
+        Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
+        """
+        from pipeline_job import PipelineParams, run_pipeline_job
+
+        body = request.get_json(silent=True) or {}
+        source = body.get("source")
+        sources = body.get("sources")
+        collection_id = body.get("collection_id")
+
+        if not source and not sources and not collection_id:
+            return json_error("source, sources, or collection_id required")
+
+        # Validate all source directories exist
+        if sources:
+            for s in sources:
+                if not os.path.isdir(s):
+                    return json_error(f"source directory not found: {s}")
+        elif source and not os.path.isdir(source):
+            return json_error(f"source directory not found: {source}")
+
+        destination = body.get("destination")
+        if destination and not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        params = PipelineParams(
+            collection_id=collection_id,
+            source=source,
+            sources=sources,
+            destination=destination,
+            file_types=body.get("file_types", "both"),
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            skip_duplicates=body.get("skip_duplicates", True),
+            labels_file=body.get("labels_file"),
+            labels_files=body.get("labels_files"),
+            model_id=body.get("model_id"),
+            reclassify=body.get("reclassify", False),
+            skip_classify=body.get("skip_classify", False),
+            download_taxonomy=body.get("download_taxonomy", True),
+            skip_extract_masks=body.get("skip_extract_masks", False),
+            skip_regroup=body.get("skip_regroup", False),
+            preview_max_size=body.get("preview_max_size", 1920),
+            exclude_paths=set(body.get("exclude_paths", [])) or None,
+            recursive=body.get("recursive", True),
+        )
+
+        # Auto-skip classify stages if no model is available
+        model_warning = None
+        if not params.skip_classify:
+            from models import get_active_model, get_models
+
+            _model = None
+            if params.model_id:
+                _all = get_models()
+                _model = next((m for m in _all if m["id"] == params.model_id and m["downloaded"]), None)
+            if not _model:
+                _model = get_active_model()
+            if not _model:
+                params.skip_classify = True
+                params.skip_extract_masks = True
+                params.skip_regroup = True
+                model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            return run_pipeline_job(job, runner, db_path, active_ws, params)
+
+        job_id = runner.start(
+            "pipeline", work,
+            config={
+                "source": source,
+                "sources": sources,
+                "collection_id": collection_id,
+                "skip_classify": params.skip_classify,
+                "skip_extract_masks": params.skip_extract_masks,
+                "skip_regroup": params.skip_regroup,
+            },
+            workspace_id=active_ws,
+        )
+        result = {"job_id": job_id}
+        if model_warning:
+            result["model_warning"] = model_warning
+        return jsonify(result)
 
     @app.route("/api/encounters/species", methods=["POST"])
     def api_encounter_species():
@@ -4313,13 +5391,31 @@ def create_app(db_path, thumb_cache_dir=None):
                       mask_path, subject_tenengrad, bg_tenengrad,
                       crop_complete, bg_separation,
                       subject_clip_high, subject_clip_low, subject_y_median,
-                      phash_crop, subject_size, detection_box, detection_conf
+                      phash_crop, subject_size
                FROM photos WHERE id = ?""",
             (photo_id,),
         ).fetchone()
         if not row:
             return json_error("Photo not found", 404)
-        return jsonify(dict(row))
+        result = dict(row)
+        # Get primary detection from detections table
+        det = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h, detector_confidence
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        if det:
+            result["detection_box"] = {
+                "x": det["box_x"], "y": det["box_y"],
+                "w": det["box_w"], "h": det["box_h"],
+            }
+            result["detection_conf"] = det["detector_confidence"]
+        else:
+            result["detection_box"] = None
+            result["detection_conf"] = None
+        return jsonify(result)
 
     @app.route("/masks/<filename>")
     def serve_mask(filename):
@@ -4663,14 +5759,22 @@ def create_app(db_path, thumb_cache_dir=None):
         from models import get_active_model
         active_model = get_active_model()
         if not active_model:
-            return jsonify({"results": [], "total_matches": 0, "model_used": None})
+            return jsonify({"results": [], "total_matches": 0, "model_used": None,
+                            "reason": "no_model"})
 
         model_name = active_model["name"]
+        model_type = active_model.get("model_type", "bioclip")
+
+        # timm models don't produce CLIP embeddings — text search unsupported
+        if model_type == "timm":
+            return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
+                            "reason": "model_no_text_search"})
 
         # Load embeddings for current model
         emb_pairs = db.get_embeddings_by_model(model_name)
         if not emb_pairs:
-            return jsonify({"results": [], "total_matches": 0, "model_used": model_name})
+            return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
+                            "reason": "no_embeddings"})
 
         # Encode query text
         from text_encoder import encode_text
@@ -4796,19 +5900,39 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Photo not found", 404)
 
         result = dict(photo)
-        # Remove binary embedding from response
+        # Remove binary embedding and dead detection columns from response
         result.pop("embedding", None)
+        result.pop("detection_box", None)
+        result.pop("detection_conf", None)
 
-        # Parse detection_box from JSON string
-        if result.get("detection_box") and isinstance(result["detection_box"], str):
-            result["detection_box"] = json.loads(result["detection_box"])
+        # Get primary detection from detections table
+        det = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h, detector_confidence
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        if det:
+            result["detection_box"] = {
+                "x": det["box_x"], "y": det["box_y"],
+                "w": det["box_w"], "h": det["box_h"],
+            }
+            result["detection_conf"] = det["detector_confidence"]
 
-        # Get predictions for this photo
+        # Get detections for this photo (from detections table)
+        dets = db.get_detections(photo_id)
+        result["detections"] = [dict(d) for d in dets]
+
+        # Get predictions for this photo (through detections JOIN)
         preds = db.conn.execute(
-            """SELECT species, confidence, model, category, status,
-                      group_id, vote_count, total_votes, individual
-               FROM predictions WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY confidence DESC""",
+            """SELECT pr.species, pr.confidence, pr.model, pr.category, pr.status,
+                      pr.group_id, pr.vote_count, pr.total_votes, pr.individual,
+                      d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ? AND d.workspace_id = ?
+               ORDER BY pr.confidence DESC""",
             (photo_id, db._active_workspace_id),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
@@ -4817,10 +5941,12 @@ def create_app(db_path, thumb_cache_dir=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Compute crop info if detection exists
-        if result.get("detection_box"):
+        # Compute crop info from primary detection (highest confidence)
+        primary_det = dets[0] if dets else None
+        if primary_det:
             import config as cfg
-            box = result["detection_box"]
+            box = {"x": primary_det["box_x"], "y": primary_det["box_y"],
+                   "w": primary_det["box_w"], "h": primary_det["box_h"]}
             pad = cfg.load().get("detection_padding", 0.2)
             result["crop_box"] = {
                 "x": max(0, box["x"] - box["w"] * pad),
@@ -4840,7 +5966,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         db = _get_db()
         photo = db.conn.execute(
-            "SELECT p.filename, p.detection_box, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
+            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
             (photo_id,),
         ).fetchone()
         if not photo:
@@ -4851,10 +5977,21 @@ def create_app(db_path, thumb_cache_dir=None):
         if img is None:
             return "Could not load image", 500
 
-        det_box = photo["detection_box"]
+        # Get primary detection box from detections table
+        det_row = db.conn.execute(
+            """SELECT box_x, box_y, box_w, box_h
+               FROM detections
+               WHERE photo_id = ? AND workspace_id = ?
+               ORDER BY detector_confidence DESC LIMIT 1""",
+            (photo_id, db._active_workspace_id),
+        ).fetchone()
+        det_box = None
+        if det_row:
+            det_box = {
+                "x": det_row["box_x"], "y": det_row["box_y"],
+                "w": det_row["box_w"], "h": det_row["box_h"],
+            }
         if det_box:
-            if isinstance(det_box, str):
-                det_box = json.loads(det_box)
             iw, ih = img.size
             padding = cfg.load().get("detection_padding", 0.2)
             pad_w = det_box["w"] * padding

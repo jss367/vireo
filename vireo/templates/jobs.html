@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Jobs</title>
+<style>
+.jobs-layout {
+  display: flex; height: calc(100vh - 48px - 28px); overflow: hidden;
+}
+.jobs-list-pane {
+  width: 320px; min-width: 240px; max-width: 400px;
+  border-right: 1px solid var(--border-primary);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg-secondary);
+}
+.jobs-list-header {
+  padding: 12px 16px; font-size: 14px; font-weight: 600;
+  border-bottom: 1px solid var(--border-primary);
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text-primary);
+}
+.jobs-list-header .badge {
+  font-size: 11px; background: var(--accent); color: var(--accent-text);
+  padding: 2px 8px; border-radius: 10px; font-variant-numeric: tabular-nums;
+}
+.jobs-filter-bar {
+  padding: 8px 16px; display: flex; gap: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.jobs-filter-bar select {
+  font-size: 12px; padding: 4px 8px; border-radius: 4px;
+  background: var(--bg-input); color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+}
+.jobs-list-content {
+  flex: 1; overflow-y: auto; padding: 0;
+}
+.jobs-list-divider {
+  padding: 6px 16px; font-size: 11px; color: var(--text-ghost);
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  background: var(--bg-tertiary);
+}
+.jobs-list-divider.clickable {
+  cursor: pointer; transition: background 0.1s; user-select: none;
+}
+.jobs-list-divider.clickable:hover { background: var(--bg-tertiary); }
+.jobs-list-divider.clickable.selected {
+  background: var(--bg-tertiary); border-left: 3px solid var(--accent); padding-left: 13px;
+}
+.job-list-item {
+  padding: 10px 16px; cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background 0.1s;
+}
+.job-list-item:hover { background: var(--bg-tertiary); }
+.job-list-item.selected { background: var(--bg-tertiary); border-left: 3px solid var(--accent); padding-left: 13px; }
+.job-list-item-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.job-list-item-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.job-list-item-dot.running { background: var(--accent); animation: pulse-dot 1.5s ease-in-out infinite; }
+.job-list-item-dot.completed { background: var(--success, #4caf50); }
+.job-list-item-dot.failed { background: var(--danger); }
+.job-list-item-dot.cancelled { background: var(--text-ghost); }
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.job-list-item-type {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  text-transform: capitalize; flex: 1;
+}
+.job-list-item-time {
+  font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums;
+}
+.job-list-item-detail {
+  font-size: 12px; color: var(--text-muted); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.job-list-item-progress {
+  margin-top: 4px; height: 3px; background: var(--bg-tertiary); border-radius: 2px;
+}
+.job-list-item-progress-fill {
+  height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+}
+.jobs-detail-pane {
+  flex: 1; overflow-y: auto; padding: 0;
+  background: var(--bg-primary);
+}
+.jobs-detail-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--text-ghost); font-size: 14px;
+}
+.job-detail-header {
+  padding: 16px 24px; border-bottom: 1px solid var(--border-primary);
+  display: flex; align-items: center; gap: 12px;
+  background: var(--bg-secondary);
+}
+.job-detail-title {
+  font-size: 16px; font-weight: 600; color: var(--text-primary);
+  text-transform: capitalize; flex: 1;
+}
+.job-detail-status {
+  font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
+}
+.job-detail-status.running { background: var(--accent); color: var(--accent-text); }
+.job-detail-status.completed { background: color-mix(in srgb, var(--success, #4caf50) 20%, transparent); color: var(--success, #4caf50); }
+.job-detail-status.failed { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
+.job-detail-meta {
+  font-size: 12px; color: var(--text-muted); display: flex; gap: 16px;
+  padding: 8px 24px; border-bottom: 1px solid var(--border-subtle);
+}
+.btn-cancel {
+  font-size: 12px; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  background: var(--danger); color: #fff; border: none;
+}
+.btn-cancel:hover { opacity: 0.85; }
+.btn-retry {
+  font-size: 11px; padding: 2px 8px; border-radius: 3px; cursor: pointer;
+  background: var(--accent); color: var(--accent-text); border: none;
+  margin-left: 8px;
+}
+.btn-retry:hover { opacity: 0.85; }
+.job-tree { padding: 16px 24px; }
+.tree-step { margin-bottom: 2px; }
+.tree-step-header {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: 4px; cursor: pointer; transition: background 0.1s;
+  font-size: 13px;
+}
+.tree-step-header:hover { background: var(--bg-tertiary); }
+.tree-toggle {
+  width: 14px; text-align: center; flex-shrink: 0; font-size: 10px;
+  color: var(--text-muted); transition: transform 0.15s;
+}
+.tree-status-icon {
+  width: 18px; text-align: center; flex-shrink: 0; font-size: 12px;
+}
+.tree-status-icon.pending { color: var(--text-ghost); }
+.tree-status-icon.running { color: var(--accent); animation: pulse-step 1.5s ease-in-out infinite; }
+.tree-status-icon.completed { color: var(--success, #4caf50); }
+.tree-status-icon.failed { color: var(--danger); }
+@keyframes pulse-step {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.tree-step-label { flex: 1; color: var(--text-primary); }
+.tree-step-label.pending { color: var(--text-ghost); }
+.tree-step-summary { font-size: 12px; color: var(--text-muted); }
+.tree-step-progress-text {
+  font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.tree-step-bar {
+  width: 100px; height: 4px; background: var(--bg-tertiary); border-radius: 2px;
+  overflow: hidden; flex-shrink: 0;
+}
+.tree-step-bar-fill {
+  height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+}
+.tree-step-bar-fill.indeterminate {
+  width: 30%; animation: shimmer 1.5s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.tree-step-duration {
+  font-size: 11px; color: var(--text-ghost); font-variant-numeric: tabular-nums;
+}
+.tree-step-error {
+  margin: 4px 0 4px 26px; padding: 6px 10px; font-size: 12px;
+  color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-radius: 4px; font-family: var(--font-mono, monospace);
+}
+.tree-leaves {
+  margin-left: 26px; padding: 4px 0; max-height: 300px; overflow: hidden;
+}
+.tree-leaf {
+  font-size: 12px; color: var(--text-muted); padding: 1px 8px;
+  font-family: var(--font-mono, monospace); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tree-leaf.current { color: var(--accent); }
+.tree-leaf.failed { color: var(--danger); font-weight: 500; }
+.tree-leaf::before { content: '\251C\2500 '; color: var(--text-ghost); }
+.tree-leaf:last-child::before { content: '\2514\2500 '; color: var(--text-ghost); }
+.job-card {
+  border-bottom: 2px solid var(--border-primary); padding-bottom: 16px; margin-bottom: 16px;
+}
+.job-card:last-child { border-bottom: none; margin-bottom: 0; }
+.job-card-header {
+  padding: 16px 24px; border-bottom: 1px solid var(--border-primary);
+  display: flex; align-items: center; gap: 12px; background: var(--bg-secondary);
+}
+.job-card-workspace {
+  font-size: 12px; padding: 2px 8px; border-radius: 4px;
+  background: var(--bg-tertiary); color: var(--text-muted);
+}
+.tree-step-errors {
+  font-size: 11px; color: var(--danger); font-weight: 500;
+}
+.tree-step-throughput {
+  margin-left: 26px; padding: 2px 8px; font-size: 12px;
+  color: var(--text-muted); font-style: italic;
+}
+.tree-step-current-file {
+  margin-left: 26px; padding: 2px 8px; font-size: 12px;
+  color: var(--accent); font-family: var(--font-mono, monospace);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.jobs-overview-divider {
+  padding: 12px 24px; font-size: 12px; color: var(--text-ghost);
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  border-top: 1px solid var(--border-primary); margin-top: 8px;
+}
+.jobs-overview-empty {
+  padding: 48px 24px; text-align: center; color: var(--text-ghost); font-size: 14px;
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<div class="jobs-layout">
+  <div class="jobs-list-pane">
+    <div class="jobs-list-header">
+      Jobs <span class="badge" id="runningBadge" style="display:none;">0</span>
+    </div>
+    <div class="jobs-filter-bar">
+      <select id="filterType" onchange="applyFilters()">
+        <option value="">All types</option>
+      </select>
+      <select id="filterStatus" onchange="applyFilters()">
+        <option value="">All status</option>
+        <option value="completed">Completed</option>
+        <option value="failed">Failed</option>
+      </select>
+    </div>
+    <div class="jobs-list-content" id="jobListContent">
+      <div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">Loading...</div>
+    </div>
+  </div>
+
+  <div class="jobs-detail-pane" id="jobDetailPane">
+    <div class="jobs-detail-empty">Loading...</div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var activeJobs = [];
+  var historyJobs = [];
+  var selectedJobId = null;
+  var selectedSource = null;
+  var pollTimer = null;
+  var sseSource = null;
+  var leafBuffers = {};
+  var LEAF_MAX = 20;
+  var collapsedSteps = {};
+  var activeWsId = null;
+  var workspaceNames = {};
+  var currentView = 'active'; // 'active', 'history', or a job id
+
+  function esc(s) {
+    if (!s) return '';
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function formatElapsed(secs) {
+    if (secs < 60) return Math.round(secs) + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.round(secs % 60) + 's';
+    return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  }
+
+  function timeAgo(iso) {
+    var secs = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (secs < 60) return 'just now';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    return Math.floor(secs / 86400) + 'd ago';
+  }
+
+  function toggleIcon(isExpanded) {
+    return '<span class="tree-toggle">' + (isExpanded ? '\u25BC' : '\u25B6') + '</span>';
+  }
+
+  function statusIcon(status) {
+    switch (status) {
+      case 'pending': return '<span class="tree-status-icon pending">\u25CB</span>';
+      case 'running': return '<span class="tree-status-icon running">\u25CB</span>';
+      case 'completed': return '<span class="tree-status-icon completed">\u2713</span>';
+      case 'failed': return '<span class="tree-status-icon failed">\u2717</span>';
+      default: return '<span class="tree-status-icon pending">\u25CB</span>';
+    }
+  }
+
+  function renderJobCard(job, options) {
+    options = options || {};
+    var isLive = job.status === 'running';
+    var elapsed = '';
+    if (isLive && job.started_at) {
+      elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
+    } else if (job.duration != null) {
+      elapsed = formatElapsed(job.duration);
+    } else if (job.started_at && job.finished_at) {
+      elapsed = formatElapsed((new Date(job.finished_at).getTime() - new Date(job.started_at).getTime()) / 1000);
+    }
+
+    var html = '<div class="job-card">';
+
+    // Header: type, workspace label, status, cancel
+    html += '<div class="job-card-header">';
+    html += '<span class="job-detail-title">' + esc(job.type) + '</span>';
+    if (options.workspaceName) {
+      html += '<span class="job-card-workspace">' + esc(options.workspaceName) + '</span>';
+    }
+    html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
+    if (isLive) {
+      html += '<button class="btn-cancel" data-cancel-job="' + esc(job.id) + '">Cancel</button>';
+    }
+    html += '</div>';
+
+    // Meta: started, elapsed, overall %
+    html += '<div class="job-detail-meta">';
+    html += '<span>Started: ' + new Date(job.started_at).toLocaleTimeString() + '</span>';
+    html += '<span>Elapsed: ' + elapsed + '</span>';
+    if (job.progress && job.progress.total > 0) {
+      html += '<span>Overall: ' + Math.round((job.progress.current / job.progress.total) * 100) + '%</span>';
+    }
+    html += '</div>';
+
+    // Steps
+    var steps = job.steps || job.tree || [];
+    if (steps.length > 0) {
+      html += '<div class="job-tree">';
+      steps.forEach(function(step) {
+        html += renderRichStep(step, job, isLive);
+      });
+      html += '</div>';
+    } else if (isLive && job.progress) {
+      // Fallback for running jobs without steps
+      html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
+      if (job.progress.phase) html += '<div style="color:var(--accent);font-weight:500;margin-bottom:8px;">' + esc(job.progress.phase) + '</div>';
+      if (job.progress.total > 0) {
+        var pct = Math.round((job.progress.current / job.progress.total) * 100);
+        html += '<div class="tree-step-bar" style="width:200px;margin-bottom:4px;"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
+        html += '<div>' + job.progress.current.toLocaleString() + ' / ' + job.progress.total.toLocaleString() + '</div>';
+      }
+      if (job.progress.current_file) html += '<div style="margin-top:4px;">' + esc(job.progress.current_file) + '</div>';
+      html += '</div></div>';
+    } else if (!isLive) {
+      // Fallback for completed/failed jobs without steps — show result/error
+      html += '<div class="job-tree"><div style="padding:8px;font-size:13px;color:var(--text-muted);">';
+      if (job.error) {
+        html += '<div style="color:var(--danger);font-weight:500;">Error: ' + esc(job.error) + '</div>';
+      }
+      if (job.result) {
+        html += '<div>' + esc(typeof job.result === 'string' ? job.result : JSON.stringify(job.result)) + '</div>';
+      }
+      if (!job.error && !job.result) {
+        html += '<div>No details available</div>';
+      }
+      html += '</div></div>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  function renderRichStep(step, job, isLive) {
+    var isRunning = step.status === 'running';
+    var isExpanded = isRunning || step.status === 'failed';
+    if (collapsedSteps[step.id] === true) isExpanded = false;
+    if (collapsedSteps[step.id] === false) isExpanded = true;
+
+    var html = '<div class="tree-step" data-step-id="' + esc(step.id) + '">';
+    html += '<div class="tree-step-header" data-toggle-step="' + esc(step.id) + '">';
+    html += toggleIcon(isExpanded);
+    html += statusIcon(step.status);
+    html += '<span class="tree-step-label' + (step.status === 'pending' ? ' pending' : '') + '">' + esc(step.label) + '</span>';
+
+    // 1-3: Progress counts, bar, percentage (for steps with progress)
+    if (step.progress && step.progress.current > 0) {
+      if (step.progress.total > 0) {
+        var pct = Math.round((step.progress.current / step.progress.total) * 100);
+        html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ' + step.progress.total.toLocaleString() + '</span>';
+        html += '<div class="tree-step-bar"><div class="tree-step-bar-fill" style="width:' + pct + '%"></div></div>';
+        html += '<span class="tree-step-progress-text">' + pct + '%</span>';
+      } else {
+        html += '<span class="tree-step-progress-text">' + step.progress.current.toLocaleString() + ' / ?</span>';
+        html += '<div class="tree-step-bar"><div class="tree-step-bar-fill indeterminate"></div></div>';
+      }
+    }
+
+    // 7: Summary for completed steps
+    if (step.status === 'completed' && step.summary) {
+      html += '<span class="tree-step-summary">(' + esc(step.summary) + ')</span>';
+    }
+
+    // 6: Duration — live timer for running, final for completed
+    if (isRunning && step.started_at) {
+      var stepElapsed = (Date.now() - new Date(step.started_at).getTime()) / 1000;
+      html += '<span class="tree-step-duration">' + formatElapsed(stepElapsed) + '</span>';
+    } else if (step.duration != null) {
+      html += '<span class="tree-step-duration">' + formatElapsed(step.duration) + '</span>';
+    }
+
+    // 5: Error count
+    if (isRunning && job.errors && job.errors.length > 0) {
+      html += '<span class="tree-step-errors">' + job.errors.length + ' error' + (job.errors.length > 1 ? 's' : '') + '</span>';
+    } else if (step.error) {
+      html += '<span class="tree-step-errors">1 error</span>';
+    }
+
+    // Retry button for failed steps on live jobs
+    if (step.status === 'failed' && isLive) {
+      html += '<button class="btn-retry" onclick="event.stopPropagation();">Retry</button>';
+    }
+
+    html += '</div>'; // end header
+
+    // Expanded content
+    if (isExpanded) {
+      // 8: Throughput for running steps
+      if (isRunning && step.progress && step.progress.current > 0 && step.started_at) {
+        var stepSecs = (Date.now() - new Date(step.started_at).getTime()) / 1000;
+        if (stepSecs > 0) {
+          var perSec = step.progress.current / stepSecs;
+          var perMin = perSec * 60;
+          var throughput;
+          if (perMin >= 1) {
+            throughput = '~' + Math.round(perMin) + '/min';
+          } else {
+            throughput = '~' + (1 / perSec).toFixed(1) + 's each';
+          }
+          html += '<div class="tree-step-throughput">' + throughput + '</div>';
+        }
+      }
+
+      // 4: Current file (step-level preferred, fall back to job-level)
+      var currentFile = step.current_file || (isRunning && job.progress && job.progress.current_file ? job.progress.current_file : '');
+      if (isRunning && currentFile) {
+        html += '<div class="tree-step-current-file">' + esc(currentFile) + '</div>';
+      }
+
+      // Error detail
+      if (step.error) {
+        html += '<div class="tree-step-error">' + esc(step.error) + '</div>';
+      }
+
+      // Leaf buffer (files processed)
+      if (isRunning) {
+        var leaves = leafBuffers[step.id] || [];
+        if (step.current_file) {
+          var found = leaves.find(function(l) { return l.name === step.current_file; });
+          if (!found) {
+            leaves.push({ name: step.current_file, status: 'current' });
+            if (leaves.length > LEAF_MAX) {
+              var nonFailed = leaves.filter(function(l) { return l.status !== 'failed'; });
+              if (nonFailed.length > LEAF_MAX) leaves.splice(leaves.indexOf(nonFailed[0]), 1);
+            }
+            leafBuffers[step.id] = leaves;
+          }
+        }
+        if (leaves.length > 0) {
+          html += '<div class="tree-leaves">';
+          leaves.forEach(function(l) {
+            var cls = l.status === 'current' ? ' current' : l.status === 'failed' ? ' failed' : '';
+            html += '<div class="tree-leaf' + cls + '">' + esc(l.name) + '</div>';
+          });
+          html += '</div>';
+        }
+      }
+    }
+
+    html += '</div>'; // end tree-step
+    return html;
+  }
+
+  function fetchJobs() {
+    fetch('/api/jobs')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        activeJobs = data.active || [];
+        activeWsId = data.active_workspace_id || null;
+        workspaceNames = data.workspace_names || {};
+        updateList();
+        updateRunningBadge();
+        if (currentView === 'active') renderActiveOverview();
+      })
+      .catch(function() {});
+  }
+
+  function fetchHistory() {
+    fetch('/api/jobs/history?limit=100')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        historyJobs = data || [];
+        historyJobs.forEach(function(j) {
+          if (typeof j.tree === 'string') {
+            try { j.tree = JSON.parse(j.tree); } catch(e) { j.tree = []; }
+          }
+          if (typeof j.result === 'string') {
+            try { j.result = JSON.parse(j.result); } catch(e) { j.result = null; }
+          }
+        });
+        updateList();
+        populateTypeFilter();
+        if (currentView === 'history') renderHistoryOverview();
+      })
+      .catch(function() {});
+  }
+
+  function populateTypeFilter() {
+    var sel = document.getElementById('filterType');
+    var types = {};
+    historyJobs.forEach(function(j) { types[j.type] = true; });
+    activeJobs.forEach(function(j) { types[j.type] = true; });
+    var current = sel.value;
+    sel.innerHTML = '<option value="">All types</option>';
+    Object.keys(types).sort().forEach(function(t) {
+      sel.innerHTML += '<option value="' + esc(t) + '">' + esc(t) + '</option>';
+    });
+    sel.value = current;
+  }
+  window.applyFilters = function() {
+    updateList();
+    if (currentView === 'history') renderHistoryOverview();
+  };
+
+  function updateList() {
+    var container = document.getElementById('jobListContent');
+    var typeFilter = document.getElementById('filterType').value;
+    var statusFilter = document.getElementById('filterStatus').value;
+    var html = '';
+
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
+      (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
+    running.forEach(function(j) { html += renderListItem(j, 'active'); });
+
+    var filtered = historyJobs;
+    if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
+    if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+
+    html += '<div class="jobs-list-divider clickable' + (currentView === 'history' ? ' selected' : '') + '" data-view="history">History</div>';
+    if (filtered.length === 0 && running.length === 0) {
+      html += '<div style="padding:24px;text-align:center;color:var(--text-ghost);font-size:13px;">No jobs yet</div>';
+    }
+    filtered.forEach(function(j) { html += renderListItem(j, 'history'); });
+    container.innerHTML = html;
+  }
+
+  function renderListItem(j, source) {
+    var selected = j.id === selectedJobId ? ' selected' : '';
+    var dot = j.status || 'completed';
+    var time = '';
+    if (j.status === 'running' && j.started_at) {
+      time = formatElapsed((Date.now() - new Date(j.started_at).getTime()) / 1000);
+    } else if (j.started_at) {
+      time = timeAgo(j.started_at);
+    }
+    var detail = '';
+    if (j.status === 'running' && j.progress && j.progress.phase) {
+      detail = esc(j.progress.phase);
+    } else if (j.summary) {
+      detail = esc(j.summary);
+    } else if (j.status === 'failed' && j.errors && j.errors.length > 0) {
+      detail = '<span style="color:var(--danger);">' + esc(j.errors[0]).substring(0, 60) + '</span>';
+    } else if (j.duration) {
+      detail = formatElapsed(j.duration);
+    }
+    var pct = 0;
+    if (j.progress && j.progress.total > 0) {
+      pct = Math.round((j.progress.current / j.progress.total) * 100);
+    }
+    var html = '<div class="job-list-item' + selected + '" data-job-id="' + esc(j.id) + '" data-job-source="' + source + '">';
+    html += '<div class="job-list-item-header">';
+    html += '<span class="job-list-item-dot ' + dot + '"></span>';
+    html += '<span class="job-list-item-type">' + esc(j.type) + '</span>';
+    html += '<span class="job-list-item-time">' + time + '</span>';
+    html += '</div>';
+    if (detail) html += '<div class="job-list-item-detail">' + detail + '</div>';
+    if (j.status === 'running' && pct > 0) {
+      html += '<div class="job-list-item-progress"><div class="job-list-item-progress-fill" style="width:' + pct + '%"></div></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function updateRunningBadge() {
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var badge = document.getElementById('runningBadge');
+    if (running.length > 0) { badge.textContent = running.length; badge.style.display = ''; }
+    else { badge.style.display = 'none'; }
+  }
+
+  // Event delegation for job list clicks
+  document.getElementById('jobListContent').addEventListener('click', function(e) {
+    var viewItem = e.target.closest('[data-view]');
+    if (viewItem) {
+      currentView = viewItem.getAttribute('data-view');
+      selectedJobId = null;
+      selectedSource = null;
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      renderMainPane();
+      updateList();
+      return;
+    }
+    var item = e.target.closest('[data-job-id]');
+    if (item) selectJob(item.getAttribute('data-job-id'), item.getAttribute('data-job-source'));
+  });
+
+  function selectJob(jobId, source) {
+    currentView = jobId;
+    selectedJobId = jobId;
+    selectedSource = source;
+    leafBuffers = {};
+    collapsedSteps = {};
+    if (sseSource) { sseSource.close(); sseSource = null; }
+    if (source === 'active') {
+      var job = activeJobs.find(function(j) { return j.id === jobId; });
+      if (job) { renderDetail(job); if (job.status === 'running') connectSSE(jobId); }
+    } else {
+      var job = historyJobs.find(function(j) { return j.id === jobId; });
+      if (job) renderHistoryDetail(job);
+    }
+    updateList();
+  }
+
+  function connectSSE(jobId) {
+    if (sseSource) sseSource.close();
+    sseSource = new EventSource('/api/jobs/' + jobId + '/stream');
+    sseSource.addEventListener('progress', function(e) {
+      var data = JSON.parse(e.data);
+      var job = activeJobs.find(function(j) { return j.id === jobId; });
+      if (job) {
+        job.progress = data;
+        if (data.steps) job.steps = data.steps;
+        if (selectedJobId === jobId) renderDetail(job);
+        updateList();
+      }
+    });
+    sseSource.addEventListener('complete', function(e) {
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      fetchJobs();
+      fetchHistory();
+    });
+    sseSource.onerror = function() {
+      if (sseSource) { sseSource.close(); sseSource = null; }
+    };
+  }
+
+  function renderDetail(job) {
+    var pane = document.getElementById('jobDetailPane');
+    pane.innerHTML = '<div style="padding:16px 24px 0;">' + renderJobCard(job) + '</div>';
+    var activeStep = pane.querySelector('.tree-status-icon.running');
+    if (activeStep) activeStep.closest('.tree-step').scrollIntoView({ block: 'nearest' });
+  }
+
+  function toggleStep(stepId) {
+    if (collapsedSteps[stepId] === undefined) collapsedSteps[stepId] = true;
+    else collapsedSteps[stepId] = !collapsedSteps[stepId];
+    var job = activeJobs.find(function(j) { return j.id === selectedJobId; });
+    if (job) renderDetail(job);
+    else {
+      job = historyJobs.find(function(j) { return j.id === selectedJobId; });
+      if (job) renderHistoryDetail(job);
+    }
+  }
+
+  // Event delegation for detail pane clicks (step toggle, cancel)
+  document.getElementById('jobDetailPane').addEventListener('click', function(e) {
+    var stepHeader = e.target.closest('[data-toggle-step]');
+    if (stepHeader) {
+      toggleStep(stepHeader.getAttribute('data-toggle-step'));
+      return;
+    }
+    var cancelBtn = e.target.closest('[data-cancel-job]');
+    if (cancelBtn) {
+      var jobId = cancelBtn.getAttribute('data-cancel-job');
+      fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+        .then(function(r) {
+          if (r.ok) fetchJobs();
+          else if (typeof showToast === 'function') showToast('Cancel not yet implemented', 'info');
+        })
+        .catch(function() {});
+    }
+  });
+
+  function renderHistoryDetail(job) {
+    var pane = document.getElementById('jobDetailPane');
+    pane.innerHTML = '<div style="padding:16px 24px 0;">' + renderJobCard(job) + '</div>';
+  }
+
+  function renderMainPane() {
+    if (currentView === 'active') {
+      renderActiveOverview();
+    } else if (currentView === 'history') {
+      renderHistoryOverview();
+    }
+    // Individual job selection handled by existing selectJob flow
+  }
+
+  function renderActiveOverview() {
+    var pane = document.getElementById('jobDetailPane');
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+
+    if (running.length === 0) {
+      pane.innerHTML = '<div class="jobs-overview-empty">No active jobs.<br><span style="font-size:12px;margin-top:8px;display:inline-block;">Start a pipeline from the Pipeline page, or run individual jobs from Browse.</span></div>';
+      return;
+    }
+
+    var thisWs = running.filter(function(j) { return j.workspace_id === activeWsId; });
+    var otherWs = running.filter(function(j) { return j.workspace_id !== activeWsId; });
+
+    var html = '<div style="padding:16px 24px 0;">';
+
+    thisWs.forEach(function(j) {
+      html += renderJobCard(j);
+    });
+
+    if (otherWs.length > 0) {
+      html += '<div class="jobs-overview-divider">Other Workspaces</div>';
+      otherWs.forEach(function(j) {
+        var wsName = workspaceNames[j.workspace_id] || ('Workspace ' + j.workspace_id);
+        html += renderJobCard(j, { workspaceName: wsName });
+      });
+    }
+
+    html += '</div>';
+    pane.innerHTML = html;
+  }
+
+  function renderHistoryOverview() {
+    var pane = document.getElementById('jobDetailPane');
+    var typeFilter = document.getElementById('filterType').value;
+    var statusFilter = document.getElementById('filterStatus').value;
+
+    var filtered = historyJobs;
+    if (typeFilter) filtered = filtered.filter(function(j) { return j.type === typeFilter; });
+    if (statusFilter) filtered = filtered.filter(function(j) { return j.status === statusFilter; });
+
+    if (filtered.length === 0) {
+      pane.innerHTML = '<div class="jobs-overview-empty">No job history' +
+        (typeFilter || statusFilter ? ' matching filters' : '') + '.</div>';
+      return;
+    }
+
+    // Date range note
+    var oldest = filtered[filtered.length - 1];
+    var oldestDate = new Date(oldest.started_at).toLocaleDateString();
+    var html = '<div style="padding:16px 24px 0;">';
+    html += '<div style="font-size:12px;color:var(--text-ghost);margin-bottom:12px;">Showing ' +
+      filtered.length + ' jobs back to ' + oldestDate + '</div>';
+
+    filtered.forEach(function(j) {
+      html += renderJobCard(j);
+    });
+
+    html += '</div>';
+    pane.innerHTML = html;
+  }
+
+  // Initial load
+  fetchJobs();
+  fetchHistory();
+  pollTimer = setInterval(fetchJobs, 2000);
+  setInterval(fetchHistory, 10000);
+})();
+</script>
+</body>
+</html>

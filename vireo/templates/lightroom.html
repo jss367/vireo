@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Lightroom Import</title>
+<style>
+body { padding-bottom: 36px; }
+.content { max-width: 900px; }
+.page-title { font-size: 20px; margin-bottom: 6px; }
+.page-subtitle { font-size: 13px; color: var(--text-dim); margin-bottom: 24px; }
+
+.input-group { display: flex; gap: 8px; margin-bottom: 12px; }
+.path-input {
+  flex: 1; background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 8px 12px; font-size: 13px; outline: none;
+}
+.path-input:focus { border-color: var(--accent); }
+
+.progress-bar {
+  height: 6px; background: var(--bg-tertiary); border-radius: 3px;
+  overflow: hidden; margin: 12px 0; display: none;
+}
+.progress-bar.active { display: block; }
+.progress-fill {
+  height: 100%; background: var(--accent); border-radius: 3px;
+  transition: width 0.3s; width: 0;
+}
+
+.help-text { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.5; }
+
+/* Catalog list */
+.catalog-list { margin-bottom: 12px; }
+.catalog-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  font-size: 13px; color: var(--text-secondary);
+}
+.catalog-item .remove-btn { color: var(--text-faint); cursor: pointer; font-size: 16px; }
+.catalog-item .remove-btn:hover { color: var(--danger); }
+
+/* Preview table */
+.preview-table {
+  width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px;
+}
+.preview-table th {
+  text-align: left; padding: 8px 12px; color: var(--text-dim);
+  font-weight: 500; border-bottom: 1px solid var(--border-primary);
+}
+.preview-table td {
+  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary);
+}
+
+/* Conflicts */
+.conflict-item {
+  background: var(--bg-tertiary); border-radius: 4px; padding: 10px 14px;
+  margin-bottom: 8px; font-size: 12px;
+}
+.conflict-file { font-weight: 600; color: var(--warning); margin-bottom: 4px; }
+.conflict-cat { color: var(--text-muted); margin-left: 8px; }
+
+/* Strategy */
+.strategy-group { display: flex; gap: 12px; margin: 12px 0; }
+.strategy-option {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text-secondary); cursor: pointer;
+}
+.strategy-option input { accent-color: var(--accent); }
+.import-options { display: flex; gap: 16px; align-items: center; margin: 12px 0; }
+.import-options label { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.result-summary { font-size: 14px; line-height: 1.8; }
+.result-summary .ok { color: var(--accent); }
+.result-summary .skip { color: var(--warning); }
+.result-summary .fail { color: var(--danger); }
+
+/* LR import phases */
+.lr-phase { display: none; }
+.lr-phase.active { display: block; }
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="content">
+  <div class="page-title">Lightroom Import</div>
+  <p class="page-subtitle">Import keywords from Lightroom .lrcat catalogs</p>
+
+  <div class="section">
+    <div class="section-title">Import from Lightroom Catalog</div>
+    <p class="help-text">
+      If your keywords live in Lightroom .lrcat catalogs (and haven't been written to XMP sidecars),
+      import them here. This reads keywords from the catalog database and adds them to Vireo.
+      You can optionally write them to XMP sidecars too.
+    </p>
+
+    <!-- Phase 1: Select -->
+    <div class="lr-phase active" id="lrPhase1">
+      <div class="input-group">
+        <input type="text" class="path-input" id="catalogInput" placeholder="/path/to/catalog.lrcat"
+               onkeydown="if(event.key==='Enter')addCatalog()">
+        <button onclick="browseForCatalog()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
+        <button class="btn btn-secondary" onclick="addCatalog()">Add</button>
+      </div>
+      <div class="catalog-list" id="catalogList"></div>
+      <button class="btn btn-primary" id="lrPreviewBtn" onclick="previewImport()" disabled>Preview Import</button>
+      <span class="status-msg" id="lrPreviewStatus"></span>
+    </div>
+
+    <!-- Phase 2: Preview -->
+    <div class="lr-phase" id="lrPhase2">
+      <table class="preview-table">
+        <thead><tr><th>Catalog</th><th>Files</th><th>Found</th><th>Missing</th><th>Keywords</th></tr></thead>
+        <tbody id="previewBody"></tbody>
+      </table>
+
+      <div id="conflictSection" style="display:none; margin-top:16px;">
+        <div style="font-size:14px;font-weight:600;color:var(--warning);margin-bottom:8px;">
+          Conflicts (<span id="conflictCount">0</span> files in multiple catalogs)
+        </div>
+        <div id="conflictList"></div>
+      </div>
+
+      <div style="margin-top:16px;">
+        <div style="font-size:13px;color:var(--text-dim);margin-bottom:6px;">Conflict resolution:</div>
+        <div class="strategy-group">
+          <label class="strategy-option">
+            <input type="radio" name="strategy" value="merge_all" checked> Merge all keywords
+          </label>
+          <label class="strategy-option">
+            <input type="radio" name="strategy" value="prefer_first"> Prefer first catalog
+          </label>
+          <label class="strategy-option">
+            <input type="radio" name="strategy" value="prefer_last"> Prefer last catalog
+          </label>
+        </div>
+        <div class="import-options">
+          <label><input type="checkbox" id="writeXmp"> Also write XMP sidecars</label>
+        </div>
+      </div>
+      <div style="display:flex; gap:12px; margin-top:16px;">
+        <button class="btn btn-secondary" onclick="lrShowPhase(1)">Back</button>
+        <button class="btn btn-primary" onclick="executeLrImport()">Import</button>
+      </div>
+    </div>
+
+    <!-- Phase 3: Progress -->
+    <div class="lr-phase" id="lrPhase3">
+      <div class="progress-bar active"><div class="progress-fill" id="lrProgressFill"></div></div>
+      <div class="status-msg" id="lrStatus">Importing...</div>
+      <div class="result-summary" id="lrResult" style="display:none;"></div>
+      <button class="btn btn-primary" id="lrDoneBtn" onclick="lrReset()" style="display:none; margin-top:16px;">Done</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ==================== LR Catalog Import ==================== */
+var catalogs = [];
+
+function addCatalog() {
+  var input = document.getElementById('catalogInput');
+  var path = input.value.trim();
+  if (!path || catalogs.indexOf(path) !== -1) return;
+  catalogs.push(path);
+  input.value = '';
+  renderCatalogs();
+}
+
+function removeCatalog(idx) {
+  catalogs.splice(idx, 1);
+  renderCatalogs();
+}
+
+function renderCatalogs() {
+  var html = '';
+  catalogs.forEach(function(c, i) {
+    html += '<div class="catalog-item">' +
+      '<span class="remove-btn" onclick="removeCatalog(' + i + ')">&times;</span>' +
+      '<span>' + escapeHtml(c) + '</span></div>';
+  });
+  document.getElementById('catalogList').innerHTML = html;
+  document.getElementById('lrPreviewBtn').disabled = catalogs.length === 0;
+}
+
+async function previewImport() {
+  var status = document.getElementById('lrPreviewStatus');
+  status.textContent = 'Loading preview...';
+  document.getElementById('lrPreviewBtn').disabled = true;
+  try {
+    var data = await safeFetch('/api/import/preview', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({catalogs: catalogs}),
+    }, { toast: false });
+    var html = '';
+    (data.catalogs || []).forEach(function(c) {
+      html += '<tr><td>' + escapeHtml(c.catalog) + '</td><td>' + c.total_files + '</td>' +
+        '<td>' + c.matched_files + '</td><td>' + c.unmatched_files + '</td>' +
+        '<td>' + c.keyword_count + '</td></tr>';
+    });
+    document.getElementById('previewBody').innerHTML = html;
+
+    if (data.conflict_count > 0) {
+      document.getElementById('conflictSection').style.display = '';
+      document.getElementById('conflictCount').textContent = data.conflict_count;
+      var chtml = '';
+      (data.conflicts || []).slice(0, 50).forEach(function(c) {
+        chtml += '<div class="conflict-item"><div class="conflict-file">' + escapeHtml(c.file_path) + '</div>';
+        for (var cat in c.keywords_by_catalog) {
+          chtml += '<div><span class="conflict-cat">' + escapeHtml(cat) + ':</span> ' +
+            escapeHtml(c.keywords_by_catalog[cat].join(', ')) + '</div>';
+        }
+        chtml += '</div>';
+      });
+      document.getElementById('conflictList').innerHTML = chtml;
+    } else {
+      document.getElementById('conflictSection').style.display = 'none';
+    }
+    lrShowPhase(2);
+    status.textContent = '';
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+  document.getElementById('lrPreviewBtn').disabled = catalogs.length === 0;
+}
+
+async function executeLrImport() {
+  lrShowPhase(3);
+  var fill = document.getElementById('lrProgressFill');
+  var status = document.getElementById('lrStatus');
+  fill.style.width = '0%';
+  status.textContent = 'Starting import...';
+
+  var strategy = document.querySelector('input[name=strategy]:checked').value;
+  var writeXmp = document.getElementById('writeXmp').checked;
+
+  try {
+    var data = await safeFetch('/api/jobs/import', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ catalogs: catalogs, strategy: strategy, write_xmp: writeXmp }),
+    }, { toast: false });
+    status.textContent = 'Importing...';
+
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.total > 0) {
+          fill.style.width = Math.round((p.current / p.total) * 100) + '%';
+          status.textContent = p.current.toLocaleString() + ' / ' + p.total.toLocaleString() + ' files';
+        }
+      },
+      onComplete: function(result) {
+        fill.style.width = '100%';
+        if (result.status === 'completed' && result.result) {
+          status.textContent = 'Complete' + (result.duration ? ' (' + result.duration + 's)' : '');
+          document.getElementById('lrResult').style.display = '';
+          document.getElementById('lrResult').innerHTML =
+            '<span class="ok">Imported: ' + (result.result.imported || 0) + '</span><br>' +
+            '<span class="skip">Skipped: ' + (result.result.skipped || 0) + '</span><br>' +
+            '<span class="fail">Failed: ' + (result.result.failed || 0) + '</span>';
+        } else {
+          status.textContent = 'Failed: ' + (result.errors || []).join(', ');
+        }
+        document.getElementById('lrDoneBtn').style.display = '';
+      },
+      onError: function() {
+        status.textContent = 'Connection lost.';
+      }
+    });
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+function lrShowPhase(n) {
+  document.querySelectorAll('.lr-phase').forEach(function(el) { el.classList.remove('active'); });
+  document.getElementById('lrPhase' + n).classList.add('active');
+}
+
+function lrReset() {
+  catalogs = [];
+  renderCatalogs();
+  document.getElementById('lrProgressFill').style.width = '0';
+  document.getElementById('lrResult').style.display = 'none';
+  document.getElementById('lrDoneBtn').style.display = 'none';
+  lrShowPhase(1);
+}
+
+/* ---------- Native file picker ---------- */
+(function() {
+  if (typeof isTauri === 'function' && isTauri()) {
+    document.querySelectorAll('.tauri-only').forEach(function(el) {
+      el.style.display = '';
+    });
+  }
+})();
+
+async function browseForCatalog() {
+  var path = await pickFile({
+    title: 'Select Lightroom Catalog',
+    filters: [{ name: 'Lightroom Catalog', extensions: ['lrcat'] }],
+  });
+  if (path) {
+    document.getElementById('catalogInput').value = path;
+  }
+}
+</script>
+</body>
+</html>

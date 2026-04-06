@@ -13,7 +13,7 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
-def build_destination_path(exif_timestamp, template="%Y/%m-%d"):
+def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     """Build relative destination folder path from EXIF timestamp.
 
     Args:
@@ -28,12 +28,14 @@ def build_destination_path(exif_timestamp, template="%Y/%m-%d"):
     return exif_timestamp.strftime(template)
 
 
-def discover_source_files(source_dir, file_types="both"):
+def discover_source_files(source_dir, file_types="both", recursive=True):
     """Discover image files in source directory.
 
     Args:
         source_dir: path to source directory (e.g., SD card mount)
-        file_types: "raw", "jpeg", or "both"
+        file_types: "raw", "jpeg", "both", or a list of extensions
+            (e.g. [".jpg", ".nef"])
+        recursive: if True (default), scan subfolders; if False, only scan root
 
     Returns:
         Sorted list of Path objects for matching files
@@ -42,16 +44,19 @@ def discover_source_files(source_dir, file_types="both"):
     if not source_path.is_dir():
         return []
 
-    if file_types == "raw":
+    if isinstance(file_types, list):
+        allowed = {ext.lower() for ext in file_types}
+    elif file_types == "raw":
         allowed = RAW_EXTENSIONS
     elif file_types == "jpeg":
         allowed = IMAGE_EXTENSIONS
     else:
         allowed = SUPPORTED_EXTENSIONS
 
+    candidates = source_path.rglob("*") if recursive else source_path.iterdir()
     return sorted(
         f
-        for f in source_path.rglob("*")
+        for f in candidates
         if f.is_file()
         and f.suffix.lower() in allowed
         and not f.name.startswith(".")
@@ -63,9 +68,12 @@ def ingest(
     destination_dir,
     db,
     file_types="both",
-    folder_template="%Y/%m-%d",
+    folder_template="%Y/%Y-%m-%d",
     skip_duplicates=True,
     progress_callback=None,
+    extra_known_hashes=None,
+    skip_paths=None,
+    recursive=True,
 ):
     """Copy and organize photos from source to destination.
 
@@ -77,20 +85,30 @@ def ingest(
         folder_template: strftime format for destination subfolder
         skip_duplicates: if True, skip files whose hash matches existing file
         progress_callback: optional callable(current, total, filename)
+        extra_known_hashes: optional set of hashes to treat as known in
+            addition to those already in the DB.  Pass a shared mutable set
+            when calling ingest() in a loop so that files copied by earlier
+            iterations are treated as duplicates by later ones even though
+            they have not been scanned into the DB yet.
 
     Returns:
         dict with counts: copied, skipped_duplicate, failed, total
     """
-    files = discover_source_files(source_dir, file_types)
+    files = discover_source_files(source_dir, file_types, recursive=recursive)
+    if skip_paths:
+        files = [f for f in files if str(f) not in skip_paths]
     total = len(files)
 
-    # Load known hashes from database for duplicate detection
+    # Load known hashes from database for duplicate detection and merge with
+    # any hashes accumulated by previous ingest() calls in the same session.
     known_hashes = set()
     if skip_duplicates:
         rows = db.conn.execute(
             "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
         ).fetchall()
         known_hashes = {r["file_hash"] for r in rows}
+        if extra_known_hashes:
+            known_hashes |= extra_known_hashes
 
     copied = 0
     skipped_duplicate = 0

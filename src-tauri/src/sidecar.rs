@@ -41,10 +41,25 @@ fn wait_for_health(port: u16, timeout: Duration) -> Result<(), String> {
 pub fn start_sidecar(app: &AppHandle) -> Result<SidecarState, String> {
     let port = find_free_port();
 
-    let (mut rx, child) = app
+    // macOS GUI apps get a minimal PATH that excludes Homebrew directories,
+    // so tools like exiftool won't be found. Prepend common Homebrew paths.
+    #[cfg(target_os = "macos")]
+    let extended_path = {
+        let path = std::env::var("PATH").unwrap_or_default();
+        format!("/opt/homebrew/bin:/usr/local/bin:{}", path)
+    };
+
+    let mut cmd = app
         .shell()
         .sidecar("vireo-server")
-        .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+        .map_err(|e| format!("Failed to create sidecar command: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        cmd = cmd.env("PATH", &extended_path);
+    }
+
+    let (mut rx, child) = cmd
         .args([
             "--port", &port.to_string(),
             "--no-browser",

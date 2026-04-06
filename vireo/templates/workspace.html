@@ -30,67 +30,8 @@
     <div class="section-title">Folders</div>
     <div id="wsFoldersContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     <div style="margin-top:12px;border-top:1px solid var(--border-primary);padding-top:12px;">
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">Add a folder by path:</div>
-      <div style="display:flex;gap:8px;">
-        <input type="text" id="addFolderPath" placeholder="/Volumes/Photography/Raw Files"
-               style="flex:1;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-primary);border-radius:4px;padding:6px 10px;font-size:13px;font-family:monospace;"
-               list="scanRootHints"
-               onkeydown="if(event.key==='Enter')scanAndAddFolder()">
-        <datalist id="scanRootHints"></datalist>
-        <button onclick="browseForFolder()" class="btn btn-secondary tauri-only" style="display:none;white-space:nowrap;">Browse&hellip;</button>
-        <button id="addFolderBtn" onclick="scanAndAddFolder()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;white-space:nowrap;">Scan &amp; Add</button>
-      </div>
-      <div id="addFolderStatus" style="font-size:12px;margin-top:6px;display:none;"></div>
-    </div>
-  </div>
-
-  <!-- Classification Overrides -->
-  <div class="section">
-    <div class="section-title">Classification Overrides</div>
-    <div class="setting-row">
-      <div class="setting-label">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <input type="checkbox" id="wsOverride_classification_threshold" onchange="toggleWsOverride('classification_threshold')">
-          Confidence threshold
-        </label>
-        <small>Override the global classification threshold for this workspace</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="wsVal_classification_threshold" min="1" max="99" disabled
-               oninput="document.getElementById('wsThresholdVal').textContent=this.value+'%'; saveWorkspaceConfig()"
-               style="width:120px;">
-        <span id="wsThresholdVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <input type="checkbox" id="wsOverride_grouping_window_seconds" onchange="toggleWsOverride('grouping_window_seconds')">
-          Grouping window
-        </label>
-        <small>Override the global grouping window for this workspace</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="number" id="wsVal_grouping_window_seconds" min="1" max="120" disabled
-               style="width:60px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveWorkspaceConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">seconds</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <input type="checkbox" id="wsOverride_similarity_threshold" onchange="toggleWsOverride('similarity_threshold')">
-          Similarity threshold
-        </label>
-        <small>Override the global similarity threshold for this workspace</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="wsVal_similarity_threshold" min="50" max="99" disabled
-               oninput="document.getElementById('wsSimilarityVal').textContent=this.value+'%'; saveWorkspaceConfig()"
-               style="width:120px;">
-        <span id="wsSimilarityVal" style="font-size:12px;color:var(--text-dim);min-width:30px;">-</span>
-      </div>
+      <a href="/pipeline" class="btn btn-secondary" style="text-decoration:none;display:inline-block;">+ Add Folder</a>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Opens Pipeline to add and scan a folder</div>
     </div>
   </div>
 
@@ -113,7 +54,6 @@
 
 <script>
 loadWsFolders();
-loadWorkspaceConfig();
 loadHistory();
 loadWorkspaces();
 
@@ -131,7 +71,7 @@ async function loadWsFolders() {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
     var container = document.getElementById('wsFoldersContent');
     if (!ws.folders || ws.folders.length === 0) {
-      container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders in this workspace. Add one below.</span>';
+      container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders in this workspace.</span>';
     } else {
       var html = '';
       ws.folders.forEach(function(f) {
@@ -142,169 +82,12 @@ async function loadWsFolders() {
       });
       container.innerHTML = html;
     }
-    // Load scan root hints for autocomplete
-    loadScanRootHints();
   } catch(e) {}
-}
-
-async function loadScanRootHints() {
-  try {
-    var cfg = await safeFetch('/api/config', {}, { toast: false });
-    var roots = cfg.scan_roots || [];
-    var list = document.getElementById('scanRootHints');
-    list.innerHTML = '';
-    roots.forEach(function(r) {
-      var opt = document.createElement('option');
-      opt.value = r;
-      list.appendChild(opt);
-    });
-  } catch(e) {}
-}
-
-async function scanAndAddFolder() {
-  var input = document.getElementById('addFolderPath');
-  var path = input.value.trim();
-  if (!path) return;
-
-  var btn = document.getElementById('addFolderBtn');
-  var status = document.getElementById('addFolderStatus');
-  btn.disabled = true;
-  btn.textContent = 'Scanning...';
-  status.style.display = 'block';
-  status.style.color = 'var(--text-muted)';
-  status.textContent = 'Starting scan...';
-
-  var data;
-  try {
-    data = await safeFetch('/api/jobs/scan', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ root: path })
-    }, { toast: false });
-  } catch(e) {
-    status.style.color = 'var(--danger)';
-    status.textContent = e.message;
-    btn.disabled = false;
-    btn.textContent = 'Scan & Add';
-    return;
-  }
-  var jobId = data.job_id;
-
-  // Stream progress via SSE
-  var source = safeEventSource('/api/jobs/' + jobId + '/stream', {
-    onProgress: function(p) {
-      if (p.total > 0) {
-        status.textContent = 'Scanning: ' + p.current + '/' + p.total + (p.current_file ? ' — ' + p.current_file : '');
-      } else if (p.current_file) {
-        status.textContent = 'Scanning: ' + p.current_file;
-      }
-    },
-    onComplete: function(result) {
-      if (result.status === 'completed') {
-        status.style.color = 'var(--accent)';
-        status.textContent = 'Done! Folder added to workspace.';
-        input.value = '';
-        loadWsFolders();
-      } else {
-        status.style.color = 'var(--danger)';
-        status.textContent = 'Scan failed' + (result.errors && result.errors.length ? ': ' + result.errors[0] : '');
-      }
-      btn.disabled = false;
-      btn.textContent = 'Scan & Add';
-      setTimeout(function() { status.style.display = 'none'; }, 5000);
-    },
-    onError: function() {
-      btn.disabled = false;
-      btn.textContent = 'Scan & Add';
-    }
-  });
 }
 
 async function removeFolderFromWs(wsId, folderId) {
   try { await safeFetch('/api/workspaces/' + wsId + '/folders/' + folderId, { method: 'DELETE' }); } catch(e) {}
   loadWsFolders();
-}
-
-/* ---------- Workspace Config Overrides ---------- */
-async function loadWorkspaceConfig() {
-  try {
-    var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
-    var keys = ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'];
-    keys.forEach(function(key) {
-      var checkbox = document.getElementById('wsOverride_' + key);
-      var input = document.getElementById('wsVal_' + key);
-      if (checkbox && input) {
-        if (overrides[key] !== undefined) {
-          checkbox.checked = true;
-          input.disabled = false;
-          if (key === 'classification_threshold' || key === 'similarity_threshold') {
-            input.value = Math.round(overrides[key] * 100);
-          } else {
-            input.value = overrides[key];
-          }
-          updateWsLabel(key);
-        } else {
-          checkbox.checked = false;
-          input.disabled = true;
-        }
-      }
-    });
-  } catch(e) {}
-}
-
-function updateWsLabel(key) {
-  var input = document.getElementById('wsVal_' + key);
-  if (!input) return;
-  if (key === 'classification_threshold') {
-    document.getElementById('wsThresholdVal').textContent = input.value + '%';
-  } else if (key === 'similarity_threshold') {
-    document.getElementById('wsSimilarityVal').textContent = input.value + '%';
-  }
-}
-
-function toggleWsOverride(key) {
-  var checkbox = document.getElementById('wsOverride_' + key);
-  var input = document.getElementById('wsVal_' + key);
-  if (!checkbox || !input) return;
-  input.disabled = !checkbox.checked;
-  if (checkbox.checked && !input.value) {
-    // Set a sensible default
-    if (key === 'classification_threshold') {
-      input.value = 40;
-    } else if (key === 'grouping_window_seconds') {
-      input.value = 10;
-    } else if (key === 'similarity_threshold') {
-      input.value = 85;
-    }
-    updateWsLabel(key);
-  }
-  saveWorkspaceConfig();
-}
-
-var _wsSaveTimer = null;
-async function saveWorkspaceConfig() {
-  clearTimeout(_wsSaveTimer);
-  _wsSaveTimer = setTimeout(async function() {
-    var overrides = {};
-    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
-      var checkbox = document.getElementById('wsOverride_' + key);
-      var input = document.getElementById('wsVal_' + key);
-      if (checkbox && checkbox.checked && input) {
-        if (key === 'classification_threshold' || key === 'similarity_threshold') {
-          overrides[key] = parseInt(input.value) / 100;
-        } else {
-          overrides[key] = parseInt(input.value);
-        }
-      }
-    });
-    try {
-      await safeFetch('/api/workspaces/active/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(overrides)
-      });
-    } catch(e) {}
-  }, 500);
 }
 
 /* ---------- Recent Jobs ---------- */
@@ -446,21 +229,6 @@ async function deleteWorkspaceConfirm(wsId, name) {
   } catch(e) {}
 }
 
-/* ---------- Native folder picker ---------- */
-(function() {
-  if (typeof isTauri === 'function' && isTauri()) {
-    document.querySelectorAll('.tauri-only').forEach(function(el) {
-      el.style.display = '';
-    });
-  }
-})();
-
-async function browseForFolder() {
-  var path = await pickDirectory('Select photo folder');
-  if (path) {
-    document.getElementById('addFolderPath').value = path;
-  }
-}
 </script>
 </body>
 </html>

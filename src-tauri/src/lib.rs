@@ -1,10 +1,8 @@
 mod menu;
 mod sidecar;
 mod tray;
-mod updater;
-
 use sidecar::SidecarState;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
@@ -16,7 +14,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -68,14 +65,6 @@ pub fn run() {
                         let _ = window.hide();
                     }
                 }
-                tauri::WindowEvent::Destroyed => {
-                    if window.label() == "main" {
-                        let app = window.app_handle();
-                        if let Some(state) = app.try_state::<SidecarState>() {
-                            sidecar::stop_sidecar(&state);
-                        }
-                    }
-                }
                 _ => {}
             }
         })
@@ -101,9 +90,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_server_port,
-            updater::check_for_update,
-            updater::install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<SidecarState>() {
+                    sidecar::stop_sidecar(&state);
+                }
+            }
+        });
 }

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import imagehash
-from image_loader import SUPPORTED_EXTENSIONS
+from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
@@ -53,24 +53,41 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
             db.tag_photo(photo_id, kid)
 
 
-def _extract_dimensions(exif_group, file_group):
+def _extract_dimensions(exif_group, file_group, extension=None):
     """Extract width and height from ExifTool metadata groups.
 
-    Priority:
-    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight (actual image dimensions for JPEGs)
+    For standard images (JPEG, PNG, etc.):
+    1. EXIF:ExifImageWidth / EXIF:ExifImageHeight
     2. EXIF:ImageWidth / EXIF:ImageHeight
     3. File:ImageWidth / File:ImageHeight
+
+    For RAW files (NEF, CR2, ARW, etc.), ExifImageWidth/Height contains the
+    embedded JPEG thumbnail dimensions (e.g. 160x120), not the actual image.
+    Priority for RAW:
+    1. File:ImageWidth / File:ImageHeight (actual decoded dimensions)
+    2. EXIF:ImageWidth / EXIF:ImageHeight
     """
-    width = exif_group.get("ExifImageWidth")
-    if width is None:
-        width = exif_group.get("ImageWidth")
-    if width is None:
+    is_raw = extension and extension.lower() in RAW_EXTENSIONS
+
+    if is_raw:
         width = file_group.get("ImageWidth")
-    height = exif_group.get("ExifImageHeight")
-    if height is None:
-        height = exif_group.get("ImageHeight")
-    if height is None:
+        if width is None:
+            width = exif_group.get("ImageWidth")
         height = file_group.get("ImageHeight")
+        if height is None:
+            height = exif_group.get("ImageHeight")
+    else:
+        width = exif_group.get("ExifImageWidth")
+        if width is None:
+            width = exif_group.get("ImageWidth")
+        if width is None:
+            width = file_group.get("ImageWidth")
+        height = exif_group.get("ExifImageHeight")
+        if height is None:
+            height = exif_group.get("ImageHeight")
+        if height is None:
+            height = file_group.get("ImageHeight")
+
     if width is not None:
         width = int(width)
     if height is not None:
@@ -130,12 +147,13 @@ def _pair_raw_jpeg_companions(db):
         companion = jpegs[0]
 
         # Transfer metadata from companion to primary if primary lacks it
+        transfer_cols = "timestamp, rating, flag, latitude, longitude, exif_data, focal_length, width, height"
         primary_full = db.conn.execute(
-            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            f"SELECT {transfer_cols} FROM photos WHERE id = ?",
             (primary["id"],),
         ).fetchone()
         companion_full = db.conn.execute(
-            "SELECT timestamp, rating, flag FROM photos WHERE id = ?",
+            f"SELECT {transfer_cols} FROM photos WHERE id = ?",
             (companion["id"],),
         ).fetchone()
 
@@ -150,6 +168,18 @@ def _pair_raw_jpeg_companions(db):
         if primary_full["flag"] == "none" and companion_full["flag"] != "none":
             updates.append("flag = ?")
             params.append(companion_full["flag"])
+        if primary_full["latitude"] is None and companion_full["latitude"] is not None:
+            updates.extend(["latitude = ?", "longitude = ?"])
+            params.extend([companion_full["latitude"], companion_full["longitude"]])
+        if not primary_full["exif_data"] and companion_full["exif_data"]:
+            updates.append("exif_data = ?")
+            params.append(companion_full["exif_data"])
+        if primary_full["focal_length"] is None and companion_full["focal_length"] is not None:
+            updates.append("focal_length = ?")
+            params.append(companion_full["focal_length"])
+        if not primary_full["width"] and companion_full["width"]:
+            updates.extend(["width = ?", "height = ?"])
+            params.extend([companion_full["width"], companion_full["height"]])
         if updates:
             params.append(primary["id"])
             db.conn.execute(
@@ -172,32 +202,12 @@ def _pair_raw_jpeg_companions(db):
             (companion["filename"], primary["id"]),
         )
 
-        # Transfer predictions: keep higher confidence when both have the same
-        # (model, workspace_id) to avoid UNIQUE constraint violation.
-        companion_preds = db.conn.execute(
-            "SELECT id, species, confidence, model, workspace_id FROM predictions WHERE photo_id = ?",
-            (companion["id"],),
-        ).fetchall()
-        for cp in companion_preds:
-            existing = db.conn.execute(
-                "SELECT id, confidence FROM predictions WHERE photo_id = ? AND model = ? AND workspace_id = ?",
-                (primary["id"], cp["model"], cp["workspace_id"]),
-            ).fetchone()
-            if existing:
-                # Keep the higher-confidence prediction
-                if cp["confidence"] > existing["confidence"]:
-                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (existing["id"],))
-                    db.conn.execute(
-                        "UPDATE predictions SET photo_id = ? WHERE id = ?",
-                        (primary["id"], cp["id"]),
-                    )
-                else:
-                    db.conn.execute("DELETE FROM predictions WHERE id = ?", (cp["id"],))
-            else:
-                db.conn.execute(
-                    "UPDATE predictions SET photo_id = ? WHERE id = ?",
-                    (primary["id"], cp["id"]),
-                )
+        # Transfer detections (and their cascaded predictions) from companion to primary.
+        # Detections are linked to photos; predictions cascade through detection_id.
+        db.conn.execute(
+            "UPDATE detections SET photo_id = ? WHERE photo_id = ?",
+            (primary["id"], companion["id"]),
+        )
 
         # Transfer pending_changes from companion to primary
         db.conn.execute(
@@ -224,7 +234,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -233,26 +243,57 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
+        photo_callback: optional callable(photo_id, path_str) called after each photo is committed
+        skip_paths: optional set of absolute path strings to exclude from scanning
+        status_callback: optional callable(message) for phase status updates
+        recursive: if True (default), scan subfolders; if False, only scan root directory
+        restrict_dirs: optional list of directory paths to scan instead of the
+            full tree. When provided, only files in these directories are
+            discovered (non-recursively), but ``root`` is still used as the
+            folder hierarchy root so parent links are preserved correctly.
     """
     root_path = Path(root)
     if not root_path.is_dir():
         log.warning("Root path does not exist or is not a directory: %s", root)
         return
 
-    # Discover all image files
-    image_files = sorted(
-        f
-        for f in root_path.rglob("*")
-        if f.is_file()
-        and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        and not f.name.startswith(".")
-    )
+    # Discover all image files (incremental enumeration for progress reporting)
+    log.info("Discovering files in %s ...", root)
+    if status_callback:
+        status_callback("Discovering files...")
+    image_files = []
+    if restrict_dirs is not None:
+        # Only enumerate files in the specified directories (non-recursive).
+        # root is still used as the folder hierarchy root for _ensure_folder.
+        for d in restrict_dirs:
+            dp = Path(d)
+            if dp.is_dir():
+                for f in dp.iterdir():
+                    if (f.is_file()
+                            and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                            and not f.name.startswith(".")
+                            and (skip_paths is None or str(f) not in skip_paths)):
+                        image_files.append(f)
+    else:
+        candidates = root_path.rglob("*") if recursive else root_path.iterdir()
+        for checked, f in enumerate(candidates, 1):
+            if checked % 500 == 0 and status_callback:
+                status_callback(f"Discovering files... ({len(image_files)} found)")
+            if (f.is_file()
+                    and f.suffix.lower() in SUPPORTED_EXTENSIONS
+                    and not f.name.startswith(".")
+                    and (skip_paths is None or str(f) not in skip_paths)):
+                image_files.append(f)
+    image_files.sort()
 
     total = len(image_files)
     log.info("Found %d images in %s", total, root)
+    if progress_callback:
+        progress_callback(0, total)
 
     # Build existing photo lookup for incremental mode
     existing_photos = {}
+    exif_extracted = set()  # photo IDs where ExifTool has already run
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
@@ -265,6 +306,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             folder_path = folders.get(p["folder_id"], "")
             full_path = os.path.join(folder_path, p["filename"])
             existing_by_path[full_path] = p
+        # Track which photos have had ExifTool metadata extracted (exif_data
+        # is non-NULL). Photos with NULL exif_data need re-extraction.
+        for row in db.conn.execute("SELECT id FROM photos WHERE exif_data IS NOT NULL"):
+            exif_extracted.add(row["id"])
 
     # Build folder cache: path -> folder_id
     folder_cache = {}
@@ -303,9 +348,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if existing:
                 file_unchanged = existing["file_mtime"] == file_mtime
                 xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+                # Re-process if ExifTool never ran for this photo (both
+                # timestamp and exif_data are NULL). Photos with genuinely
+                # missing timestamps (screenshots, exports) will have
+                # exif_data set after one extraction attempt.
+                metadata_missing = (
+                    existing["timestamp"] is None
+                    and existing["id"] not in exif_extracted
+                )
 
-                if file_unchanged and xmp_unchanged:
+                if file_unchanged and xmp_unchanged and not metadata_missing:
                     processed_count += 1
+                    if photo_callback:
+                        photo_callback(existing["id"], full_path_str)
                     if progress_callback:
                         progress_callback(processed_count, total)
                     continue
@@ -319,8 +374,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     )
                     db.conn.commit()
 
-                if file_unchanged:
+                if file_unchanged and not metadata_missing:
                     processed_count += 1
+                    if photo_callback:
+                        photo_callback(existing["id"], full_path_str)
                     if progress_callback:
                         progress_callback(processed_count, total)
                     continue
@@ -329,6 +386,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Batch extract metadata via ExifTool only for files that need processing
     paths_to_extract = [str(ip) for ip in files_to_process]
+    if paths_to_extract and status_callback:
+        status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
 
     for image_path in files_to_process:
@@ -350,15 +409,26 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         composite = file_meta.get("Composite", {})
 
         # Dimensions from ExifTool (works for all file types including RAW)
-        width, height = _extract_dimensions(exif_group, file_group)
+        width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
 
-        # Fallback to Pillow if ExifTool didn't provide dimensions
+        # Fallback if ExifTool didn't provide dimensions
         if width is None or height is None:
-            try:
-                with Image.open(str(image_path)) as img:
-                    width, height = img.size
-            except Exception:
-                log.debug("Could not read dimensions from %s", image_path)
+            ext = image_path.suffix.lower()
+            if ext in RAW_EXTENSIONS:
+                try:
+                    import rawpy
+
+                    with rawpy.imread(str(image_path)) as raw:
+                        width = raw.sizes.width
+                        height = raw.sizes.height
+                except Exception:
+                    log.debug("Could not read RAW dimensions from %s", image_path)
+            else:
+                try:
+                    with Image.open(str(image_path)) as img:
+                        width, height = img.size
+                except Exception:
+                    log.debug("Could not read dimensions from %s", image_path)
 
         # Timestamp from ExifTool
         timestamp = _extract_timestamp(exif_group)
@@ -409,9 +479,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             height=height,
         )
 
-        # Store GPS, pHash, focal length, burst ID, and exif_data
+        # Update metadata columns (also fixes existing photos that were
+        # inserted before ExifTool metadata was available)
         updates = []
         update_params = []
+        if timestamp is not None:
+            updates.append("timestamp=?")
+            update_params.append(timestamp)
+        if width is not None:
+            updates.append("width=?")
+            update_params.append(width)
+        if height is not None:
+            updates.append("height=?")
+            update_params.append(height)
         if latitude is not None:
             updates.extend(["latitude=?", "longitude=?"])
             update_params.extend([latitude, longitude])
@@ -430,6 +510,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if file_meta and extract_full_metadata:
             updates.append("exif_data=?")
             update_params.append(json.dumps(file_meta))
+        elif file_meta:
+            # Store minimal marker so we know ExifTool ran (even when
+            # extract_full_metadata is off) — prevents perpetual retry
+            updates.append("exif_data=COALESCE(exif_data, ?)")
+            update_params.append("{}")
         if updates:
             update_params.append(photo_id)
             db.conn.execute(
@@ -441,6 +526,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # Import XMP keywords if sidecar exists
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
+
+        if photo_callback:
+            photo_callback(photo_id, str(image_path))
 
         processed_count += 1
         if progress_callback:
