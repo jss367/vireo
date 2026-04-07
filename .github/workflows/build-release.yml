@@ -456,7 +456,7 @@ jobs:
             -name "*.AppImage.sig" \
           \) -exec cp {} release-files/ \;
 
-          # Updater artifacts — macOS (rename to include arch)
+          # Updater artifacts — macOS (wrap in .tar.gz, rename to include arch)
           for spec in "vireo-macos-arm64:aarch64" "vireo-macos-x86_64:x64"; do
             label="${spec%%:*}"
             arch="${spec##*:}"
