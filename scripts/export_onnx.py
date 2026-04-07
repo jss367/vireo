@@ -15,7 +15,7 @@ Usage:
     python scripts/export_onnx.py --model bioclip-vit-b-16 --validate
 
     # Custom output directory and opset version
-    python scripts/export_onnx.py --all --output-dir my_models/ --opset 18
+    python scripts/export_onnx.py --all --output-dir my_models/ --opset 20
 """
 
 import argparse
@@ -1083,8 +1083,8 @@ Examples:
     parser.add_argument(
         "--opset",
         type=int,
-        default=17,
-        help="ONNX opset version (default: 17)",
+        default=18,
+        help="ONNX opset version (default: 18)",
     )
     parser.add_argument(
         "--validate",
