@@ -1490,7 +1490,15 @@ def create_app(db_path, thumb_cache_dir=None):
         if target_ws_id and new_ws_name:
             return json_error("Provide target_workspace_id or new_workspace_name, not both")
 
+        # Validate source workspace and folder ownership before creating a
+        # new workspace to avoid orphans if the move would fail.
         if new_ws_name:
+            if not db.get_workspace(ws_id):
+                return json_error(f"Source workspace {ws_id} not found")
+            source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+            for fid in folder_ids:
+                if fid not in source_folder_ids:
+                    return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
             try:
                 target_ws_id = db.create_workspace(new_ws_name)
             except Exception as e:
