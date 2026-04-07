@@ -311,3 +311,78 @@ def test_workspace_config_ignores_unknown_keys(app_and_db):
     assert "unknown_key" not in config
     assert "api_key" not in config
     assert config["classification_threshold"] == 0.5
+
+
+def test_move_folders_to_existing_workspace(app_and_db):
+    """POST move-folders moves folders to an existing workspace."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    active = client.get("/api/workspaces/active").get_json()
+    source_ws_id = active["id"]
+    folder_ids = [f["id"] for f in active["folders"]]
+    assert len(folder_ids) > 0
+
+    target_resp = client.post("/api/workspaces", json={"name": "Target WS"})
+    target_ws_id = target_resp.get_json()["id"]
+
+    resp = client.post(f"/api/workspaces/{source_ws_id}/move-folders", json={
+        "folder_ids": folder_ids,
+        "target_workspace_id": target_ws_id,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["folders_moved"] == len(folder_ids)
+    assert data["target_workspace_id"] == target_ws_id
+
+    target_folders = client.get(f"/api/workspaces/{target_ws_id}/folders").get_json()
+    assert len(target_folders) == len(folder_ids)
+    source_folders = client.get(f"/api/workspaces/{source_ws_id}/folders").get_json()
+    assert len(source_folders) == 0
+
+
+def test_move_folders_to_new_workspace(app_and_db):
+    """POST move-folders with new_workspace_name creates WS and moves folders."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    active = client.get("/api/workspaces/active").get_json()
+    source_ws_id = active["id"]
+    folder_ids = [f["id"] for f in active["folders"]]
+
+    resp = client.post(f"/api/workspaces/{source_ws_id}/move-folders", json={
+        "folder_ids": folder_ids,
+        "new_workspace_name": "Brand New WS",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["folders_moved"] == len(folder_ids)
+    assert data["target_workspace_id"] is not None
+
+    new_ws_folders = client.get(f"/api/workspaces/{data['target_workspace_id']}/folders").get_json()
+    assert len(new_ws_folders) == len(folder_ids)
+
+
+def test_move_folders_no_folder_ids_returns_400(app_and_db):
+    """POST move-folders with empty folder_ids returns 400."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    active = client.get("/api/workspaces/active").get_json()
+    resp = client.post(f"/api/workspaces/{active['id']}/move-folders", json={
+        "folder_ids": [],
+        "target_workspace_id": 1,
+    })
+    assert resp.status_code == 400
+
+
+def test_move_folders_no_target_returns_400(app_and_db):
+    """POST move-folders without target or name returns 400."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    active = client.get("/api/workspaces/active").get_json()
+    resp = client.post(f"/api/workspaces/{active['id']}/move-folders", json={
+        "folder_ids": [1],
+    })
+    assert resp.status_code == 400

@@ -52,6 +52,30 @@
 
 </div>
 
+<!-- Move Folders Modal -->
+<div class="modal-overlay" id="moveFoldersModal">
+  <div class="modal">
+    <h3 style="margin:0 0 16px 0;font-size:16px;">Move Folders to Workspace</h3>
+    <div style="margin-bottom:12px;">
+      <label class="modal-label">Existing Workspace</label>
+      <select class="modal-input" id="moveTargetWs" onchange="document.getElementById('moveNewWsName').value=''">
+        <option value="">-- Select --</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px;text-align:center;color:var(--text-dim);font-size:12px;">or</div>
+    <div style="margin-bottom:12px;">
+      <label class="modal-label">New Workspace Name</label>
+      <input class="modal-input" id="moveNewWsName" placeholder="e.g. Kenya 2025"
+             oninput="if(this.value.trim()) document.getElementById('moveTargetWs').value=''">
+    </div>
+    <div class="modal-actions">
+      <button class="modal-btn modal-btn-primary" onclick="doMoveFolders()">Move</button>
+      <button class="modal-btn" onclick="hideMoveFoldersModal()">Cancel</button>
+    </div>
+    <div class="modal-error" id="moveFoldersError"></div>
+  </div>
+</div>
+
 <script>
 loadWsFolders();
 loadHistory();
@@ -76,10 +100,16 @@ async function loadWsFolders() {
       var html = '';
       ws.folders.forEach(function(f) {
         html += '<div class="setting-row">';
-        html += '<div class="setting-label" style="font-family:monospace;font-size:13px;">' + escapeHtml(f.path) + '</div>';
+        html += '<label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">';
+        html += '<input type="checkbox" class="folder-move-cb" value="' + f.id + '" onchange="updateMoveBtn()" style="accent-color:var(--accent);">';
+        html += '<span style="font-family:monospace;font-size:13px;">' + escapeHtml(f.path) + '</span>';
+        html += '</label>';
         html += '<button onclick="removeFolderFromWs(' + ws.id + ', ' + f.id + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;" title="Remove from workspace">&times;</button>';
         html += '</div>';
       });
+      html += '<div id="moveFoldersBar" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border-primary);">';
+      html += '<button onclick="showMoveFoldersModal()" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;font-weight:500;">Move Selected to...</button>';
+      html += '</div>';
       container.innerHTML = html;
     }
   } catch(e) {}
@@ -227,6 +257,72 @@ async function deleteWorkspaceConfirm(wsId, name) {
     await safeFetch('/api/workspaces/' + wsId, { method: 'DELETE' });
     loadWorkspaces();
   } catch(e) {}
+}
+
+/* ---------- Move Folders ---------- */
+function updateMoveBtn() {
+  var checked = document.querySelectorAll('.folder-move-cb:checked');
+  var bar = document.getElementById('moveFoldersBar');
+  if (bar) bar.style.display = checked.length > 0 ? 'block' : 'none';
+}
+
+async function showMoveFoldersModal() {
+  var workspaces = await safeFetch('/api/workspaces', {}, { toast: false });
+  var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
+  var sel = document.getElementById('moveTargetWs');
+  sel.innerHTML = '<option value="">-- Select --</option>';
+  workspaces.forEach(function(ws) {
+    if (ws.id !== active.id) {
+      sel.innerHTML += '<option value="' + ws.id + '">' + escapeHtml(ws.name) + '</option>';
+    }
+  });
+  document.getElementById('moveNewWsName').value = '';
+  document.getElementById('moveFoldersError').style.display = 'none';
+  document.getElementById('moveFoldersModal').classList.add('open');
+}
+
+function hideMoveFoldersModal() {
+  document.getElementById('moveFoldersModal').classList.remove('open');
+}
+
+async function doMoveFolders() {
+  var checked = document.querySelectorAll('.folder-move-cb:checked');
+  var folderIds = Array.from(checked).map(function(cb) { return parseInt(cb.value); });
+  if (folderIds.length === 0) return;
+
+  var targetWsId = document.getElementById('moveTargetWs').value;
+  var newName = document.getElementById('moveNewWsName').value.trim();
+
+  if (!targetWsId && !newName) {
+    var errEl = document.getElementById('moveFoldersError');
+    errEl.textContent = 'Select an existing workspace or enter a name for a new one';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  var active = await safeFetch('/api/workspaces/active', {}, { toast: false });
+  var payload = { folder_ids: folderIds };
+  if (targetWsId) {
+    payload.target_workspace_id = parseInt(targetWsId);
+  } else {
+    payload.new_workspace_name = newName;
+  }
+
+  try {
+    var result = await safeFetch('/api/workspaces/' + active.id + '/move-folders', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    hideMoveFoldersModal();
+    showToast('Moved ' + result.folders_moved + ' folder(s), ' + result.detections_moved + ' detection(s), ' + result.pending_changes_moved + ' pending change(s)', 'success');
+    loadWsFolders();
+    loadWorkspaces();
+  } catch(e) {
+    var errEl = document.getElementById('moveFoldersError');
+    errEl.textContent = e.message || 'Failed to move folders';
+    errEl.style.display = 'block';
+  }
 }
 
 </script>
