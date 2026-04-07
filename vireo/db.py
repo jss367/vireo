@@ -1235,9 +1235,10 @@ class Database:
         """
         if verify_workspace:
             return self.conn.execute(
-                f"""SELECT {self.PHOTO_DETAIL_COLS} FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    WHERE p.id = ? AND wf.workspace_id = ?""",
+                f"""SELECT {self.PHOTO_DETAIL_COLS} FROM photos
+                    WHERE id = ? AND folder_id IN (
+                        SELECT folder_id FROM workspace_folders
+                        WHERE workspace_id = ?)""",
                 (photo_id, self._ws_id()),
             ).fetchone()
         return self.conn.execute(
