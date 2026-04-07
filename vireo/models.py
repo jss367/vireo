@@ -89,8 +89,10 @@ KNOWN_MODELS = [
         "files": [
             "model.onnx",
             "class_names.json",
-            "label_descriptions.json",
             "config.json",
+        ],
+        "optional_files": [
+            "label_descriptions.json",
         ],
         "description": "EVA-02 Large fine-tuned on iNaturalist 2021. 10K species, 92% top-1. No label files needed.",
         "size_mb": 1200,
