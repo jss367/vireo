@@ -1528,6 +1528,42 @@ def create_app(db_path, thumb_cache_dir=None):
         db.remove_workspace_folder(ws_id, folder_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
+    def api_move_workspace_folders(ws_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        folder_ids = body.get("folder_ids", [])
+        target_ws_id = body.get("target_workspace_id")
+        new_ws_name = (body.get("new_workspace_name") or "").strip()
+
+        if not folder_ids:
+            return json_error("folder_ids is required")
+        if not target_ws_id and not new_ws_name:
+            return json_error("Provide target_workspace_id or new_workspace_name")
+        if target_ws_id and new_ws_name:
+            return json_error("Provide target_workspace_id or new_workspace_name, not both")
+
+        # Validate source workspace and folder ownership before creating a
+        # new workspace to avoid orphans if the move would fail.
+        if new_ws_name:
+            if not db.get_workspace(ws_id):
+                return json_error(f"Source workspace {ws_id} not found")
+            source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+            for fid in folder_ids:
+                if fid not in source_folder_ids:
+                    return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
+            try:
+                target_ws_id = db.create_workspace(new_ws_name)
+            except Exception as e:
+                return json_error(f"Failed to create workspace: {e}")
+
+        try:
+            result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
+            result["target_workspace_id"] = target_ws_id
+            return jsonify(result)
+        except ValueError as e:
+            return json_error(str(e))
+
     @app.route("/api/workspaces/active/config")
     def api_workspace_config():
         """Get the active workspace's config overrides."""
