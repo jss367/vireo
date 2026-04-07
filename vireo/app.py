@@ -4463,7 +4463,8 @@ def create_app(db_path, thumb_cache_dir=None):
             best_count = 0
             for r in result["results"]:
                 if r["group_size"] > 1 and r["is_best"]:
-                    thread_db.update_photo_flag(r["photo_id"], "flagged")
+                    thread_db.update_photo_flag(r["photo_id"], "flagged",
+                                                verify_workspace=False)
                     best_count += 1
 
             result["auto_flagged"] = best_count

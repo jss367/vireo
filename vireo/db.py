@@ -637,6 +637,23 @@ class Database:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
+    def _photo_in_workspace(self, photo_id):
+        """Return True if the photo belongs to a folder visible in the active workspace."""
+        row = self.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row is not None
+
+    def _verify_photo_in_workspace(self, photo_id):
+        """Raise ValueError if the photo is not in the active workspace."""
+        if not self._photo_in_workspace(photo_id):
+            raise ValueError(
+                f"Photo {photo_id} does not belong to the active workspace"
+            )
+
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
@@ -1206,8 +1223,23 @@ class Database:
     # Columns for single-photo detail queries (includes exif_data JSON)
     PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
 
-    def get_photo(self, photo_id):
-        """Return a single photo by id, including full metadata."""
+    def get_photo(self, photo_id, verify_workspace=False):
+        """Return a single photo by id, including full metadata.
+
+        Args:
+            photo_id: the photo's primary key.
+            verify_workspace: if True, only return the photo when it belongs
+                to a folder visible in the active workspace.  Callers in
+                route handlers should pass True; background jobs that already
+                scope their photo lists can leave it False.
+        """
+        if verify_workspace:
+            return self.conn.execute(
+                f"""SELECT {self.PHOTO_DETAIL_COLS} FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE p.id = ? AND wf.workspace_id = ?""",
+                (photo_id, self._ws_id()),
+            ).fetchone()
         return self.conn.execute(
             f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
@@ -1864,17 +1896,35 @@ class Database:
         ).fetchone()
         return row[0]
 
-    def update_photo_rating(self, photo_id, rating):
-        """Set photo rating (0-5)."""
+    def update_photo_rating(self, photo_id, rating, verify_workspace=True):
+        """Set photo rating (0-5).
+
+        Args:
+            verify_workspace: when True (the default), raises ValueError if
+                the photo is not in the active workspace's folders.  Pass
+                False from background jobs that already scope their photo
+                lists, or from undo/redo where the edit history is already
+                workspace-scoped.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute(
             "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
         )
         self.conn.commit()
 
-    def batch_update_photo_rating(self, photo_ids, rating):
-        """Set rating for multiple photos in a single transaction."""
+    def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
+        """Set rating for multiple photos in a single transaction.
+
+        Args:
+            verify_workspace: when True, raises ValueError if any photo is
+                not in the active workspace.
+        """
         if not photo_ids:
             return
+        if verify_workspace:
+            for pid in photo_ids:
+                self._verify_photo_in_workspace(pid)
         placeholders = ",".join("?" for _ in photo_ids)
         self.conn.execute(
             f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
@@ -1882,15 +1932,30 @@ class Database:
         )
         self.conn.commit()
 
-    def update_photo_flag(self, photo_id, flag):
-        """Set photo flag ('none', 'flagged', 'rejected')."""
+    def update_photo_flag(self, photo_id, flag, verify_workspace=True):
+        """Set photo flag ('none', 'flagged', 'rejected').
+
+        Args:
+            verify_workspace: when True (the default), raises ValueError if
+                the photo is not in the active workspace's folders.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id))
         self.conn.commit()
 
-    def batch_update_photo_flag(self, photo_ids, flag):
-        """Set flag for multiple photos in a single transaction."""
+    def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
+        """Set flag for multiple photos in a single transaction.
+
+        Args:
+            verify_workspace: when True, raises ValueError if any photo is
+                not in the active workspace.
+        """
         if not photo_ids:
             return
+        if verify_workspace:
+            for pid in photo_ids:
+                self._verify_photo_in_workspace(pid)
         placeholders = ",".join("?" for _ in photo_ids)
         self.conn.execute(
             f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
@@ -2766,8 +2831,18 @@ class Database:
         ).fetchone()
         return row["embedding"] if row else None
 
-    def store_photo_embedding(self, photo_id, embedding_bytes, model=None):
-        """Store an embedding blob for a photo, optionally with model name."""
+    def store_photo_embedding(self, photo_id, embedding_bytes, model=None,
+                              verify_workspace=False):
+        """Store an embedding blob for a photo, optionally with model name.
+
+        Args:
+            verify_workspace: when True, raises ValueError if the photo is
+                not in the active workspace.  Defaults to False because this
+                method is typically called from background classify jobs that
+                already iterate only over workspace-scoped photos.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute(
             "UPDATE photos SET embedding = ?, embedding_model = ? WHERE id = ?",
             (embedding_bytes, model, photo_id),
@@ -3099,12 +3174,13 @@ class Database:
             old_val = item['old_value']
             pid = item['photo_id']
             if entry['action_type'] == 'rating':
-                self.update_photo_rating(pid, int(old_val))
+                # Edit history is already workspace-scoped; skip re-verification
+                self.update_photo_rating(pid, int(old_val), verify_workspace=False)
                 if old_val != entry['new_value']:
                     self.remove_pending_changes(pid, 'rating', entry['new_value'])
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, old_val)
+                self.update_photo_flag(pid, old_val, verify_workspace=False)
             elif entry['action_type'] == 'color_label':
                 if old_val:
                     self.set_color_label(pid, old_val)
@@ -3157,13 +3233,14 @@ class Database:
             new_val = item['new_value']
             pid = item['photo_id']
             if entry['action_type'] == 'rating':
-                self.update_photo_rating(pid, int(new_val) if new_val else 0)
+                # Edit history is already workspace-scoped; skip re-verification
+                self.update_photo_rating(pid, int(new_val) if new_val else 0, verify_workspace=False)
                 old_val = item['old_value']
                 if old_val != new_val:
                     self.remove_pending_changes(pid, 'rating', old_val)
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, entry['new_value'])
+                self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
             elif entry['action_type'] == 'color_label':
                 if new_val:
                     self.set_color_label(pid, new_val)
@@ -3243,7 +3320,8 @@ class Database:
         Returns (folder_join, join_clause, where, params) or None if collection not found.
         """
         row = self.conn.execute(
-            "SELECT rules FROM collections WHERE id = ?", (collection_id,)
+            "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, self._ws_id()),
         ).fetchone()
         if not row:
             return None
