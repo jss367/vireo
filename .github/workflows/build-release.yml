@@ -237,6 +237,8 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Intentionally omitting APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID
           # so Tauri does NOT attempt notarization. We notarize the DMG
           # explicitly in the next step (Tauri only notarizes the .app,
@@ -354,6 +356,8 @@ jobs:
           # Override global CARGO_BUILD_JOBS — Linux runners have only 7GB RAM
           # and linking Tauri with 3 parallel jobs can OOM even with swap.
           CARGO_BUILD_JOBS: "2"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           echo "=== Starting Tauri build at $(date -u) ==="
           cd src-tauri
@@ -370,6 +374,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
           args: --target ${{ matrix.rust-target }}
@@ -395,6 +401,10 @@ jobs:
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip.sig
           if-no-files-found: warn
           retention-days: 7
 
@@ -406,6 +416,9 @@ jobs:
     if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag_name != '')
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -424,6 +437,7 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release-files
+          # Regular installers (unique names across platforms)
           find artifacts -type f \( \
             -name "*.dmg" -o \
             -name "*.msi" -o \
@@ -431,7 +445,30 @@ jobs:
             -name "*.AppImage" -o \
             -name "*.deb" \
           \) -exec cp {} release-files/ \;
+
+          # Updater artifacts — Windows and Linux (already unique names)
+          find artifacts -type f \( \
+            -name "*.nsis.zip" -o \
+            -name "*.nsis.zip.sig" -o \
+            -name "*.AppImage.tar.gz" -o \
+            -name "*.AppImage.tar.gz.sig" \
+          \) -exec cp {} release-files/ \;
+
+          # Updater artifacts — macOS (rename to include arch)
+          for spec in "vireo-macos-arm64:aarch64" "vireo-macos-x86_64:x64"; do
+            label="${spec%%:*}"
+            arch="${spec##*:}"
+            src=$(find "artifacts/${label}" -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
+            if [ -n "$src" ]; then
+              cp "$src" "release-files/Vireo_${arch}.app.tar.gz"
+              cp "${src}.sig" "release-files/Vireo_${arch}.app.tar.gz.sig" 2>/dev/null || true
+            fi
+          done
+
           ls -lh release-files/
+
+      - name: Generate update manifest
+        run: python3 scripts/generate_update_manifest.py "${{ steps.tag.outputs.tag }}" release-files
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
