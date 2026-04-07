@@ -151,6 +151,8 @@ class JobRunner:
             job["status"] = "failed"
             job["errors"].append(str(e))
             log.exception("Job %s failed", job["id"])
+            with self._lock:
+                self._cancelled.discard(job["id"])
         finally:
             elapsed = time.time() - start_time
             job["finished_at"] = datetime.now().isoformat()
