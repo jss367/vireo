@@ -2427,11 +2427,15 @@ function safeEventSource(url, callbacks) {
   callbacks = callbacks || {};
   var source = new EventSource(url);
   source.addEventListener('progress', function(e) {
-    if (callbacks.onProgress) callbacks.onProgress(JSON.parse(e.data));
+    try {
+      if (callbacks.onProgress) callbacks.onProgress(JSON.parse(e.data));
+    } catch(ex) { /* ignore malformed SSE data */ }
   });
   source.addEventListener('complete', function(e) {
     source.close();
-    if (callbacks.onComplete) callbacks.onComplete(JSON.parse(e.data));
+    try {
+      if (callbacks.onComplete) callbacks.onComplete(JSON.parse(e.data));
+    } catch(ex) { /* ignore malformed SSE data */ }
   });
   source.onerror = function() {
     source.close();
@@ -2616,6 +2620,10 @@ function formatDuration(seconds) {
 
     // Always poll once for navbar badge
     pollJobs();
+
+    // Clear any existing timers before starting new ones
+    if (_jobPollTimer) { clearInterval(_jobPollTimer); _jobPollTimer = null; }
+    if (_navJobPollTimer) { clearInterval(_navJobPollTimer); _navJobPollTimer = null; }
 
     if (panelOpen) {
       // Fast poll when panel is open; no slow poll needed
@@ -2824,7 +2832,7 @@ function formatDuration(seconds) {
     if (lpSource) return;
     lpSource = new EventSource('/api/logs/stream');
     lpSource.addEventListener('log', function(e) {
-      addLpLine(JSON.parse(e.data));
+      try { addLpLine(JSON.parse(e.data)); } catch(ex) { /* ignore malformed SSE data */ }
     });
   }
 
