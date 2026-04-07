@@ -303,6 +303,19 @@ body {
 .detail-flag-btn:hover { border-color: var(--accent); }
 .detail-flag-btn.active-flag { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); }
 .detail-flag-btn.active-reject { background: var(--danger); color: var(--text-primary); border-color: var(--danger); }
+.detail-colors { display: flex; gap: 6px; margin-bottom: 8px; }
+.detail-color-btn {
+  width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; transition: border-color 0.15s, transform 0.1s;
+  position: relative;
+}
+.detail-color-btn:hover { transform: scale(1.15); }
+.detail-color-btn.active { border-color: var(--text-primary); }
+.detail-color-btn[data-color="red"] { background: #e74c3c; }
+.detail-color-btn[data-color="yellow"] { background: #f1c40f; }
+.detail-color-btn[data-color="green"] { background: #2ecc71; }
+.detail-color-btn[data-color="blue"] { background: #3498db; }
+.detail-color-btn[data-color="purple"] { background: #9b59b6; }
 .keyword-tag {
   display: inline-block;
   background: var(--bg-tertiary);
@@ -827,6 +840,17 @@ body {
       </div>
 
       <div class="detail-section">
+        <div class="detail-section-title">Color Label</div>
+        <div class="detail-colors" id="detailColors">
+          <button class="detail-color-btn" data-color="red" onclick="setColorLabel('red')" title="Red (6)"></button>
+          <button class="detail-color-btn" data-color="yellow" onclick="setColorLabel('yellow')" title="Yellow (7)"></button>
+          <button class="detail-color-btn" data-color="green" onclick="setColorLabel('green')" title="Green (8)"></button>
+          <button class="detail-color-btn" data-color="blue" onclick="setColorLabel('blue')" title="Blue (9)"></button>
+          <button class="detail-color-btn" data-color="purple" onclick="setColorLabel('purple')" title="Purple"></button>
+        </div>
+      </div>
+
+      <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords"></div>
         <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." onkeydown="if(event.key==='Enter')addKeyword()">
@@ -923,6 +947,7 @@ var selectedPhotos = new Set(); // multi-select
 var showDetectionBoxes = false;
 var cardFields = ["filename", "rating", "flag", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
+var colorLabels = {};    // {photo_id: color_string}
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
@@ -1365,6 +1390,7 @@ async function loadPhotos() {
       photos = photos.concat(data.photos);
       var newIds = data.photos.map(function(p) { return p.id; });
       loadInatStatus(newIds);
+      fetchColorLabels(newIds);
       currentPage++;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
@@ -2054,6 +2080,9 @@ function renderDetail(photo) {
   if (photo.flag === 'flagged') flagBtns[1].classList.add('active-flag');
   else if (photo.flag === 'rejected') flagBtns[2].classList.add('active-reject');
 
+  // Color labels
+  updateDetailColors();
+
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', location:'📍', descriptive:'◆', people:'👤', event:'📅'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', location:'Location', descriptive:'Descriptive', people:'People', event:'Event'};
@@ -2357,6 +2386,39 @@ async function setFlag(flag) {
     renderGrid();
     loadDetail(selectedPhotoId);
   } catch(e) {}
+}
+
+async function fetchColorLabels(photoIds) {
+  if (!photoIds.length) return;
+  var data = await safeFetch('/api/photos/color_labels?ids=' + photoIds.join(','), {}, { toast: false });
+  if (data) {
+    for (var id in data) colorLabels[id] = data[id];
+  }
+}
+
+async function setColorLabel(color) {
+  if (!selectedPhotoId) return;
+  var current = colorLabels[selectedPhotoId] || null;
+  var newColor = (current === color) ? null : color;
+  await safeFetch('/api/photos/' + selectedPhotoId + '/color_label', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({color: newColor}),
+  });
+  if (newColor) {
+    colorLabels[selectedPhotoId] = newColor;
+  } else {
+    delete colorLabels[selectedPhotoId];
+  }
+  updateDetailColors();
+  renderGrid();
+}
+
+function updateDetailColors() {
+  var current = colorLabels[selectedPhotoId] || null;
+  document.querySelectorAll('.detail-color-btn').forEach(function(btn) {
+    btn.classList.toggle('active', btn.dataset.color === current);
+  });
 }
 
 async function addKeyword() {
