@@ -117,7 +117,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS pending_changes (
                 id          INTEGER PRIMARY KEY,
-                photo_id    INTEGER REFERENCES photos(id),
+                photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
                 change_type TEXT,
                 value       TEXT,
                 change_token TEXT,
@@ -254,24 +254,24 @@ class Database:
         # Migrations for existing databases
         try:
             self.conn.execute("SELECT is_species FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0"
             )
         try:
             self.conn.execute("SELECT group_id FROM predictions LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE predictions ADD COLUMN group_id TEXT")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN vote_count INTEGER")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN total_votes INTEGER")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN individual TEXT")
         try:
             self.conn.execute("SELECT sharpness FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN sharpness REAL")
         try:
             self.conn.execute("SELECT quality_score FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN detection_box TEXT")
             self.conn.execute("ALTER TABLE photos ADD COLUMN detection_conf REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN subject_sharpness REAL")
@@ -279,24 +279,24 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN quality_score REAL")
         try:
             self.conn.execute("SELECT embedding FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
         try:
             self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding_model TEXT")
         try:
             self.conn.execute("SELECT latitude FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN latitude REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN longitude REAL")
         try:
             self.conn.execute("SELECT phash FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN phash TEXT")
         try:
             self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT"
             )
@@ -309,7 +309,7 @@ class Database:
         # Pipeline feature columns (SAM2 masking + quality features)
         try:
             self.conn.execute("SELECT mask_path FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN mask_path TEXT")
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN dino_subject_embedding BLOB"
@@ -328,31 +328,31 @@ class Database:
         # Noise estimate column
         try:
             self.conn.execute("SELECT noise_estimate FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN noise_estimate REAL")
         # Enhanced EXIF metadata columns
         try:
             self.conn.execute("SELECT focal_length FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
         # Ingest: file hash for duplicate detection + companion for raw/JPEG pairing
         try:
             self.conn.execute("SELECT file_hash FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN file_hash TEXT")
             self.conn.execute("ALTER TABLE photos ADD COLUMN companion_path TEXT")
 
         # Full EXIF metadata JSON blob
         try:
             self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN exif_data TEXT")
 
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.executescript("""
                 CREATE TABLE IF NOT EXISTS edit_history (
                     id           INTEGER PRIMARY KEY,
@@ -376,7 +376,7 @@ class Database:
         # Add undone column to edit_history if missing (migration for existing databases)
         try:
             self.conn.execute("SELECT undone FROM edit_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE edit_history ADD COLUMN undone INTEGER DEFAULT 0")
 
         # Workspace migration for existing databases
@@ -409,7 +409,7 @@ class Database:
             # to UNIQUE(photo_id, model, workspace_id)
             try:
                 self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
-            except Exception:
+            except sqlite3.OperationalError:
                 self.conn.execute(
                     """CREATE TABLE predictions_new (
                         id          INTEGER PRIMARY KEY,
@@ -457,7 +457,7 @@ class Database:
             for table in ("collections", "pending_changes"):
                 try:
                     self.conn.execute(f"SELECT workspace_id FROM {table} LIMIT 0")
-                except Exception:
+                except sqlite3.OperationalError:
                     self.conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN workspace_id INTEGER "
                         f"REFERENCES workspaces(id) ON DELETE CASCADE"
@@ -471,14 +471,14 @@ class Database:
         # Ensure change_token column exists (added after workspace migration)
         try:
             self.conn.execute("SELECT change_token FROM pending_changes LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE pending_changes ADD COLUMN change_token TEXT")
             self.conn.commit()
 
         # Keyword type/location/taxon columns (taxonomy support)
         try:
             self.conn.execute("SELECT type FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN type TEXT NOT NULL DEFAULT 'general'"
             )
@@ -488,12 +488,12 @@ class Database:
             )
         try:
             self.conn.execute("SELECT latitude FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE keywords ADD COLUMN latitude REAL")
             self.conn.execute("ALTER TABLE keywords ADD COLUMN longitude REAL")
         try:
             self.conn.execute("SELECT taxon_id FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
             )
@@ -592,10 +592,34 @@ class Database:
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE folders ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
             )
+
+        # Migrate pending_changes: add ON DELETE CASCADE to photo_id FK.
+        # SQLite doesn't support ALTER FOREIGN KEY, so recreate the table.
+        pc_schema = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_changes'"
+        ).fetchone()
+        if pc_schema and "ON DELETE CASCADE" not in pc_schema[0].upper().split("PHOTO_ID", 1)[-1].split(",")[0]:
+            self.conn.executescript("""
+                CREATE TABLE pending_changes_new (
+                    id          INTEGER PRIMARY KEY,
+                    photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+                    change_type TEXT,
+                    value       TEXT,
+                    change_token TEXT,
+                    created_at  TEXT DEFAULT (datetime('now')),
+                    workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
+                );
+                INSERT INTO pending_changes_new
+                    SELECT id, photo_id, change_type, value, change_token, created_at, workspace_id
+                    FROM pending_changes;
+                DROP TABLE pending_changes;
+                ALTER TABLE pending_changes_new RENAME TO pending_changes;
+            """)
+            self.conn.commit()
 
         # Ensure indexes exist (for fresh DBs that skip migration, and for
         # legacy DBs where DROP TABLE predictions destroys earlier indexes)
@@ -1533,6 +1557,7 @@ class Database:
         }
         order = sort_map.get(sort, "p.timestamp ASC")
 
+        page = max(1, page)
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
@@ -3432,6 +3457,7 @@ class Database:
             return []
 
         folder_join, join_clause, where, params = parts
+        page = max(1, page)
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 

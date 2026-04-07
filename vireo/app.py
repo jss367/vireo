@@ -1154,8 +1154,8 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/edit-history")
     def api_edit_history():
         db = _get_db()
-        limit = request.args.get("limit", 50, type=int)
-        offset = request.args.get("offset", 0, type=int)
+        limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
+        offset = max(0, request.args.get("offset", 0, type=int))
         return jsonify(db.get_edit_history(limit=limit, offset=offset))
 
     # -- Statistics --
@@ -1610,7 +1610,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         nav_order = body.get("nav_order")
         if not isinstance(nav_order, list):
-            return jsonify({"error": "nav_order must be a list"}), 400
+            return json_error("nav_order must be a list")
         ws = db.get_workspace(db._active_workspace_id)
         existing = {}
         if ws and ws["config_overrides"]:
@@ -1691,7 +1691,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
-            return jsonify({"error": "collection_id required"}), 400
+            return json_error("collection_id required")
 
         photos = db.get_collection_photos(collection_id, per_page=999999)
         photo_ids = [p["id"] for p in photos]
@@ -2098,9 +2098,9 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
         if not all(isinstance(pid, int) for pid in photo_ids):
-            return jsonify({"error": "photo_ids must be a list of integers"}), 400
+            return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -2114,7 +2114,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 file_paths.append(os.path.join(folder_path, photo["filename"]))
 
         if not file_paths:
-            return jsonify({"error": "No photos found"}), 404
+            return json_error("No photos found", 404)
 
         editor = cfg.get("external_editor")
         try:
@@ -2134,7 +2134,7 @@ def create_app(db_path, thumb_cache_dir=None):
                         subprocess.Popen(["xdg-open", fp])
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
-            return jsonify({"error": str(e)}), 500
+            return json_error(str(e), 500)
 
         return jsonify({"opened": len(file_paths)})
 
@@ -4624,13 +4624,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/logs/recent")
     def api_logs_recent():
-        count = request.args.get("count", 100, type=int)
+        count = min(max(1, request.args.get("count", 100, type=int)), 1000)
         return jsonify(app._log_broadcaster.get_recent(count))
 
     @app.route("/api/jobs/history")
     def api_job_history():
         db = _get_db()
-        limit = request.args.get("limit", 10, type=int)
+        limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
         return jsonify(app._job_runner.get_history(db, limit=limit))
 
     # -- Image serving --
@@ -5839,7 +5839,7 @@ def create_app(db_path, thumb_cache_dir=None):
         if not query:
             return json_error("Missing query parameter 'q'")
 
-        limit = request.args.get("limit", 50, type=int)
+        limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         threshold = request.args.get("threshold", 0.15, type=float)
 
         db = _get_db()
@@ -5916,19 +5916,14 @@ def create_app(db_path, thumb_cache_dir=None):
         import numpy as np
 
         db = _get_db()
-        limit = request.args.get("limit", 20, type=int)
+        limit = min(max(1, request.args.get("limit", 20, type=int)), 1000)
 
         # Get the source photo's embedding
         source = db.conn.execute(
             "SELECT embedding FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
         if not source or not source["embedding"]:
-            return (
-                jsonify(
-                    {"error": "No embedding for this photo — run classification first"}
-                ),
-                400,
-            )
+            return json_error("No embedding for this photo — run classification first")
 
         source_emb = np.frombuffer(source["embedding"], dtype=np.float32)
 
