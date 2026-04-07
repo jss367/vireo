@@ -789,7 +789,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("rating must be an integer 0-5")
         old = db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
-        db.update_photo_rating(photo_id, rating)
+        try:
+            db.update_photo_rating(photo_id, rating)
+        except ValueError as e:
+            return json_error(str(e), 403)
         db.queue_change(photo_id, "rating", str(rating))
         db.record_edit('rating', f'Set rating to {rating}', str(rating),
                        [{'photo_id': photo_id, 'old_value': str(old_rating), 'new_value': str(rating)}])
@@ -804,7 +807,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         old = db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
-        db.update_photo_flag(photo_id, flag)
+        try:
+            db.update_photo_flag(photo_id, flag)
+        except ValueError as e:
+            return json_error(str(e), 403)
         db.record_edit('flag', f'Set flag to {flag}', flag,
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
@@ -934,7 +940,10 @@ def create_app(db_path, thumb_cache_dir=None):
         photos_map = db.get_photos_by_ids(photo_ids)
         old_values = {pid: photos_map[pid]["rating"] for pid in photo_ids if pid in photos_map}
         valid_ids = list(old_values.keys())
-        db.batch_update_photo_rating(valid_ids, rating)
+        try:
+            db.batch_update_photo_rating(valid_ids, rating)
+        except ValueError as e:
+            return json_error(str(e), 403)
         for pid in valid_ids:
             db.queue_change(pid, "rating", str(rating))
         items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
@@ -955,7 +964,10 @@ def create_app(db_path, thumb_cache_dir=None):
         photos_map = db.get_photos_by_ids(photo_ids)
         old_values = {pid: photos_map[pid]["flag"] for pid in photo_ids if pid in photos_map}
         valid_ids = list(old_values.keys())
-        db.batch_update_photo_flag(valid_ids, flag)
+        try:
+            db.batch_update_photo_flag(valid_ids, flag)
+        except ValueError as e:
+            return json_error(str(e), 403)
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -1795,28 +1807,31 @@ def create_app(db_path, thumb_cache_dir=None):
                 old_flags[pid] = old["flag"] or "none"
 
         # Flag picks and add species keyword
-        if species:
-            kid = db.add_keyword(species, is_species=True)
-            for pid in picks:
-                db.update_photo_flag(pid, "flagged")
-                db.tag_photo(pid, kid)
-                db.queue_change(pid, "keyword_add", species)
+        try:
+            if species:
+                kid = db.add_keyword(species, is_species=True)
+                for pid in picks:
+                    db.update_photo_flag(pid, "flagged")
+                    db.tag_photo(pid, kid)
+                    db.queue_change(pid, "keyword_add", species)
 
-            # Record keyword_add history for picks
-            kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
-                        for pid in picks]
-            if kw_items:
-                db.record_edit('keyword_add',
-                               f'Added "{species}" to {len(picks)} photos (group prediction)',
-                               str(kid), kw_items, is_batch=len(picks) > 1)
-        else:
-            # No species — still flag picks
-            for pid in picks:
-                db.update_photo_flag(pid, "flagged")
+                # Record keyword_add history for picks
+                kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
+                            for pid in picks]
+                if kw_items:
+                    db.record_edit('keyword_add',
+                                   f'Added "{species}" to {len(picks)} photos (group prediction)',
+                                   str(kid), kw_items, is_batch=len(picks) > 1)
+            else:
+                # No species — still flag picks
+                for pid in picks:
+                    db.update_photo_flag(pid, "flagged")
 
-        # Reject rejects
-        for pid in rejects:
-            db.update_photo_flag(pid, "rejected")
+            # Reject rejects
+            for pid in rejects:
+                db.update_photo_flag(pid, "rejected")
+        except ValueError as e:
+            return json_error(str(e), 403)
 
         # Record flag history for all picks + rejects
         flag_items = []
@@ -5810,10 +5825,13 @@ def create_app(db_path, thumb_cache_dir=None):
             if old:
                 old_flags[pid] = old["flag"] or "none"
 
-        for pid in keepers:
-            db.update_photo_flag(pid, "flagged")
-        for pid in rejects:
-            db.update_photo_flag(pid, "rejected")
+        try:
+            for pid in keepers:
+                db.update_photo_flag(pid, "flagged")
+            for pid in rejects:
+                db.update_photo_flag(pid, "rejected")
+        except ValueError as e:
+            return json_error(str(e), 403)
 
         # Record flag history
         flag_items = []
