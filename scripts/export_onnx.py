@@ -140,11 +140,16 @@ def export_megadetector(output_dir, opset, validate=False):
     """
     log.info("Exporting MegaDetector v6...")
 
-    from PytorchWildlife.models.detection import MegaDetectorV6
+    from ultralytics import YOLO
 
-    model = MegaDetectorV6(pretrained=True, version="MDV6-yolov9-c")
-    # The underlying model is an ultralytics YOLO model
-    yolo_model = model.model
+    # Load via ultralytics directly — PytorchWildlife downloads the weights
+    # to torch hub checkpoints dir
+    weights_path = os.path.join(torch.hub.get_dir(), "checkpoints", "MDV6-yolov9-c.pt")
+    if not os.path.exists(weights_path):
+        # Trigger download via PytorchWildlife
+        from PytorchWildlife.models.detection import MegaDetectorV6
+        MegaDetectorV6(pretrained=True, version="MDV6-yolov9-c")
+    yolo_model = YOLO(weights_path)
 
     out_dir = _ensure_dir(os.path.join(output_dir, "megadetector-v6"))
     onnx_path = os.path.join(out_dir, "model.onnx")
@@ -695,39 +700,13 @@ class _SAM2ImageEncoderWrapper(torch.nn.Module):
         self._sam2 = sam2_model
 
     def forward(self, x):
-        # SAM2 image encoder produces multi-scale features.
-        # We need the final image embeddings that the mask decoder expects.
-        # The exact method depends on the SAM2 version.
         backbone_out = self.image_encoder(x)
-
-        # SAM2 typically returns a dict with "vision_features" and
-        # "vision_pos_enc" keys, or processes through a neck.
-        # For ONNX export we need a single tensor output.
-        # Try the full _image_encode path if available.
-        if hasattr(self._sam2, "_prepare_backbone_features"):
-            # Use SAM2's internal pipeline to get the final embedding
-            (
-                _,
-                vision_feats,
-                _,
-                _,
-            ) = self._sam2._prepare_backbone_features(backbone_out)
-            # vision_feats[-1] is the highest-res feature map
-            # Reshape from (HW, B, C) to (B, C, H, W)
-            feat = vision_feats[-1]
-            B = x.shape[0]
-            hw = feat.shape[0]
-            C = feat.shape[-1]
-            H = W = int(hw ** 0.5)
-            return feat.permute(1, 2, 0).reshape(B, C, H, W)
-
-        # Fallback: return raw backbone output
-        if isinstance(backbone_out, dict):
-            # Return the first tensor value
-            for v in backbone_out.values():
-                if isinstance(v, torch.Tensor):
-                    return v
-        return backbone_out
+        # Project high-res FPN features through mask decoder conv layers
+        # (SAM2 does this in forward_image to avoid recomputing on each click)
+        fpn = backbone_out["backbone_fpn"]
+        hr0 = self._sam2.sam_mask_decoder.conv_s0(fpn[0])  # 256->32 channels
+        hr1 = self._sam2.sam_mask_decoder.conv_s1(fpn[1])  # 256->64 channels
+        return backbone_out["vision_features"], hr0, hr1
 
 
 class _SAM2MaskDecoderWrapper(torch.nn.Module):
@@ -737,7 +716,8 @@ class _SAM2MaskDecoderWrapper(torch.nn.Module):
         super().__init__()
         self.sam_model = sam2_model
 
-    def forward(self, image_embeddings, point_coords, point_labels,
+    def forward(self, image_embeddings, high_res_feat_0, high_res_feat_1,
+                point_coords, point_labels,
                 mask_input, has_mask_input, orig_im_size):
         # Encode prompts
         sparse_embeddings, dense_embeddings = self.sam_model.sam_prompt_encoder(
@@ -746,13 +726,15 @@ class _SAM2MaskDecoderWrapper(torch.nn.Module):
             masks=mask_input if has_mask_input.sum() > 0 else None,
         )
 
-        # Run mask decoder
-        low_res_masks, iou_predictions = self.sam_model.sam_mask_decoder(
+        # Run mask decoder with high-res features from encoder FPN
+        low_res_masks, iou_predictions, _, _ = self.sam_model.sam_mask_decoder(
             image_embeddings=image_embeddings,
             image_pe=self.sam_model.sam_prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=True,
+            repeat_image=False,
+            high_res_features=[high_res_feat_0, high_res_feat_1],
         )
 
         # Upscale masks to original image size
@@ -799,8 +781,9 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
     dummy_image = torch.randn(1, 3, 1024, 1024)
 
     with torch.no_grad():
-        pt_enc_out = encoder_wrapper(dummy_image)
-    log.info("  Image encoder output shape: %s", pt_enc_out.shape)
+        pt_enc_out, pt_hr0, pt_hr1 = encoder_wrapper(dummy_image)
+    log.info("  Image encoder output shapes: embeddings=%s, hr0=%s, hr1=%s",
+             pt_enc_out.shape, pt_hr0.shape, pt_hr1.shape)
 
     try:
         torch.onnx.export(
@@ -809,11 +792,14 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
             encoder_path,
             opset_version=opset,
             input_names=["pixel_values"],
-            output_names=["image_embeddings"],
+            output_names=["image_embeddings", "high_res_feat_0", "high_res_feat_1"],
             dynamic_axes={
                 "pixel_values": {0: "batch"},
                 "image_embeddings": {0: "batch"},
+                "high_res_feat_0": {0: "batch"},
+                "high_res_feat_1": {0: "batch"},
             },
+            dynamo=False,  # legacy exporter — dynamo hangs on SAM2
         )
         log.info("  Image encoder exported: %s", encoder_path)
     except Exception as e:
@@ -829,8 +815,10 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
     decoder_wrapper.eval()
 
     # Create dummy decoder inputs
-    # Use the actual encoder output shape for image_embeddings
+    # Use the actual encoder outputs for image_embeddings and high-res features
     dummy_embeddings = pt_enc_out.detach()
+    dummy_hr0 = pt_hr0.detach()
+    dummy_hr1 = pt_hr1.detach()
     dummy_point_coords = torch.tensor([[[100.0, 100.0], [400.0, 400.0]]], dtype=torch.float32)
     dummy_point_labels = torch.tensor([[2.0, 3.0]], dtype=torch.float32)
     dummy_mask_input = torch.zeros(1, 1, 256, 256, dtype=torch.float32)
@@ -840,7 +828,8 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
     try:
         with torch.no_grad():
             pt_masks, pt_scores = decoder_wrapper(
-                dummy_embeddings, dummy_point_coords, dummy_point_labels,
+                dummy_embeddings, dummy_hr0, dummy_hr1,
+                dummy_point_coords, dummy_point_labels,
                 dummy_mask_input, dummy_has_mask, dummy_orig_size,
             )
         log.info("  Mask decoder output shapes: masks=%s, scores=%s",
@@ -848,17 +837,22 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
 
         torch.onnx.export(
             decoder_wrapper,
-            (dummy_embeddings, dummy_point_coords, dummy_point_labels,
+            (dummy_embeddings, dummy_hr0, dummy_hr1,
+             dummy_point_coords, dummy_point_labels,
              dummy_mask_input, dummy_has_mask, dummy_orig_size),
             decoder_path,
             opset_version=opset,
             input_names=[
-                "image_embeddings", "point_coords", "point_labels",
+                "image_embeddings", "high_res_feat_0", "high_res_feat_1",
+                "point_coords", "point_labels",
                 "mask_input", "has_mask_input", "orig_im_size",
             ],
             output_names=["masks", "iou_predictions"],
+            dynamo=False,  # legacy exporter — dynamo hangs on SAM2
             dynamic_axes={
                 "image_embeddings": {0: "batch"},
+                "high_res_feat_0": {0: "batch"},
+                "high_res_feat_1": {0: "batch"},
                 "point_coords": {0: "batch", 1: "num_points"},
                 "point_labels": {0: "batch", 1: "num_points"},
                 "masks": {0: "batch"},
@@ -893,12 +887,12 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
         dummy_np = np.random.randn(1, 3, 1024, 1024).astype(np.float32)
 
         with torch.no_grad():
-            pt_ref = encoder_wrapper(torch.from_numpy(dummy_np)).numpy()
+            pt_emb, pt_h0, pt_h1 = encoder_wrapper(torch.from_numpy(dummy_np))
 
         _validate_onnx(
             encoder_path,
             {"pixel_values": dummy_np},
-            [pt_ref],
+            [pt_emb.numpy(), pt_h0.numpy(), pt_h1.numpy()],
             tolerance=0.02,
         )
 
