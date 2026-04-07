@@ -142,7 +142,7 @@ def export_megadetector(output_dir, opset, validate=False):
 
     from PytorchWildlife.models.detection import MegaDetectorV6
 
-    model = MegaDetectorV6(pretrained=True)
+    model = MegaDetectorV6(pretrained=True, version="MDV6-yolov9-c")
     # The underlying model is an ultralytics YOLO model
     yolo_model = model.model
 
@@ -205,8 +205,8 @@ def export_megadetector(output_dir, opset, validate=False):
 # BioCLIP model configurations
 _BIOCLIP_CONFIGS = {
     "bioclip-vit-b-16": {
-        "model_name": "ViT-B-16",
-        "pretrained": "hf-hub:imageomics/bioclip",
+        "model_name": "hf-hub:imageomics/bioclip",
+        "pretrained": None,
         "input_size": 224,
         "embedding_dim": 512,
         "mean": [0.48145466, 0.4578275, 0.40821073],
@@ -784,7 +784,7 @@ def _export_sam2_variant(model_id, output_dir, opset, validate=False):
 
     from sam2.build_sam import build_sam2_hf
 
-    sam2_model = build_sam2_hf(hf_model_id)
+    sam2_model = build_sam2_hf(hf_model_id, device="cpu")
     sam2_model.eval()
 
     out_dir = _ensure_dir(os.path.join(output_dir, model_id))
