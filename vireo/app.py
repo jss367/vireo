@@ -4570,9 +4570,11 @@ def create_app(db_path, thumb_cache_dir=None):
                     except queue.Empty:
                         # Send keepalive
                         yield ": keepalive\n\n"
-                        # Check if job is done (in case we missed the complete event)
+                        # Check if job is done (in case we missed the complete event).
+                        # Include "cancelled" as a terminal state so cancelled jobs
+                        # close the SSE stream instead of looping indefinitely.
                         j = runner.get(job_id)
-                        if j and j["status"] in ("completed", "failed"):
+                        if j and j["status"] in ("completed", "failed", "cancelled"):
                             yield f"event: complete\ndata: {json.dumps({'status': j['status'], 'result': j['result'], 'errors': j['errors']})}\n\n"
                             break
             finally:
