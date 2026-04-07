@@ -860,6 +860,19 @@ function renderGrid() {
   grid.innerHTML = items.map(function(p) { return renderPredictionCard(p); }).join('');
 }
 
+/* Delegate grid clicks for lightbox and group review (XSS-safe) */
+document.getElementById('grid').addEventListener('click', function(e) {
+  var img = e.target.closest('img[data-photo-id]');
+  if (img) {
+    openLightbox(parseInt(img.dataset.photoId, 10), img.dataset.filename || '');
+    return;
+  }
+  var groupBtn = e.target.closest('button[data-group-id]');
+  if (groupBtn) {
+    openGroupReview(groupBtn.dataset.groupId, groupBtn.dataset.model || '');
+  }
+});
+
 function getConsensusSpecies(pred) {
   // For grouped predictions, derive the consensus winner from the individual votes
   if (pred.individual) {
@@ -987,7 +1000,7 @@ function renderPredictionCard(pred) {
   var hasBox = pred.box_x != null && pred.box_y != null && pred.box_w != null && pred.box_h != null;
   var imgStyle = hasBox ? 'cursor:pointer;object-fit:contain;' : 'cursor:pointer;';
   var imgTag = '<img src="' + thumbUrl + '" loading="lazy" alt="' + escapeAttr(pred.filename || '') +
-    '" style="' + imgStyle + '" onclick="openLightbox(' + pred.photo_id + ',\'' + escapeAttr(pred.filename || '').replace(/'/g, "\\'") + '\')">';
+    '" style="' + imgStyle + '" data-photo-id="' + pred.photo_id + '" data-filename="' + escapeAttr(pred.filename || '') + '">';
 
   var imgHtml;
   if (hasBox) {
@@ -1031,7 +1044,7 @@ function groupMembersHtml(pred) {
   });
   if (members.length <= 1) return '';
 
-  return '<button onclick="openGroupReview(\'' + escapeAttr(pred.group_id) + '\',\'' + escapeAttr(pred.model || '') + '\')" ' +
+  return '<button data-group-id="' + escapeAttr(pred.group_id) + '" data-model="' + escapeAttr(pred.model || '') + '" ' +
     'style="background:var(--accent,#24E5CA);color:var(--accent-text,#0A1F2E);border:none;border-radius:6px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;width:100%;display:flex;align-items:center;justify-content:center;gap:6px;">' +
     '<span style="font-size:16px;">&#9638;</span> Review Burst Group (' + members.length + ' photos)</button>';
 }

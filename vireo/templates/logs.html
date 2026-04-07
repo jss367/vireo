@@ -101,14 +101,18 @@ safeFetch('/api/logs/recent?count=500', {}, { toast: false })
 /* Connect to SSE stream */
 var source = new EventSource('/api/logs/stream');
 source.addEventListener('log', function(e) {
-  var record = JSON.parse(e.data);
-  addLogLine(record);
-  applyFilter();
+  try {
+    var record = JSON.parse(e.data);
+    addLogLine(record);
+    applyFilter();
+  } catch(ex) { /* ignore malformed SSE data */ }
 });
 source.onerror = function() {
   source.close();
   showToast('Log stream disconnected', 'error');
 };
+/* Clean up SSE on page unload */
+window.addEventListener('beforeunload', function() { source.close(); });
 
 function addLogLine(record) {
   var time = new Date(record.time * 1000);
