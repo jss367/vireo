@@ -2327,3 +2327,73 @@ def test_batch_remove_color_label(tmp_path):
     db.batch_set_color_label([p1, p2], None)
     assert db.get_color_label(p1) is None
     assert db.get_color_label(p2) is None
+
+
+def test_get_photos_filter_by_color_label(tmp_path):
+    """get_photos can filter by color label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(p1, 'red')
+    db.set_color_label(p2, 'blue')
+
+    results = db.get_photos(color_label='red')
+    assert len(results) == 1
+    assert results[0]['filename'] == 'a.jpg'
+
+
+def test_count_filtered_photos_with_color_label(tmp_path):
+    """count_filtered_photos respects color_label filter."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(p1, 'green')
+
+    count = db.count_filtered_photos(color_label='green')
+    assert count == 1
+
+
+def test_collection_color_label_rule(tmp_path):
+    """Collections support color_label rules."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(p1, 'red')
+    db.set_color_label(p2, 'blue')
+
+    rules = json.dumps([{"field": "color_label", "op": "equals", "value": "red"}])
+    cid = db.add_collection("Reds", rules)
+    photos = db.get_collection_photos(cid)
+    assert len(photos) == 1
+    assert photos[0]['filename'] == 'a.jpg'
+
+
+def test_collection_color_label_not_equals_rule(tmp_path):
+    """Collections support color_label 'is not' rule."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(p1, 'red')
+    db.set_color_label(p2, 'blue')
+
+    rules = json.dumps([{"field": "color_label", "op": "is not", "value": "red"}])
+    cid = db.add_collection("Not Red", rules)
+    photos = db.get_collection_photos(cid)
+    filenames = {p['filename'] for p in photos}
+    assert 'a.jpg' not in filenames
+    assert 'b.jpg' in filenames
+    assert 'c.jpg' in filenames

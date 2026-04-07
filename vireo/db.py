@@ -1400,6 +1400,7 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        color_label=None,
     ):
         """Return paginated, filtered photo list scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -1428,6 +1429,12 @@ class Database:
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
             params.append(f"%{keyword}%")
             params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            params.append(color_label)
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1464,6 +1471,7 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        color_label=None,
     ):
         """Return count of photos matching the given filters, scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -1492,6 +1500,12 @@ class Database:
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
             params.append(f"%{keyword}%")
             params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            params.append(color_label)
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -3195,6 +3209,23 @@ class Database:
                     params.append(value)
                 elif op == "is not":
                     conditions.append("p.flag != ?")
+                    params.append(value)
+            elif field == "color_label":
+                if op in ("equals", "is"):
+                    conditions.append(
+                        """EXISTS (
+                        SELECT 1 FROM photo_color_labels pcl
+                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
+                    )
+                    params.append(self._ws_id())
+                    params.append(value)
+                elif op == "is not":
+                    conditions.append(
+                        """NOT EXISTS (
+                        SELECT 1 FROM photo_color_labels pcl
+                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
+                    )
+                    params.append(self._ws_id())
                     params.append(value)
             elif field == "has_species":
                 if op == "equals" and value is False or value == 0:
