@@ -536,6 +536,7 @@ def create_app(db_path, thumb_cache_dir=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
 
         photos = db.get_photos(
             folder_id=folder_id,
@@ -546,10 +547,11 @@ def create_app(db_path, thumb_cache_dir=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            color_label=color_label,
         )
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -558,6 +560,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                color_label=color_label,
             )
 
         photo_dicts = [dict(p) for p in photos]
@@ -605,6 +608,16 @@ def create_app(db_path, thumb_cache_dir=None):
                 collection_id=collection_id,
             )
         )
+
+    @app.route("/api/photos/color_labels")
+    def api_photos_color_labels():
+        db = _get_db()
+        ids_str = request.args.get("ids", "")
+        if not ids_str:
+            return jsonify({})
+        photo_ids = [int(x) for x in ids_str.split(",") if x.strip().isdigit()]
+        labels = db.get_color_labels_for_photos(photo_ids)
+        return jsonify(labels)
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -792,6 +805,23 @@ def create_app(db_path, thumb_cache_dir=None):
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
 
+    @app.route("/api/photos/<int:photo_id>/color_label", methods=["POST"])
+    def api_set_color_label(photo_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        color = body.get("color")
+        if color is not None and color not in db.VALID_COLOR_LABELS:
+            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
+        old_color = db.get_color_label(photo_id) or ''
+        new_color = color or ''
+        if color:
+            db.set_color_label(photo_id, color)
+        else:
+            db.remove_color_label(photo_id)
+        db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
+                       [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
     def api_add_keyword(photo_id):
         db = _get_db()
@@ -926,6 +956,25 @@ def create_app(db_path, thumb_cache_dir=None):
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
         return jsonify({"ok": True, "updated": len(old_values)})
+
+    @app.route("/api/batch/color_label", methods=["POST"])
+    def api_batch_color_label():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        color = body.get("color")
+        if color is not None and color not in db.VALID_COLOR_LABELS:
+            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
+        if not photo_ids:
+            return json_error("photo_ids required")
+        old_labels = db.get_color_labels_for_photos(photo_ids)
+        new_color = color or ''
+        db.batch_set_color_label(photo_ids, color)
+        items = [{'photo_id': pid, 'old_value': old_labels.get(pid, ''), 'new_value': new_color}
+                 for pid in photo_ids]
+        db.record_edit('color_label', f'Set color to {color or "none"} on {len(photo_ids)} photos',
+                       new_color, items, is_batch=True)
+        return jsonify({"ok": True, "updated": len(photo_ids)})
 
     @app.route("/api/batch/keyword", methods=["POST"])
     def api_batch_keyword():
