@@ -4572,7 +4572,11 @@ def create_app(db_path, thumb_cache_dir=None):
                         yield ": keepalive\n\n"
                         # Check if job is done (in case we missed the complete event)
                         j = runner.get(job_id)
-                        if j and j["status"] in ("completed", "failed"):
+                        if j is None:
+                            # Job was pruned from finished jobs dict
+                            yield f"event: complete\ndata: {json.dumps({'status': 'completed', 'result': None, 'errors': []})}\n\n"
+                            break
+                        if j["status"] in ("completed", "failed", "cancelled"):
                             yield f"event: complete\ndata: {json.dumps({'status': j['status'], 'result': j['result'], 'errors': j['errors']})}\n\n"
                             break
             finally:
