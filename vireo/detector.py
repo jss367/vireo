@@ -5,12 +5,14 @@ Provides bounding boxes around animals in photos for quality scoring.
 
 import logging
 import os
+import threading
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
 _session = None
+_lock = threading.Lock()
 
 # MegaDetector ONNX model path — downloaded to ~/.vireo/models/megadetector-v6/
 MEGADETECTOR_ONNX_DIR = os.path.expanduser("~/.vireo/models/megadetector-v6")
@@ -24,21 +26,28 @@ CLASS_NAMES = {0: "animal", 1: "person", 2: "vehicle"}
 
 
 def _get_session():
-    """Load MegaDetector ONNX session (cached singleton)."""
+    """Load MegaDetector ONNX session (cached singleton).
+
+    Uses double-checked locking to ensure only one thread creates the
+    session, even when multiple threads call this concurrently.
+    """
     global _session
     if _session is not None:
         return _session
 
-    if not os.path.exists(MEGADETECTOR_ONNX_PATH):
-        raise RuntimeError(
-            f"MegaDetector ONNX model not found at {MEGADETECTOR_ONNX_PATH}. "
-            "Download it from the Models page in Settings."
-        )
+    with _lock:
+        if _session is None:
+            if not os.path.exists(MEGADETECTOR_ONNX_PATH):
+                raise RuntimeError(
+                    f"MegaDetector ONNX model not found at {MEGADETECTOR_ONNX_PATH}. "
+                    "Download it from the Models page in Settings."
+                )
 
-    from onnx_runtime import create_session
+            from onnx_runtime import create_session
 
-    _session = create_session(MEGADETECTOR_ONNX_PATH)
-    log.info("MegaDetector ONNX model loaded")
+            _session = create_session(MEGADETECTOR_ONNX_PATH)
+            log.info("MegaDetector ONNX model loaded")
+
     return _session
 
 
