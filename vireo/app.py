@@ -4591,9 +4591,18 @@ def create_app(db_path, thumb_cache_dir=None):
                     except queue.Empty:
                         # Send keepalive
                         yield ": keepalive\n\n"
-                        # Check if job is done (in case we missed the complete event)
+                        # Check if job is done (in case we missed the complete event).
+                        # Include "cancelled" as a terminal state so cancelled jobs
+                        # close the SSE stream instead of looping indefinitely.
                         j = runner.get(job_id)
-                        if j and j["status"] in ("completed", "failed"):
+                        if j is None:
+                            # Job was pruned from finished jobs dict; true terminal
+                            # status is unknown (could have been completed, failed, or
+                            # cancelled before pruning).  Emit "expired" so callers do
+                            # not incorrectly execute success-only code paths.
+                            yield f"event: complete\ndata: {json.dumps({'status': 'expired', 'result': None, 'errors': ['job expired from server memory before stream could read final status']})}\n\n"
+                            break
+                        if j["status"] in ("completed", "failed", "cancelled"):
                             yield f"event: complete\ndata: {json.dumps({'status': j['status'], 'result': j['result'], 'errors': j['errors']})}\n\n"
                             break
             finally:
