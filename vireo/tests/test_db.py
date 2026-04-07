@@ -2397,3 +2397,35 @@ def test_collection_color_label_not_equals_rule(tmp_path):
     assert 'a.jpg' not in filenames
     assert 'b.jpg' in filenames
     assert 'c.jpg' in filenames
+
+
+def test_undo_color_label(tmp_path):
+    """Undo reverts a color label change."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(pid, 'red')
+    db.record_edit('color_label', 'Set color to red', 'red',
+                   [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
+
+    result = db.undo_last_edit()
+    assert result is not None
+    assert db.get_color_label(pid) is None
+
+
+def test_redo_color_label(tmp_path):
+    """Redo re-applies a color label change."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(pid, 'red')
+    db.record_edit('color_label', 'Set color to red', 'red',
+                   [{'photo_id': pid, 'old_value': '', 'new_value': 'red'}])
+
+    db.undo_last_edit()
+    assert db.get_color_label(pid) is None
+
+    db.redo_last_undo()
+    assert db.get_color_label(pid) == 'red'

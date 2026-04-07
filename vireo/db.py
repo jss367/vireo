@@ -3005,6 +3005,11 @@ class Database:
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val)
+            elif entry['action_type'] == 'color_label':
+                if old_val:
+                    self.set_color_label(pid, old_val)
+                else:
+                    self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 self.untag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
@@ -3059,6 +3064,11 @@ class Database:
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, entry['new_value'])
+            elif entry['action_type'] == 'color_label':
+                if new_val:
+                    self.set_color_label(pid, new_val)
+                else:
+                    self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
