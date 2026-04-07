@@ -71,8 +71,6 @@ KNOWN_MODELS = [
             "text_encoder.onnx",
             "tokenizer.json",
             "config.json",
-            "tol_embeddings.npy",
-            "tol_classes.json",
         ],
         "description": "2025 model with ViT-H/14 backbone, 986M parameters. Largest BioCLIP variant.",
         "size_mb": 3900,
