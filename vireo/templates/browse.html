@@ -1310,7 +1310,15 @@ function removeRule(idx) {
 
 function updateRule(idx, key, val) {
   collectionRules[idx][key] = val;
-  if (key === 'field') renderRules();
+  if (key === 'field') {
+    if (val === 'color_label') {
+      collectionRules[idx].op = 'is';
+      collectionRules[idx].value = 'red';
+    } else if (val === 'flag') {
+      collectionRules[idx].op = 'is';
+    }
+    renderRules();
+  }
 }
 
 function renderRules() {
@@ -1321,6 +1329,7 @@ function renderRules() {
         '<option value="keyword"' + (r.field==='keyword'?' selected':'') + '>Keyword</option>' +
         '<option value="rating"' + (r.field==='rating'?' selected':'') + '>Rating</option>' +
         '<option value="flag"' + (r.field==='flag'?' selected':'') + '>Flag</option>' +
+        '<option value="color_label"' + (r.field==='color_label'?' selected':'') + '>Color Label</option>' +
         '<option value="extension"' + (r.field==='extension'?' selected':'') + '>Extension</option>' +
         '<option value="folder"' + (r.field==='folder'?' selected':'') + '>Folder</option>' +
         '<option value="timestamp"' + (r.field==='timestamp'?' selected':'') + '>Date</option>' +
@@ -1335,7 +1344,15 @@ function renderRules() {
         '<option value="under"' + (r.op==='under'?' selected':'') + '>under</option>' +
         '<option value="not_under"' + (r.op==='not_under'?' selected':'') + '>not under</option>' +
       '</select>' +
-      '<input type="' + (r.field === 'timestamp' ? 'date' : 'text') + '" value="' + escapeAttr(String(r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">' +
+      (r.field === 'color_label'
+        ? '<select onchange="updateRule(' + i + ',\'value\',this.value)" style="flex:1;">' +
+            '<option value="red"' + (r.value==='red'?' selected':'') + '>Red</option>' +
+            '<option value="yellow"' + (r.value==='yellow'?' selected':'') + '>Yellow</option>' +
+            '<option value="green"' + (r.value==='green'?' selected':'') + '>Green</option>' +
+            '<option value="blue"' + (r.value==='blue'?' selected':'') + '>Blue</option>' +
+            '<option value="purple"' + (r.value==='purple'?' selected':'') + '>Purple</option>' +
+          '</select>'
+        : '<input type="' + (r.field === 'timestamp' ? 'date' : 'text') + '" value="' + escapeAttr(String(r.value)) + '" onchange="updateRule(' + i + ',\'value\',this.value)" placeholder="value" style="flex:1;">') +
       '<span class="remove-rule" onclick="removeRule(' + i + ')">&times;</span>' +
     '</div>';
   });
