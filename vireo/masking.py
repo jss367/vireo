@@ -120,6 +120,9 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         enc_input_name = encoder_session.get_inputs()[0].name
         enc_outputs = encoder_session.run(None, {enc_input_name: input_tensor})
         image_embeddings = enc_outputs[0]  # (1, C, H', W')
+        # Encoder also outputs high-res FPN features for the mask decoder
+        high_res_feat_0 = enc_outputs[1] if len(enc_outputs) > 1 else None
+        high_res_feat_1 = enc_outputs[2] if len(enc_outputs) > 2 else None
 
         # Step 2: Encode box prompt as numpy arrays
         # The image encoder resizes to SAM2_INPUT_SIZE x SAM2_INPUT_SIZE,
@@ -153,6 +156,8 @@ def generate_mask(image, detection_box, variant="sam2-small"):
         # Map expected input names to our arrays
         input_map = {
             "image_embeddings": image_embeddings,
+            "high_res_feat_0": high_res_feat_0,
+            "high_res_feat_1": high_res_feat_1,
             "point_coords": point_coords,
             "point_labels": point_labels,
             "mask_input": mask_input,
