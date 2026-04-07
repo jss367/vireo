@@ -147,11 +147,13 @@ def test_get_models_downloaded_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    # Create model directory with required ONNX files
+    # Create model directory with all required files for bioclip-vit-b-16
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
 
     result = models.get_models()
     bioclip = [m for m in result if m["id"] == "bioclip-vit-b-16"]
@@ -180,11 +182,13 @@ def test_set_and_get_active_model(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    # Create model directory with required ONNX files
+    # Create model directory with all required files for bioclip-vit-b-16
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
 
     models.set_active_model("bioclip-vit-b-16")
     active = models.get_active_model()
@@ -200,11 +204,13 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "CONFIG_PATH", cfg_path)
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
 
-    # Create model directory with required ONNX files
+    # Create model directory with all required files for bioclip-vit-b-16
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
 
     models._save_config({
         "models": [],
