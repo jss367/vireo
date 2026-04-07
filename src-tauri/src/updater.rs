@@ -1,13 +1,26 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
+
+/// Prevents overlapping update checks from running simultaneously.
+static CHECKING: AtomicBool = AtomicBool::new(false);
 
 /// Spawn an update check on a background async task.
 ///
 /// When `user_initiated` is true, a dialog is shown even when no update
 /// is available or when the check fails. Background (automatic) checks
 /// stay silent on "no update" and log errors without bothering the user.
+///
+/// If a check is already in progress the call is silently ignored.
 pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
+    // Atomically set the flag; if it was already true another check is running.
+    if CHECKING.swap(true, Ordering::SeqCst) {
+        log::debug!("Update check already in progress, skipping");
+        return;
+    }
+
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         match do_update_check(&handle, user_initiated).await {
@@ -24,6 +37,7 @@ pub fn spawn_update_check(app: &AppHandle, user_initiated: bool) {
                 }
             }
         }
+        CHECKING.store(false, Ordering::SeqCst);
     });
 }
 
