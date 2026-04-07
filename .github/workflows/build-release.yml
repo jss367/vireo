@@ -401,10 +401,11 @@ jobs:
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.app.tar.gz
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.app.tar.gz.sig
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz.sig
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage.sig
           if-no-files-found: warn
           retention-days: 7
 
@@ -446,9 +447,12 @@ jobs:
             -name "*.deb" \
           \) -exec cp {} release-files/ \;
 
-          # Updater signatures — Windows and Linux (v2 mode: .sig alongside installers)
+          # Updater signatures — Windows and Linux (Tauri v2 createUpdaterArtifacts mode)
+          # Windows: installer .exe/.msi already copied above; copy their .sig sidecars.
+          # Linux: .AppImage already copied above; copy its .sig sidecar.
           find artifacts -type f \( \
             -name "*.exe.sig" -o \
+            -name "*.msi.sig" -o \
             -name "*.AppImage.sig" \
           \) -exec cp {} release-files/ \;
 

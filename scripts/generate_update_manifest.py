@@ -6,9 +6,14 @@ Usage: generate_update_manifest.py <tag> <release-dir>
 Scans <release-dir> for signed updater artifacts and writes a latest.json
 manifest that the Tauri updater plugin can consume.
 
-With createUpdaterArtifacts: true (v2 mode), Tauri reuses existing
-installers on Windows/Linux and only adds .sig files alongside them.
-macOS is the exception — .app is wrapped in .tar.gz since it's a directory.
+Tauri v2 with ``createUpdaterArtifacts: true`` produces:
+  - macOS:   <App>_<ver>_<arch>.app.tar.gz  + .app.tar.gz.sig
+  - Windows: <App>_<ver>_<arch>-setup.exe   + .exe.sig   (NSIS installer)
+             <App>_<ver>_<arch>.msi          + .msi.sig   (MSI installer)
+  - Linux:   <App>_<ver>_<arch>.AppImage    + .AppImage.sig
+
+The manifest ``url`` points to the installer; ``signature`` is the content
+of the matching ``.sig`` sidecar.
 """
 
 import json
@@ -18,12 +23,16 @@ from pathlib import Path
 
 REPO = "jss367/vireo"
 
-# (filename suffix, Tauri platform key)
+# Each entry: (installer suffix, sig suffix, Tauri platform key)
+# The sig suffix is the extension appended to the installer filename.
 PLATFORM_MAP = [
-    ("_aarch64.app.tar.gz", "darwin-aarch64"),
-    ("_x64.app.tar.gz", "darwin-x86_64"),
-    ("-setup.exe", "windows-x86_64"),
-    (".AppImage", "linux-x86_64"),
+    # macOS — .app.tar.gz bundle + .app.tar.gz.sig
+    ("_aarch64.app.tar.gz", ".sig", "darwin-aarch64"),
+    ("_x64.app.tar.gz", ".sig", "darwin-x86_64"),
+    # Windows — NSIS .exe installer + .exe.sig  (preferred over .msi)
+    ("-setup.exe", ".sig", "windows-x86_64"),
+    # Linux — .AppImage + .AppImage.sig
+    (".AppImage", ".sig", "linux-x86_64"),
 ]
 
 
@@ -32,7 +41,7 @@ def generate(tag: str, release_dir: Path) -> dict | None:
     base_url = f"https://github.com/{REPO}/releases/download/{tag}"
 
     platforms = {}
-    for suffix, key in PLATFORM_MAP:
+    for suffix, sig_ext, key in PLATFORM_MAP:
         matches = [
             f
             for f in release_dir.iterdir()
@@ -42,7 +51,7 @@ def generate(tag: str, release_dir: Path) -> dict | None:
             print(f"  skip {key}: no *{suffix}")
             continue
         artifact = matches[0]
-        sig_path = Path(f"{artifact}.sig")
+        sig_path = Path(str(artifact) + sig_ext)
         if not sig_path.exists():
             print(f"  skip {key}: missing {sig_path.name}")
             continue
