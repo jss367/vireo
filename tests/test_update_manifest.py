@@ -14,10 +14,10 @@ def test_all_platforms(tmp_path):
     (tmp_path / "Vireo_aarch64.app.tar.gz.sig").write_text("sig-darwin-arm64")
     (tmp_path / "Vireo_x64.app.tar.gz").write_bytes(b"fake")
     (tmp_path / "Vireo_x64.app.tar.gz.sig").write_text("sig-darwin-x64")
-    (tmp_path / "Vireo_0.6.27_x64-setup.nsis.zip").write_bytes(b"fake")
-    (tmp_path / "Vireo_0.6.27_x64-setup.nsis.zip.sig").write_text("sig-windows")
-    (tmp_path / "vireo_0.6.27_amd64.AppImage.tar.gz").write_bytes(b"fake")
-    (tmp_path / "vireo_0.6.27_amd64.AppImage.tar.gz.sig").write_text("sig-linux")
+    (tmp_path / "Vireo_0.6.27_x64-setup.exe").write_bytes(b"fake")
+    (tmp_path / "Vireo_0.6.27_x64-setup.exe.sig").write_text("sig-windows")
+    (tmp_path / "vireo_0.6.27_amd64.AppImage").write_bytes(b"fake")
+    (tmp_path / "vireo_0.6.27_amd64.AppImage.sig").write_text("sig-linux")
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "v0.6.27", str(tmp_path)],
@@ -43,8 +43,8 @@ def test_all_platforms(tmp_path):
 
 def test_partial_platforms(tmp_path):
     """Handles missing platforms gracefully — only includes what's available."""
-    (tmp_path / "vireo_1.0.0_amd64.AppImage.tar.gz").write_bytes(b"fake")
-    (tmp_path / "vireo_1.0.0_amd64.AppImage.tar.gz.sig").write_text("sig-linux")
+    (tmp_path / "vireo_1.0.0_amd64.AppImage").write_bytes(b"fake")
+    (tmp_path / "vireo_1.0.0_amd64.AppImage.sig").write_text("sig-linux")
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "v1.0.0", str(tmp_path)],
@@ -74,8 +74,8 @@ def test_missing_sig_skips_platform(tmp_path):
     """Skips a platform if its .sig file is missing."""
     (tmp_path / "Vireo_aarch64.app.tar.gz").write_bytes(b"fake")
     # No .sig file for this artifact
-    (tmp_path / "vireo_0.6.27_amd64.AppImage.tar.gz").write_bytes(b"fake")
-    (tmp_path / "vireo_0.6.27_amd64.AppImage.tar.gz.sig").write_text("sig-linux")
+    (tmp_path / "vireo_0.6.27_amd64.AppImage").write_bytes(b"fake")
+    (tmp_path / "vireo_0.6.27_amd64.AppImage.sig").write_text("sig-linux")
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "v0.6.27", str(tmp_path)],

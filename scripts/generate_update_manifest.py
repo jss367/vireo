@@ -3,9 +3,12 @@
 
 Usage: generate_update_manifest.py <tag> <release-dir>
 
-Scans <release-dir> for signed updater artifacts (.tar.gz/.nsis.zip with
-matching .sig files) and writes a latest.json manifest that the Tauri
-updater plugin can consume.
+Scans <release-dir> for signed updater artifacts and writes a latest.json
+manifest that the Tauri updater plugin can consume.
+
+With createUpdaterArtifacts: true (v2 mode), Tauri reuses existing
+installers on Windows/Linux and only adds .sig files alongside them.
+macOS is the exception — .app is wrapped in .tar.gz since it's a directory.
 """
 
 import json
@@ -19,8 +22,8 @@ REPO = "jss367/vireo"
 PLATFORM_MAP = [
     ("_aarch64.app.tar.gz", "darwin-aarch64"),
     ("_x64.app.tar.gz", "darwin-x86_64"),
-    ("-setup.nsis.zip", "windows-x86_64"),
-    (".AppImage.tar.gz", "linux-x86_64"),
+    ("-setup.exe", "windows-x86_64"),
+    (".AppImage", "linux-x86_64"),
 ]
 
 

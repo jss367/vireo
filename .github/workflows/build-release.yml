@@ -401,10 +401,10 @@ jobs:
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz.sig
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.app.tar.gz
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.app.tar.gz.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe.sig
           if-no-files-found: warn
           retention-days: 7
 
@@ -446,15 +446,13 @@ jobs:
             -name "*.deb" \
           \) -exec cp {} release-files/ \;
 
-          # Updater artifacts — Windows and Linux (already unique names)
+          # Updater signatures — Windows and Linux (v2 mode: .sig alongside installers)
           find artifacts -type f \( \
-            -name "*.nsis.zip" -o \
-            -name "*.nsis.zip.sig" -o \
-            -name "*.AppImage.tar.gz" -o \
-            -name "*.AppImage.tar.gz.sig" \
+            -name "*.exe.sig" -o \
+            -name "*.AppImage.sig" \
           \) -exec cp {} release-files/ \;
 
-          # Updater artifacts — macOS (rename to include arch)
+          # Updater artifacts — macOS (wrap in .tar.gz, rename to include arch)
           for spec in "vireo-macos-arm64:aarch64" "vireo-macos-x86_64:x64"; do
             label="${spec%%:*}"
             arch="${spec##*:}"
