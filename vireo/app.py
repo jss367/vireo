@@ -1798,6 +1798,11 @@ def create_app(db_path, thumb_cache_dir=None):
         removed = body.get("removed", [])  # list of prediction_ids to ungroup
         species = body.get("species", "")
 
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in picks + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
         # Capture old flag values before mutation
         all_flag_pids = picks + rejects
         old_flags = {}
@@ -1807,31 +1812,28 @@ def create_app(db_path, thumb_cache_dir=None):
                 old_flags[pid] = old["flag"] or "none"
 
         # Flag picks and add species keyword
-        try:
-            if species:
-                kid = db.add_keyword(species, is_species=True)
-                for pid in picks:
-                    db.update_photo_flag(pid, "flagged")
-                    db.tag_photo(pid, kid)
-                    db.queue_change(pid, "keyword_add", species)
+        if species:
+            kid = db.add_keyword(species, is_species=True)
+            for pid in picks:
+                db.update_photo_flag(pid, "flagged")
+                db.tag_photo(pid, kid)
+                db.queue_change(pid, "keyword_add", species)
 
-                # Record keyword_add history for picks
-                kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
-                            for pid in picks]
-                if kw_items:
-                    db.record_edit('keyword_add',
-                                   f'Added "{species}" to {len(picks)} photos (group prediction)',
-                                   str(kid), kw_items, is_batch=len(picks) > 1)
-            else:
-                # No species — still flag picks
-                for pid in picks:
-                    db.update_photo_flag(pid, "flagged")
+            # Record keyword_add history for picks
+            kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
+                        for pid in picks]
+            if kw_items:
+                db.record_edit('keyword_add',
+                               f'Added "{species}" to {len(picks)} photos (group prediction)',
+                               str(kid), kw_items, is_batch=len(picks) > 1)
+        else:
+            # No species — still flag picks
+            for pid in picks:
+                db.update_photo_flag(pid, "flagged")
 
-            # Reject rejects
-            for pid in rejects:
-                db.update_photo_flag(pid, "rejected")
-        except ValueError as e:
-            return json_error(str(e), 403)
+        # Reject rejects
+        for pid in rejects:
+            db.update_photo_flag(pid, "rejected")
 
         # Record flag history for all picks + rejects
         flag_items = []
@@ -5818,6 +5820,11 @@ def create_app(db_path, thumb_cache_dir=None):
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
 
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in keepers + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
         # Capture old flags before mutation
         old_flags = {}
         for pid in keepers + rejects:
@@ -5825,13 +5832,10 @@ def create_app(db_path, thumb_cache_dir=None):
             if old:
                 old_flags[pid] = old["flag"] or "none"
 
-        try:
-            for pid in keepers:
-                db.update_photo_flag(pid, "flagged")
-            for pid in rejects:
-                db.update_photo_flag(pid, "rejected")
-        except ValueError as e:
-            return json_error(str(e), 403)
+        for pid in keepers:
+            db.update_photo_flag(pid, "flagged")
+        for pid in rejects:
+            db.update_photo_flag(pid, "rejected")
 
         # Record flag history
         flag_items = []
