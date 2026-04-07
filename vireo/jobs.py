@@ -136,12 +136,16 @@ class JobRunner:
         start_time = time.time()
         try:
             result = work_fn(job)
-            # Check if cancelled during execution
-            if self.is_cancelled(job["id"]):
-                job["status"] = "cancelled"
-                job["result"] = result
-            else:
-                job["status"] = "completed"
+            # Atomically check cancellation and set final status under the
+            # same lock acquisition to prevent a race where cancel_job()
+            # returns True but the job still finishes as "completed".
+            with self._lock:
+                job_id = job["id"]
+                if job_id in self._cancelled:
+                    job["status"] = "cancelled"
+                    self._cancelled.discard(job_id)
+                else:
+                    job["status"] = "completed"
                 job["result"] = result
         except Exception as e:
             job["status"] = "failed"
