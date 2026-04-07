@@ -403,8 +403,9 @@ jobs:
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.deb
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz
             src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.tar.gz.sig
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip
-            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.nsis.zip.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.exe.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.msi.sig
+            src-tauri/target/${{ matrix.rust-target }}/release/bundle/**/*.AppImage.sig
           if-no-files-found: warn
           retention-days: 7
 
@@ -446,12 +447,13 @@ jobs:
             -name "*.deb" \
           \) -exec cp {} release-files/ \;
 
-          # Updater artifacts — Windows and Linux (already unique names)
+          # Updater signatures — Windows and Linux (Tauri v2 createUpdaterArtifacts mode)
+          # Windows: installer .exe/.msi already copied above; copy their .sig sidecars.
+          # Linux: .AppImage already copied above; copy its .sig sidecar.
           find artifacts -type f \( \
-            -name "*.nsis.zip" -o \
-            -name "*.nsis.zip.sig" -o \
-            -name "*.AppImage.tar.gz" -o \
-            -name "*.AppImage.tar.gz.sig" \
+            -name "*.exe.sig" -o \
+            -name "*.msi.sig" -o \
+            -name "*.AppImage.sig" \
           \) -exec cp {} release-files/ \;
 
           # Updater artifacts — macOS (rename to include arch)
