@@ -10,6 +10,9 @@ from datetime import datetime
 
 log = logging.getLogger(__name__)
 
+# How long to keep completed/failed jobs in memory before eviction (seconds)
+_JOB_RETENTION_SECS = 3600  # 1 hour
+
 
 class JobRunner:
     """Runs long operations in background threads with progress tracking.
@@ -23,6 +26,7 @@ class JobRunner:
         self._events = {}  # job_id -> deque of events
         self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.Lock()
+        self._cancelled = set()  # job ids that have been cancelled
         self._db_path = None
         if db:
             self._db_path = db.conn.execute("PRAGMA database_list").fetchone()[2]
@@ -97,6 +101,7 @@ class JobRunner:
         }
 
         with self._lock:
+            self._prune_finished_jobs()
             self._jobs[job_id] = job
             self._events[job_id] = deque(maxlen=1000)
             self._subscribers[job_id] = []
@@ -107,12 +112,37 @@ class JobRunner:
         thread.start()
         return job_id
 
+    def _prune_finished_jobs(self):
+        """Remove completed/failed jobs older than _JOB_RETENTION_SECS.
+
+        Must be called with self._lock held.
+        """
+        now = time.time()
+        to_remove = []
+        for jid, j in self._jobs.items():
+            if (
+                j["status"] in ("completed", "failed", "cancelled")
+                and j.get("_ended_at")
+                and now - j["_ended_at"] > _JOB_RETENTION_SECS
+            ):
+                to_remove.append(jid)
+        for jid in to_remove:
+            del self._jobs[jid]
+            self._events.pop(jid, None)
+            self._subscribers.pop(jid, None)
+            self._cancelled.discard(jid)
+
     def _run_job(self, job, work_fn):
         start_time = time.time()
         try:
             result = work_fn(job)
-            job["status"] = "completed"
-            job["result"] = result
+            # Check if cancelled during execution
+            if self.is_cancelled(job["id"]):
+                job["status"] = "cancelled"
+                job["result"] = result
+            else:
+                job["status"] = "completed"
+                job["result"] = result
         except Exception as e:
             job["status"] = "failed"
             job["errors"].append(str(e))
@@ -120,6 +150,7 @@ class JobRunner:
         finally:
             elapsed = time.time() - start_time
             job["finished_at"] = datetime.now().isoformat()
+            job["_ended_at"] = time.time()
             self.push_event(
                 job["id"],
                 "complete",
@@ -221,8 +252,12 @@ class JobRunner:
         return job["type"] + " " + job["status"]
 
     def get(self, job_id):
-        """Get a job by id."""
-        return self._jobs.get(job_id)
+        """Get a job by id. Returns a shallow copy so callers don't mutate shared state."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return dict(job)
 
     def list_jobs(self):
         """List all tracked jobs (active and recently completed)."""
@@ -264,20 +299,39 @@ class JobRunner:
 
     def push_event(self, job_id, event_type, data):
         """Push an event to the job's event stream."""
-        if event_type == "progress":
-            job = self._jobs.get(job_id)
-            if job and job.get("steps"):
-                data = dict(data)
-                data["steps"] = [dict(s) for s in job["steps"]]
-        event = {"type": event_type, "data": data, "time": time.time()}
+        is_critical = event_type in ("complete", "error")
         with self._lock:
+            if event_type == "progress":
+                job = self._jobs.get(job_id)
+                if job and job.get("steps"):
+                    data = dict(data)
+                    data["steps"] = [dict(s) for s in job["steps"]]
+            event = {"type": event_type, "data": data, "time": time.time()}
             if job_id in self._events:
                 self._events[job_id].append(event)
-            for q in self._subscribers.get(job_id, []):
+            # Snapshot subscriber list so we can deliver outside the lock
+            subscribers = list(self._subscribers.get(job_id, []))
+
+        # Deliver to subscribers outside the lock to avoid blocking
+        for q in subscribers:
+            if is_critical:
+                # Critical events must not be dropped
+                try:
+                    q.put(event, timeout=5)
+                except queue.Full:
+                    log.warning(
+                        "Failed to deliver critical '%s' event for job %s "
+                        "after 5s — subscriber queue full",
+                        event_type, job_id,
+                    )
+            else:
                 try:
                     q.put_nowait(event)
                 except queue.Full:
-                    pass
+                    log.debug(
+                        "Dropped '%s' event for job %s — subscriber queue full",
+                        event_type, job_id,
+                    )
 
     def get_events(self, job_id):
         """Get all buffered events for a job."""
@@ -320,32 +374,54 @@ class JobRunner:
                 "summary": None,
                 "error": None,
             })
-        job = self._jobs.get(job_id)
-        if job:
-            job["steps"] = full_steps
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job["steps"] = full_steps
 
     def update_step(self, job_id, step_id, **kwargs):
         """Update a step's fields (status, progress, summary, error).
 
         Automatically sets started_at/finished_at/duration timestamps.
         """
-        job = self._jobs.get(job_id)
-        if not job or "steps" not in job:
-            return
-        for step in job["steps"]:
-            if step["id"] == step_id:
-                new_status = kwargs.get("status")
-                if new_status == "running" and step["status"] == "pending":
-                    step["started_at"] = datetime.now().isoformat()
-                if new_status in ("completed", "failed") and step["started_at"]:
-                    step["finished_at"] = datetime.now().isoformat()
-                    start = datetime.fromisoformat(step["started_at"])
-                    end = datetime.fromisoformat(step["finished_at"])
-                    step["duration"] = round((end - start).total_seconds(), 1)
-                for key in ("status", "summary", "error", "progress", "current_file"):
-                    if key in kwargs:
-                        step[key] = kwargs[key]
-                break
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or "steps" not in job:
+                return
+            for step in job["steps"]:
+                if step["id"] == step_id:
+                    new_status = kwargs.get("status")
+                    if new_status == "running" and step["status"] == "pending":
+                        step["started_at"] = datetime.now().isoformat()
+                    if new_status in ("completed", "failed") and step["started_at"]:
+                        step["finished_at"] = datetime.now().isoformat()
+                        start = datetime.fromisoformat(step["started_at"])
+                        end = datetime.fromisoformat(step["finished_at"])
+                        step["duration"] = round((end - start).total_seconds(), 1)
+                    for key in ("status", "summary", "error", "progress", "current_file"):
+                        if key in kwargs:
+                            step[key] = kwargs[key]
+                    break
+
+    def cancel_job(self, job_id):
+        """Request cancellation of a running job.
+
+        The job's work function should periodically check
+        runner.is_cancelled(job_id) and exit early if True.
+
+        Returns True if the job was found and marked for cancellation.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job["status"] != "running":
+                return False
+            self._cancelled.add(job_id)
+            return True
+
+    def is_cancelled(self, job_id):
+        """Check whether a job has been marked for cancellation."""
+        with self._lock:
+            return job_id in self._cancelled
 
 
 class LogBroadcaster(logging.Handler):
