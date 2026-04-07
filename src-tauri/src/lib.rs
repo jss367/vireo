@@ -1,6 +1,7 @@
 mod menu;
 mod sidecar;
 mod tray;
+mod updater;
 use sidecar::SidecarState;
 use tauri::{Manager, RunEvent};
 
@@ -16,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 // In dev mode, don't spawn sidecar — developer runs Flask manually
@@ -54,6 +56,23 @@ pub fn run() {
 
             let port = app.state::<SidecarState>().port;
             tray::create_tray(app.handle(), port)?;
+
+            // Background update checks (production only)
+            if !cfg!(debug_assertions) {
+                let update_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    // Let the app finish loading before first check
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    updater::spawn_update_check(&update_handle, false);
+
+                    // Check every 24 hours
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
+                        updater::spawn_update_check(&update_handle, false);
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -70,6 +89,11 @@ pub fn run() {
         })
         .on_menu_event(|app, event| {
             let id = event.id().0.as_str();
+
+            if id == menu::ids::CHECK_FOR_UPDATES {
+                updater::spawn_update_check(app, true);
+                return;
+            }
 
             // "Report an Issue" — open GitHub issues in the default browser
             if id == menu::ids::REPORT_ISSUE {

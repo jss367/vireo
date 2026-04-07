@@ -536,6 +536,7 @@ def create_app(db_path, thumb_cache_dir=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
 
         photos = db.get_photos(
             folder_id=folder_id,
@@ -546,10 +547,11 @@ def create_app(db_path, thumb_cache_dir=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            color_label=color_label,
         )
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -558,6 +560,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                color_label=color_label,
             )
 
         photo_dicts = [dict(p) for p in photos]
@@ -581,8 +584,10 @@ def create_app(db_path, thumb_cache_dir=None):
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
         data = db.get_calendar_data(
-            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword
+            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+            color_label=color_label,
         )
         return jsonify(data)
 
@@ -595,6 +600,7 @@ def create_app(db_path, thumb_cache_dir=None):
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
         collection_id = request.args.get("collection_id", None, type=int)
+        color_label = request.args.get("color_label", None)
         return jsonify(
             db.get_browse_summary(
                 folder_id=folder_id,
@@ -603,8 +609,19 @@ def create_app(db_path, thumb_cache_dir=None):
                 date_to=date_to,
                 keyword=keyword,
                 collection_id=collection_id,
+                color_label=color_label,
             )
         )
+
+    @app.route("/api/photos/color_labels")
+    def api_photos_color_labels():
+        db = _get_db()
+        ids_str = request.args.get("ids", "")
+        if not ids_str:
+            return jsonify({})
+        photo_ids = [int(x) for x in ids_str.split(",") if x.strip().isdigit()]
+        labels = db.get_color_labels_for_photos(photo_ids)
+        return jsonify(labels)
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -792,6 +809,23 @@ def create_app(db_path, thumb_cache_dir=None):
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
 
+    @app.route("/api/photos/<int:photo_id>/color_label", methods=["POST"])
+    def api_set_color_label(photo_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        color = body.get("color")
+        if color is not None and color not in db.VALID_COLOR_LABELS:
+            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
+        old_color = db.get_color_label(photo_id) or ''
+        new_color = color or ''
+        if color:
+            db.set_color_label(photo_id, color)
+        else:
+            db.remove_color_label(photo_id)
+        db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
+                       [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
     def api_add_keyword(photo_id):
         db = _get_db()
@@ -926,6 +960,25 @@ def create_app(db_path, thumb_cache_dir=None):
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
         return jsonify({"ok": True, "updated": len(old_values)})
+
+    @app.route("/api/batch/color_label", methods=["POST"])
+    def api_batch_color_label():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        color = body.get("color")
+        if color is not None and color not in db.VALID_COLOR_LABELS:
+            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
+        if not photo_ids:
+            return json_error("photo_ids required")
+        old_labels = db.get_color_labels_for_photos(photo_ids)
+        new_color = color or ''
+        db.batch_set_color_label(photo_ids, color)
+        items = [{'photo_id': pid, 'old_value': old_labels.get(pid, ''), 'new_value': new_color}
+                 for pid in photo_ids]
+        db.record_edit('color_label', f'Set color to {color or "none"} on {len(photo_ids)} photos',
+                       new_color, items, is_batch=True)
+        return jsonify({"ok": True, "updated": len(photo_ids)})
 
     @app.route("/api/batch/keyword", methods=["POST"])
     def api_batch_keyword():
@@ -1474,6 +1527,42 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         db.remove_workspace_folder(ws_id, folder_id)
         return jsonify({"ok": True})
+
+    @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
+    def api_move_workspace_folders(ws_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        folder_ids = body.get("folder_ids", [])
+        target_ws_id = body.get("target_workspace_id")
+        new_ws_name = (body.get("new_workspace_name") or "").strip()
+
+        if not folder_ids:
+            return json_error("folder_ids is required")
+        if not target_ws_id and not new_ws_name:
+            return json_error("Provide target_workspace_id or new_workspace_name")
+        if target_ws_id and new_ws_name:
+            return json_error("Provide target_workspace_id or new_workspace_name, not both")
+
+        # Validate source workspace and folder ownership before creating a
+        # new workspace to avoid orphans if the move would fail.
+        if new_ws_name:
+            if not db.get_workspace(ws_id):
+                return json_error(f"Source workspace {ws_id} not found")
+            source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+            for fid in folder_ids:
+                if fid not in source_folder_ids:
+                    return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
+            try:
+                target_ws_id = db.create_workspace(new_ws_name)
+            except Exception as e:
+                return json_error(f"Failed to create workspace: {e}")
+
+        try:
+            result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
+            result["target_workspace_id"] = target_ws_id
+            return jsonify(result)
+        except ValueError as e:
+            return json_error(str(e))
 
     @app.route("/api/workspaces/active/config")
     def api_workspace_config():

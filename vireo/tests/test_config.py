@@ -90,6 +90,37 @@ def test_ingest_defaults_present():
     assert ingest["file_types"] == "both"
 
 
+def test_load_returns_defaults_when_no_file(tmp_path):
+    """load() returns full defaults when config file does not exist."""
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "nonexistent.json")
+    loaded = cfg.load()
+    assert loaded == cfg.DEFAULTS
+
+
+def test_load_falls_back_on_corrupt_file(tmp_path):
+    """load() returns defaults when config file contains invalid JSON."""
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        f.write("not valid json {{{")
+    loaded = cfg.load()
+    assert loaded == cfg.DEFAULTS
+
+
+def test_get_and_set_round_trip(tmp_path):
+    """get() returns value previously written by set()."""
+    import config as cfg
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.set("classification_threshold", 0.75)
+    assert cfg.get("classification_threshold") == 0.75
+    # Other defaults still intact
+    assert cfg.get("photos_per_page") == 50
+
+
 def test_deep_merge_preserves_pipeline(tmp_path):
     """Deep merge correctly handles nested pipeline config."""
     import json

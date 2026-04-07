@@ -1,3 +1,52 @@
+def test_set_color_label(app_and_db):
+    """POST /api/photos/<id>/color_label sets the color label."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    resp = client.post(f'/api/photos/{pid}/color_label', json={'color': 'red'})
+    assert resp.status_code == 200
+    assert db.get_color_label(pid) == 'red'
+
+
+def test_remove_color_label(app_and_db):
+    """POST /api/photos/<id>/color_label with null removes the label."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    client.post(f'/api/photos/{pid}/color_label', json={'color': 'blue'})
+    resp = client.post(f'/api/photos/{pid}/color_label', json={'color': None})
+    assert resp.status_code == 200
+    assert db.get_color_label(pid) is None
+
+
+def test_set_color_label_invalid(app_and_db):
+    """POST /api/photos/<id>/color_label rejects invalid colors."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    resp = client.post(f'/api/photos/{pid}/color_label', json={'color': 'orange'})
+    assert resp.status_code == 400
+
+
+def test_batch_color_label(app_and_db):
+    """POST /api/batch/color_label sets labels on multiple photos."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:2]]
+
+    resp = client.post('/api/batch/color_label', json={'photo_ids': pids, 'color': 'green'})
+    assert resp.status_code == 200
+    assert db.get_color_label(pids[0]) == 'green'
+    assert db.get_color_label(pids[1]) == 'green'
+
+
 def test_set_rating(app_and_db):
     """POST /api/photos/<id>/rating updates rating and queues pending change."""
     app, db = app_and_db

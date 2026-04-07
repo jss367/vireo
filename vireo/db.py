@@ -233,12 +233,22 @@ class Database:
                 last_run_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS photo_color_labels (
+                photo_id      INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+                workspace_id  INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                color         TEXT NOT NULL,
+                PRIMARY KEY (photo_id, workspace_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
+
+            CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
+            ON photo_color_labels(workspace_id);
         """
         )
         # Migrations for existing databases
@@ -753,6 +763,76 @@ class Database:
                ORDER BY f.path""",
             (workspace_id,),
         ).fetchall()
+
+    def move_folders_to_workspace(self, source_ws_id, target_ws_id, folder_ids):
+        """Move folders and their workspace-scoped data to another workspace.
+
+        Moves: workspace_folders rows, detections (with child predictions),
+        and pending_changes. Collections and edit_history stay behind.
+
+        Returns:
+            dict with keys: folders_moved, detections_moved, pending_changes_moved
+        """
+        if not self.get_workspace(source_ws_id):
+            raise ValueError(f"Source workspace {source_ws_id} not found")
+        if not self.get_workspace(target_ws_id):
+            raise ValueError(f"Target workspace {target_ws_id} not found")
+        if source_ws_id == target_ws_id:
+            raise ValueError("Source and target workspace are the same")
+
+        source_folders = self.get_workspace_folders(source_ws_id)
+        source_folder_ids = {f["id"] for f in source_folders}
+        for fid in folder_ids:
+            if fid not in source_folder_ids:
+                raise ValueError(
+                    f"Folder {fid} does not belong to source workspace {source_ws_id}"
+                )
+
+        if not folder_ids:
+            return {"folders_moved": 0, "detections_moved": 0, "pending_changes_moved": 0}
+
+        placeholders = ",".join("?" for _ in folder_ids)
+
+        try:
+            # Move detections (predictions follow via detection_id FK)
+            cur = self.conn.execute(
+                f"""UPDATE detections SET workspace_id = ?
+                    WHERE workspace_id = ?
+                    AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
+                [target_ws_id, source_ws_id] + list(folder_ids),
+            )
+            detections_moved = cur.rowcount
+
+            # Move pending_changes
+            cur = self.conn.execute(
+                f"""UPDATE pending_changes SET workspace_id = ?
+                    WHERE workspace_id = ?
+                    AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
+                [target_ws_id, source_ws_id] + list(folder_ids),
+            )
+            pending_changes_moved = cur.rowcount
+
+            # Move workspace_folders: remove from source, add to target
+            self.conn.execute(
+                f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
+                [source_ws_id] + list(folder_ids),
+            )
+            for fid in folder_ids:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+                    (target_ws_id, fid),
+                )
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return {
+            "folders_moved": len(folder_ids),
+            "detections_moved": detections_moved,
+            "pending_changes_moved": pending_changes_moved,
+        }
 
     def ensure_default_workspace(self):
         """Create the Default workspace if it doesn't exist. Returns its id."""
@@ -1326,30 +1406,38 @@ class Database:
             "detected_count": detected_count,
         }
 
-    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None):
+    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
                       "substr(p.timestamp, 1, 4) = ?"]
-        params = [ws, str(year)]
+        join_params = []
+        where_params = [ws, str(year)]
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            where_params.append(folder_id)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
-            params.append(rating_min)
+            where_params.append(rating_min)
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(ws)
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1390,23 +1478,25 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        color_label=None,
     ):
         """Return paginated, filtered photo list scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
-        params = [self._ws_id()]
+        where_params = [self._ws_id()]
+        join_params = []
 
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            where_params.append(folder_id)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
-            params.append(rating_min)
+            where_params.append(rating_min)
         if date_from is not None:
             conditions.append("p.timestamp >= ?")
-            params.append(date_from)
+            where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            params.append(date_to)
+            where_params.append(date_to)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1416,8 +1506,18 @@ class Database:
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        # join_params must precede where_params because JOIN placeholders appear
+        # in the SQL before the WHERE placeholders.
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1454,23 +1554,25 @@ class Database:
         date_from=None,
         date_to=None,
         keyword=None,
+        color_label=None,
     ):
         """Return count of photos matching the given filters, scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
-        params = [self._ws_id()]
+        where_params = [self._ws_id()]
+        join_params = []
 
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            where_params.append(folder_id)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
-            params.append(rating_min)
+            where_params.append(rating_min)
         if date_from is not None:
             conditions.append("p.timestamp >= ?")
-            params.append(date_from)
+            where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            params.append(date_to)
+            where_params.append(date_to)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1480,8 +1582,18 @@ class Database:
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        # join_params must precede where_params because JOIN placeholders appear
+        # in the SQL before the WHERE placeholders.
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1500,25 +1612,27 @@ class Database:
         date_to=None,
         keyword=None,
         collection_id=None,
+        color_label=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
 
         # Build shared filter conditions
         conditions = ["wf.workspace_id = ?"]
-        params = [ws]
+        join_params = []
+        where_params = [ws]
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            where_params.append(folder_id)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
-            params.append(rating_min)
+            where_params.append(rating_min)
         if date_from is not None:
             conditions.append("p.timestamp >= ?")
-            params.append(date_from)
+            where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            params.append(date_to)
+            where_params.append(date_to)
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
@@ -1535,7 +1649,7 @@ class Database:
                     f"{coll_folder_join} {coll_join_clause} {coll_where}"
                 )
                 conditions.append(f"p.id IN ({coll_subquery})")
-                params.extend(coll_params)
+                where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1545,8 +1659,18 @@ class Database:
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        # join_params must precede where_params because JOIN placeholders appear
+        # in the SQL before the WHERE placeholders.
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1772,6 +1896,66 @@ class Database:
             f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
             [flag] + list(photo_ids),
         )
+        self.conn.commit()
+
+    VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
+
+    def set_color_label(self, photo_id, color):
+        """Set a color label for a photo in the active workspace."""
+        if color not in self.VALID_COLOR_LABELS:
+            raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
+            (photo_id, self._ws_id(), color),
+        )
+        self.conn.commit()
+
+    def remove_color_label(self, photo_id):
+        """Remove the color label for a photo in the active workspace."""
+        self.conn.execute(
+            "DELETE FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, self._ws_id()),
+        )
+        self.conn.commit()
+
+    def get_color_label(self, photo_id):
+        """Return the color label for a photo in the active workspace, or None."""
+        row = self.conn.execute(
+            "SELECT color FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row['color'] if row else None
+
+    def get_color_labels_for_photos(self, photo_ids):
+        """Return a dict of {photo_id: color} for the active workspace."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+            [self._ws_id()] + list(photo_ids),
+        ).fetchall()
+        return {row['photo_id']: row['color'] for row in rows}
+
+    def batch_set_color_label(self, photo_ids, color):
+        """Set or remove color label for multiple photos in the active workspace."""
+        if not photo_ids:
+            return
+        ws_id = self._ws_id()
+        if color is None:
+            placeholders = ",".join("?" for _ in photo_ids)
+            self.conn.execute(
+                f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+                [ws_id] + list(photo_ids),
+            )
+        else:
+            if color not in self.VALID_COLOR_LABELS:
+                raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
+            for pid in photo_ids:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
+                    (pid, ws_id, color),
+                )
         self.conn.commit()
 
     def delete_photos(self, photo_ids, include_companions=False):
@@ -2921,6 +3105,11 @@ class Database:
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, old_val)
+            elif entry['action_type'] == 'color_label':
+                if old_val:
+                    self.set_color_label(pid, old_val)
+                else:
+                    self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 self.untag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
@@ -2975,6 +3164,11 @@ class Database:
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
                 self.update_photo_flag(pid, entry['new_value'])
+            elif entry['action_type'] == 'color_label':
+                if new_val:
+                    self.set_color_label(pid, new_val)
+                else:
+                    self.remove_color_label(pid)
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 self.tag_photo(pid, int(entry['new_value']))
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
@@ -3125,6 +3319,23 @@ class Database:
                     params.append(value)
                 elif op == "is not":
                     conditions.append("p.flag != ?")
+                    params.append(value)
+            elif field == "color_label":
+                if op in ("equals", "is"):
+                    conditions.append(
+                        """EXISTS (
+                        SELECT 1 FROM photo_color_labels pcl
+                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
+                    )
+                    params.append(self._ws_id())
+                    params.append(value)
+                elif op == "is not":
+                    conditions.append(
+                        """NOT EXISTS (
+                        SELECT 1 FROM photo_color_labels pcl
+                        WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? AND pcl.color = ?)"""
+                    )
+                    params.append(self._ws_id())
                     params.append(value)
             elif field == "has_species":
                 if op == "equals" and value is False or value == 0:

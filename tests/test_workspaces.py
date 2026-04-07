@@ -856,3 +856,95 @@ def test_keyword_tree_includes_ancestors(db):
     assert "Red-tailed Hawk" in names
     assert "Raptors" in names  # ancestor must be included
     assert "Birds" in names    # root ancestor must be included
+
+
+# -- Move folders between workspaces --
+
+
+def test_move_folders_moves_detections_and_pending_changes(db_with_workspace):
+    """move_folders_to_workspace moves folders, detections, and pending_changes."""
+    db, ws1, folder_id, photo_id = db_with_workspace
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
+    db.queue_change(photo_id, "keyword_add", "Robin")
+
+    ws2 = db.create_workspace("Target")
+
+    result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
+    assert result["folders_moved"] == 1
+    assert result["detections_moved"] == 1
+    assert result["pending_changes_moved"] == 1
+
+    # Folder moved: ws2 has it, ws1 does not
+    assert len(db.get_workspace_folders(ws2)) == 1
+    assert len(db.get_workspace_folders(ws1)) == 0
+
+    # Detections/predictions moved to ws2
+    db.set_active_workspace(ws2)
+    preds = db.get_predictions()
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Robin"
+
+    db.set_active_workspace(ws1)
+    assert len(db.get_predictions()) == 0
+
+    # Pending changes moved to ws2
+    db.set_active_workspace(ws2)
+    assert len(db.get_pending_changes()) == 1
+    db.set_active_workspace(ws1)
+    assert len(db.get_pending_changes()) == 0
+
+
+def test_move_folders_collections_stay_behind(db_with_workspace):
+    """Collections in the source workspace are NOT moved."""
+    db, ws1, folder_id, photo_id = db_with_workspace
+    db.add_collection("Flagged", "[]")
+
+    ws2 = db.create_workspace("Target")
+    db.move_folders_to_workspace(ws1, ws2, [folder_id])
+
+    db.set_active_workspace(ws1)
+    assert len(db.get_collections()) == 1
+    db.set_active_workspace(ws2)
+    assert len(db.get_collections()) == 0
+
+
+def test_move_folders_validates_source_workspace(db):
+    """Raises ValueError if source workspace doesn't exist."""
+    ws = db.create_workspace("A")
+    with pytest.raises(ValueError, match="Source workspace"):
+        db.move_folders_to_workspace(9999, ws, [1])
+
+
+def test_move_folders_validates_target_workspace(db):
+    """Raises ValueError if target workspace doesn't exist."""
+    ws = db.create_workspace("A")
+    with pytest.raises(ValueError, match="Target workspace"):
+        db.move_folders_to_workspace(ws, 9999, [1])
+
+
+def test_move_folders_validates_same_workspace(db):
+    """Raises ValueError when source == target."""
+    ws = db.create_workspace("A")
+    with pytest.raises(ValueError, match="same"):
+        db.move_folders_to_workspace(ws, ws, [1])
+
+
+def test_move_folders_validates_folder_belongs_to_source(db):
+    """Raises ValueError if a folder doesn't belong to source workspace."""
+    ws1 = db.create_workspace("Source")
+    ws2 = db.create_workspace("Target")
+    db.set_active_workspace(ws1)
+    fid = db.add_folder("/photos/a", name="a")
+    with pytest.raises(ValueError, match="does not belong"):
+        db.move_folders_to_workspace(ws1, ws2, [fid, 9999])
+
+
+def test_move_folders_empty_list(db):
+    """Moving an empty list returns zeros without error."""
+    ws1 = db.create_workspace("A")
+    ws2 = db.create_workspace("B")
+    result = db.move_folders_to_workspace(ws1, ws2, [])
+    assert result["folders_moved"] == 0

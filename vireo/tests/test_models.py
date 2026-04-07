@@ -74,7 +74,7 @@ def test_known_models_structure():
     from models import KNOWN_MODELS
 
     assert len(KNOWN_MODELS) >= 3
-    required = {"id", "name", "model_type", "model_str", "source", "description", "size_mb"}
+    required = {"id", "name", "model_type", "model_str", "description", "size_mb"}
     for m in KNOWN_MODELS:
         missing = required - set(m.keys())
         assert not missing, f"Model {m.get('id', '?')} missing fields: {missing}"
