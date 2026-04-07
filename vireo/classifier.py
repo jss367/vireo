@@ -320,16 +320,19 @@ class Classifier:
                 )
                 # Load text encoder session
                 text_session = onnx_runtime.create_session(text_encoder_path)
-                text_input_name = text_session.get_inputs()[0].name
-                tokenizer = _load_tokenizer(tokenizer_path)
+                try:
+                    text_input_name = text_session.get_inputs()[0].name
+                    tokenizer = _load_tokenizer(tokenizer_path)
 
-                self._txt_embeddings = _compute_embeddings_with_progress(
-                    text_session,
-                    text_input_name,
-                    tokenizer,
-                    self._classes,
-                    progress_callback=embedding_progress_callback,
-                )
+                    self._txt_embeddings = _compute_embeddings_with_progress(
+                        text_session,
+                        text_input_name,
+                        tokenizer,
+                        self._classes,
+                        progress_callback=embedding_progress_callback,
+                    )
+                finally:
+                    del text_session
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 np.save(cache_path, self._txt_embeddings)
                 # Update manifest with human-readable metadata
