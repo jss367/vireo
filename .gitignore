@@ -211,4 +211,5 @@ vireo/taxonomy.json
 .worktrees/
 docs/plans/
 node_modules/
+output/
 */.DS_Store
