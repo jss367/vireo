@@ -2437,6 +2437,8 @@ async function fetchColorLabels(photoIds) {
   if (!photoIds.length) return;
   var data = await safeFetch('/api/photos/color_labels?ids=' + photoIds.join(','), {}, { toast: false });
   if (data) {
+    // Clear all fetched IDs first so removed labels don't remain stale
+    photoIds.forEach(function(id) { delete colorLabels[id]; });
     for (var id in data) colorLabels[id] = data[id];
   }
 }

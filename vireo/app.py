@@ -584,8 +584,10 @@ def create_app(db_path, thumb_cache_dir=None):
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         keyword = request.args.get("keyword", None)
+        color_label = request.args.get("color_label", None)
         data = db.get_calendar_data(
-            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword
+            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+            color_label=color_label,
         )
         return jsonify(data)
 
@@ -598,6 +600,7 @@ def create_app(db_path, thumb_cache_dir=None):
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
         collection_id = request.args.get("collection_id", None, type=int)
+        color_label = request.args.get("color_label", None)
         return jsonify(
             db.get_browse_summary(
                 folder_id=folder_id,
@@ -606,6 +609,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 date_to=date_to,
                 keyword=keyword,
                 collection_id=collection_id,
+                color_label=color_label,
             )
         )
 

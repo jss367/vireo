@@ -1336,30 +1336,38 @@ class Database:
             "detected_count": detected_count,
         }
 
-    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None):
+    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
                       "substr(p.timestamp, 1, 4) = ?"]
-        params = [ws, str(year)]
+        join_params = []
+        where_params = [ws, str(year)]
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
             conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            where_params.append(folder_id)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
-            params.append(rating_min)
+            where_params.append(rating_min)
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(ws)
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1571,7 +1579,7 @@ class Database:
                     f"{coll_folder_join} {coll_join_clause} {coll_where}"
                 )
                 conditions.append(f"p.id IN ({coll_subquery})")
-                params.extend(coll_params)
+                where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1581,8 +1589,18 @@ class Database:
                 LEFT JOIN keywords k ON k.id = pk.keyword_id
             """
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
-            params.append(f"%{keyword}%")
-            params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+            where_params.append(f"%{keyword}%")
+
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            where_params.append(color_label)
+
+        # join_params must precede where_params because JOIN placeholders appear
+        # in the SQL before the WHERE placeholders.
+        params = join_params + where_params
 
         where = "WHERE " + " AND ".join(conditions)
 
