@@ -155,14 +155,12 @@ def get_models():
         if not downloaded and km["id"] in registered:
             reg = registered[km["id"]]
             reg_path = reg.get("weights_path", "")
-            if reg_path and os.path.isdir(reg_path):
-                # Check if all required files exist at the registered path
-                if all(
-                    os.path.isfile(os.path.join(reg_path, f))
-                    for f in km.get("files", [])
-                ):
-                    entry["downloaded"] = True
-                    entry["weights_path"] = reg_path
+            if reg_path and os.path.isdir(reg_path) and all(
+                os.path.isfile(os.path.join(reg_path, f))
+                for f in km.get("files", [])
+            ):
+                entry["downloaded"] = True
+                entry["weights_path"] = reg_path
 
         result.append(entry)
 
