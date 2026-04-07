@@ -1798,6 +1798,11 @@ def create_app(db_path, thumb_cache_dir=None):
         removed = body.get("removed", [])  # list of prediction_ids to ungroup
         species = body.get("species", "")
 
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in picks + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
         # Capture old flag values before mutation
         all_flag_pids = picks + rejects
         old_flags = {}
@@ -5817,6 +5822,11 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
+
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in keepers + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
 
         # Capture old flags before mutation
         old_flags = {}
