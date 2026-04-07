@@ -1336,7 +1336,7 @@ class Database:
             "detected_count": detected_count,
         }
 
-    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None):
+    def get_calendar_data(self, year, folder_id=None, rating_min=None, keyword=None, color_label=None):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
@@ -1360,6 +1360,12 @@ class Database:
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
             params.append(f"%{keyword}%")
             params.append(f"%{keyword}%")
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id"
+            conditions.append("pcl.workspace_id = ?")
+            params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            params.append(color_label)
 
         where = "WHERE " + " AND ".join(conditions)
 
@@ -1431,7 +1437,8 @@ class Database:
             params.append(f"%{keyword}%")
 
         if color_label is not None:
-            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id"
+            conditions.append("pcl.workspace_id = ?")
             params.append(self._ws_id())
             conditions.append("pcl.color = ?")
             params.append(color_label)
@@ -1502,7 +1509,8 @@ class Database:
             params.append(f"%{keyword}%")
 
         if color_label is not None:
-            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id AND pcl.workspace_id = ?"
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id"
+            conditions.append("pcl.workspace_id = ?")
             params.append(self._ws_id())
             conditions.append("pcl.color = ?")
             params.append(color_label)
@@ -1524,6 +1532,7 @@ class Database:
         date_to=None,
         keyword=None,
         collection_id=None,
+        color_label=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
@@ -1571,6 +1580,12 @@ class Database:
             conditions.append("(k.name LIKE ? OR p.filename LIKE ?)")
             params.append(f"%{keyword}%")
             params.append(f"%{keyword}%")
+        if color_label is not None:
+            join_clause += "\nJOIN photo_color_labels pcl ON pcl.photo_id = p.id"
+            conditions.append("pcl.workspace_id = ?")
+            params.append(self._ws_id())
+            conditions.append("pcl.color = ?")
+            params.append(color_label)
 
         where = "WHERE " + " AND ".join(conditions)
 

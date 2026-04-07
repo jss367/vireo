@@ -2358,6 +2358,29 @@ def test_count_filtered_photos_with_color_label(tmp_path):
     assert count == 1
 
 
+def test_get_photos_filter_color_label_combined_with_rating(tmp_path):
+    """color_label + rating_min combined filter works (regression: param ordering)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.update_photo_rating(p1, 4)
+    db.update_photo_rating(p2, 4)
+    db.update_photo_rating(p3, 2)
+    db.set_color_label(p1, 'red')
+    db.set_color_label(p3, 'red')
+
+    # Only p1 has both rating >= 4 AND color_label red
+    results = db.get_photos(rating_min=4, color_label='red')
+    assert len(results) == 1
+    assert results[0]['filename'] == 'a.jpg'
+
+    count = db.count_filtered_photos(rating_min=4, color_label='red')
+    assert count == 1
+
+
 def test_collection_color_label_rule(tmp_path):
     """Collections support color_label rules."""
     import json
