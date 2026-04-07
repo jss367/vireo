@@ -2019,45 +2019,49 @@ class Database:
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
 
-        # Delete associated data (non-cascading FKs)
-        self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
-        self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
-        # Deleting detections cascades to predictions via ON DELETE CASCADE
-        self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
+        try:
+            # Delete associated data (non-cascading FKs)
+            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
+            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
+            # Deleting detections cascades to predictions via ON DELETE CASCADE
+            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
 
-        # Clean collection rules
-        import json as _json
-        collections = self.conn.execute(
-            "SELECT id, rules FROM collections WHERE workspace_id = ?",
-            (self._ws_id(),),
-        ).fetchall()
-        deleted_set = set(all_ids)
-        for coll in collections:
-            rules = _json.loads(coll["rules"])
-            changed = False
-            for rule in rules:
-                if rule.get("field") == "photo_ids" and "value" in rule:
-                    original_len = len(rule["value"])
-                    rule["value"] = [v for v in rule["value"] if v not in deleted_set]
-                    if len(rule["value"]) != original_len:
-                        changed = True
-            if changed:
+            # Clean collection rules
+            import json as _json
+            collections = self.conn.execute(
+                "SELECT id, rules FROM collections WHERE workspace_id = ?",
+                (self._ws_id(),),
+            ).fetchall()
+            deleted_set = set(all_ids)
+            for coll in collections:
+                rules = _json.loads(coll["rules"])
+                changed = False
+                for rule in rules:
+                    if rule.get("field") == "photo_ids" and "value" in rule:
+                        original_len = len(rule["value"])
+                        rule["value"] = [v for v in rule["value"] if v not in deleted_set]
+                        if len(rule["value"]) != original_len:
+                            changed = True
+                if changed:
+                    self.conn.execute(
+                        "UPDATE collections SET rules = ? WHERE id = ?",
+                        (_json.dumps(rules), coll["id"]),
+                    )
+
+            # Delete photos (cascades to edit_history_items, inat_submissions)
+            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
+
+            # Update folder counts
+            for fid, count in folder_counts.items():
                 self.conn.execute(
-                    "UPDATE collections SET rules = ? WHERE id = ?",
-                    (_json.dumps(rules), coll["id"]),
+                    "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
+                    (count, fid),
                 )
 
-        # Delete photos (cascades to edit_history_items, inat_submissions)
-        self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
-
-        # Update folder counts
-        for fid, count in folder_counts.items():
-            self.conn.execute(
-                "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
-                (count, fid),
-            )
-
-        self.conn.commit()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return {"deleted": len(all_ids), "files": files}
 
     def update_photo_sharpness(self, photo_id, sharpness):
@@ -2266,7 +2270,7 @@ class Database:
             return name.title()
         return name
 
-    def add_keyword(self, name, parent_id=None, is_species=False):
+    def add_keyword(self, name, parent_id=None, is_species=False, _commit=True):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -2274,6 +2278,10 @@ class Database:
 
         For new species keywords, auto-detects the user's casing convention
         from existing keywords and applies it (unless overridden by config).
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
         """
         # Case-insensitive lookup
         if parent_id is None:
@@ -2293,7 +2301,8 @@ class Database:
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy' WHERE id = ? AND is_species = 0",
                     (existing["id"],),
                 )
-                self.conn.commit()
+                if _commit:
+                    self.conn.commit()
             return existing["id"]
 
         # Apply casing convention for new species keywords
@@ -2337,7 +2346,8 @@ class Database:
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
             (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return cur.lastrowid
 
     def merge_duplicate_keywords(self):
@@ -2410,13 +2420,19 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def tag_photo(self, photo_id, keyword_id):
-        """Associate a keyword with a photo."""
+    def tag_photo(self, photo_id, keyword_id, _commit=True):
+        """Associate a keyword with a photo.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         self.conn.execute(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (photo_id, keyword_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def untag_photo(self, photo_id, keyword_id):
         """Remove a keyword association from a photo."""
@@ -2695,12 +2711,18 @@ class Database:
             params,
         ).fetchall()
 
-    def update_prediction_status(self, prediction_id, status):
-        """Update prediction status ('pending', 'accepted', 'rejected')."""
+    def update_prediction_status(self, prediction_id, status, _commit=True):
+        """Update prediction status ('pending', 'accepted', 'rejected').
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         self.conn.execute(
             "UPDATE predictions SET status = ? WHERE id = ?", (status, prediction_id)
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def get_group_predictions(self, group_id):
         """Get all predictions and photo data for a burst group."""
@@ -2816,6 +2838,9 @@ class Database:
 
         If the prediction belongs to a group, derives the consensus species
         from the individual votes and applies that to all photos.
+
+        All database changes are performed atomically in a single transaction.
+        On failure, all changes are rolled back.
         """
         pred = self.conn.execute(
             """SELECT pr.*, d.photo_id
@@ -2827,51 +2852,55 @@ class Database:
         if not pred:
             return None
 
-        # Reject sibling predictions for same detection+model
-        # (covers both accepting an alternative and accepting the top-1)
-        self.conn.execute(
-            """UPDATE predictions SET status = 'rejected'
-               WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
-            (pred["detection_id"], pred["model"], prediction_id),
-        )
-        self.conn.commit()
+        try:
+            # Reject sibling predictions for same detection+model
+            # (covers both accepting an alternative and accepting the top-1)
+            self.conn.execute(
+                """UPDATE predictions SET status = 'rejected'
+                   WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
+                (pred["detection_id"], pred["model"], prediction_id),
+            )
 
-        # For grouped predictions, derive consensus from individual votes
-        species = pred["species"]
-        if pred["group_id"] and pred["individual"]:
-            import json as _json
+            # For grouped predictions, derive consensus from individual votes
+            species = pred["species"]
+            if pred["group_id"] and pred["individual"]:
+                import json as _json
 
-            try:
-                votes = _json.loads(pred["individual"])
-                best = max(votes, key=lambda sp: votes[sp])
-                species = best
-            except Exception:
-                pass
+                try:
+                    votes = _json.loads(pred["individual"])
+                    best = max(votes, key=lambda sp: votes[sp])
+                    species = best
+                except Exception:
+                    pass
 
-        kid = self.add_keyword(species, is_species=True)
-        affected = []  # list of {"photo_id": int, "prediction_id": int}
+            kid = self.add_keyword(species, is_species=True, _commit=False)
+            affected = []  # list of {"photo_id": int, "prediction_id": int}
 
-        # If grouped, accept all predictions in the group
-        if pred["group_id"]:
-            group_preds = self.conn.execute(
-                """SELECT pr.*, d.photo_id
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
-                (pred["group_id"], pred["model"], self._ws_id()),
-            ).fetchall()
-            for gp in group_preds:
-                self.update_prediction_status(gp["id"], "accepted")
-                self.tag_photo(gp["photo_id"], kid)
-                self.queue_change(gp["photo_id"], "keyword_add", species)
-                affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
-        else:
-            self.update_prediction_status(prediction_id, "accepted")
-            self.tag_photo(pred["photo_id"], kid)
-            self.queue_change(pred["photo_id"], "keyword_add", species)
-            affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
+            # If grouped, accept all predictions in the group
+            if pred["group_id"]:
+                group_preds = self.conn.execute(
+                    """SELECT pr.*, d.photo_id
+                       FROM predictions pr
+                       JOIN detections d ON d.id = pr.detection_id
+                       WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
+                    (pred["group_id"], pred["model"], self._ws_id()),
+                ).fetchall()
+                for gp in group_preds:
+                    self.update_prediction_status(gp["id"], "accepted", _commit=False)
+                    self.tag_photo(gp["photo_id"], kid, _commit=False)
+                    self.queue_change(gp["photo_id"], "keyword_add", species, _commit=False)
+                    affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
+            else:
+                self.update_prediction_status(prediction_id, "accepted", _commit=False)
+                self.tag_photo(pred["photo_id"], kid, _commit=False)
+                self.queue_change(pred["photo_id"], "keyword_add", species, _commit=False)
+                affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
 
-        return {"species": species, "keyword_id": kid, "affected": affected}
+            self.conn.commit()
+            return {"species": species, "keyword_id": kid, "affected": affected}
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # -- Detections --
 
@@ -2930,11 +2959,15 @@ class Database:
 
     # -- Pending Changes --
 
-    def queue_change(self, photo_id, change_type, value, workspace_id=None):
+    def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
         """Add a change to the sync queue (skips if already queued).
 
         Returns the inserted pending change token, or None if an identical row already exists.
         If workspace_id is not provided, uses the active workspace.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
         """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing = self.conn.execute(
@@ -2948,7 +2981,8 @@ class Database:
             "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
             (photo_id, change_type, value, change_token, ws_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return change_token
 
     def get_pending_changes(self):
