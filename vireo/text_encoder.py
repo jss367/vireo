@@ -33,19 +33,33 @@ def _get_text_session(model_str, pretrained_str=None):
 
     Args:
         model_str: model identifier (determines model directory)
-        pretrained_str: accepted for API compatibility but ignored
+        pretrained_str: optional path to model directory.  When provided and
+                        pointing to an existing directory it takes precedence
+                        over the default ``~/.vireo/models/<mapped-id>``
+                        location so that custom ``weights_path`` registrations
+                        are respected.
 
     Returns:
         (text_session, text_input_name, tokenizer) tuple
     """
-    dir_name = _MODEL_DIR_MAP.get(model_str)
-    if dir_name is None:
-        raise ValueError(
-            f"Unknown BioCLIP model: {model_str}. "
-            f"Known models: {list(_MODEL_DIR_MAP.keys())}"
-        )
-
-    model_dir = os.path.join(_MODELS_ROOT, dir_name)
+    # Resolve model directory – honour configured weights_path first.
+    if pretrained_str and os.path.isdir(pretrained_str):
+        model_dir = pretrained_str
+    else:
+        if pretrained_str:
+            log.warning(
+                "pretrained_str %r is not a directory; falling back to "
+                "default model directory for model_str=%r",
+                pretrained_str,
+                model_str,
+            )
+        dir_name = _MODEL_DIR_MAP.get(model_str)
+        if dir_name is None:
+            raise ValueError(
+                f"Unknown BioCLIP model: {model_str}. "
+                f"Known models: {list(_MODEL_DIR_MAP.keys())}"
+            )
+        model_dir = os.path.join(_MODELS_ROOT, dir_name)
 
     if model_dir not in _session_cache:
         log.info("Loading CLIP text encoder for %s...", model_str)
@@ -83,7 +97,9 @@ def encode_text(query, model_str, pretrained_str=None):
     Args:
         query: natural language search string (e.g., "bird in flight over water")
         model_str: model identifier (e.g., "ViT-B-16", "hf-hub:imageomics/bioclip-2")
-        pretrained_str: accepted for API compatibility but ignored
+        pretrained_str: optional path to model directory.  When provided and
+                        pointing to an existing directory it takes precedence
+                        over the default model location.
 
     Returns:
         numpy float32 array -- normalized text embedding vector

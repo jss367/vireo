@@ -89,8 +89,10 @@ KNOWN_MODELS = [
         "files": [
             "model.onnx",
             "class_names.json",
-            "label_descriptions.json",
             "config.json",
+        ],
+        "optional_files": [
+            "label_descriptions.json",
         ],
         "description": "EVA-02 Large fine-tuned on iNaturalist 2021. 10K species, 92% top-1. No label files needed.",
         "size_mb": 1200,
@@ -115,22 +117,20 @@ def _save_config(config):
 
 
 def _check_onnx_downloaded(model_dir, files):
-    """Check if all required ONNX files exist in a model directory.
+    """Check if all required model files exist in a model directory.
 
     Args:
         model_dir: path to the model directory
         files: list of filenames that must be present
 
     Returns:
-        True if the directory exists and contains at least the ONNX files
+        True if the directory exists and contains all required files
     """
     if not os.path.isdir(model_dir):
         return False
-    # At minimum, check that the .onnx files exist
-    onnx_files = [f for f in files if f.endswith(".onnx")]
     return all(
         os.path.isfile(os.path.join(model_dir, f))
-        for f in onnx_files
+        for f in files
     )
 
 
@@ -156,9 +156,11 @@ def get_models():
             reg = registered[km["id"]]
             reg_path = reg.get("weights_path", "")
             if reg_path and os.path.isdir(reg_path):
-                # Check if ONNX files exist at the registered path
-                onnx_files = [f for f in km.get("files", []) if f.endswith(".onnx")]
-                if all(os.path.isfile(os.path.join(reg_path, f)) for f in onnx_files):
+                # Check if all required files exist at the registered path
+                if all(
+                    os.path.isfile(os.path.join(reg_path, f))
+                    for f in km.get("files", [])
+                ):
                     entry["downloaded"] = True
                     entry["weights_path"] = reg_path
 
@@ -168,13 +170,16 @@ def get_models():
     for mid, m in registered.items():
         if not any(km["id"] == mid for km in KNOWN_MODELS):
             path = m.get("weights_path", "")
-            # Custom models: check for any .onnx file in the directory
+            # Custom models: require a .onnx file AND config.json so that
+            # a partial download (missing metadata) is not reported as ready.
             downloaded = False
             if path and os.path.isdir(path):
-                downloaded = any(
+                has_onnx = any(
                     f.endswith(".onnx")
                     for f in os.listdir(path)
                 )
+                has_config = os.path.isfile(os.path.join(path, "config.json"))
+                downloaded = has_onnx and has_config
             elif path and os.path.isfile(path) and path.endswith(".onnx"):
                 downloaded = True
             result.append(
