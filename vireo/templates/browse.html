@@ -217,6 +217,14 @@ body {
 }
 .flag-flagged { background: var(--accent); color: var(--bg-primary); }
 .flag-rejected { background: var(--danger); color: var(--text-primary); }
+.grid-card-color {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+}
+.grid-card-color[data-color="red"] { background: #e74c3c; }
+.grid-card-color[data-color="yellow"] { background: #f1c40f; }
+.grid-card-color[data-color="green"] { background: #2ecc71; }
+.grid-card-color[data-color="blue"] { background: #3498db; }
+.grid-card-color[data-color="purple"] { background: #9b59b6; }
 
 /* ---------- Detail Panel ---------- */
 .detail-panel {
@@ -718,6 +726,14 @@ body {
         <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
         <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
       </div>
+      <select id="colorFilter" onchange="applyFilters()" title="Filter by color label" style="font-size:12px;">
+        <option value="">Color: Any</option>
+        <option value="red">Red</option>
+        <option value="yellow">Yellow</option>
+        <option value="green">Green</option>
+        <option value="blue">Blue</option>
+        <option value="purple">Purple</option>
+      </select>
       <select id="sortSelect" onchange="applyFilters()" title="Sort order">
         <option value="date">Capture date (oldest)</option>
         <option value="date_desc">Capture date (newest)</option>
@@ -945,7 +961,7 @@ var selectedPhotoId = null;
 var selectedIndex = -1;
 var selectedPhotos = new Set(); // multi-select
 var showDetectionBoxes = false;
-var cardFields = ["filename", "rating", "flag", "sharpness"]; // default, overridden by config
+var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 var filterRating = 0;
@@ -1044,6 +1060,10 @@ function renderCardField(field, p) {
       return '';
     case 'quality_score':
       if (p.quality_score != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Quality score">' + p.quality_score.toFixed(2) + '</span>';
+      return '';
+    case 'color_label':
+      var cl = colorLabels[p.id];
+      if (cl) return '<span class="grid-card-color" data-color="' + cl + '" title="' + cl + '"></span>';
       return '';
     default:
       return '';
@@ -1371,6 +1391,9 @@ async function loadPhotos() {
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (filterRating > 0) params.set('rating_min', filterRating);
 
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
+
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
@@ -1427,6 +1450,8 @@ async function loadCalendarData() {
   params.set('year', calendarYear);
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (filterRating > 0) params.set('rating_min', filterRating);
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
   var search = document.getElementById('searchInput').value.trim();
   if (search) params.set('keyword', search);
   if (activeKeyword) params.set('keyword', activeKeyword);
@@ -2301,6 +2326,8 @@ async function loadSummary() {
   var params = new URLSearchParams();
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (filterRating > 0) params.set('rating_min', filterRating);
+  var colorFilter = document.getElementById('colorFilter').value;
+  if (colorFilter) params.set('color_label', colorFilter);
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
