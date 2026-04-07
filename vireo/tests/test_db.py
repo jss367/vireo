@@ -2226,3 +2226,104 @@ def test_get_folders_with_quality_data(tmp_path):
     assert len(folders) == 1
     assert folders[0]["name"] == "scored"
     assert folders[0]["photo_count"] > 0
+
+
+def test_color_labels_table_exists(tmp_path):
+    """photo_color_labels table is created on init."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = {r['name'] for r in db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert 'photo_color_labels' in tables
+
+
+def test_set_color_label(tmp_path):
+    """set_color_label stores a color for a photo in the active workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(pid, 'red')
+    assert db.get_color_label(pid) == 'red'
+
+
+def test_set_color_label_replaces(tmp_path):
+    """Setting a new color replaces the old one."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(pid, 'red')
+    db.set_color_label(pid, 'blue')
+    assert db.get_color_label(pid) == 'blue'
+
+
+def test_remove_color_label(tmp_path):
+    """remove_color_label deletes the label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.set_color_label(pid, 'green')
+    db.remove_color_label(pid)
+    assert db.get_color_label(pid) is None
+
+
+def test_color_label_invalid_color(tmp_path):
+    """set_color_label rejects invalid colors."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    with pytest.raises(ValueError):
+        db.set_color_label(pid, 'orange')
+
+
+def test_color_label_workspace_scoped(tmp_path):
+    """Color labels are per-workspace — same photo can have different labels in different workspaces."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+
+    # Default workspace
+    ws1 = db._active_workspace_id
+    db.set_color_label(pid, 'red')
+
+    # Create second workspace and add the folder
+    ws2 = db.create_workspace('Second')
+    db.set_active_workspace(ws2)
+    db.add_workspace_folder(ws2, fid)
+    db.set_color_label(pid, 'blue')
+
+    # Verify each workspace has its own label
+    assert db.get_color_label(pid) == 'blue'
+    db.set_active_workspace(ws1)
+    assert db.get_color_label(pid) == 'red'
+
+
+def test_batch_set_color_label(tmp_path):
+    """batch_set_color_label sets label on multiple photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.batch_set_color_label([p1, p2], 'yellow')
+    assert db.get_color_label(p1) == 'yellow'
+    assert db.get_color_label(p2) == 'yellow'
+
+
+def test_batch_remove_color_label(tmp_path):
+    """batch_set_color_label with None removes labels."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.batch_set_color_label([p1, p2], 'yellow')
+    db.batch_set_color_label([p1, p2], None)
+    assert db.get_color_label(p1) is None
+    assert db.get_color_label(p2) is None

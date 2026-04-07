@@ -233,12 +233,22 @@ class Database:
                 last_run_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS photo_color_labels (
+                photo_id      INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+                workspace_id  INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                color         TEXT NOT NULL,
+                PRIMARY KEY (photo_id, workspace_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
             CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
             CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
+
+            CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
+            ON photo_color_labels(workspace_id);
         """
         )
         # Migrations for existing databases
@@ -1772,6 +1782,66 @@ class Database:
             f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
             [flag] + list(photo_ids),
         )
+        self.conn.commit()
+
+    VALID_COLOR_LABELS = ('red', 'yellow', 'green', 'blue', 'purple')
+
+    def set_color_label(self, photo_id, color):
+        """Set a color label for a photo in the active workspace."""
+        if color not in self.VALID_COLOR_LABELS:
+            raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
+        self.conn.execute(
+            "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
+            (photo_id, self._ws_id(), color),
+        )
+        self.conn.commit()
+
+    def remove_color_label(self, photo_id):
+        """Remove the color label for a photo in the active workspace."""
+        self.conn.execute(
+            "DELETE FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, self._ws_id()),
+        )
+        self.conn.commit()
+
+    def get_color_label(self, photo_id):
+        """Return the color label for a photo in the active workspace, or None."""
+        row = self.conn.execute(
+            "SELECT color FROM photo_color_labels WHERE photo_id = ? AND workspace_id = ?",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row['color'] if row else None
+
+    def get_color_labels_for_photos(self, photo_ids):
+        """Return a dict of {photo_id: color} for the active workspace."""
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"SELECT photo_id, color FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+            [self._ws_id()] + list(photo_ids),
+        ).fetchall()
+        return {row['photo_id']: row['color'] for row in rows}
+
+    def batch_set_color_label(self, photo_ids, color):
+        """Set or remove color label for multiple photos in the active workspace."""
+        if not photo_ids:
+            return
+        ws_id = self._ws_id()
+        if color is None:
+            placeholders = ",".join("?" for _ in photo_ids)
+            self.conn.execute(
+                f"DELETE FROM photo_color_labels WHERE workspace_id = ? AND photo_id IN ({placeholders})",
+                [ws_id] + list(photo_ids),
+            )
+        else:
+            if color not in self.VALID_COLOR_LABELS:
+                raise ValueError(f"Invalid color label: {color}. Must be one of {self.VALID_COLOR_LABELS}")
+            for pid in photo_ids:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO photo_color_labels (photo_id, workspace_id, color) VALUES (?, ?, ?)",
+                    (pid, ws_id, color),
+                )
         self.conn.commit()
 
     def delete_photos(self, photo_ids, include_companions=False):
