@@ -812,3 +812,118 @@ def test_pair_raw_jpeg_does_not_overwrite_zero_primary_gps(tmp_path):
     photo = db.conn.execute("SELECT latitude, longitude FROM photos").fetchone()
     assert photo["latitude"] == 0.0
     assert photo["longitude"] == 0.0
+
+
+def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
+    """Scanning a RAW file creates a working copy JPEG."""
+    import scanner
+    from db import Database
+
+    # Set up vireo dir structure
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    # Create a fake NEF file
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    nef_file = photo_dir / "IMG_001.nef"
+    nef_file.write_bytes(b"fake raw data")
+
+    # Mock ExifTool to return empty metadata
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    # Mock extract_working_copy to actually create a file (simulates success)
+    def fake_extract(source, output, max_size=4096, quality=92):
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=999999)
+    assert len(photos) == 1
+    assert photos[0]["working_copy_path"] is not None
+    assert os.path.exists(os.path.join(str(vireo_dir), photos[0]["working_copy_path"]))
+
+
+def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
+    """Scanning a JPEG file does not create a working copy."""
+    import scanner
+    from db import Database
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    jpg_file = photo_dir / "IMG_001.jpg"
+    Image.new("RGB", (3000, 2000)).save(str(jpg_file), "JPEG")
+
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    # Mock extract_working_copy -- should never be called for JPEGs
+    calls = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        calls.append(source)
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=999999)
+    assert len(photos) == 1
+    assert photos[0]["working_copy_path"] is None
+    assert len(calls) == 0
+
+
+def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
+    """When RAW+JPEG pair exists, working copy is extracted from the companion JPEG."""
+    import scanner
+    from db import Database
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+
+    # Create RAW + JPEG pair
+    nef_file = photo_dir / "IMG_001.nef"
+    nef_file.write_bytes(b"fake raw data")
+    jpg_file = photo_dir / "IMG_001.jpg"
+    Image.new("RGB", (6000, 4000), color=(255, 0, 0)).save(str(jpg_file), "JPEG")
+
+    # Mock ExifTool
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+
+    # Track which source file extract_working_copy is called with
+    sources_used = []
+
+    def fake_extract(source, output, max_size=4096, quality=92):
+        sources_used.append(source)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        Image.new("RGB", (4096, 2731)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(scanner, "extract_working_copy", fake_extract)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(str(photo_dir), db, vireo_dir=str(vireo_dir))
+
+    # After companion pairing, the RAW should have a working copy
+    photos = db.get_photos(per_page=999999)
+    raw_photos = [p for p in photos if p["extension"] == ".nef"]
+    assert len(raw_photos) == 1
+    assert raw_photos[0]["working_copy_path"] is not None
+
+    # Verify the companion JPEG was used as the source, not the RAW file
+    assert len(sources_used) == 1
+    assert sources_used[0].endswith("IMG_001.jpg"), (
+        f"Expected companion JPEG as source, got: {sources_used[0]}"
+    )

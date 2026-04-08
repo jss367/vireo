@@ -34,6 +34,8 @@ DEFAULTS = {
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,
+    "working_copy_max_size": 4096,
+    "working_copy_quality": 92,
     "preview_quality": 90,
     "browse_thumb_default": 220,
     # --- Detection ---

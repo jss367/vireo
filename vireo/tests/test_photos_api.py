@@ -324,3 +324,226 @@ def test_batch_keyword_with_type_override(app_and_db):
         "SELECT type FROM keywords WHERE name = 'Central Park'").fetchone()
     assert row is not None
     assert row["type"] == "location"
+
+
+# --- Working copy integration tests for serving endpoints ---
+
+import os
+
+
+def test_preview_uses_working_copy(app_and_db):
+    """Preview endpoint loads from working copy instead of original."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Set a working copy path on the photo
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (4096, 2731), color=(0, 255, 0)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    # Clear preview cache
+    preview_dir = os.path.join(vireo_dir, "previews")
+    cache_file = os.path.join(preview_dir, f"{pid}.jpg")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+
+    resp = client.get(f"/photos/{pid}/full")
+    assert resp.status_code == 200
+
+
+def test_preview_falls_back_to_original(app_and_db, tmp_path):
+    """Preview endpoint falls back to original when no working copy exists."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Point folder to a writable tmp location and create a real image
+    from PIL import Image
+    photo_dir = tmp_path / "photo_files"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
+    Image.new("RGB", (2000, 1500)).save(img_path, "JPEG")
+
+    # Clear preview cache
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    cache_file = os.path.join(preview_dir, f"{pid}.jpg")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+
+    resp = client.get(f"/photos/{pid}/full")
+    assert resp.status_code == 200
+
+
+def test_original_serves_full_res_working_copy(app_and_db):
+    """Original endpoint serves working copy directly when it is full-res."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Set photo dimensions to match working copy
+    db.conn.execute("UPDATE photos SET width=800, height=600 WHERE id=?", (pid,))
+    db.conn.commit()
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    # Working copy is 800x600 which matches original dimensions
+    Image.new("RGB", (800, 600)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+    assert resp.status_code == 200
+
+
+def test_original_endpoint_upgrades_working_copy_to_full_res(app_and_db, tmp_path):
+    """Original endpoint extracts full-res when working copy is capped."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Set dimensions larger than working copy
+    db.conn.execute("UPDATE photos SET width=6000, height=4000 WHERE id=?", (pid,))
+    db.conn.commit()
+
+    # Create a capped working copy (smaller than original dimensions)
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (4096, 2731)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    # Point folder to a writable tmp location and create a real source image
+    photo_dir = tmp_path / "photo_files"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
+    Image.new("RGB", (6000, 4000)).save(img_path, "JPEG")
+
+    resp = client.get(f"/photos/{pid}/original")
+    assert resp.status_code == 200
+
+
+def test_original_serves_native_jpeg_directly(app_and_db, tmp_path):
+    """Original endpoint serves JPEG file directly when no working copy."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Point folder to a writable tmp location and create a real JPEG
+    from PIL import Image
+    photo_dir = tmp_path / "photo_files"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
+    Image.new("RGB", (3000, 2000)).save(img_path, "JPEG")
+
+    # Ensure no working copy is set
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/original")
+    assert resp.status_code == 200
+
+
+def test_crop_preview_uses_working_copy(app_and_db):
+    """Crop preview endpoint loads from working copy when available."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Create a working copy
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (4096, 2731), color=(255, 0, 0)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/crop")
+    assert resp.status_code == 200
+    assert resp.content_type == "image/jpeg"
+
+
+def test_crop_preview_falls_back_to_original(app_and_db, tmp_path):
+    """Crop preview endpoint falls back to original when no working copy."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Point folder to a writable tmp location and create a real image
+    from PIL import Image
+    photo_dir = tmp_path / "photo_files"
+    photo_dir.mkdir()
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(photo_dir), photos[0]["folder_id"]),
+    )
+    db.conn.commit()
+    img_path = os.path.join(str(photo_dir), photos[0]["filename"])
+    Image.new("RGB", (2000, 1500)).save(img_path, "JPEG")
+
+    # Ensure no working copy
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/crop")
+    assert resp.status_code == 200
+    assert resp.content_type == "image/jpeg"

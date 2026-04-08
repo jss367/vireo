@@ -1050,12 +1050,14 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews)
+        # Clean up cached files (thumbnails, previews, working copies)
         thumb_dir = app.config["THUMB_CACHE_DIR"]
-        preview_dir = os.path.join(os.path.dirname(thumb_dir), "previews")
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
         for f in result["files"]:
             pid = f["photo_id"]
-            for d in [thumb_dir, preview_dir]:
+            for d in [thumb_dir, preview_dir, working_dir]:
                 cached = os.path.join(d, f"{pid}.jpg")
                 if os.path.isfile(cached):
                     os.remove(cached)
@@ -3860,10 +3862,12 @@ def create_app(db_path, thumb_cache_dir=None):
                     "rate": 0,
                 })
 
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental,
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                 status_callback=status_cb,
+                vireo_dir=vireo_dir,
             )
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
@@ -3904,7 +3908,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             thumb_result = generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
+                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
+                vireo_dir=vireo_dir,
             )
             from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",
@@ -3945,8 +3950,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             return generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=progress_cb
+                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=progress_cb,
+                vireo_dir=vireo_dir,
             )
 
         job_id = runner.start("thumbnails", work, workspace_id=active_ws)
@@ -4289,7 +4296,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
@@ -4314,6 +4322,7 @@ def create_app(db_path, thumb_cache_dir=None):
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
+                vireo_dir=vireo_dir,
             )
             from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",
@@ -4465,6 +4474,8 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
         def work(job):
             from sharpness import score_collection_photos
 
@@ -4500,6 +4511,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 thread_db,
                 collection_id,
                 progress_callback=progress_cb,
+                vireo_dir=vireo_dir,
             )
             runner.update_step(job["id"], "score", status="completed",
                                summary=f"{len(result['results'])} scored")
@@ -4574,9 +4586,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
         def work(job):
-            return run_classify_job(job, runner, db_path, active_ws, params)
+            return run_classify_job(job, runner, db_path, active_ws, params, vireo_dir=vireo_dir)
 
         job_id = runner.start(
             "classify",
@@ -6128,14 +6141,25 @@ def create_app(db_path, thumb_cache_dir=None):
         from PIL import Image
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
 
-        image_path = os.path.join(photo["path"], photo["filename"])
+        # Try working copy first, fall back to original
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
         img = load_image(image_path, max_size=None)
         if img is None:
             return "Could not load image", 500
@@ -6198,13 +6222,26 @@ def create_app(db_path, thumb_cache_dir=None):
         from image_loader import load_image
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
-        image_path = os.path.join(photo["path"], photo["filename"])
+
+        # Try working copy first, fall back to original
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
         img = load_image(image_path, max_size=max_size)
         if img is None:
             return "Could not load image", 500
@@ -6216,43 +6253,79 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):
-        """Serve the full-resolution image for 1:1 zoom, converting RAW formats to JPEG."""
+        """Serve full-resolution image for 1:1 zoom."""
         import config as cfg
         from flask import send_file
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
-        image_path = os.path.join(photo["path"], photo["filename"])
-        if not os.path.exists(image_path):
-            return "Not found", 404
 
-        # Serve browser-native formats directly
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        # Check if working copy is full-res
+        if photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                from PIL import Image as _PILImage
+                with _PILImage.open(wc_path) as wc_img:
+                    wc_w, wc_h = wc_img.size
+                orig_w = photo["width"]
+                orig_h = photo["height"]
+                # If working copy matches original dimensions, serve it directly.
+                # Skip shortcut when original dimensions are unknown (None) to
+                # avoid serving a capped working copy as full-res.
+                if orig_w and orig_h and wc_w >= orig_w and wc_h >= orig_h:
+                    return send_file(wc_path, mimetype="image/jpeg")
+                # Otherwise: need full-res extraction (on-demand upgrade)
+
+        # Resolve original file path
+        folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder:
+            return "Not found", 404
+        image_path = os.path.join(folder["path"], photo["filename"])
+
+        # For browser-native formats without a working copy, serve directly
         ext = os.path.splitext(photo["filename"])[1].lower()
-        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp") and not photo["working_copy_path"] and os.path.exists(image_path):
             return send_file(image_path)
 
-        # Convert non-browser formats (RAW, etc.) to JPEG, cached
-        originals_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "originals"
-        )
-        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
-        if os.path.exists(cache_path):
-            return send_file(cache_path, mimetype="image/jpeg")
+        # Extract full-res working copy (on-demand upgrade)
+        from image_loader import extract_working_copy, load_image
+        wc_rel = f"working/{photo_id}.jpg"
+        wc_abs = os.path.join(vireo_dir, wc_rel)
+        quality = cfg.load().get("working_copy_quality", 92)
 
-        from image_loader import load_image
+        if extract_working_copy(image_path, wc_abs, max_size=0, quality=quality):
+            # Update DB so future requests are fast; also backfill
+            # dimensions if missing so the full-res shortcut works next time
+            from PIL import Image as _PILImage
+            with _PILImage.open(wc_abs) as upgraded:
+                uw, uh = upgraded.size
+            updates = ["working_copy_path=?"]
+            params = [wc_rel]
+            if not photo["width"] or not photo["height"]:
+                updates.extend(["width=?", "height=?"])
+                params.extend([uw, uh])
+            params.append(photo_id)
+            db.conn.execute(
+                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+            db.conn.commit()
+            return send_file(wc_abs, mimetype="image/jpeg")
 
+        # Fallback: serve via load_image
         img = load_image(image_path, max_size=None)
         if img is None:
             return "Could not load image", 500
-
+        originals_dir = os.path.join(vireo_dir, "originals")
+        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
         os.makedirs(originals_dir, exist_ok=True)
-        preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
+        img.save(cache_path, format="JPEG", quality=quality)
         return send_file(cache_path, mimetype="image/jpeg")
 
     # -- Logs page --

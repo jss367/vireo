@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import imagehash
-from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
+from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS, extract_working_copy
 from metadata import extract_metadata
 from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
@@ -238,7 +238,58 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None):
+def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None):
+    """Extract working copies for all RAW photos missing one.
+
+    For each RAW photo without a working_copy_path, extract a JPEG working
+    copy into ``<vireo_dir>/working/<photo_id>.jpg``.  When the photo has a
+    companion JPEG (RAW+JPEG pair), the companion is used as the extraction
+    source because the in-camera JPEG is higher quality than extracting from
+    the RAW.
+    """
+    import config as cfg
+
+    user_cfg = cfg.load()
+    wc_max_size = user_cfg.get("working_copy_max_size", 4096)
+    wc_quality = user_cfg.get("working_copy_quality", 92)
+
+    rows = db.conn.execute(
+        "SELECT p.id, p.filename, p.companion_path, p.working_copy_path, "
+        "f.path AS folder_path "
+        "FROM photos p JOIN folders f ON f.id = p.folder_id "
+        "WHERE p.extension IN ({}) AND p.working_copy_path IS NULL".format(
+            ",".join("?" for _ in RAW_EXTENSIONS)
+        ),
+        list(RAW_EXTENSIONS),
+    ).fetchall()
+
+    if not rows:
+        return
+
+    if status_callback:
+        status_callback(f"Extracting {len(rows)} working copies...")
+
+    for _i, row in enumerate(rows):
+        wc_rel = f"working/{row['id']}.jpg"
+        wc_abs = os.path.join(vireo_dir, wc_rel)
+
+        # Prefer companion JPEG if available
+        source = os.path.join(row["folder_path"], row["filename"])
+        if row["companion_path"]:
+            companion = os.path.join(row["folder_path"], row["companion_path"])
+            if os.path.isfile(companion):
+                source = companion
+
+        if extract_working_copy(source, wc_abs, max_size=wc_max_size, quality=wc_quality):
+            db.conn.execute(
+                "UPDATE photos SET working_copy_path=? WHERE id=?",
+                (wc_rel, row["id"]),
+            )
+
+    db.conn.commit()
+
+
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, vireo_dir=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -255,6 +306,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             full tree. When provided, only files in these directories are
             discovered (non-recursively), but ``root`` is still used as the
             folder hierarchy root so parent links are preserved correctly.
+        vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
+            When provided, working copies are extracted for RAW photos after
+            companion pairing.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -540,6 +594,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path
     _pair_raw_jpeg_companions(db)
+
+    # Extract working copies for RAW photos (after pairing so companion is known)
+    if vireo_dir:
+        _extract_working_copies(db, vireo_dir, progress_callback, status_callback)
 
     db.update_folder_counts()
     log.info("Scan complete: %d photos indexed", total)

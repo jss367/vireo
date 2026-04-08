@@ -240,3 +240,105 @@ def test_embedded_jpeg_exif_orientation_applied(tmp_path, monkeypatch):
     assert result.size == (960, 1920), (
         f"Expected (960, 1920) after EXIF orientation transpose + resize, got {result.size}"
     )
+
+
+# ── extract_working_copy tests ──────────────────────────────────────────
+
+
+def test_extract_working_copy_basic(tmp_path):
+    """extract_working_copy saves a capped JPEG from a standard image file."""
+    from image_loader import extract_working_copy
+    from PIL import Image
+
+    # Create a real JPEG source image
+    source = tmp_path / "photo.jpg"
+    img = Image.new("RGB", (5000, 3333), color="blue")
+    img.save(str(source), "JPEG")
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(str(source), str(output), max_size=4096, quality=92)
+
+    assert result is True
+    assert output.exists()
+    out_img = Image.open(str(output))
+    assert max(out_img.size) <= 4096
+
+
+def test_extract_working_copy_full_resolution(tmp_path):
+    """extract_working_copy at max_size=0 preserves full resolution."""
+    from image_loader import extract_working_copy
+    from PIL import Image
+
+    source = tmp_path / "photo.jpg"
+    img = Image.new("RGB", (6000, 4000), color="green")
+    img.save(str(source), "JPEG")
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(str(source), str(output), max_size=0, quality=92)
+
+    assert result is True
+    out_img = Image.open(str(output))
+    assert out_img.size == (6000, 4000)
+
+
+def test_extract_working_copy_missing_source_returns_false(tmp_path):
+    """extract_working_copy returns False when the source file does not exist."""
+    from image_loader import extract_working_copy
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(
+        str(tmp_path / "nonexistent.jpg"), str(output), max_size=4096
+    )
+
+    assert result is False
+    assert not output.exists()
+
+
+# ── load_working_image tests ──────────────────────────────────────────
+
+
+def test_load_working_image_uses_working_copy(tmp_path):
+    """load_working_image loads from working copy when available."""
+    from image_loader import load_working_image
+    from PIL import Image
+
+    # Create a working copy JPEG
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    wc_path = working_dir / "42.jpg"
+    Image.new("RGB", (4096, 2731)).save(str(wc_path), "JPEG")
+
+    photo = {"working_copy_path": "working/42.jpg", "folder_id": 1, "filename": "test.nef"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024)
+
+    assert img is not None
+    assert max(img.size) <= 1024
+
+
+def test_load_working_image_uses_original_for_jpeg(tmp_path):
+    """load_working_image uses original file when working_copy_path is NULL."""
+    from image_loader import load_working_image
+    from PIL import Image
+
+    # Create a JPEG original
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    orig = folder / "test.jpg"
+    Image.new("RGB", (3000, 2000)).save(str(orig), "JPEG")
+
+    folders = {1: str(folder)}
+    photo = {"working_copy_path": None, "folder_id": 1, "filename": "test.jpg"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024, folders=folders)
+
+    assert img is not None
+    assert max(img.size) <= 1024
+
+
+def test_load_working_image_returns_none_when_no_working_copy_no_folders(tmp_path):
+    """load_working_image returns None when working_copy_path is set but file is missing, and folders is None."""
+    from image_loader import load_working_image
+
+    photo = {"working_copy_path": "working/missing.jpg", "folder_id": 1, "filename": "test.nef"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024)
+
+    assert img is None

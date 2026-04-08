@@ -42,6 +42,14 @@ def test_photos_table_has_exif_data_column(tmp_path):
     assert col is not None  # No exception means column exists
 
 
+def test_working_copy_path_column_exists(tmp_path):
+    """The photos table has a working_copy_path column after migration."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute("SELECT working_copy_path FROM photos LIMIT 0").description
+    assert row[0][0] == "working_copy_path"
+
+
 def test_add_and_get_folder(tmp_path):
     """add_folder creates a folder, get_folder_tree returns it."""
     from db import Database

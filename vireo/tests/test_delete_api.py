@@ -240,6 +240,29 @@ def test_api_batch_delete_removes_thumbnails(app_and_db):
     assert not os.path.exists(thumb_path)
 
 
+def test_api_batch_delete_removes_working_copy(app_and_db):
+    """Deleting a photo removes its working copy file."""
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    # Create a working copy file for this photo
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    working_dir = os.path.join(os.path.dirname(thumb_dir), "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (100, 100)).save(working_path)
+    assert os.path.exists(working_path)
+
+    client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+
+    assert not os.path.exists(working_path)
+
+
 def test_api_batch_delete_requires_photo_ids(app_and_db):
     """API returns error when photo_ids is missing."""
     app, db = app_and_db

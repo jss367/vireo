@@ -25,9 +25,10 @@ except ImportError:
     compute_sharpness = None
 
 try:
-    from image_loader import load_image
+    from image_loader import load_image, load_working_image
 except ImportError:
     load_image = None
+    load_working_image = None
 
 from db import Database
 from models import get_active_model, get_models
@@ -432,7 +433,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
 _BATCH_SIZE = 16
 
 
-def _prepare_image(photo, folders, detection):
+def _prepare_image(photo, folders, detection, vireo_dir=None):
     """Load and crop a photo to a specific detection's bounding box.
 
     Args:
@@ -440,6 +441,9 @@ def _prepare_image(photo, folders, detection):
         folders: {folder_id: path} mapping
         detection: detection dict with box_x, box_y, box_w, box_h keys
             (or None for full image classification)
+        vireo_dir: optional path to ~/.vireo/; when set, tries to load the
+            pre-extracted working copy JPEG before falling back to the
+            original file via load_image().
 
     Returns:
         (PIL.Image, folder_path, image_path) or (None, folder_path, image_path) on failure.
@@ -449,7 +453,11 @@ def _prepare_image(photo, folders, detection):
     folder_path = folders.get(photo["folder_id"], "")
     image_path = os.path.join(folder_path, photo["filename"])
 
-    img = load_image(image_path, max_size=None)
+    img = None
+    if vireo_dir and load_working_image is not None:
+        img = load_working_image(photo, vireo_dir, max_size=None, folders=folders)
+    if img is None:
+        img = load_image(image_path, max_size=None)
     if img is None:
         return None, folder_path, image_path
 
@@ -568,7 +576,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
 
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
-    model_name, runner, job, db, top_k=1,
+    model_name, runner, job, db, top_k=1, vireo_dir=None,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -663,7 +671,7 @@ def _classify_photos(
             # Classify each detection independently
             for detection in photo_detections:
                 img, det_folder_path, det_image_path = _prepare_image(
-                    photo, folders, detection
+                    photo, folders, detection, vireo_dir=vireo_dir
                 )
                 if img is None:
                     failed += 1
@@ -686,7 +694,7 @@ def _classify_photos(
                                "confidence": 0, "category": "animal"}]
             full_det_ids = db.save_detections(photo["id"], full_image_det,
                                               detector_model="full-image")
-            img, folder_path, image_path = _prepare_image(photo, folders, None)
+            img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:
                 failed += 1
                 continue
@@ -871,7 +879,7 @@ def _store_grouped_predictions(
     }
 
 
-def run_classify_job(job, runner, db_path, workspace_id, params):
+def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None):
     """Execute classification job. Called by JobRunner in a background thread.
 
     Args:
@@ -880,6 +888,8 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
         db_path: path to SQLite database
         workspace_id: active workspace ID
         params: ClassifyParams with request parameters
+        vireo_dir: optional path to ~/.vireo/; when set, classification uses
+            pre-extracted working copy JPEGs instead of decoding RAW files.
     """
     thread_db = Database(db_path)
     try:
@@ -1083,6 +1093,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params):
             job=job,
             db=thread_db,
             top_k=top_k,
+            vireo_dir=vireo_dir,
         )
         classified_count = len(raw_results) - skipped_existing
         parts = [f"{classified_count} classified"]

@@ -74,6 +74,34 @@ def test_get_thumb_path_returns_path_if_exists(tmp_path):
     assert os.path.exists(result)
 
 
+def test_generate_all_uses_working_copy(tmp_path):
+    """generate_all uses working copy instead of original for RAW photos."""
+    from db import Database
+    from thumbnails import generate_all
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    thumb_dir = vireo_dir / "thumbnails"
+
+    # Create a working copy (simulating extracted JPEG)
+    wc = working_dir / "1.jpg"
+    Image.new("RGB", (4096, 2731), color=(0, 255, 0)).save(str(wc), "JPEG")
+
+    db = Database(str(vireo_dir / "test.db"))
+    folder_id = db.add_folder("/fake/photos")
+    photo_id = db.add_photo(folder_id, "test.nef", ".nef", 1000, 1.0)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        ("working/1.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert os.path.exists(os.path.join(str(thumb_dir), f"{photo_id}.jpg"))
+
+
 def test_generate_all_creates_missing(tmp_path):
     """generate_all generates thumbnails for photos without them."""
     from db import Database

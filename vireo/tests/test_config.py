@@ -90,6 +90,15 @@ def test_ingest_defaults_present():
     assert ingest["file_types"] == "both"
 
 
+def test_working_copy_defaults(tmp_path, monkeypatch):
+    """Config includes working copy defaults."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    config = cfg.load()
+    assert config["working_copy_max_size"] == 4096
+    assert config["working_copy_quality"] == 92
+
+
 def test_load_returns_defaults_when_no_file(tmp_path):
     """load() returns full defaults when config file does not exist."""
     import config as cfg

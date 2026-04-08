@@ -352,6 +352,12 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN exif_data TEXT")
 
+        # Working copy path for JPG-centric pipeline
+        try:
+            self.conn.execute("SELECT working_copy_path FROM photos LIMIT 0")
+        except Exception:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_path TEXT")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
@@ -1245,7 +1251,7 @@ class Database:
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
                     timestamp, width, height, rating, flag, thumb_path, sharpness,
                     subject_sharpness, subject_size, quality_score,
-                    latitude, longitude, companion_path"""
+                    latitude, longitude, companion_path, working_copy_path"""
 
     # Columns for single-photo detail queries (includes exif_data JSON)
     PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"

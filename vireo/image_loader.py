@@ -19,6 +19,7 @@ RAW strategy (JPEG-first):
 
 import io
 import logging
+import os
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -56,6 +57,7 @@ def load_image(file_path, max_size=1024):
             img = _load_raw(path, max_size)
         else:
             img = Image.open(str(path))
+            img = ImageOps.exif_transpose(img)
             img = img.convert("RGB")
 
         if img is None:
@@ -68,6 +70,84 @@ def load_image(file_path, max_size=1024):
     except Exception as e:
         log.warning("Failed to load image: %s — %s", file_path, e)
         return None
+
+
+def _load_standard(path, max_size):
+    """Load a standard image file (JPEG, PNG, TIFF, etc.) via PIL.
+
+    Opens the file, converts to RGB, and resizes to max_size if needed.
+    This is the fast path — no RAW decoding involved.
+
+    Args:
+        path: path to the image file
+        max_size: maximum dimension (longest side). None or 0 for full resolution.
+
+    Returns:
+        PIL.Image.Image or None
+    """
+    try:
+        img = Image.open(str(path))
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        if max_size and max_size > 0 and max(img.size) > max_size:
+            img.thumbnail((max_size, max_size), Image.LANCZOS)
+        return img
+    except Exception as e:
+        log.warning("Failed to load standard image: %s — %s", path, e)
+        return None
+
+
+def load_working_image(photo, vireo_dir, max_size=1024, folders=None):
+    """Load a photo's working image — the fast path for all pixel operations.
+
+    Uses the pre-extracted working copy JPEG if available,
+    otherwise falls back to loading the original file directly.
+
+    Args:
+        photo: photo dict with working_copy_path, folder_id, filename
+        vireo_dir: path to ~/.vireo/
+        max_size: maximum dimension (longest side). None for full resolution.
+        folders: optional {folder_id: path} mapping (required when working_copy_path is NULL)
+
+    Returns:
+        PIL.Image.Image or None
+    """
+    if photo.get("working_copy_path"):
+        wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+        if os.path.exists(wc_path):
+            return _load_standard(wc_path, max_size)
+
+    # No working copy — load original (JPEG source or missing working copy)
+    if folders is None:
+        return None
+    folder_path = folders.get(photo["folder_id"], "")
+    source_path = os.path.join(folder_path, photo["filename"])
+    return _load_standard(source_path, max_size)
+
+
+def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
+    """Extract a JPEG working copy from an image file.
+
+    Args:
+        source_path: path to source image (RAW or JPEG)
+        output_path: where to save the working copy JPEG
+        max_size: max dimension (longest side). 0 or None for full resolution.
+        quality: JPEG quality (1-95)
+
+    Returns:
+        True on success, False on failure
+    """
+    try:
+        img = load_image(source_path, max_size=max_size or None)
+        if img is None:
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path, "JPEG", quality=quality)
+        return True
+    except Exception:
+        log.warning("Failed to extract working copy from %s", source_path,
+                    exc_info=True)
+        return False
 
 
 def _load_raw(path, max_size):

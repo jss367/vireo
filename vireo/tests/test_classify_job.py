@@ -900,3 +900,127 @@ def test_api_route_calls_run_classify_job(app_and_db):
     data = resp.get_json()
     assert "job_id" in data
     assert data["job_id"].startswith("classify-")
+
+
+# ── Task 8: _prepare_image working copy tests ─────────────────────────────────
+
+
+def test_prepare_image_uses_working_copy(tmp_path):
+    """_prepare_image loads from working copy when vireo_dir is provided."""
+    from classify_job import _prepare_image
+
+    # Set up vireo_dir with a working copy JPEG
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+
+    wc_img = Image.new("RGB", (2000, 1500), color="blue")
+    wc_path = working_dir / "42.jpg"
+    wc_img.save(str(wc_path), "JPEG")
+
+    photo = {
+        "id": 42,
+        "folder_id": 10,
+        "filename": "bird.nef",
+        "working_copy_path": "working/42.jpg",
+    }
+    folders = {10: str(tmp_path / "photos")}
+
+    # Do NOT create the original file — _prepare_image should use the working copy
+    img, folder_path, image_path = _prepare_image(
+        photo, folders, None, vireo_dir=str(vireo_dir)
+    )
+
+    assert img is not None
+    # The result should be thumbnailed to 1024
+    assert max(img.size) <= 1024
+
+
+def test_prepare_image_falls_back_without_working_copy(tmp_path):
+    """_prepare_image falls back to load_image when no working copy exists."""
+
+    from classify_job import _prepare_image
+
+    vireo_dir = str(tmp_path / "vireo")
+
+    # Create a real original image
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    orig_img = Image.new("RGB", (2000, 1500), color="red")
+    orig_img.save(str(photos_dir / "bird.jpg"), "JPEG")
+
+    photo = {
+        "id": 99,
+        "folder_id": 10,
+        "filename": "bird.jpg",
+        "working_copy_path": None,
+    }
+    folders = {10: str(photos_dir)}
+
+    img, folder_path, image_path = _prepare_image(
+        photo, folders, None, vireo_dir=vireo_dir
+    )
+
+    assert img is not None
+    assert max(img.size) <= 1024
+
+
+def test_prepare_image_crops_detection_from_working_copy(tmp_path):
+    """_prepare_image crops to detection bbox when using a working copy."""
+    from classify_job import _prepare_image
+
+    # Set up vireo_dir with a working copy
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+
+    wc_img = Image.new("RGB", (2000, 1500), color="green")
+    wc_path = working_dir / "7.jpg"
+    wc_img.save(str(wc_path), "JPEG")
+
+    photo = {
+        "id": 7,
+        "folder_id": 10,
+        "filename": "bird.arw",
+        "working_copy_path": "working/7.jpg",
+    }
+    folders = {10: str(tmp_path / "photos")}
+
+    detection = {
+        "box_x": 0.2,
+        "box_y": 0.2,
+        "box_w": 0.4,
+        "box_h": 0.4,
+    }
+
+    img, folder_path, image_path = _prepare_image(
+        photo, folders, detection, vireo_dir=str(vireo_dir)
+    )
+
+    assert img is not None
+    # Should be cropped and thumbnailed
+    assert max(img.size) <= 1024
+
+
+def test_prepare_image_no_vireo_dir_uses_original(tmp_path):
+    """_prepare_image without vireo_dir loads original file directly."""
+    from classify_job import _prepare_image
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    orig_img = Image.new("RGB", (800, 600), color="yellow")
+    orig_img.save(str(photos_dir / "bird.jpg"), "JPEG")
+
+    photo = {
+        "id": 1,
+        "folder_id": 10,
+        "filename": "bird.jpg",
+        "working_copy_path": "working/1.jpg",  # has path but no vireo_dir
+    }
+    folders = {10: str(photos_dir)}
+
+    img, folder_path, image_path = _prepare_image(
+        photo, folders, None  # no vireo_dir
+    )
+
+    assert img is not None

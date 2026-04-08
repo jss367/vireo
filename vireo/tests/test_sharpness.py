@@ -277,3 +277,129 @@ def test_score_burst_group_output_structure(tmp_path):
     assert set(r.keys()) == {"photo_id", "path", "sharpness", "rank", "is_best", "is_worst"}
     assert r["photo_id"] == 42
     assert r["path"] == path
+
+
+# ---------------------------------------------------------------------------
+# compute_sharpness_for_photo
+# ---------------------------------------------------------------------------
+
+
+def test_compute_sharpness_for_photo_without_vireo_dir(tmp_path):
+    """Without vireo_dir, loads image from folder_id + filename (original path)."""
+    from sharpness import compute_sharpness_for_photo
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    _save_sharp_image(os.path.join(folder_path, "sharp.jpg"))
+
+    photo = {"folder_id": 1, "filename": "sharp.jpg", "working_copy_path": None}
+    folders = {1: folder_path}
+
+    score = compute_sharpness_for_photo(photo, folders)
+    assert score is not None
+    assert isinstance(score, float)
+    assert score > 0
+
+
+def test_compute_sharpness_for_photo_with_working_copy(tmp_path):
+    """With vireo_dir and a working copy, uses the working copy JPEG."""
+    from sharpness import compute_sharpness_for_photo
+
+    vireo_dir = str(tmp_path / "vireo")
+    wc_dir = os.path.join(vireo_dir, "working_copies")
+    os.makedirs(wc_dir)
+    wc_path = os.path.join(wc_dir, "abc123.jpg")
+    _save_sharp_image(wc_path)
+
+    photo = {
+        "folder_id": 1,
+        "filename": "original.nef",
+        "working_copy_path": "working_copies/abc123.jpg",
+    }
+    folders = {1: "/nonexistent/folder"}
+
+    score = compute_sharpness_for_photo(photo, folders, vireo_dir=vireo_dir)
+    assert score is not None
+    assert isinstance(score, float)
+    assert score > 0
+
+
+def test_compute_sharpness_for_photo_fallback_no_working_copy(tmp_path):
+    """With vireo_dir but no working_copy_path, falls back to original."""
+    from sharpness import compute_sharpness_for_photo
+
+    vireo_dir = str(tmp_path / "vireo")
+    os.makedirs(vireo_dir)
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    _save_sharp_image(os.path.join(folder_path, "test.jpg"))
+
+    photo = {"folder_id": 1, "filename": "test.jpg", "working_copy_path": None}
+    folders = {1: folder_path}
+
+    score = compute_sharpness_for_photo(photo, folders, vireo_dir=vireo_dir)
+    assert score is not None
+    assert score > 0
+
+
+def test_compute_sharpness_for_photo_missing_file(tmp_path):
+    """Returns None when file doesn't exist."""
+    from sharpness import compute_sharpness_for_photo
+
+    photo = {"folder_id": 1, "filename": "missing.jpg", "working_copy_path": None}
+    folders = {1: "/nonexistent/path"}
+
+    score = compute_sharpness_for_photo(photo, folders)
+    assert score is None
+
+
+def test_compute_sharpness_for_photo_with_region(tmp_path):
+    """Region parameter works with compute_sharpness_for_photo."""
+    from sharpness import compute_sharpness_for_photo
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    _save_sharp_image(os.path.join(folder_path, "test.jpg"), size=(400, 400))
+
+    photo = {"folder_id": 1, "filename": "test.jpg", "working_copy_path": None}
+    folders = {1: folder_path}
+
+    score = compute_sharpness_for_photo(photo, folders, region=(50, 50, 100, 100))
+    assert score is not None
+    assert score > 0
+
+
+def test_compute_sharpness_for_photo_working_copy_preferred(tmp_path):
+    """Working copy is used in preference to original when both exist."""
+    from sharpness import compute_sharpness_for_photo
+
+    vireo_dir = str(tmp_path / "vireo")
+    wc_dir = os.path.join(vireo_dir, "working_copies")
+    os.makedirs(wc_dir)
+
+    # Working copy: sharp image
+    wc_path = os.path.join(wc_dir, "wc.jpg")
+    _save_sharp_image(wc_path)
+
+    # Original: blurry image
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path)
+    _save_blurry_image(os.path.join(folder_path, "original.jpg"))
+
+    photo = {
+        "folder_id": 1,
+        "filename": "original.jpg",
+        "working_copy_path": "working_copies/wc.jpg",
+    }
+    folders = {1: folder_path}
+
+    # Score with working copy (sharp)
+    score_wc = compute_sharpness_for_photo(photo, folders, vireo_dir=vireo_dir)
+    # Score without vireo_dir — uses original (blurry)
+    score_orig = compute_sharpness_for_photo(photo, folders)
+
+    assert score_wc is not None
+    assert score_orig is not None
+    # Working copy (sharp) should score higher than original (blurry)
+    assert score_wc > score_orig
