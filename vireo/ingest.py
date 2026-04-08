@@ -134,7 +134,7 @@ def ingest(
                 log.debug("Could not read EXIF timestamp from %s", source_file)
             if exif_dt is None:
                 # Fall back to file modification time
-                with contextlib.suppress(OSError):
+                with contextlib.suppress(OSError, ValueError, OverflowError):
                     exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
 
             rel_folder = build_destination_path(exif_dt, folder_template)
