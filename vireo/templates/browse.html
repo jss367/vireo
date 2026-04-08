@@ -2814,6 +2814,13 @@ function openInEditorBatch() {
 function openExportModal() {
   if (selectedPhotos.size === 0) return;
   document.getElementById('exportSubmitBtn').textContent = 'Export ' + selectedPhotos.size + ' photo' + (selectedPhotos.size === 1 ? '' : 's');
+  document.getElementById('exportSubmitBtn').disabled = false;
+  document.getElementById('exportResize').value = '';
+  document.getElementById('exportResizeCustom').style.display = 'none';
+  document.getElementById('exportResizeCustom').value = '';
+  document.getElementById('exportQuality').value = 92;
+  document.getElementById('exportQualityVal').textContent = '92';
+  document.getElementById('exportTemplate').value = '{original}';
   document.getElementById('exportOverlay').classList.add('open');
   updateExportPreview();
 }
@@ -2867,7 +2874,7 @@ document.getElementById('exportQuality').addEventListener('input', function() {
   document.getElementById('exportQualityVal').textContent = this.value;
 });
 
-function startExport() {
+async function startExport() {
   var dest = document.getElementById('exportDest').value.trim();
   if (!dest) { alert('Please enter a destination folder.'); return; }
 
@@ -2881,24 +2888,29 @@ function startExport() {
 
   var quality = parseInt(document.getElementById('exportQuality').value) || 92;
   var template = document.getElementById('exportTemplate').value || '{original}';
+  var btn = document.getElementById('exportSubmitBtn');
+  var count = selectedPhotos.size;
+  btn.disabled = true;
 
-  safeFetch('/api/jobs/export', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      photo_ids: Array.from(selectedPhotos),
-      destination: dest,
-      naming_template: template,
-      max_size: maxSize,
-      quality: quality,
-    }),
-  }).then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.error) { alert('Export error: ' + data.error); return; }
-      closeExportModal();
-      showToast('Export started (' + selectedPhotos.size + ' photos)');
-    })
-    .catch(function(err) { alert('Export failed: ' + err.message); });
+  try {
+    var data = await safeFetch('/api/jobs/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        photo_ids: Array.from(selectedPhotos),
+        destination: dest,
+        naming_template: template,
+        max_size: maxSize,
+        quality: quality,
+      }),
+    });
+    if (data.error) { alert('Export error: ' + data.error); btn.disabled = false; return; }
+    closeExportModal();
+    showToast('Export started (' + count + ' photos)');
+  } catch(err) {
+    alert('Export failed: ' + err.message);
+    btn.disabled = false;
+  }
 }
 
 // Close on overlay click
