@@ -4,6 +4,8 @@ import logging
 import os
 import re
 
+from image_loader import load_image
+
 log = logging.getLogger(__name__)
 
 # Characters not allowed in filenames (covers Windows + macOS + Linux)
@@ -54,3 +56,134 @@ def resolve_template(template, photo, species=None, seq=1):
         result = result.replace("{" + key + "}", value)
 
     return result
+
+
+def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_cb=None):
+    """Export photos to a destination directory with optional resize and renaming.
+
+    Args:
+        db: Database instance
+        vireo_dir: path to ~/.vireo/
+        photo_ids: list of photo IDs to export
+        destination: absolute path to output directory
+        options: dict with keys:
+            naming_template: str (default "{original}")
+            max_size: int or None -- max long-edge pixels
+            quality: int 1-100 (default 92)
+        progress_cb: optional callback(current, total, current_file)
+
+    Returns:
+        dict with keys: exported (int), errors (list of str), destination (str)
+    """
+    options = options or {}
+    template = options.get("naming_template", "{original}")
+    max_size = options.get("max_size")
+    quality = options.get("quality", 92)
+
+    os.makedirs(destination, exist_ok=True)
+
+    photos_map = db.get_photos_by_ids(photo_ids)
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+
+    # Get species keywords for all photos in one query
+    species_map = db.get_species_keywords_for_photos(photo_ids)
+
+    # Track sequence numbers per subdirectory
+    seq_counters = {}
+    exported = 0
+    errors = []
+
+    for i, pid in enumerate(photo_ids):
+        photo = photos_map.get(pid)
+        if not photo:
+            errors.append(f"Photo {pid} not found in database")
+            if progress_cb:
+                progress_cb(i + 1, len(photo_ids), "")
+            continue
+
+        # Resolve source path
+        source_path = _resolve_source(photo, vireo_dir, folders)
+        if not source_path or not os.path.isfile(source_path):
+            errors.append(f"{photo['filename']}: source file missing")
+            if progress_cb:
+                progress_cb(i + 1, len(photo_ids), photo["filename"])
+            continue
+
+        # Get species (first species keyword, or None)
+        species_list = species_map.get(pid, [])
+        species = species_list[0] if species_list else None
+
+        # Build photo dict for template
+        folder_path = folders.get(photo["folder_id"], "")
+        photo_info = {
+            "filename": photo["filename"],
+            "timestamp": photo["timestamp"],
+            "rating": photo["rating"],
+            "folder_name": os.path.basename(folder_path),
+        }
+
+        # Determine subdirectory for sequence counter
+        # Render template once to extract the directory part
+        subdir_key = os.path.dirname(
+            resolve_template(template, photo_info, species=species, seq=0)
+        )
+        seq_counters.setdefault(subdir_key, 0)
+        seq_counters[subdir_key] += 1
+        seq = seq_counters[subdir_key]
+
+        # Resolve final output path
+        rel_path = resolve_template(template, photo_info, species=species, seq=seq)
+        out_path = os.path.join(destination, rel_path + ".jpg")
+
+        # Handle collisions
+        out_path = _deduplicate_path(out_path)
+
+        # Ensure subdirectory exists
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        # Load, resize, and save
+        try:
+            img = load_image(source_path, max_size=max_size or None)
+            if img is None:
+                errors.append(f"{photo['filename']}: failed to load image")
+                if progress_cb:
+                    progress_cb(i + 1, len(photo_ids), photo["filename"])
+                continue
+            img.save(out_path, "JPEG", quality=quality)
+            exported += 1
+        except Exception as exc:
+            log.warning("Export failed for %s: %s", photo["filename"], exc)
+            errors.append(f"{photo['filename']}: {exc}")
+
+        if progress_cb:
+            progress_cb(i + 1, len(photo_ids), photo["filename"])
+
+    return {"exported": exported, "errors": errors, "destination": destination}
+
+
+def _resolve_source(photo, vireo_dir, folders):
+    """Return the best available source path for a photo.
+
+    photo is a sqlite3.Row (supports [] but not .get()), so we use
+    bracket access with a guard for the optional working_copy_path field.
+    """
+    wc_path = photo["working_copy_path"]
+    if wc_path:
+        wc = os.path.join(vireo_dir, wc_path)
+        if os.path.exists(wc):
+            return wc
+    folder_path = folders.get(photo["folder_id"], "")
+    return os.path.join(folder_path, photo["filename"])
+
+
+def _deduplicate_path(path):
+    """Append _2, _3, etc. if path already exists."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    counter = 2
+    while os.path.exists(f"{stem}_{counter}{ext}"):
+        counter += 1
+    return f"{stem}_{counter}{ext}"
