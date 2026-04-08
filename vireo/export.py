@@ -141,9 +141,12 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
         out_path = os.path.join(destination, rel_path_safe + ".jpg")
         # Final containment check: resolved path must start with destination.
+        # dest_real may already end with os.sep when destination is a root dir
+        # (e.g. "/" on POSIX), so avoid doubling the separator.
         dest_real = os.path.realpath(destination)
         out_real = os.path.realpath(out_path)
-        if not out_real.startswith(dest_real + os.sep) and out_real != dest_real:
+        dest_prefix = dest_real if dest_real.endswith(os.sep) else dest_real + os.sep
+        if not out_real.startswith(dest_prefix) and out_real != dest_real:
             errors.append(f"{photo['filename']}: unsafe output path rejected")
             if progress_cb:
                 progress_cb(i + 1, len(photo_ids), photo["filename"])
