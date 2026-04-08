@@ -8,10 +8,40 @@ import logging
 import os
 
 import numpy as np
-from image_loader import load_image
+from image_loader import load_image, load_working_image
 from PIL import ImageFilter
 
 log = logging.getLogger(__name__)
+
+
+def _score_from_pil(img, region=None):
+    """Compute Laplacian variance sharpness from a PIL Image.
+
+    Args:
+        img: PIL Image (already loaded/resized)
+        region: optional (x, y, w, h) tuple to score a specific region
+
+    Returns:
+        float sharpness score (higher = sharper)
+    """
+    gray = img.convert("L")
+
+    if region:
+        x, y, w, h = region
+        gray = gray.crop((x, y, x + w, y + h))
+
+    laplacian = gray.filter(
+        ImageFilter.Kernel(
+            size=(3, 3),
+            kernel=[0, 1, 0, 1, -4, 1, 0, 1, 0],
+            scale=1,
+            offset=128,
+        )
+    )
+
+    arr = np.array(laplacian, dtype=np.float64)
+    score = float(np.var(arr))
+    return round(score, 2)
 
 
 def compute_sharpness(image_path, region=None):
@@ -28,29 +58,32 @@ def compute_sharpness(image_path, region=None):
     if img is None:
         return None
 
-    # Convert to grayscale
-    gray = img.convert("L")
+    return _score_from_pil(img, region)
 
-    # Crop to region if specified
-    if region:
-        x, y, w, h = region
-        gray = gray.crop((x, y, x + w, y + h))
 
-    # Apply Laplacian filter (edge detection)
-    laplacian = gray.filter(
-        ImageFilter.Kernel(
-            size=(3, 3),
-            kernel=[0, 1, 0, 1, -4, 1, 0, 1, 0],
-            scale=1,
-            offset=128,
-        )
-    )
+def compute_sharpness_for_photo(photo, folders, vireo_dir=None, region=None):
+    """Compute sharpness for a photo dict, using working copy when available.
 
-    # Variance of the Laplacian — higher = more edges = sharper
-    arr = np.array(laplacian, dtype=np.float64)
-    score = float(np.var(arr))
+    Args:
+        photo: photo dict with working_copy_path, folder_id, filename
+        folders: {folder_id: path} mapping
+        vireo_dir: path to ~/.vireo/ (enables working copy usage)
+        region: optional (x, y, w, h) tuple to score a specific region
 
-    return round(score, 2)
+    Returns:
+        float sharpness score (higher = sharper), or None on failure
+    """
+    if vireo_dir:
+        img = load_working_image(photo, vireo_dir, max_size=1024, folders=folders)
+    else:
+        folder_path = folders.get(photo["folder_id"], "")
+        image_path = os.path.join(folder_path, photo["filename"])
+        img = load_image(str(image_path), max_size=1024)
+
+    if img is None:
+        return None
+
+    return _score_from_pil(img, region)
 
 
 def score_burst_group(photo_paths):
@@ -86,13 +119,14 @@ def score_burst_group(photo_paths):
     return results
 
 
-def score_collection_photos(db, collection_id, progress_callback=None):
+def score_collection_photos(db, collection_id, progress_callback=None, vireo_dir=None):
     """Score all photos in a collection, grouping bursts and ranking within each.
 
     Args:
         db: Database instance
         collection_id: collection to score (or None for all photos)
         progress_callback: optional callable(current, total, message)
+        vireo_dir: path to ~/.vireo/ (enables working copy usage)
 
     Returns:
         dict with scored_count, group_count, results (list of scored photos)
@@ -132,6 +166,7 @@ def score_collection_photos(db, collection_id, progress_callback=None):
                 "filename": p["filename"],
                 "timestamp": timestamp,
                 "embedding": embedding,
+                "_photo": p,
             }
         )
 
@@ -150,7 +185,9 @@ def score_collection_photos(db, collection_id, progress_callback=None):
         if len(group) < 2:
             # Single photo — score it but no ranking
             item = group[0]
-            score = compute_sharpness(item["path"])
+            score = compute_sharpness_for_photo(
+                item["_photo"], folders, vireo_dir=vireo_dir
+            )
             all_results.append(
                 {
                     "photo_id": item["photo_id"],
@@ -169,10 +206,29 @@ def score_collection_photos(db, collection_id, progress_callback=None):
         # Multi-photo group — score and rank
         group_count += 1
         gid = f"burst-{gi + 1:04d}"
-        paths = [(item["photo_id"], item["path"]) for item in group]
-        ranked = score_burst_group(paths)
 
-        for r in ranked:
+        group_scores = []
+        for item in group:
+            score = compute_sharpness_for_photo(
+                item["_photo"], folders, vireo_dir=vireo_dir
+            )
+            group_scores.append(
+                {
+                    "photo_id": item["photo_id"],
+                    "path": item["path"],
+                    "sharpness": score if score is not None else 0,
+                }
+            )
+
+        # Sort by sharpness descending
+        group_scores.sort(key=lambda x: x["sharpness"], reverse=True)
+
+        for rank_i, r in enumerate(group_scores):
+            r["rank"] = rank_i + 1
+            r["is_best"] = rank_i == 0
+            r["is_worst"] = (rank_i == len(group_scores) - 1) and len(group_scores) > 1
+
+        for r in group_scores:
             item = next(g for g in group if g["photo_id"] == r["photo_id"])
             all_results.append(
                 {

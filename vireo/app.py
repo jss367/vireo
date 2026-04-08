@@ -4410,6 +4410,8 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
         def work(job):
             from sharpness import score_collection_photos
 
@@ -4445,6 +4447,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 thread_db,
                 collection_id,
                 progress_callback=progress_cb,
+                vireo_dir=vireo_dir,
             )
             runner.update_step(job["id"], "score", status="completed",
                                summary=f"{len(result['results'])} scored")
