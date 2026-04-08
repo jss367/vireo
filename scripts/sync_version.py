@@ -26,7 +26,7 @@ def update_astro_version(path, version):
     with open(path) as f:
         content = f.read()
     # Update all per-platform version constants
-    platforms = ["macosArm64Version", "macosX86Version", "windowsVersion", "linuxVersion"]
+    platforms = ["macosArm64Version", "windowsVersion", "linuxVersion"]
     count = 0
     for plat in platforms:
         content, n = re.subn(
@@ -48,7 +48,6 @@ def update_astro_platform_version(path, platform, version):
     """Update a single platform version constant in an Astro file."""
     var_map = {
         "macos-arm64": "macosArm64Version",
-        "macos-x86_64": "macosX86Version",
         "windows-x86_64": "windowsVersion",
         "linux-x86_64": "linuxVersion",
     }
