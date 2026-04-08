@@ -292,3 +292,53 @@ def test_extract_working_copy_missing_source_returns_false(tmp_path):
 
     assert result is False
     assert not output.exists()
+
+
+# ── load_working_image tests ──────────────────────────────────────────
+
+
+def test_load_working_image_uses_working_copy(tmp_path):
+    """load_working_image loads from working copy when available."""
+    from image_loader import load_working_image
+    from PIL import Image
+
+    # Create a working copy JPEG
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    wc_path = working_dir / "42.jpg"
+    Image.new("RGB", (4096, 2731)).save(str(wc_path), "JPEG")
+
+    photo = {"working_copy_path": "working/42.jpg", "folder_id": 1, "filename": "test.nef"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024)
+
+    assert img is not None
+    assert max(img.size) <= 1024
+
+
+def test_load_working_image_uses_original_for_jpeg(tmp_path):
+    """load_working_image uses original file when working_copy_path is NULL."""
+    from image_loader import load_working_image
+    from PIL import Image
+
+    # Create a JPEG original
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    orig = folder / "test.jpg"
+    Image.new("RGB", (3000, 2000)).save(str(orig), "JPEG")
+
+    folders = {1: str(folder)}
+    photo = {"working_copy_path": None, "folder_id": 1, "filename": "test.jpg"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024, folders=folders)
+
+    assert img is not None
+    assert max(img.size) <= 1024
+
+
+def test_load_working_image_returns_none_when_no_working_copy_no_folders(tmp_path):
+    """load_working_image returns None when working_copy_path is set but file is missing, and folders is None."""
+    from image_loader import load_working_image
+
+    photo = {"working_copy_path": "working/missing.jpg", "folder_id": 1, "filename": "test.nef"}
+    img = load_working_image(photo, str(tmp_path), max_size=1024)
+
+    assert img is None
