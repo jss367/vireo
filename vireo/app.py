@@ -2510,15 +2510,35 @@ def create_app(db_path, thumb_cache_dir=None):
         """List mounted volumes (macOS/Linux) to help find SD cards."""
         import platform
         volumes = []
+        seen_paths: set[str] = set()
+
+        def _add_volume(name: str, path: str) -> None:
+            if path not in seen_paths and os.path.isdir(path):
+                seen_paths.add(path)
+                volumes.append({"name": name, "path": path})
+
+        def _scan_dir(vol_dir: str) -> None:
+            """List direct children of *vol_dir* as volumes."""
+            if os.path.isdir(vol_dir):
+                for name in sorted(os.listdir(vol_dir)):
+                    _add_volume(name, os.path.join(vol_dir, name))
+
         if platform.system() == "Darwin":
-            vol_dir = "/Volumes"
+            _scan_dir("/Volumes")
         else:
-            vol_dir = "/media"
-        if os.path.isdir(vol_dir):
-            for name in sorted(os.listdir(vol_dir)):
-                path = os.path.join(vol_dir, name)
-                if os.path.isdir(path):
-                    volumes.append({"name": name, "path": path})
+            # /media — flat list of mount points
+            _scan_dir("/media")
+            # /run/media — systemd convention: /run/media/<user>/<volume>
+            run_media = "/run/media"
+            if os.path.isdir(run_media):
+                for user_dir in sorted(os.listdir(run_media)):
+                    user_path = os.path.join(run_media, user_dir)
+                    if os.path.isdir(user_path):
+                        for name in sorted(os.listdir(user_path)):
+                            _add_volume(name, os.path.join(user_path, name))
+            # /mnt — traditional mount point
+            _scan_dir("/mnt")
+
         return jsonify(volumes)
 
     @app.route("/api/browse", methods=["GET"])
