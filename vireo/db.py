@@ -342,6 +342,9 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN file_hash TEXT")
             self.conn.execute("ALTER TABLE photos ADD COLUMN companion_path TEXT")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash)"
+        )
 
         # Full EXIF metadata JSON blob
         try:
