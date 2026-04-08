@@ -2851,7 +2851,7 @@ function updateExportPreview() {
     .replace('{datetime}', datePart + '_' + timePart)
     .replace('{species}', species)
     .replace('{rating}', String(photo.rating || 0))
-    .replace('{seq}', '001')
+    .replace('{seq}', '0001')
     .replace('{folder}', '');
   document.getElementById('exportPreview').textContent = 'Preview: ' + preview + '.jpg';
 }

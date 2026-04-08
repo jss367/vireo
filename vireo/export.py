@@ -47,7 +47,7 @@ def resolve_template(template, photo, species=None, seq=1):
         "datetime": f"{date_part}_{time_part}",
         "species": sanitize_filename(species_name),
         "rating": str(photo.get("rating") or 0),
-        "seq": f"{seq:03d}",
+        "seq": f"{seq:04d}",
         "folder": sanitize_filename(photo.get("folder_name") or ""),
     }
 
@@ -152,6 +152,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                     progress_cb(i + 1, len(photo_ids), photo["filename"])
                 continue
             img.save(out_path, "JPEG", quality=quality)
+            img.close()
             exported += 1
         except Exception as exc:
             log.warning("Export failed for %s: %s", photo["filename"], exc)

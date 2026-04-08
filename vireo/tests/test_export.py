@@ -23,7 +23,7 @@ def test_resolve_template_species_date_seq():
              "rating": 3, "folder_name": "June_Trip"}
     result = resolve_template("{species}/{date}_{seq}", photo,
                               species="Red-tailed Hawk", seq=5)
-    assert result == "Red-tailed Hawk/2024-06-15_005"
+    assert result == "Red-tailed Hawk/2024-06-15_0005"
 
 
 def test_resolve_template_datetime():
@@ -39,7 +39,7 @@ def test_resolve_template_all_variables():
              "rating": 5, "folder_name": "Safari"}
     result = resolve_template("{folder}/{species}/{rating}_{seq}", photo,
                               species="Elephant", seq=12)
-    assert result == "Safari/Elephant/5_012"
+    assert result == "Safari/Elephant/5_0012"
 
 
 def test_resolve_template_missing_timestamp():
@@ -53,7 +53,7 @@ def test_resolve_template_no_species():
     photo = {"filename": "bird.jpg", "timestamp": "2024-01-10T08:00:00",
              "rating": 0, "folder_name": "Photos"}
     result = resolve_template("{species}_{seq}", photo, species=None, seq=1)
-    assert result == "unknown_001"
+    assert result == "unknown_0001"
 
 
 def test_sanitize_filename_slashes():
@@ -149,9 +149,9 @@ def test_export_photos_subdirectories(export_env):
     )
     assert result["exported"] == 2
     # p1 has species keyword
-    assert os.path.isfile(os.path.join(env["dest"], "Red-tailed Hawk", "2024-06-15_001.jpg"))
+    assert os.path.isfile(os.path.join(env["dest"], "Red-tailed Hawk", "2024-06-15_0001.jpg"))
     # p2 has no species
-    assert os.path.isfile(os.path.join(env["dest"], "unknown", "2024-06-16_001.jpg"))
+    assert os.path.isfile(os.path.join(env["dest"], "unknown", "2024-06-16_0001.jpg"))
 
 
 def test_export_photos_collision_renames(export_env):
