@@ -26,6 +26,7 @@ KNOWN_MODELS = [
         "name": "BioCLIP",
         "model_type": "bioclip",
         "model_str": "ViT-B-16",
+        "source": "hf-hub:imageomics/bioclip",
         "hf_subdir": "bioclip-vit-b-16",
         "files": [
             "image_encoder.onnx",
@@ -43,6 +44,7 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2",
+        "source": "hf-hub:imageomics/bioclip-2",
         "hf_subdir": "bioclip-2",
         "files": [
             "image_encoder.onnx",
@@ -62,14 +64,13 @@ KNOWN_MODELS = [
         "name": "BioCLIP-2.5",
         "model_type": "bioclip",
         "model_str": "hf-hub:imageomics/bioclip-2.5-vith14",
+        "source": "hf-hub:imageomics/bioclip-2.5-vith14",
         "hf_subdir": "bioclip-2.5-vith14",
         "files": [
             "image_encoder.onnx",
             "text_encoder.onnx",
             "tokenizer.json",
             "config.json",
-            "tol_embeddings.npy",
-            "tol_classes.json",
         ],
         "description": "2025 model with ViT-H/14 backbone, 986M parameters. Largest BioCLIP variant.",
         "size_mb": 3900,
@@ -81,12 +82,15 @@ KNOWN_MODELS = [
         "name": "iNat21 (EVA-02 Large)",
         "model_type": "timm",
         "model_str": "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21",
+        "source": "timm",
         "hf_subdir": "timm-eva02-large-inat21",
         "files": [
             "model.onnx",
             "class_names.json",
-            "label_descriptions.json",
             "config.json",
+        ],
+        "optional_files": [
+            "label_descriptions.json",
         ],
         "description": "EVA-02 Large fine-tuned on iNaturalist 2021. 10K species, 92% top-1. No label files needed.",
         "size_mb": 1200,
@@ -111,22 +115,20 @@ def _save_config(config):
 
 
 def _check_onnx_downloaded(model_dir, files):
-    """Check if all required ONNX files exist in a model directory.
+    """Check if all required model files exist in a model directory.
 
     Args:
         model_dir: path to the model directory
         files: list of filenames that must be present
 
     Returns:
-        True if the directory exists and contains at least the ONNX files
+        True if the directory exists and contains all required files
     """
     if not os.path.isdir(model_dir):
         return False
-    # At minimum, check that the .onnx files exist
-    onnx_files = [f for f in files if f.endswith(".onnx")]
     return all(
         os.path.isfile(os.path.join(model_dir, f))
-        for f in onnx_files
+        for f in files
     )
 
 
@@ -151,12 +153,12 @@ def get_models():
         if not downloaded and km["id"] in registered:
             reg = registered[km["id"]]
             reg_path = reg.get("weights_path", "")
-            if reg_path and os.path.isdir(reg_path):
-                # Check if ONNX files exist at the registered path
-                onnx_files = [f for f in km.get("files", []) if f.endswith(".onnx")]
-                if all(os.path.isfile(os.path.join(reg_path, f)) for f in onnx_files):
-                    entry["downloaded"] = True
-                    entry["weights_path"] = reg_path
+            if reg_path and os.path.isdir(reg_path) and all(
+                os.path.isfile(os.path.join(reg_path, f))
+                for f in km.get("files", [])
+            ):
+                entry["downloaded"] = True
+                entry["weights_path"] = reg_path
 
         result.append(entry)
 
@@ -164,13 +166,16 @@ def get_models():
     for mid, m in registered.items():
         if not any(km["id"] == mid for km in KNOWN_MODELS):
             path = m.get("weights_path", "")
-            # Custom models: check for any .onnx file in the directory
+            # Custom models: require a .onnx file AND config.json so that
+            # a partial download (missing metadata) is not reported as ready.
             downloaded = False
             if path and os.path.isdir(path):
-                downloaded = any(
+                has_onnx = any(
                     f.endswith(".onnx")
                     for f in os.listdir(path)
                 )
+                has_config = os.path.isfile(os.path.join(path, "config.json"))
+                downloaded = has_onnx and has_config
             elif path and os.path.isfile(path) and path.endswith(".onnx"):
                 downloaded = True
             result.append(

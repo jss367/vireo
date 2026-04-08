@@ -1873,7 +1873,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
-        from classifier import _embedding_cache_path
+        from classifier import _embedding_cache_path, _resolve_model_dir
         from labels import get_active_labels, get_saved_labels, load_merged_labels
         from models import get_active_model, get_models
 
@@ -1975,7 +1975,12 @@ def create_app(db_path, thumb_cache_dir=None):
         # Check embedding cache
         embeddings_cached = False
         if model and not use_tol and labels:
-            cache_path = _embedding_cache_path(labels, model.get("model_str", ""))
+            model_dir = _resolve_model_dir(
+                model.get("model_str", ""), model.get("weights_path")
+            )
+            cache_path = _embedding_cache_path(
+                labels, model.get("model_str", ""), model_dir
+            )
             embeddings_cached = os.path.exists(cache_path)
 
         return jsonify(
@@ -2366,7 +2371,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/embedding-matrix")
     def api_embedding_matrix():
         """Return which model+labels combinations have cached embeddings."""
-        from classifier import _embedding_cache_path
+        from classifier import _embedding_cache_path, _resolve_model_dir
         from labels import get_saved_labels
         from models import get_models
 
@@ -2387,7 +2392,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 "models": {},
             }
             for m in models:
-                cache_path = _embedding_cache_path(labels, m["model_str"])
+                model_dir = _resolve_model_dir(m["model_str"], m.get("weights_path"))
+                cache_path = _embedding_cache_path(labels, m["model_str"], model_dir)
                 row["models"][m["id"]] = {
                     "cached": os.path.exists(cache_path),
                     "model_name": m["name"],
@@ -3109,10 +3115,13 @@ def create_app(db_path, thumb_cache_dir=None):
             active_model = get_active_model()
             if active_model and active_model["downloaded"]:
                 try:
-                    from classifier import _embedding_cache_path
+                    from classifier import _embedding_cache_path, _resolve_model_dir
 
+                    model_dir = _resolve_model_dir(
+                        active_model["model_str"], active_model.get("weights_path")
+                    )
                     cache_path = _embedding_cache_path(
-                        list(set(species)), active_model["model_str"]
+                        list(set(species)), active_model["model_str"], model_dir
                     )
                     if not os.path.exists(cache_path):
                         progress_cb(

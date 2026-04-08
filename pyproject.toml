@@ -30,6 +30,7 @@ export = [
     "timm>=1.0",
     "sam2>=1.0",
     "open_clip_torch>=2.0",
+    "onnxscript>=0.1",
 ]
 dev = [
     "pytest>=9.0",
