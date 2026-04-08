@@ -6299,12 +6299,24 @@ def create_app(db_path, thumb_cache_dir=None):
         wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        # Prefer companion JPEG as extraction source — avoids slow RAW decode
+        # Prefer companion JPEG as extraction source — avoids slow RAW decode.
+        # Only use it when its dimensions match the recorded original dimensions
+        # so we don't silently serve a lower-res or differently-cropped image.
         source_for_extraction = image_path
         if photo["companion_path"]:
             companion_abs = os.path.join(folder["path"], photo["companion_path"])
             if os.path.exists(companion_abs):
-                source_for_extraction = companion_abs
+                orig_w = photo["width"]
+                orig_h = photo["height"]
+                if orig_w and orig_h:
+                    from PIL import Image as _PILImage
+                    with _PILImage.open(companion_abs) as _comp_img:
+                        comp_w, comp_h = _comp_img.size
+                    if comp_w == orig_w and comp_h == orig_h:
+                        source_for_extraction = companion_abs
+                else:
+                    # Original dimensions unknown — trust the companion JPEG
+                    source_for_extraction = companion_abs
 
         if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
