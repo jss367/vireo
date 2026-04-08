@@ -2531,7 +2531,11 @@ def create_app(db_path, thumb_cache_dir=None):
             # /run/media — systemd convention: /run/media/<user>/<volume>
             run_media = "/run/media"
             if os.path.isdir(run_media):
-                for user_dir in sorted(os.listdir(run_media)):
+                try:
+                    run_media_entries = sorted(os.listdir(run_media))
+                except PermissionError:
+                    run_media_entries = []
+                for user_dir in run_media_entries:
                     user_path = os.path.join(run_media, user_dir)
                     if os.path.isdir(user_path):
                         try:
