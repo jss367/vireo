@@ -30,9 +30,6 @@ jobs:
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             label: macos-arm64
-          - os: macos-15-intel
-            rust-target: x86_64-apple-darwin
-            label: macos-x86_64
           - os: windows-latest
             rust-target: x86_64-pc-windows-msvc
             label: windows-x86_64
@@ -65,17 +62,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           # Windows: PyInstaller --onefile DLL loading bug with 3.14
-          # macOS x86: last PyTorch x86_64 macOS wheel (2.2.2) requires Python <=3.12
-          python-version: ${{ matrix.label == 'macos-x86_64' && '3.12' || (runner.os == 'Windows' && '3.13' || env.PYTHON_VERSION) }}
+          python-version: ${{ runner.os == 'Windows' && '3.13' || env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install PyTorch (CPU only)
         shell: bash
         run: |
-          if [ "${{ matrix.label }}" = "macos-x86_64" ]; then
-            # PyTorch dropped macOS x86_64 after 2.2.2 — pin to last available wheels
-            pip install torch==2.2.2 torchvision==0.17.2
-          elif [ "$RUNNER_OS" = "macOS" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             # Default PyPI serves CPU-only builds for Mac arm64
             pip install torch torchvision
           else
@@ -457,7 +450,7 @@ jobs:
           \) -exec cp {} release-files/ \;
 
           # Updater artifacts — macOS (wrap in .tar.gz, rename to include arch)
-          for spec in "vireo-macos-arm64:aarch64" "vireo-macos-x86_64:x64"; do
+          for spec in "vireo-macos-arm64:aarch64"; do
             label="${spec%%:*}"
             arch="${spec##*:}"
             src=$(find "artifacts/${label}" -name "*.app.tar.gz" ! -name "*.sig" 2>/dev/null | head -1)
@@ -522,7 +515,6 @@ jobs:
           for artifact in $ARTIFACTS; do
             case "$artifact" in
               vireo-macos-arm64)    python scripts/sync_version.py "$VER" --platform macos-arm64 && UPDATED=true ;;
-              vireo-macos-x86_64)   python scripts/sync_version.py "$VER" --platform macos-x86_64 && UPDATED=true ;;
               vireo-windows-x86_64) python scripts/sync_version.py "$VER" --platform windows-x86_64 && UPDATED=true ;;
               vireo-linux-x86_64)   python scripts/sync_version.py "$VER" --platform linux-x86_64 && UPDATED=true ;;
             esac

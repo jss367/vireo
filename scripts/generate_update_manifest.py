@@ -28,7 +28,6 @@ REPO = "jss367/vireo"
 PLATFORM_MAP = [
     # macOS — .app.tar.gz bundle + .app.tar.gz.sig
     ("_aarch64.app.tar.gz", ".sig", "darwin-aarch64"),
-    ("_x64.app.tar.gz", ".sig", "darwin-x86_64"),
     # Windows — NSIS .exe installer + .exe.sig  (preferred over .msi)
     ("-setup.exe", ".sig", "windows-x86_64"),
     # Linux — .AppImage + .AppImage.sig

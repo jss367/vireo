@@ -7,7 +7,6 @@ const releaseUrl = (v: string) => `https://github.com/jss367/vireo/releases/down
 
 // Per-platform versions — updated independently by CI when each platform builds
 const macosArm64Version = '0.6.26';
-const macosX86Version = '0.6.26';
 const windowsVersion = '0.8.0';
 const linuxVersion = '0.6.26';
 ---
@@ -45,7 +44,7 @@ const linuxVersion = '0.6.26';
       </div>
 
       <p class="download-hero__alt-arch">
-        macOS button is for Apple Silicon. <a href={`${releaseUrl(macosX86Version)}/Vireo_${macosX86Version}_x64.dmg`}>Download for Intel Mac</a>
+        macOS download is for Apple Silicon (M1 and later).
       </p>
 
       <p class="download-hero__releases">
@@ -65,7 +64,7 @@ const linuxVersion = '0.6.26';
           <h3>macOS</h3>
           <ul>
             <li>macOS 12 Monterey or later</li>
-            <li>Apple Silicon or Intel</li>
+            <li>Apple Silicon (M1 or later)</li>
             <li>4 GB RAM minimum</li>
             <li>500 MB disk space</li>
           </ul>
