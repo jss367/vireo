@@ -225,3 +225,88 @@ def test_export_photos_missing_source(export_env):
     )
     assert result["exported"] == 0
     assert len(result["errors"]) == 1
+
+
+def test_export_traversal_template_is_sanitized(export_env, tmp_path):
+    """Templates with '..' segments are sanitized so output stays inside destination."""
+    env = export_env
+    # A template like "../escaped/{original}" must not write outside destination.
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "../escaped/{original}"},
+    )
+    assert result["exported"] == 1
+    # The file must exist inside the destination, not outside it.
+    for root, dirs, files in os.walk(env["dest"]):
+        for f in files:
+            full = os.path.join(root, f)
+            assert os.path.realpath(full).startswith(os.path.realpath(env["dest"]))
+    # Confirm the sibling directory was NOT created
+    sibling = os.path.join(os.path.dirname(env["dest"]), "escaped")
+    assert not os.path.exists(sibling), "path traversal escaped the destination directory"
+
+
+def test_export_no_resize_uses_original_not_working_copy(export_env, tmp_path):
+    """When no resize is requested, export uses the original file, not the working copy."""
+    import shutil
+    env = export_env
+    # Create a fake (smaller) working copy
+    wc_dir = os.path.join(env["vireo_dir"], "thumbnails")
+    os.makedirs(wc_dir, exist_ok=True)
+    small_wc = os.path.join(wc_dir, "bird1_wc.jpg")
+    small_img = Image.new("RGB", (100, 75), color="green")
+    small_img.save(small_wc, "JPEG")
+
+    # Patch the DB to return a photo row that has working_copy_path set
+    # We update the photo record directly via the DB connection
+    env["db"].conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?",
+        ("thumbnails/bird1_wc.jpg", env["p1"]),
+    )
+    env["db"].conn.commit()
+
+    # Export without resize — must use original (800x600), not working copy (100x75)
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": None},
+    )
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.jpg")
+    with Image.open(out_path) as img:
+        assert img.size == (800, 600)  # original dimensions, not the 100x75 working copy
+
+
+def test_export_with_resize_may_use_working_copy(export_env):
+    """When resize is requested and a working copy exists, it is used as the source."""
+    env = export_env
+    # Create a fake working copy larger than the requested max_size
+    wc_dir = os.path.join(env["vireo_dir"], "thumbnails")
+    os.makedirs(wc_dir, exist_ok=True)
+    small_wc = os.path.join(wc_dir, "bird1_wc.jpg")
+    wc_img = Image.new("RGB", (600, 400), color="blue")
+    wc_img.save(small_wc, "JPEG")
+
+    env["db"].conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?",
+        ("thumbnails/bird1_wc.jpg", env["p1"]),
+    )
+    env["db"].conn.commit()
+
+    # Export with resize — working copy should be preferred
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 300},
+    )
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.jpg")
+    with Image.open(out_path) as img:
+        assert max(img.size) <= 300

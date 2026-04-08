@@ -101,8 +101,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path
-        source_path = _resolve_source(photo, vireo_dir, folders)
+        # Resolve source path.  When no resize is requested we always prefer
+        # the original file to avoid silently downscaling via a capped working
+        # copy.  Working copies are only used when resizing, where their
+        # pre-decoded JPEG provides a fast path that avoids a full RAW decode.
+        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=bool(max_size))
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -133,7 +136,18 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Resolve final output path
         rel_path = resolve_template(template, photo_info, species=species, seq=seq)
-        out_path = os.path.join(destination, rel_path + ".jpg")
+        # Guard against path traversal: strip leading slashes/dots so that
+        # absolute paths and ".." segments cannot escape the destination dir.
+        rel_path_safe = os.path.normpath(rel_path).lstrip(os.sep + ".")
+        out_path = os.path.join(destination, rel_path_safe + ".jpg")
+        # Final containment check: resolved path must start with destination.
+        dest_real = os.path.realpath(destination)
+        out_real = os.path.realpath(out_path)
+        if not out_real.startswith(dest_real + os.sep) and out_real != dest_real:
+            errors.append(f"{photo['filename']}: unsafe output path rejected")
+            if progress_cb:
+                progress_cb(i + 1, len(photo_ids), photo["filename"])
+            continue
 
         # Handle collisions
         out_path = _deduplicate_path(out_path)
@@ -164,17 +178,23 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
-def _resolve_source(photo, vireo_dir, folders):
+def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):
     """Return the best available source path for a photo.
+
+    When use_working_copy is True (resize is requested), prefers the working
+    copy so RAW files are served from a pre-decoded JPEG (faster).  When
+    use_working_copy is False (full-resolution export), always uses the
+    original file to avoid silently downscaling via a capped working copy.
 
     photo is a sqlite3.Row (supports [] but not .get()), so we use
     bracket access with a guard for the optional working_copy_path field.
     """
-    wc_path = photo["working_copy_path"]
-    if wc_path:
-        wc = os.path.join(vireo_dir, wc_path)
-        if os.path.exists(wc):
-            return wc
+    if use_working_copy:
+        wc_path = photo["working_copy_path"]
+        if wc_path:
+            wc = os.path.join(vireo_dir, wc_path)
+            if os.path.exists(wc):
+                return wc
     folder_path = folders.get(photo["folder_id"], "")
     return os.path.join(folder_path, photo["filename"])
 
