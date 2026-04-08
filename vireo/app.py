@@ -2516,15 +2516,47 @@ def create_app(db_path, thumb_cache_dir=None):
         """List mounted volumes (macOS/Linux) to help find SD cards."""
         import platform
         volumes = []
+        seen_paths: set[str] = set()
+
+        def _add_volume(name: str, path: str) -> None:
+            if path not in seen_paths and os.path.isdir(path):
+                seen_paths.add(path)
+                volumes.append({"name": name, "path": path})
+
+        def _scan_dir(vol_dir: str) -> None:
+            """List direct children of *vol_dir* as volumes."""
+            if os.path.isdir(vol_dir):
+                try:
+                    entries = sorted(os.listdir(vol_dir))
+                except PermissionError:
+                    return
+                for name in entries:
+                    _add_volume(name, os.path.join(vol_dir, name))
+
         if platform.system() == "Darwin":
-            vol_dir = "/Volumes"
+            _scan_dir("/Volumes")
         else:
-            vol_dir = "/media"
-        if os.path.isdir(vol_dir):
-            for name in sorted(os.listdir(vol_dir)):
-                path = os.path.join(vol_dir, name)
-                if os.path.isdir(path):
-                    volumes.append({"name": name, "path": path})
+            # /media — flat list of mount points
+            _scan_dir("/media")
+            # /run/media — systemd convention: /run/media/<user>/<volume>
+            run_media = "/run/media"
+            if os.path.isdir(run_media):
+                try:
+                    run_media_entries = sorted(os.listdir(run_media))
+                except PermissionError:
+                    run_media_entries = []
+                for user_dir in run_media_entries:
+                    user_path = os.path.join(run_media, user_dir)
+                    if os.path.isdir(user_path):
+                        try:
+                            entries = sorted(os.listdir(user_path))
+                        except PermissionError:
+                            continue
+                        for name in entries:
+                            _add_volume(name, os.path.join(user_path, name))
+            # /mnt — traditional mount point
+            _scan_dir("/mnt")
+
         return jsonify(volumes)
 
     @app.route("/api/browse", methods=["GET"])
