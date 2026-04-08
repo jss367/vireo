@@ -2520,7 +2520,11 @@ def create_app(db_path, thumb_cache_dir=None):
         def _scan_dir(vol_dir: str) -> None:
             """List direct children of *vol_dir* as volumes."""
             if os.path.isdir(vol_dir):
-                for name in sorted(os.listdir(vol_dir)):
+                try:
+                    entries = sorted(os.listdir(vol_dir))
+                except PermissionError:
+                    return
+                for name in entries:
                     _add_volume(name, os.path.join(vol_dir, name))
 
         if platform.system() == "Darwin":
