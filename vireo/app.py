@@ -4518,9 +4518,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
         def work(job):
-            return run_classify_job(job, runner, db_path, active_ws, params)
+            return run_classify_job(job, runner, db_path, active_ws, params, vireo_dir=vireo_dir)
 
         job_id = runner.start(
             "classify",
