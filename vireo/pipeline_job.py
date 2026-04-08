@@ -252,7 +252,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
                         from scanner import compute_file_hash
                         for path in result_info.get("copied_paths", []):
-                            with contextlib.suppress(Exception):
+                            with contextlib.suppress(OSError):
                                 accumulated_hashes.add(compute_file_hash(path))
 
                 # Mark ingest complete
@@ -731,7 +731,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             image_path = os.path.join(folder_path, photo["filename"])
                             timestamp = None
                             if photo["timestamp"]:
-                                with contextlib.suppress(Exception):
+                                with contextlib.suppress(ValueError, TypeError):
                                     timestamp = dt.fromisoformat(photo["timestamp"])
                             embedding = None
                             if model_type != "timm":
