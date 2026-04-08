@@ -57,6 +57,7 @@ def load_image(file_path, max_size=1024):
             img = _load_raw(path, max_size)
         else:
             img = Image.open(str(path))
+            img = ImageOps.exif_transpose(img)
             img = img.convert("RGB")
 
         if img is None:
@@ -86,6 +87,7 @@ def _load_standard(path, max_size):
     """
     try:
         img = Image.open(str(path))
+        img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
         if max_size and max_size > 0 and max(img.size) > max_size:
             img.thumbnail((max_size, max_size), Image.LANCZOS)

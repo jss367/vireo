@@ -3801,10 +3801,12 @@ def create_app(db_path, thumb_cache_dir=None):
                     "rate": 0,
                 })
 
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             do_scan(
                 root, thread_db, progress_callback=progress_cb, incremental=incremental,
                 extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                 status_callback=status_cb,
+                vireo_dir=vireo_dir,
             )
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
@@ -3844,7 +3846,6 @@ def create_app(db_path, thumb_cache_dir=None):
                     },
                 )
 
-            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
                 vireo_dir=vireo_dir,
@@ -4234,7 +4235,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Scanning photos",
                 })
 
-            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None)
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
@@ -4256,7 +4258,6 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Generating thumbnails",
                 })
 
-            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,

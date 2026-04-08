@@ -249,15 +249,14 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
     wc_quality = user_cfg.get("working_copy_quality", 92)
 
-    raw_exts = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
     rows = db.conn.execute(
         "SELECT p.id, p.filename, p.companion_path, p.working_copy_path, "
         "f.path AS folder_path "
         "FROM photos p JOIN folders f ON f.id = p.folder_id "
         "WHERE p.extension IN ({}) AND p.working_copy_path IS NULL".format(
-            ",".join("?" for _ in raw_exts)
+            ",".join("?" for _ in RAW_EXTENSIONS)
         ),
-        list(raw_exts),
+        list(RAW_EXTENSIONS),
     ).fetchall()
 
     if not rows:
