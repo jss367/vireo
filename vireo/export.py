@@ -101,8 +101,9 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path
-        source_path = _resolve_source(photo, vireo_dir, folders)
+        # Resolve source path — pass max_size so we only use the capped working
+        # copy when a resize is actually requested (avoids silent downscaling).
+        source_path = _resolve_source(photo, vireo_dir, folders, max_size=max_size)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -133,7 +134,15 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
         # Resolve final output path
         rel_path = resolve_template(template, photo_info, species=species, seq=seq)
-        out_path = os.path.join(destination, rel_path + ".jpg")
+        out_path = os.path.normpath(os.path.join(destination, rel_path + ".jpg"))
+
+        # Reject paths that escape the destination directory (path traversal)
+        dest_norm = os.path.normpath(destination)
+        if not (out_path == dest_norm or out_path.startswith(dest_norm + os.sep)):
+            errors.append(f"{photo['filename']}: naming template resolves outside destination")
+            if progress_cb:
+                progress_cb(i + 1, len(photo_ids), photo["filename"])
+            continue
 
         # Handle collisions
         out_path = _deduplicate_path(out_path)
@@ -164,17 +173,23 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
-def _resolve_source(photo, vireo_dir, folders):
+def _resolve_source(photo, vireo_dir, folders, max_size=None):
     """Return the best available source path for a photo.
+
+    Working copies are capped at working_copy_max_size (default 4096 px) during
+    scan, so they are only used when the caller explicitly requests a downscale
+    (max_size is not None).  When no resize is requested we always fall back to
+    the original source file to avoid silent quality loss.
 
     photo is a sqlite3.Row (supports [] but not .get()), so we use
     bracket access with a guard for the optional working_copy_path field.
     """
-    wc_path = photo["working_copy_path"]
-    if wc_path:
-        wc = os.path.join(vireo_dir, wc_path)
-        if os.path.exists(wc):
-            return wc
+    if max_size is not None:
+        wc_path = photo["working_copy_path"]
+        if wc_path:
+            wc = os.path.join(vireo_dir, wc_path)
+            if os.path.exists(wc):
+                return wc
     folder_path = folders.get(photo["folder_id"], "")
     return os.path.join(folder_path, photo["filename"])
 
