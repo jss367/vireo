@@ -6273,8 +6273,10 @@ def create_app(db_path, thumb_cache_dir=None):
                     wc_w, wc_h = wc_img.size
                 orig_w = photo["width"] or 0
                 orig_h = photo["height"] or 0
-                # If working copy matches original dimensions, serve it directly
-                if wc_w >= orig_w and wc_h >= orig_h:
+                # If working copy matches original dimensions, serve it directly.
+                # Skip shortcut when original dimensions are unknown (0) to avoid
+                # incorrectly serving a downscaled copy as full-res.
+                if orig_w and orig_h and wc_w >= orig_w and wc_h >= orig_h:
                     return send_file(wc_path, mimetype="image/jpeg")
                 # Otherwise: need full-res extraction (on-demand upgrade)
 

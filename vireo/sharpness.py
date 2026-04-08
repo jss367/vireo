@@ -73,9 +73,10 @@ def compute_sharpness_for_photo(photo, folders, vireo_dir=None, region=None):
     Returns:
         float sharpness score (higher = sharper), or None on failure
     """
+    img = None
     if vireo_dir:
         img = load_working_image(photo, vireo_dir, max_size=1024, folders=folders)
-    else:
+    if img is None:
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
         img = load_image(str(image_path), max_size=1024)
