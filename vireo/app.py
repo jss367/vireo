@@ -1038,12 +1038,14 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews)
+        # Clean up cached files (thumbnails, previews, working copies)
         thumb_dir = app.config["THUMB_CACHE_DIR"]
-        preview_dir = os.path.join(os.path.dirname(thumb_dir), "previews")
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
         for f in result["files"]:
             pid = f["photo_id"]
-            for d in [thumb_dir, preview_dir]:
+            for d in [thumb_dir, preview_dir, working_dir]:
                 cached = os.path.join(d, f"{pid}.jpg")
                 if os.path.isfile(cached):
                     os.remove(cached)
