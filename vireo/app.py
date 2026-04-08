@@ -6064,14 +6064,25 @@ def create_app(db_path, thumb_cache_dir=None):
         from PIL import Image
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
 
-        image_path = os.path.join(photo["path"], photo["filename"])
+        # Try working copy first, fall back to original
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
         img = load_image(image_path, max_size=None)
         if img is None:
             return "Could not load image", 500
@@ -6134,13 +6145,26 @@ def create_app(db_path, thumb_cache_dir=None):
         from image_loader import load_image
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
-        image_path = os.path.join(photo["path"], photo["filename"])
+
+        # Try working copy first, fall back to original
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
         img = load_image(image_path, max_size=max_size)
         if img is None:
             return "Could not load image", 500
@@ -6152,43 +6176,67 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):
-        """Serve the full-resolution image for 1:1 zoom, converting RAW formats to JPEG."""
+        """Serve full-resolution image for 1:1 zoom."""
         import config as cfg
         from flask import send_file
 
         db = _get_db()
-        photo = db.conn.execute(
-            "SELECT p.filename, f.path FROM photos p JOIN folders f ON f.id = p.folder_id WHERE p.id = ?",
-            (photo_id,),
-        ).fetchone()
+        photo = db.get_photo(photo_id)
         if not photo:
             return "Not found", 404
-        image_path = os.path.join(photo["path"], photo["filename"])
-        if not os.path.exists(image_path):
-            return "Not found", 404
 
-        # Serve browser-native formats directly
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        # Check if working copy is full-res
+        if photo["working_copy_path"]:
+            wc_path = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc_path):
+                from PIL import Image as _PILImage
+                with _PILImage.open(wc_path) as wc_img:
+                    wc_w, wc_h = wc_img.size
+                orig_w = photo["width"] or 0
+                orig_h = photo["height"] or 0
+                # If working copy matches original dimensions, serve it directly
+                if wc_w >= orig_w and wc_h >= orig_h:
+                    return send_file(wc_path, mimetype="image/jpeg")
+                # Otherwise: need full-res extraction (on-demand upgrade)
+
+        # Resolve original file path
+        folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder:
+            return "Not found", 404
+        image_path = os.path.join(folder["path"], photo["filename"])
+
+        # For browser-native formats without a working copy, serve directly
         ext = os.path.splitext(photo["filename"])[1].lower()
-        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+        if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp") and not photo["working_copy_path"] and os.path.exists(image_path):
             return send_file(image_path)
 
-        # Convert non-browser formats (RAW, etc.) to JPEG, cached
-        originals_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "originals"
-        )
-        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
-        if os.path.exists(cache_path):
-            return send_file(cache_path, mimetype="image/jpeg")
+        # Extract full-res working copy (on-demand upgrade)
+        from image_loader import extract_working_copy, load_image
+        wc_rel = f"working/{photo_id}.jpg"
+        wc_abs = os.path.join(vireo_dir, wc_rel)
+        quality = cfg.load().get("working_copy_quality", 92)
 
-        from image_loader import load_image
+        if extract_working_copy(image_path, wc_abs, max_size=0, quality=quality):
+            # Update DB so future requests are fast
+            db.conn.execute(
+                "UPDATE photos SET working_copy_path=? WHERE id=?",
+                (wc_rel, photo_id),
+            )
+            db.conn.commit()
+            return send_file(wc_abs, mimetype="image/jpeg")
 
+        # Fallback: serve via load_image
         img = load_image(image_path, max_size=None)
         if img is None:
             return "Could not load image", 500
-
+        originals_dir = os.path.join(vireo_dir, "originals")
+        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
         os.makedirs(originals_dir, exist_ok=True)
-        preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
+        img.save(cache_path, format="JPEG", quality=quality)
         return send_file(cache_path, mimetype="image/jpeg")
 
     # -- Logs page --
