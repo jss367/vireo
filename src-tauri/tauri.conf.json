@@ -54,7 +54,7 @@
       "endpoints": [
         "https://github.com/jss367/vireo/releases/latest/download/latest.json"
       ],
-      "pubkey": "PLACEHOLDER_REPLACE_WITH_REAL_KEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdCMzUzMEQxQ0NCNEMxNEIKUldSTHdiVE0wVEExZTJsZjQzU3MyTk1oYTlRQ0luN3g5Q2MreGlUU3BnMjJ2NHBEUXZSVW1HWWMK"
     }
   }
 }
