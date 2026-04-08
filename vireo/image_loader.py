@@ -19,6 +19,7 @@ RAW strategy (JPEG-first):
 
 import io
 import logging
+import os
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -68,6 +69,31 @@ def load_image(file_path, max_size=1024):
     except Exception as e:
         log.warning("Failed to load image: %s — %s", file_path, e)
         return None
+
+
+def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
+    """Extract a JPEG working copy from an image file.
+
+    Args:
+        source_path: path to source image (RAW or JPEG)
+        output_path: where to save the working copy JPEG
+        max_size: max dimension (longest side). 0 or None for full resolution.
+        quality: JPEG quality (1-95)
+
+    Returns:
+        True on success, False on failure
+    """
+    try:
+        img = load_image(source_path, max_size=max_size or None)
+        if img is None:
+            return False
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        img.save(output_path, "JPEG", quality=quality)
+        return True
+    except Exception:
+        log.warning("Failed to extract working copy from %s", source_path,
+                    exc_info=True)
+        return False
 
 
 def _load_raw(path, max_size):

@@ -240,3 +240,55 @@ def test_embedded_jpeg_exif_orientation_applied(tmp_path, monkeypatch):
     assert result.size == (960, 1920), (
         f"Expected (960, 1920) after EXIF orientation transpose + resize, got {result.size}"
     )
+
+
+# ── extract_working_copy tests ──────────────────────────────────────────
+
+
+def test_extract_working_copy_basic(tmp_path):
+    """extract_working_copy saves a capped JPEG from a standard image file."""
+    from image_loader import extract_working_copy
+    from PIL import Image
+
+    # Create a real JPEG source image
+    source = tmp_path / "photo.jpg"
+    img = Image.new("RGB", (5000, 3333), color="blue")
+    img.save(str(source), "JPEG")
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(str(source), str(output), max_size=4096, quality=92)
+
+    assert result is True
+    assert output.exists()
+    out_img = Image.open(str(output))
+    assert max(out_img.size) <= 4096
+
+
+def test_extract_working_copy_full_resolution(tmp_path):
+    """extract_working_copy at max_size=0 preserves full resolution."""
+    from image_loader import extract_working_copy
+    from PIL import Image
+
+    source = tmp_path / "photo.jpg"
+    img = Image.new("RGB", (6000, 4000), color="green")
+    img.save(str(source), "JPEG")
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(str(source), str(output), max_size=0, quality=92)
+
+    assert result is True
+    out_img = Image.open(str(output))
+    assert out_img.size == (6000, 4000)
+
+
+def test_extract_working_copy_missing_source_returns_false(tmp_path):
+    """extract_working_copy returns False when the source file does not exist."""
+    from image_loader import extract_working_copy
+
+    output = tmp_path / "working" / "42.jpg"
+    result = extract_working_copy(
+        str(tmp_path / "nonexistent.jpg"), str(output), max_size=4096
+    )
+
+    assert result is False
+    assert not output.exists()
