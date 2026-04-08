@@ -4174,9 +4174,24 @@ def create_app(db_path, thumb_cache_dir=None):
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
+        db = _get_db()
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
+
+        # Filter to only photos visible in the active workspace
+        placeholders = ",".join("?" for _ in photo_ids)
+        visible = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            [active_ws] + list(photo_ids),
+        ).fetchall()
+        photo_ids = [r["id"] for r in visible]
+        if not photo_ids:
+            return json_error("no exportable photos in current workspace")
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        effective_cfg = db.get_effective_config(cfg.load())
+        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
 
         def work(job):
             from export import export_photos
@@ -4210,6 +4225,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "naming_template": naming_template,
                     "max_size": max_size,
                     "quality": quality,
+                    "working_copy_max_size": wc_max_size,
                 },
                 progress_cb=progress_cb,
             )

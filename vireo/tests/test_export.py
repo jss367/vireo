@@ -309,3 +309,33 @@ def test_export_with_resize_may_use_working_copy(export_env):
     out_path = os.path.join(env["dest"], "bird1.jpg")
     with Image.open(out_path) as img:
         assert max(img.size) <= 300
+
+
+def test_export_large_max_size_uses_original(export_env):
+    """When max_size exceeds working copy cap, export uses the original file."""
+    env = export_env
+    wc_dir = os.path.join(env["vireo_dir"], "thumbnails")
+    os.makedirs(wc_dir, exist_ok=True)
+    small_wc = os.path.join(wc_dir, "bird1_wc.jpg")
+    # Simulate a capped working copy (100x75)
+    Image.new("RGB", (100, 75), color="green").save(small_wc, "JPEG")
+
+    env["db"].conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?",
+        ("thumbnails/bird1_wc.jpg", env["p1"]),
+    )
+    env["db"].conn.commit()
+
+    # Request max_size=8000, well above the default working_copy_max_size (4096)
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 8000},
+    )
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.jpg")
+    with Image.open(out_path) as img:
+        # Should use original (800x600), not working copy (100x75)
+        assert img.size == (800, 600)
