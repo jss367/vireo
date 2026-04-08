@@ -240,7 +240,7 @@ def test_export_traversal_template_is_sanitized(export_env, tmp_path):
     )
     assert result["exported"] == 1
     # The file must exist inside the destination, not outside it.
-    for root, dirs, files in os.walk(env["dest"]):
+    for root, _dirs, files in os.walk(env["dest"]):
         for f in files:
             full = os.path.join(root, f)
             assert os.path.realpath(full).startswith(os.path.realpath(env["dest"]))
@@ -251,7 +251,6 @@ def test_export_traversal_template_is_sanitized(export_env, tmp_path):
 
 def test_export_no_resize_uses_original_not_working_copy(export_env, tmp_path):
     """When no resize is requested, export uses the original file, not the working copy."""
-    import shutil
     env = export_env
     # Create a fake (smaller) working copy
     wc_dir = os.path.join(env["vireo_dir"], "thumbnails")
