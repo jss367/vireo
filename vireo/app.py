@@ -4161,14 +4161,15 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_export():
         """Export selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
+        raw_ids = body.get("photo_ids", [])
         destination = body.get("destination", "")
         naming_template = body.get("naming_template", "{original}")
         max_size = body.get("max_size")
         quality = body.get("quality", 92)
 
-        if not photo_ids:
+        if not raw_ids:
             return json_error("photo_ids required")
+        photo_ids = [int(pid) for pid in raw_ids]
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
