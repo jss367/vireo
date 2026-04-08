@@ -1278,18 +1278,34 @@ class Database:
             f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
 
-    def get_photos_by_ids(self, photo_ids):
+    def get_photos_by_ids(self, photo_ids, verify_workspace=False):
         """Return photos for a list of IDs in a single query.
+
+        Args:
+            photo_ids: iterable of photo primary keys.
+            verify_workspace: if True, only return photos that belong to a
+                folder visible in the active workspace, silently excluding any
+                IDs from other workspaces.
 
         Returns a dict mapping photo_id -> Row for efficient lookup.
         """
         if not photo_ids:
             return {}
         placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
-            photo_ids,
-        ).fetchall()
+        if verify_workspace:
+            rows = self.conn.execute(
+                f"""SELECT {self.PHOTO_COLS} FROM photos
+                    WHERE id IN ({placeholders})
+                    AND folder_id IN (
+                        SELECT folder_id FROM workspace_folders
+                        WHERE workspace_id = ?)""",
+                list(photo_ids) + [self._ws_id()],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                f"SELECT {self.PHOTO_COLS} FROM photos WHERE id IN ({placeholders})",
+                photo_ids,
+            ).fetchall()
         return {row["id"]: row for row in rows}
 
     def count_photos(self):

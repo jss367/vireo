@@ -70,6 +70,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             naming_template: str (default "{original}")
             max_size: int or None -- max long-edge pixels
             quality: int 1-100 (default 92)
+            wc_max_size: int -- working copy pixel cap (default 4096); used to
+                decide whether the working copy can satisfy the requested
+                max_size.  Working copies are only used when max_size is set
+                AND max_size <= wc_max_size.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -79,10 +83,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     template = options.get("naming_template", "{original}")
     max_size = options.get("max_size")
     quality = options.get("quality", 92)
+    wc_max_size = options.get("wc_max_size", 4096)
 
     os.makedirs(destination, exist_ok=True)
 
-    photos_map = db.get_photos_by_ids(photo_ids)
+    # Only export photos that belong to the active workspace to enforce
+    # workspace isolation (photo IDs originate from client input).
+    photos_map = db.get_photos_by_ids(photo_ids, verify_workspace=True)
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
 
     # Get species keywords for all photos in one query
@@ -101,11 +108,14 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path.  When no resize is requested we always prefer
-        # the original file to avoid silently downscaling via a capped working
-        # copy.  Working copies are only used when resizing, where their
-        # pre-decoded JPEG provides a fast path that avoids a full RAW decode.
-        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=bool(max_size))
+        # Resolve source path.  Use the working copy (pre-decoded JPEG) only
+        # when a resize is requested AND the requested size is within the
+        # working-copy cap — otherwise the working copy may be smaller than
+        # max_size and would silently reduce output resolution.  For
+        # full-resolution exports or oversized requests, always use the
+        # original file.
+        use_wc = bool(max_size) and max_size <= wc_max_size
+        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:

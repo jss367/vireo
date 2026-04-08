@@ -309,3 +309,82 @@ def test_export_with_resize_may_use_working_copy(export_env):
     out_path = os.path.join(env["dest"], "bird1.jpg")
     with Image.open(out_path) as img:
         assert max(img.size) <= 300
+
+
+def test_export_oversized_resize_uses_original_not_working_copy(export_env):
+    """When max_size exceeds wc_max_size, original is used instead of working copy."""
+    env = export_env
+    # Working copy is 600x400; original is 800x600
+    wc_dir = os.path.join(env["vireo_dir"], "thumbnails")
+    os.makedirs(wc_dir, exist_ok=True)
+    wc_path = os.path.join(wc_dir, "bird1_wc.jpg")
+    wc_img = Image.new("RGB", (600, 400), color="blue")
+    wc_img.save(wc_path, "JPEG")
+
+    env["db"].conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?",
+        ("thumbnails/bird1_wc.jpg", env["p1"]),
+    )
+    env["db"].conn.commit()
+
+    # Request max_size larger than wc_max_size (600) — should use original (800x600)
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 700, "wc_max_size": 600},
+    )
+    assert result["exported"] == 1
+    out_path = os.path.join(env["dest"], "bird1.jpg")
+    with Image.open(out_path) as img:
+        # Resized from the 800x600 original to 700px long edge
+        assert max(img.size) <= 700
+        # Should be larger than if we had used the 600px working copy
+        assert max(img.size) > 600
+
+
+def test_export_workspace_isolation(tmp_path):
+    """export_photos only exports photos belonging to the active workspace."""
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    db.set_active_workspace(ws1)
+
+    # Create a second workspace
+    ws2 = db.create_workspace("Other")
+
+    src1 = tmp_path / "src1"
+    src1.mkdir()
+    src2 = tmp_path / "src2"
+    src2.mkdir()
+    vireo_dir = str(tmp_path / "vireo")
+    os.makedirs(vireo_dir, exist_ok=True)
+    dest = str(tmp_path / "export_out")
+
+    # add_folder auto-links to the active workspace, so switch workspaces when adding
+    fid1 = db.add_folder(str(src1), name="Folder1")  # linked to ws1
+
+    db.set_active_workspace(ws2)
+    fid2 = db.add_folder(str(src2), name="Folder2")  # linked to ws2
+    db.set_active_workspace(ws1)  # restore ws1 as active for the export
+
+    img = Image.new("RGB", (100, 100), color="red")
+    img.save(str(src1 / "bird1.jpg"), "JPEG")
+    img.save(str(src2 / "bird2.jpg"), "JPEG")
+
+    p1 = db.add_photo(folder_id=fid1, filename="bird1.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid2, filename="bird2.jpg", extension=".jpg",
+                      file_size=1000, file_mtime=1.0)
+
+    # Active workspace is ws1 — photo p2 belongs to ws2 and should be excluded
+    result = export_photos(
+        db=db,
+        vireo_dir=vireo_dir,
+        photo_ids=[p1, p2],
+        destination=dest,
+        options={"naming_template": "{original}"},
+    )
+    assert result["exported"] == 1
+    assert os.path.isfile(os.path.join(dest, "bird1.jpg"))
+    assert not os.path.isfile(os.path.join(dest, "bird2.jpg"))

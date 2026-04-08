@@ -4175,7 +4175,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("destination must be an absolute path")
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        effective_cfg = db.get_effective_config(cfg.load())
+        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
         def work(job):
@@ -4210,6 +4213,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "naming_template": naming_template,
                     "max_size": max_size,
                     "quality": quality,
+                    "wc_max_size": wc_max_size,
                 },
                 progress_cb=progress_cb,
             )
