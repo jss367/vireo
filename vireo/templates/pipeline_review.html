@@ -1595,6 +1595,8 @@ function openInspect(photoId) {
 
   panel.innerHTML = html;
   overlay.classList.add('open');
+  // Remove any previous listener before adding to prevent accumulation
+  document.removeEventListener('keydown', inspectKeyHandler);
   document.addEventListener('keydown', inspectKeyHandler);
 }
 

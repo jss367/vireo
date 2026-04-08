@@ -134,9 +134,42 @@ def _save_manifest(manifest):
         json.dump(manifest, f, indent=2)
 
 
-def _embedding_cache_path(labels, model_str):
-    """Build a cache file path based on a hash of the labels and model."""
-    key = model_str + "\n" + "\n".join(labels)
+def _resolve_model_dir(model_str, pretrained_str=None):
+    """Resolve the model directory for a given model_str and optional pretrained_str.
+
+    Mirrors the logic in ``Classifier.__init__`` so callers outside of
+    ``Classifier`` (e.g. app.py cache-status checks) can compute a model
+    directory that exactly matches the one ``Classifier`` would use, ensuring
+    that ``_embedding_cache_path`` produces the same key in both places.
+
+    Args:
+        model_str: model identifier (e.g. ``"ViT-B-16"``).
+        pretrained_str: optional configured ``weights_path`` from the model
+            registry.  When it points to an existing directory it is used as-is,
+            just like ``Classifier.__init__`` does.
+
+    Returns:
+        Resolved absolute path to the model directory, or ``None`` if
+        ``model_str`` is not recognised and ``pretrained_str`` is not a valid
+        directory.
+    """
+    if pretrained_str and os.path.isdir(pretrained_str):
+        return pretrained_str
+    dir_name = _MODEL_DIR_MAP.get(model_str)
+    if dir_name is None:
+        return None
+    return os.path.join(_MODELS_ROOT, dir_name)
+
+
+def _embedding_cache_path(labels, model_str, model_dir=None):
+    """Build a cache file path based on a hash of the labels, model, and weights path.
+
+    ``model_dir`` is included so that two models sharing the same ``model_str``
+    but loaded from different directories (e.g. a default install vs. a custom
+    ``weights_path``) produce distinct cache entries and never share embeddings
+    computed with different encoder weights.
+    """
+    key = model_str + "\n" + (model_dir or "") + "\n" + "\n".join(labels)
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
     return os.path.join(CACHE_DIR, f"{digest}.npy")
 
@@ -237,8 +270,11 @@ class Classifier:
         labels: list of species/label strings for custom labels mode.
                 If None, uses Tree of Life mode with pre-computed embeddings.
         model_str: model identifier (e.g. "ViT-B-16", "hf-hub:imageomics/bioclip-2")
-        pretrained_str: accepted for API compatibility but ignored (model_str
-                        determines the model directory)
+        pretrained_str: optional path to the model directory. When provided and
+                        pointing to an existing directory it takes precedence over
+                        the default ``~/.vireo/models/<mapped-id>`` location, so
+                        models registered at a custom ``weights_path`` are loaded
+                        from the correct place.
         embedding_progress_callback: optional callable(current, total) for
                                      embedding computation progress
     """
@@ -247,18 +283,30 @@ class Classifier:
         self,
         labels=None,
         model_str="ViT-B-16",
-        pretrained_str=None,  # kept for backward compatibility, not used
+        pretrained_str=None,
         embedding_progress_callback=None,
     ):
-        # Resolve model directory
-        dir_name = _MODEL_DIR_MAP.get(model_str)
-        if dir_name is None:
-            raise ValueError(
-                f"Unknown BioCLIP model: {model_str}. "
-                f"Known models: {list(_MODEL_DIR_MAP.keys())}"
-            )
-
-        self._model_dir = os.path.join(_MODELS_ROOT, dir_name)
+        # Resolve model directory.
+        # pretrained_str may be a configured weights_path (e.g. from a custom
+        # model registration).  Use it directly when it points to an existing
+        # directory so that non-default install locations are respected.
+        if pretrained_str and os.path.isdir(pretrained_str):
+            self._model_dir = pretrained_str
+        else:
+            if pretrained_str:
+                log.warning(
+                    "pretrained_str %r is not a directory; falling back to "
+                    "default model directory for model_str=%r",
+                    pretrained_str,
+                    model_str,
+                )
+            dir_name = _MODEL_DIR_MAP.get(model_str)
+            if dir_name is None:
+                raise ValueError(
+                    f"Unknown BioCLIP model: {model_str}. "
+                    f"Known models: {list(_MODEL_DIR_MAP.keys())}"
+                )
+            self._model_dir = os.path.join(_MODELS_ROOT, dir_name)
         image_encoder_path = os.path.join(self._model_dir, "image_encoder.onnx")
         text_encoder_path = os.path.join(self._model_dir, "text_encoder.onnx")
         tokenizer_path = os.path.join(self._model_dir, "tokenizer.json")
@@ -304,7 +352,7 @@ class Classifier:
 
             self._classes = [cls.strip() for cls in labels]
 
-            cache_path = _embedding_cache_path(labels, model_str)
+            cache_path = _embedding_cache_path(labels, model_str, self._model_dir)
 
             if os.path.exists(cache_path):
                 log.info(
@@ -320,16 +368,19 @@ class Classifier:
                 )
                 # Load text encoder session
                 text_session = onnx_runtime.create_session(text_encoder_path)
-                text_input_name = text_session.get_inputs()[0].name
-                tokenizer = _load_tokenizer(tokenizer_path)
+                try:
+                    text_input_name = text_session.get_inputs()[0].name
+                    tokenizer = _load_tokenizer(tokenizer_path)
 
-                self._txt_embeddings = _compute_embeddings_with_progress(
-                    text_session,
-                    text_input_name,
-                    tokenizer,
-                    self._classes,
-                    progress_callback=embedding_progress_callback,
-                )
+                    self._txt_embeddings = _compute_embeddings_with_progress(
+                        text_session,
+                        text_input_name,
+                        tokenizer,
+                        self._classes,
+                        progress_callback=embedding_progress_callback,
+                    )
+                finally:
+                    del text_session
                 os.makedirs(CACHE_DIR, exist_ok=True)
                 np.save(cache_path, self._txt_embeddings)
                 # Update manifest with human-readable metadata
@@ -338,6 +389,7 @@ class Classifier:
                 manifest = _load_manifest()
                 manifest[os.path.basename(cache_path)] = {
                     "model": model_str,
+                    "model_dir": self._model_dir,
                     "label_count": len(labels),
                     "created": datetime.now().isoformat(timespec="seconds"),
                 }

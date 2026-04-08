@@ -117,7 +117,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS pending_changes (
                 id          INTEGER PRIMARY KEY,
-                photo_id    INTEGER REFERENCES photos(id),
+                photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
                 change_type TEXT,
                 value       TEXT,
                 change_token TEXT,
@@ -254,24 +254,24 @@ class Database:
         # Migrations for existing databases
         try:
             self.conn.execute("SELECT is_species FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0"
             )
         try:
             self.conn.execute("SELECT group_id FROM predictions LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE predictions ADD COLUMN group_id TEXT")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN vote_count INTEGER")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN total_votes INTEGER")
             self.conn.execute("ALTER TABLE predictions ADD COLUMN individual TEXT")
         try:
             self.conn.execute("SELECT sharpness FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN sharpness REAL")
         try:
             self.conn.execute("SELECT quality_score FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN detection_box TEXT")
             self.conn.execute("ALTER TABLE photos ADD COLUMN detection_conf REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN subject_sharpness REAL")
@@ -279,24 +279,24 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN quality_score REAL")
         try:
             self.conn.execute("SELECT embedding FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
         try:
             self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN embedding_model TEXT")
         try:
             self.conn.execute("SELECT latitude FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN latitude REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN longitude REAL")
         try:
             self.conn.execute("SELECT phash FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN phash TEXT")
         try:
             self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT"
             )
@@ -309,7 +309,7 @@ class Database:
         # Pipeline feature columns (SAM2 masking + quality features)
         try:
             self.conn.execute("SELECT mask_path FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN mask_path TEXT")
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN dino_subject_embedding BLOB"
@@ -328,25 +328,28 @@ class Database:
         # Noise estimate column
         try:
             self.conn.execute("SELECT noise_estimate FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN noise_estimate REAL")
         # Enhanced EXIF metadata columns
         try:
             self.conn.execute("SELECT focal_length FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
         # Ingest: file hash for duplicate detection + companion for raw/JPEG pairing
         try:
             self.conn.execute("SELECT file_hash FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN file_hash TEXT")
             self.conn.execute("ALTER TABLE photos ADD COLUMN companion_path TEXT")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash)"
+        )
 
         # Full EXIF metadata JSON blob
         try:
             self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN exif_data TEXT")
 
         # Working copy path for JPG-centric pipeline
@@ -358,7 +361,7 @@ class Database:
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.executescript("""
                 CREATE TABLE IF NOT EXISTS edit_history (
                     id           INTEGER PRIMARY KEY,
@@ -382,7 +385,7 @@ class Database:
         # Add undone column to edit_history if missing (migration for existing databases)
         try:
             self.conn.execute("SELECT undone FROM edit_history LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE edit_history ADD COLUMN undone INTEGER DEFAULT 0")
 
         # Workspace migration for existing databases
@@ -415,7 +418,7 @@ class Database:
             # to UNIQUE(photo_id, model, workspace_id)
             try:
                 self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
-            except Exception:
+            except sqlite3.OperationalError:
                 self.conn.execute(
                     """CREATE TABLE predictions_new (
                         id          INTEGER PRIMARY KEY,
@@ -463,7 +466,7 @@ class Database:
             for table in ("collections", "pending_changes"):
                 try:
                     self.conn.execute(f"SELECT workspace_id FROM {table} LIMIT 0")
-                except Exception:
+                except sqlite3.OperationalError:
                     self.conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN workspace_id INTEGER "
                         f"REFERENCES workspaces(id) ON DELETE CASCADE"
@@ -477,14 +480,14 @@ class Database:
         # Ensure change_token column exists (added after workspace migration)
         try:
             self.conn.execute("SELECT change_token FROM pending_changes LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE pending_changes ADD COLUMN change_token TEXT")
             self.conn.commit()
 
         # Keyword type/location/taxon columns (taxonomy support)
         try:
             self.conn.execute("SELECT type FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN type TEXT NOT NULL DEFAULT 'general'"
             )
@@ -494,12 +497,12 @@ class Database:
             )
         try:
             self.conn.execute("SELECT latitude FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE keywords ADD COLUMN latitude REAL")
             self.conn.execute("ALTER TABLE keywords ADD COLUMN longitude REAL")
         try:
             self.conn.execute("SELECT taxon_id FROM keywords LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
             )
@@ -598,10 +601,34 @@ class Database:
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")
-        except Exception:
+        except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE folders ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
             )
+
+        # Migrate pending_changes: add ON DELETE CASCADE to photo_id FK.
+        # SQLite doesn't support ALTER FOREIGN KEY, so recreate the table.
+        pc_schema = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_changes'"
+        ).fetchone()
+        if pc_schema and "ON DELETE CASCADE" not in pc_schema[0].upper().split("PHOTO_ID", 1)[-1].split(",")[0]:
+            self.conn.executescript("""
+                CREATE TABLE pending_changes_new (
+                    id          INTEGER PRIMARY KEY,
+                    photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
+                    change_type TEXT,
+                    value       TEXT,
+                    change_token TEXT,
+                    created_at  TEXT DEFAULT (datetime('now')),
+                    workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
+                );
+                INSERT INTO pending_changes_new
+                    SELECT id, photo_id, change_type, value, change_token, created_at, workspace_id
+                    FROM pending_changes;
+                DROP TABLE pending_changes;
+                ALTER TABLE pending_changes_new RENAME TO pending_changes;
+            """)
+            self.conn.commit()
 
         # Ensure indexes exist (for fresh DBs that skip migration, and for
         # legacy DBs where DROP TABLE predictions destroys earlier indexes)
@@ -642,6 +669,23 @@ class Database:
         if self._active_workspace_id is None:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
+
+    def _photo_in_workspace(self, photo_id):
+        """Return True if the photo belongs to a folder visible in the active workspace."""
+        row = self.conn.execute(
+            """SELECT 1 FROM photos p
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE p.id = ? AND wf.workspace_id = ?""",
+            (photo_id, self._ws_id()),
+        ).fetchone()
+        return row is not None
+
+    def _verify_photo_in_workspace(self, photo_id):
+        """Raise ValueError if the photo is not in the active workspace."""
+        if not self._photo_in_workspace(photo_id):
+            raise ValueError(
+                f"Photo {photo_id} does not belong to the active workspace"
+            )
 
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
@@ -1212,8 +1256,24 @@ class Database:
     # Columns for single-photo detail queries (includes exif_data JSON)
     PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
 
-    def get_photo(self, photo_id):
-        """Return a single photo by id, including full metadata."""
+    def get_photo(self, photo_id, verify_workspace=False):
+        """Return a single photo by id, including full metadata.
+
+        Args:
+            photo_id: the photo's primary key.
+            verify_workspace: if True, only return the photo when it belongs
+                to a folder visible in the active workspace.  Callers in
+                route handlers should pass True; background jobs that already
+                scope their photo lists can leave it False.
+        """
+        if verify_workspace:
+            return self.conn.execute(
+                f"""SELECT {self.PHOTO_DETAIL_COLS} FROM photos
+                    WHERE id = ? AND folder_id IN (
+                        SELECT folder_id FROM workspace_folders
+                        WHERE workspace_id = ?)""",
+                (photo_id, self._ws_id()),
+            ).fetchone()
         return self.conn.execute(
             f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
@@ -1539,6 +1599,7 @@ class Database:
         }
         order = sort_map.get(sort, "p.timestamp ASC")
 
+        page = max(1, page)
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 
@@ -1870,17 +1931,35 @@ class Database:
         ).fetchone()
         return row[0]
 
-    def update_photo_rating(self, photo_id, rating):
-        """Set photo rating (0-5)."""
+    def update_photo_rating(self, photo_id, rating, verify_workspace=True):
+        """Set photo rating (0-5).
+
+        Args:
+            verify_workspace: when True (the default), raises ValueError if
+                the photo is not in the active workspace's folders.  Pass
+                False from background jobs that already scope their photo
+                lists, or from undo/redo where the edit history is already
+                workspace-scoped.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute(
             "UPDATE photos SET rating = ? WHERE id = ?", (rating, photo_id)
         )
         self.conn.commit()
 
-    def batch_update_photo_rating(self, photo_ids, rating):
-        """Set rating for multiple photos in a single transaction."""
+    def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
+        """Set rating for multiple photos in a single transaction.
+
+        Args:
+            verify_workspace: when True, raises ValueError if any photo is
+                not in the active workspace.
+        """
         if not photo_ids:
             return
+        if verify_workspace:
+            for pid in photo_ids:
+                self._verify_photo_in_workspace(pid)
         placeholders = ",".join("?" for _ in photo_ids)
         self.conn.execute(
             f"UPDATE photos SET rating = ? WHERE id IN ({placeholders})",
@@ -1888,15 +1967,30 @@ class Database:
         )
         self.conn.commit()
 
-    def update_photo_flag(self, photo_id, flag):
-        """Set photo flag ('none', 'flagged', 'rejected')."""
+    def update_photo_flag(self, photo_id, flag, verify_workspace=True):
+        """Set photo flag ('none', 'flagged', 'rejected').
+
+        Args:
+            verify_workspace: when True (the default), raises ValueError if
+                the photo is not in the active workspace's folders.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute("UPDATE photos SET flag = ? WHERE id = ?", (flag, photo_id))
         self.conn.commit()
 
-    def batch_update_photo_flag(self, photo_ids, flag):
-        """Set flag for multiple photos in a single transaction."""
+    def batch_update_photo_flag(self, photo_ids, flag, verify_workspace=True):
+        """Set flag for multiple photos in a single transaction.
+
+        Args:
+            verify_workspace: when True, raises ValueError if any photo is
+                not in the active workspace.
+        """
         if not photo_ids:
             return
+        if verify_workspace:
+            for pid in photo_ids:
+                self._verify_photo_in_workspace(pid)
         placeholders = ",".join("?" for _ in photo_ids)
         self.conn.execute(
             f"UPDATE photos SET flag = ? WHERE id IN ({placeholders})",
@@ -2025,45 +2119,49 @@ class Database:
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
 
-        # Delete associated data (non-cascading FKs)
-        self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
-        self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
-        # Deleting detections cascades to predictions via ON DELETE CASCADE
-        self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
+        try:
+            # Delete associated data (non-cascading FKs)
+            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
+            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", all_ids)
+            # Deleting detections cascades to predictions via ON DELETE CASCADE
+            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", all_ids)
 
-        # Clean collection rules
-        import json as _json
-        collections = self.conn.execute(
-            "SELECT id, rules FROM collections WHERE workspace_id = ?",
-            (self._ws_id(),),
-        ).fetchall()
-        deleted_set = set(all_ids)
-        for coll in collections:
-            rules = _json.loads(coll["rules"])
-            changed = False
-            for rule in rules:
-                if rule.get("field") == "photo_ids" and "value" in rule:
-                    original_len = len(rule["value"])
-                    rule["value"] = [v for v in rule["value"] if v not in deleted_set]
-                    if len(rule["value"]) != original_len:
-                        changed = True
-            if changed:
+            # Clean collection rules
+            import json as _json
+            collections = self.conn.execute(
+                "SELECT id, rules FROM collections WHERE workspace_id = ?",
+                (self._ws_id(),),
+            ).fetchall()
+            deleted_set = set(all_ids)
+            for coll in collections:
+                rules = _json.loads(coll["rules"])
+                changed = False
+                for rule in rules:
+                    if rule.get("field") == "photo_ids" and "value" in rule:
+                        original_len = len(rule["value"])
+                        rule["value"] = [v for v in rule["value"] if v not in deleted_set]
+                        if len(rule["value"]) != original_len:
+                            changed = True
+                if changed:
+                    self.conn.execute(
+                        "UPDATE collections SET rules = ? WHERE id = ?",
+                        (_json.dumps(rules), coll["id"]),
+                    )
+
+            # Delete photos (cascades to edit_history_items, inat_submissions)
+            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
+
+            # Update folder counts
+            for fid, count in folder_counts.items():
                 self.conn.execute(
-                    "UPDATE collections SET rules = ? WHERE id = ?",
-                    (_json.dumps(rules), coll["id"]),
+                    "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
+                    (count, fid),
                 )
 
-        # Delete photos (cascades to edit_history_items, inat_submissions)
-        self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", all_ids)
-
-        # Update folder counts
-        for fid, count in folder_counts.items():
-            self.conn.execute(
-                "UPDATE folders SET photo_count = photo_count - ? WHERE id = ?",
-                (count, fid),
-            )
-
-        self.conn.commit()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return {"deleted": len(all_ids), "files": files}
 
     def update_photo_sharpness(self, photo_id, sharpness):
@@ -2272,7 +2370,7 @@ class Database:
             return name.title()
         return name
 
-    def add_keyword(self, name, parent_id=None, is_species=False):
+    def add_keyword(self, name, parent_id=None, is_species=False, _commit=True):
         """Insert a keyword. Returns existing id if duplicate (case-insensitive).
 
         If a keyword with the same name but different casing exists, reuses
@@ -2280,6 +2378,10 @@ class Database:
 
         For new species keywords, auto-detects the user's casing convention
         from existing keywords and applies it (unless overridden by config).
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
         """
         # Case-insensitive lookup
         if parent_id is None:
@@ -2299,7 +2401,8 @@ class Database:
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy' WHERE id = ? AND is_species = 0",
                     (existing["id"],),
                 )
-                self.conn.commit()
+                if _commit:
+                    self.conn.commit()
             return existing["id"]
 
         # Apply casing convention for new species keywords
@@ -2343,7 +2446,8 @@ class Database:
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
             (name, parent_id, 1 if is_species else (1 if taxon_id else 0), kw_type, taxon_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return cur.lastrowid
 
     def merge_duplicate_keywords(self):
@@ -2416,13 +2520,19 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def tag_photo(self, photo_id, keyword_id):
-        """Associate a keyword with a photo."""
+    def tag_photo(self, photo_id, keyword_id, _commit=True):
+        """Associate a keyword with a photo.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         self.conn.execute(
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (photo_id, keyword_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def untag_photo(self, photo_id, keyword_id):
         """Remove a keyword association from a photo."""
@@ -2701,12 +2811,18 @@ class Database:
             params,
         ).fetchall()
 
-    def update_prediction_status(self, prediction_id, status):
-        """Update prediction status ('pending', 'accepted', 'rejected')."""
+    def update_prediction_status(self, prediction_id, status, _commit=True):
+        """Update prediction status ('pending', 'accepted', 'rejected').
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         self.conn.execute(
             "UPDATE predictions SET status = ? WHERE id = ?", (status, prediction_id)
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def get_group_predictions(self, group_id):
         """Get all predictions and photo data for a burst group."""
@@ -2772,8 +2888,18 @@ class Database:
         ).fetchone()
         return row["embedding"] if row else None
 
-    def store_photo_embedding(self, photo_id, embedding_bytes, model=None):
-        """Store an embedding blob for a photo, optionally with model name."""
+    def store_photo_embedding(self, photo_id, embedding_bytes, model=None,
+                              verify_workspace=False):
+        """Store an embedding blob for a photo, optionally with model name.
+
+        Args:
+            verify_workspace: when True, raises ValueError if the photo is
+                not in the active workspace.  Defaults to False because this
+                method is typically called from background classify jobs that
+                already iterate only over workspace-scoped photos.
+        """
+        if verify_workspace:
+            self._verify_photo_in_workspace(photo_id)
         self.conn.execute(
             "UPDATE photos SET embedding = ?, embedding_model = ? WHERE id = ?",
             (embedding_bytes, model, photo_id),
@@ -2822,6 +2948,9 @@ class Database:
 
         If the prediction belongs to a group, derives the consensus species
         from the individual votes and applies that to all photos.
+
+        All database changes are performed atomically in a single transaction.
+        On failure, all changes are rolled back.
         """
         pred = self.conn.execute(
             """SELECT pr.*, d.photo_id
@@ -2833,51 +2962,55 @@ class Database:
         if not pred:
             return None
 
-        # Reject sibling predictions for same detection+model
-        # (covers both accepting an alternative and accepting the top-1)
-        self.conn.execute(
-            """UPDATE predictions SET status = 'rejected'
-               WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
-            (pred["detection_id"], pred["model"], prediction_id),
-        )
-        self.conn.commit()
+        try:
+            # Reject sibling predictions for same detection+model
+            # (covers both accepting an alternative and accepting the top-1)
+            self.conn.execute(
+                """UPDATE predictions SET status = 'rejected'
+                   WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
+                (pred["detection_id"], pred["model"], prediction_id),
+            )
 
-        # For grouped predictions, derive consensus from individual votes
-        species = pred["species"]
-        if pred["group_id"] and pred["individual"]:
-            import json as _json
+            # For grouped predictions, derive consensus from individual votes
+            species = pred["species"]
+            if pred["group_id"] and pred["individual"]:
+                import json as _json
 
-            try:
-                votes = _json.loads(pred["individual"])
-                best = max(votes, key=lambda sp: votes[sp])
-                species = best
-            except Exception:
-                pass
+                try:
+                    votes = _json.loads(pred["individual"])
+                    best = max(votes, key=lambda sp: votes[sp])
+                    species = best
+                except Exception:
+                    pass
 
-        kid = self.add_keyword(species, is_species=True)
-        affected = []  # list of {"photo_id": int, "prediction_id": int}
+            kid = self.add_keyword(species, is_species=True, _commit=False)
+            affected = []  # list of {"photo_id": int, "prediction_id": int}
 
-        # If grouped, accept all predictions in the group
-        if pred["group_id"]:
-            group_preds = self.conn.execute(
-                """SELECT pr.*, d.photo_id
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
-                (pred["group_id"], pred["model"], self._ws_id()),
-            ).fetchall()
-            for gp in group_preds:
-                self.update_prediction_status(gp["id"], "accepted")
-                self.tag_photo(gp["photo_id"], kid)
-                self.queue_change(gp["photo_id"], "keyword_add", species)
-                affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
-        else:
-            self.update_prediction_status(prediction_id, "accepted")
-            self.tag_photo(pred["photo_id"], kid)
-            self.queue_change(pred["photo_id"], "keyword_add", species)
-            affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
+            # If grouped, accept all predictions in the group
+            if pred["group_id"]:
+                group_preds = self.conn.execute(
+                    """SELECT pr.*, d.photo_id
+                       FROM predictions pr
+                       JOIN detections d ON d.id = pr.detection_id
+                       WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
+                    (pred["group_id"], pred["model"], self._ws_id()),
+                ).fetchall()
+                for gp in group_preds:
+                    self.update_prediction_status(gp["id"], "accepted", _commit=False)
+                    self.tag_photo(gp["photo_id"], kid, _commit=False)
+                    self.queue_change(gp["photo_id"], "keyword_add", species, _commit=False)
+                    affected.append({"photo_id": gp["photo_id"], "prediction_id": gp["id"]})
+            else:
+                self.update_prediction_status(prediction_id, "accepted", _commit=False)
+                self.tag_photo(pred["photo_id"], kid, _commit=False)
+                self.queue_change(pred["photo_id"], "keyword_add", species, _commit=False)
+                affected.append({"photo_id": pred["photo_id"], "prediction_id": prediction_id})
 
-        return {"species": species, "keyword_id": kid, "affected": affected}
+            self.conn.commit()
+            return {"species": species, "keyword_id": kid, "affected": affected}
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # -- Detections --
 
@@ -2936,11 +3069,15 @@ class Database:
 
     # -- Pending Changes --
 
-    def queue_change(self, photo_id, change_type, value, workspace_id=None):
+    def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
         """Add a change to the sync queue (skips if already queued).
 
         Returns the inserted pending change token, or None if an identical row already exists.
         If workspace_id is not provided, uses the active workspace.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
         """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing = self.conn.execute(
@@ -2954,7 +3091,8 @@ class Database:
             "INSERT INTO pending_changes (photo_id, change_type, value, change_token, workspace_id) VALUES (?, ?, ?, ?, ?)",
             (photo_id, change_type, value, change_token, ws_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return change_token
 
     def get_pending_changes(self):
@@ -3105,12 +3243,13 @@ class Database:
             old_val = item['old_value']
             pid = item['photo_id']
             if entry['action_type'] == 'rating':
-                self.update_photo_rating(pid, int(old_val))
+                # Edit history is already workspace-scoped; skip re-verification
+                self.update_photo_rating(pid, int(old_val), verify_workspace=False)
                 if old_val != entry['new_value']:
                     self.remove_pending_changes(pid, 'rating', entry['new_value'])
                     self.queue_change(pid, 'rating', old_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, old_val)
+                self.update_photo_flag(pid, old_val, verify_workspace=False)
             elif entry['action_type'] == 'color_label':
                 if old_val:
                     self.set_color_label(pid, old_val)
@@ -3163,13 +3302,14 @@ class Database:
             new_val = item['new_value']
             pid = item['photo_id']
             if entry['action_type'] == 'rating':
-                self.update_photo_rating(pid, int(new_val) if new_val else 0)
+                # Edit history is already workspace-scoped; skip re-verification
+                self.update_photo_rating(pid, int(new_val) if new_val else 0, verify_workspace=False)
                 old_val = item['old_value']
                 if old_val != new_val:
                     self.remove_pending_changes(pid, 'rating', old_val)
                     self.queue_change(pid, 'rating', new_val)
             elif entry['action_type'] == 'flag':
-                self.update_photo_flag(pid, entry['new_value'])
+                self.update_photo_flag(pid, entry['new_value'], verify_workspace=False)
             elif entry['action_type'] == 'color_label':
                 if new_val:
                     self.set_color_label(pid, new_val)
@@ -3249,7 +3389,8 @@ class Database:
         Returns (folder_join, join_clause, where, params) or None if collection not found.
         """
         row = self.conn.execute(
-            "SELECT rules FROM collections WHERE id = ?", (collection_id,)
+            "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, self._ws_id()),
         ).fetchone()
         if not row:
             return None
@@ -3438,6 +3579,7 @@ class Database:
             return []
 
         folder_join, join_clause, where, params = parts
+        page = max(1, page)
         offset = (page - 1) * per_page
         params.extend([per_page, offset])
 

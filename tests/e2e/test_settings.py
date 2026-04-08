@@ -22,7 +22,3 @@ def test_settings_system_info_renders(live_server, page):
     # Compute device should be populated
     device_name = page.locator("#deviceName")
     expect(device_name).not_to_have_text("-", timeout=api_timeout)
-
-    # PyTorch version should be populated (either a version or "Not installed")
-    torch_version = page.locator("#torchVersion")
-    expect(torch_version).not_to_have_text("-", timeout=api_timeout)

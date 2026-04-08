@@ -253,7 +253,7 @@ function renderSpeciesList(species) {
     var taxLine = '';
     if (s.taxonomy_family) taxLine = s.taxonomy_family;
     if (s.taxonomy_order) taxLine = s.taxonomy_order + (taxLine ? ' / ' + taxLine : '');
-    html += '<div class="species-item' + activeClass + '" onclick="selectSpecies(\'' + escapeAttr(s.species) + '\')">' +
+    html += '<div class="species-item' + activeClass + '" data-species="' + escapeAttr(s.species) + '">' +
       '<span class="species-item-count">' + s.photo_count + '</span>' +
       escapeHtml(s.species) +
       (taxLine ? '<div class="species-item-tax">' + escapeHtml(taxLine) + '</div>' : '') +
@@ -261,6 +261,12 @@ function renderSpeciesList(species) {
   });
   list.innerHTML = html;
 }
+
+/* Delegate species clicks (XSS-safe) */
+document.getElementById('speciesList').addEventListener('click', function(e) {
+  var item = e.target.closest('.species-item[data-species]');
+  if (item) selectSpecies(item.dataset.species);
+});
 
 function filterSpecies() {
   var q = document.getElementById('speciesSearch').value.toLowerCase();
@@ -331,7 +337,7 @@ function renderClusters(data) {
       '<span class="cluster-group-count">' + cluster.count + ' photo' + (cluster.count !== 1 ? 's' : '') + '</span>' +
       '<div class="cluster-label-input">' +
         '<input type="text" id="clusterLabel' + ci + '" placeholder="e.g. male, juvenile...">' +
-        '<button class="cluster-label-btn" onclick="labelCluster(' + ci + ', ' + JSON.stringify(photoIds) + ')">Label</button>' +
+        '<button class="cluster-label-btn" data-cluster-idx="' + ci + '" data-photo-ids="' + escapeAttr(JSON.stringify(photoIds)) + '">Label</button>' +
       '</div>' +
     '</div>';
 
@@ -340,7 +346,7 @@ function renderClusters(data) {
       var p = item.photo;
       html += '<img class="cluster-thumb" src="/thumbnails/' + p.id + '.jpg" loading="lazy" ' +
         'title="' + escapeAttr(p.filename) + '" ' +
-        'onclick="openLightbox(' + p.id + ',\'' + escapeAttr(p.filename).replace(/'/g, "\\'") + '\')">';
+        'data-photo-id="' + p.id + '" data-filename="' + escapeAttr(p.filename) + '">';
     });
     html += '</div>';
 
@@ -349,6 +355,19 @@ function renderClusters(data) {
 
   area.innerHTML = html;
 }
+
+/* Delegate cluster area clicks (XSS-safe) */
+document.getElementById('clusterArea').addEventListener('click', function(e) {
+  var thumb = e.target.closest('.cluster-thumb[data-photo-id]');
+  if (thumb) {
+    openLightbox(parseInt(thumb.dataset.photoId, 10), thumb.dataset.filename || '');
+    return;
+  }
+  var labelBtn = e.target.closest('.cluster-label-btn[data-cluster-idx]');
+  if (labelBtn) {
+    labelCluster(parseInt(labelBtn.dataset.clusterIdx, 10), JSON.parse(labelBtn.dataset.photoIds));
+  }
+});
 
 async function recluster(species, threshold) {
   var area = document.getElementById('clusterArea');

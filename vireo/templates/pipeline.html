@@ -2258,7 +2258,10 @@ function openFolderBrowser(mode) {
   };
   // Start at home directory
   browseTo(null);
-  // Close on Escape
+  // Close on Escape — remove previous listener to prevent accumulation
+  if (overlay._escHandler) {
+    document.removeEventListener('keydown', overlay._escHandler);
+  }
   overlay._escHandler = function(e) {
     if (e.key === 'Escape') closeFolderBrowser();
   };

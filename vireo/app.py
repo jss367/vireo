@@ -789,7 +789,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("rating must be an integer 0-5")
         old = db.get_photo(photo_id)
         old_rating = old["rating"] if old else 0
-        db.update_photo_rating(photo_id, rating)
+        try:
+            db.update_photo_rating(photo_id, rating)
+        except ValueError as e:
+            return json_error(str(e), 403)
         db.queue_change(photo_id, "rating", str(rating))
         db.record_edit('rating', f'Set rating to {rating}', str(rating),
                        [{'photo_id': photo_id, 'old_value': str(old_rating), 'new_value': str(rating)}])
@@ -804,7 +807,10 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("flag must be 'none', 'flagged', or 'rejected'")
         old = db.get_photo(photo_id)
         old_flag = old["flag"] if old else "none"
-        db.update_photo_flag(photo_id, flag)
+        try:
+            db.update_photo_flag(photo_id, flag)
+        except ValueError as e:
+            return json_error(str(e), 403)
         db.record_edit('flag', f'Set flag to {flag}', flag,
                        [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
         return jsonify({"ok": True})
@@ -934,7 +940,10 @@ def create_app(db_path, thumb_cache_dir=None):
         photos_map = db.get_photos_by_ids(photo_ids)
         old_values = {pid: photos_map[pid]["rating"] for pid in photo_ids if pid in photos_map}
         valid_ids = list(old_values.keys())
-        db.batch_update_photo_rating(valid_ids, rating)
+        try:
+            db.batch_update_photo_rating(valid_ids, rating)
+        except ValueError as e:
+            return json_error(str(e), 403)
         for pid in valid_ids:
             db.queue_change(pid, "rating", str(rating))
         items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
@@ -955,7 +964,10 @@ def create_app(db_path, thumb_cache_dir=None):
         photos_map = db.get_photos_by_ids(photo_ids)
         old_values = {pid: photos_map[pid]["flag"] for pid in photo_ids if pid in photos_map}
         valid_ids = list(old_values.keys())
-        db.batch_update_photo_flag(valid_ids, flag)
+        try:
+            db.batch_update_photo_flag(valid_ids, flag)
+        except ValueError as e:
+            return json_error(str(e), 403)
         items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
         db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
                        flag, items, is_batch=True)
@@ -1156,8 +1168,8 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/edit-history")
     def api_edit_history():
         db = _get_db()
-        limit = request.args.get("limit", 50, type=int)
-        offset = request.args.get("offset", 0, type=int)
+        limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
+        offset = max(0, request.args.get("offset", 0, type=int))
         return jsonify(db.get_edit_history(limit=limit, offset=offset))
 
     # -- Statistics --
@@ -1612,7 +1624,7 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         nav_order = body.get("nav_order")
         if not isinstance(nav_order, list):
-            return jsonify({"error": "nav_order must be a list"}), 400
+            return json_error("nav_order must be a list")
         ws = db.get_workspace(db._active_workspace_id)
         existing = {}
         if ws and ws["config_overrides"]:
@@ -1693,7 +1705,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
-            return jsonify({"error": "collection_id required"}), 400
+            return json_error("collection_id required")
 
         photos = db.get_collection_photos(collection_id, per_page=999999)
         photo_ids = [p["id"] for p in photos]
@@ -1788,6 +1800,11 @@ def create_app(db_path, thumb_cache_dir=None):
         removed = body.get("removed", [])  # list of prediction_ids to ungroup
         species = body.get("species", "")
 
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in picks + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
         # Capture old flag values before mutation
         all_flag_pids = picks + rejects
         old_flags = {}
@@ -1797,28 +1814,31 @@ def create_app(db_path, thumb_cache_dir=None):
                 old_flags[pid] = old["flag"] or "none"
 
         # Flag picks and add species keyword
-        if species:
-            kid = db.add_keyword(species, is_species=True)
-            for pid in picks:
-                db.update_photo_flag(pid, "flagged")
-                db.tag_photo(pid, kid)
-                db.queue_change(pid, "keyword_add", species)
+        try:
+            if species:
+                kid = db.add_keyword(species, is_species=True)
+                for pid in picks:
+                    db.update_photo_flag(pid, "flagged")
+                    db.tag_photo(pid, kid)
+                    db.queue_change(pid, "keyword_add", species)
 
-            # Record keyword_add history for picks
-            kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
-                        for pid in picks]
-            if kw_items:
-                db.record_edit('keyword_add',
-                               f'Added "{species}" to {len(picks)} photos (group prediction)',
-                               str(kid), kw_items, is_batch=len(picks) > 1)
-        else:
-            # No species — still flag picks
-            for pid in picks:
-                db.update_photo_flag(pid, "flagged")
+                # Record keyword_add history for picks
+                kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
+                            for pid in picks]
+                if kw_items:
+                    db.record_edit('keyword_add',
+                                   f'Added "{species}" to {len(picks)} photos (group prediction)',
+                                   str(kid), kw_items, is_batch=len(picks) > 1)
+            else:
+                # No species — still flag picks
+                for pid in picks:
+                    db.update_photo_flag(pid, "flagged")
 
-        # Reject rejects
-        for pid in rejects:
-            db.update_photo_flag(pid, "rejected")
+            # Reject rejects
+            for pid in rejects:
+                db.update_photo_flag(pid, "rejected")
+        except ValueError as e:
+            return json_error(str(e), 403)
 
         # Record flag history for all picks + rejects
         flag_items = []
@@ -1855,7 +1875,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
-        from classifier import _embedding_cache_path
+        from classifier import _embedding_cache_path, _resolve_model_dir
         from labels import get_active_labels, get_saved_labels, load_merged_labels
         from models import get_active_model, get_models
 
@@ -1957,7 +1977,12 @@ def create_app(db_path, thumb_cache_dir=None):
         # Check embedding cache
         embeddings_cached = False
         if model and not use_tol and labels:
-            cache_path = _embedding_cache_path(labels, model.get("model_str", ""))
+            model_dir = _resolve_model_dir(
+                model.get("model_str", ""), model.get("weights_path")
+            )
+            cache_path = _embedding_cache_path(
+                labels, model.get("model_str", ""), model_dir
+            )
             embeddings_cached = os.path.exists(cache_path)
 
         return jsonify(
@@ -2100,9 +2125,9 @@ def create_app(db_path, thumb_cache_dir=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids")
         if not isinstance(photo_ids, list) or not photo_ids:
-            return jsonify({"error": "photo_ids required"}), 400
+            return json_error("photo_ids required")
         if not all(isinstance(pid, int) for pid in photo_ids):
-            return jsonify({"error": "photo_ids must be a list of integers"}), 400
+            return json_error("photo_ids must be a list of integers")
 
         db = _get_db()
         folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
@@ -2116,7 +2141,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 file_paths.append(os.path.join(folder_path, photo["filename"]))
 
         if not file_paths:
-            return jsonify({"error": "No photos found"}), 404
+            return json_error("No photos found", 404)
 
         editor = cfg.get("external_editor")
         try:
@@ -2136,7 +2161,7 @@ def create_app(db_path, thumb_cache_dir=None):
                         subprocess.Popen(["xdg-open", fp])
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
-            return jsonify({"error": str(e)}), 500
+            return json_error(str(e), 500)
 
         return jsonify({"opened": len(file_paths)})
 
@@ -2348,7 +2373,7 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/embedding-matrix")
     def api_embedding_matrix():
         """Return which model+labels combinations have cached embeddings."""
-        from classifier import _embedding_cache_path
+        from classifier import _embedding_cache_path, _resolve_model_dir
         from labels import get_saved_labels
         from models import get_models
 
@@ -2369,7 +2394,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 "models": {},
             }
             for m in models:
-                cache_path = _embedding_cache_path(labels, m["model_str"])
+                model_dir = _resolve_model_dir(m["model_str"], m.get("weights_path"))
+                cache_path = _embedding_cache_path(labels, m["model_str"], model_dir)
                 row["models"][m["id"]] = {
                     "cached": os.path.exists(cache_path),
                     "model_name": m["name"],
@@ -2492,15 +2518,47 @@ def create_app(db_path, thumb_cache_dir=None):
         """List mounted volumes (macOS/Linux) to help find SD cards."""
         import platform
         volumes = []
+        seen_paths: set[str] = set()
+
+        def _add_volume(name: str, path: str) -> None:
+            if path not in seen_paths and os.path.isdir(path):
+                seen_paths.add(path)
+                volumes.append({"name": name, "path": path})
+
+        def _scan_dir(vol_dir: str) -> None:
+            """List direct children of *vol_dir* as volumes."""
+            if os.path.isdir(vol_dir):
+                try:
+                    entries = sorted(os.listdir(vol_dir))
+                except PermissionError:
+                    return
+                for name in entries:
+                    _add_volume(name, os.path.join(vol_dir, name))
+
         if platform.system() == "Darwin":
-            vol_dir = "/Volumes"
+            _scan_dir("/Volumes")
         else:
-            vol_dir = "/media"
-        if os.path.isdir(vol_dir):
-            for name in sorted(os.listdir(vol_dir)):
-                path = os.path.join(vol_dir, name)
-                if os.path.isdir(path):
-                    volumes.append({"name": name, "path": path})
+            # /media — flat list of mount points
+            _scan_dir("/media")
+            # /run/media — systemd convention: /run/media/<user>/<volume>
+            run_media = "/run/media"
+            if os.path.isdir(run_media):
+                try:
+                    run_media_entries = sorted(os.listdir(run_media))
+                except PermissionError:
+                    run_media_entries = []
+                for user_dir in run_media_entries:
+                    user_path = os.path.join(run_media, user_dir)
+                    if os.path.isdir(user_path):
+                        try:
+                            entries = sorted(os.listdir(user_path))
+                        except PermissionError:
+                            continue
+                        for name in entries:
+                            _add_volume(name, os.path.join(user_path, name))
+            # /mnt — traditional mount point
+            _scan_dir("/mnt")
+
         return jsonify(volumes)
 
     @app.route("/api/browse", methods=["GET"])
@@ -3091,10 +3149,13 @@ def create_app(db_path, thumb_cache_dir=None):
             active_model = get_active_model()
             if active_model and active_model["downloaded"]:
                 try:
-                    from classifier import _embedding_cache_path
+                    from classifier import _embedding_cache_path, _resolve_model_dir
 
+                    model_dir = _resolve_model_dir(
+                        active_model["model_str"], active_model.get("weights_path")
+                    )
                     cache_path = _embedding_cache_path(
-                        list(set(species)), active_model["model_str"]
+                        list(set(species)), active_model["model_str"], model_dir
                     )
                     if not os.path.exists(cache_path):
                         progress_cb(
@@ -4475,7 +4536,8 @@ def create_app(db_path, thumb_cache_dir=None):
             best_count = 0
             for r in result["results"]:
                 if r["group_size"] > 1 and r["is_best"]:
-                    thread_db.update_photo_flag(r["photo_id"], "flagged")
+                    thread_db.update_photo_flag(r["photo_id"], "flagged",
+                                                verify_workspace=False)
                     best_count += 1
 
             result["auto_flagged"] = best_count
@@ -4583,9 +4645,18 @@ def create_app(db_path, thumb_cache_dir=None):
                     except queue.Empty:
                         # Send keepalive
                         yield ": keepalive\n\n"
-                        # Check if job is done (in case we missed the complete event)
+                        # Check if job is done (in case we missed the complete event).
+                        # Include "cancelled" as a terminal state so cancelled jobs
+                        # close the SSE stream instead of looping indefinitely.
                         j = runner.get(job_id)
-                        if j and j["status"] in ("completed", "failed"):
+                        if j is None:
+                            # Job was pruned from finished jobs dict; true terminal
+                            # status is unknown (could have been completed, failed, or
+                            # cancelled before pruning).  Emit "expired" so callers do
+                            # not incorrectly execute success-only code paths.
+                            yield f"event: complete\ndata: {json.dumps({'status': 'expired', 'result': None, 'errors': ['job expired from server memory before stream could read final status']})}\n\n"
+                            break
+                        if j["status"] in ("completed", "failed", "cancelled"):
                             yield f"event: complete\ndata: {json.dumps({'status': j['status'], 'result': j['result'], 'errors': j['errors']})}\n\n"
                             break
             finally:
@@ -4637,13 +4708,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/logs/recent")
     def api_logs_recent():
-        count = request.args.get("count", 100, type=int)
+        count = min(max(1, request.args.get("count", 100, type=int)), 1000)
         return jsonify(app._log_broadcaster.get_recent(count))
 
     @app.route("/api/jobs/history")
     def api_job_history():
         db = _get_db()
-        limit = request.args.get("limit", 10, type=int)
+        limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
         return jsonify(app._job_runner.get_history(db, limit=limit))
 
     # -- Image serving --
@@ -5815,6 +5886,11 @@ def create_app(db_path, thumb_cache_dir=None):
         keepers = body.get("keepers", [])
         rejects = body.get("rejects", [])
 
+        # Pre-validate all photo IDs against workspace before any mutations
+        for pid in keepers + rejects:
+            if not db._photo_in_workspace(pid):
+                return json_error(f"Photo {pid} is not in the active workspace", 403)
+
         # Capture old flags before mutation
         old_flags = {}
         for pid in keepers + rejects:
@@ -5822,10 +5898,13 @@ def create_app(db_path, thumb_cache_dir=None):
             if old:
                 old_flags[pid] = old["flag"] or "none"
 
-        for pid in keepers:
-            db.update_photo_flag(pid, "flagged")
-        for pid in rejects:
-            db.update_photo_flag(pid, "rejected")
+        try:
+            for pid in keepers:
+                db.update_photo_flag(pid, "flagged")
+            for pid in rejects:
+                db.update_photo_flag(pid, "rejected")
+        except ValueError as e:
+            return json_error(str(e), 403)
 
         # Record flag history
         flag_items = []
@@ -5852,7 +5931,7 @@ def create_app(db_path, thumb_cache_dir=None):
         if not query:
             return json_error("Missing query parameter 'q'")
 
-        limit = request.args.get("limit", 50, type=int)
+        limit = min(max(1, request.args.get("limit", 50, type=int)), 1000)
         threshold = request.args.get("threshold", 0.15, type=float)
 
         db = _get_db()
@@ -5929,19 +6008,14 @@ def create_app(db_path, thumb_cache_dir=None):
         import numpy as np
 
         db = _get_db()
-        limit = request.args.get("limit", 20, type=int)
+        limit = min(max(1, request.args.get("limit", 20, type=int)), 1000)
 
         # Get the source photo's embedding
         source = db.conn.execute(
             "SELECT embedding FROM photos WHERE id = ?", (photo_id,)
         ).fetchone()
         if not source or not source["embedding"]:
-            return (
-                jsonify(
-                    {"error": "No embedding for this photo — run classification first"}
-                ),
-                400,
-            )
+            return json_error("No embedding for this photo — run classification first")
 
         source_emb = np.frombuffer(source["embedding"], dtype=np.float32)
 

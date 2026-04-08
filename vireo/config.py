@@ -1,12 +1,17 @@
 """User configuration for Vireo (persisted to ~/.vireo/config.json)."""
 
+import contextlib
 import json
 import logging
 import os
+import tempfile
+import threading
 
 log = logging.getLogger(__name__)
 
 CONFIG_PATH = os.path.expanduser("~/.vireo/config.json")
+
+_lock = threading.Lock()
 
 DEFAULTS = {
     "classification_threshold": 0.4,
@@ -141,10 +146,18 @@ def load():
 
 
 def save(config):
-    """Save config to disk."""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
+    """Save config to disk atomically (write to temp file, then replace)."""
+    config_dir = os.path.dirname(CONFIG_PATH)
+    os.makedirs(config_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=config_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2)
+        os.replace(tmp_path, CONFIG_PATH)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 def get(key):
@@ -153,7 +166,8 @@ def get(key):
 
 
 def set(key, value):
-    """Set a single config value."""
-    config = load()
-    config[key] = value
-    save(config)
+    """Set a single config value (thread-safe)."""
+    with _lock:
+        config = load()
+        config[key] = value
+        save(config)

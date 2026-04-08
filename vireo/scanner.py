@@ -123,7 +123,11 @@ def _pair_raw_jpeg_companions(db):
     jpeg_exts = {".jpg", ".jpeg"}
 
     rows = db.conn.execute(
-        "SELECT id, folder_id, filename, extension FROM photos ORDER BY folder_id, filename"
+        "SELECT id, folder_id, filename, extension FROM photos"
+        " WHERE companion_path IS NULL"
+        " OR (companion_path IS NOT NULL AND extension IN"
+        " ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf'))"
+        " ORDER BY folder_id, filename"
     ).fetchall()
 
     # Group by folder_id + base name (without extension)

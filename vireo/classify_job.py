@@ -255,14 +255,17 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             from PIL import Image
 
                             img = Image.open(image_path)
-                            iw, ih = img.size
-                            px = int(det_box["x"] * iw)
-                            py = int(det_box["y"] * ih)
-                            pw = int(det_box["w"] * iw)
-                            ph = int(det_box["h"] * ih)
-                            subject_sharpness = compute_sharpness(
-                                image_path, region=(px, py, pw, ph)
-                            )
+                            try:
+                                iw, ih = img.size
+                                px = int(det_box["x"] * iw)
+                                py = int(det_box["y"] * ih)
+                                pw = int(det_box["w"] * iw)
+                                ph = int(det_box["h"] * ih)
+                                subject_sharpness = compute_sharpness(
+                                    image_path, region=(px, py, pw, ph)
+                                )
+                            finally:
+                                img.close()
                         except Exception:
                             subject_sharpness = overall_sharpness
 
@@ -469,7 +472,10 @@ def _prepare_image(photo, folders, detection, vireo_dir=None):
         y2 = min(ih, int((detection["box_y"] + detection["box_h"] + pad_h) * ih))
         crop = img.crop((x1, y1, x2, y2))
         if crop.size[0] >= 50 and crop.size[1] >= 50:
+            img.close()
             img = crop
+        else:
+            crop.close()
 
     img.thumbnail((1024, 1024), Image.LANCZOS)
     return img, folder_path, image_path
@@ -486,79 +492,84 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
     failed = 0
 
     try:
-        if model_type == "timm":
-            batch_preds = clf.classify_batch(images, threshold=0)
-            batch_results = [(preds, None) for preds in batch_preds]
-        else:
-            batch_results = clf.classify_batch_with_embedding(images, threshold=0)
-    except Exception:
-        log.warning("Batch classification failed, falling back to single-image", exc_info=True)
-        batch_results = []
-        for entry in batch:
-            try:
-                if model_type == "timm":
-                    preds = clf.classify(entry["img"], threshold=0)
-                    batch_results.append((preds, None))
-                else:
-                    preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
-                    batch_results.append((preds, emb))
-            except Exception:
-                log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
-                batch_results.append(None)
-                failed += 1
+        try:
+            if model_type == "timm":
+                batch_preds = clf.classify_batch(images, threshold=0)
+                batch_results = [(preds, None) for preds in batch_preds]
+            else:
+                batch_results = clf.classify_batch_with_embedding(images, threshold=0)
+        except Exception:
+            log.warning("Batch classification failed, falling back to single-image", exc_info=True)
+            batch_results = []
+            for entry in batch:
+                try:
+                    if model_type == "timm":
+                        preds = clf.classify(entry["img"], threshold=0)
+                        batch_results.append((preds, None))
+                    else:
+                        preds, emb = clf.classify_with_embedding(entry["img"], threshold=0)
+                        batch_results.append((preds, emb))
+                except Exception:
+                    log.warning("Classification failed for %s", entry["photo"]["filename"], exc_info=True)
+                    batch_results.append(None)
+                    failed += 1
 
-    for entry, result in zip(batch, batch_results, strict=True):
-        if result is None:
-            continue
-        all_preds, embedding = result
+        for entry, result in zip(batch, batch_results, strict=True):
+            if result is None:
+                continue
+            all_preds, embedding = result
 
-        if embedding is not None:
-            db.store_photo_embedding(
-                entry["photo"]["id"], embedding.tobytes(), model=model_name
+            if embedding is not None:
+                db.store_photo_embedding(
+                    entry["photo"]["id"], embedding.tobytes(), model=model_name
+                )
+
+            if not all_preds:
+                continue
+
+            top = all_preds[0]
+            log.info(
+                '%s: "%s" at %.0f%%',
+                entry["photo"]["filename"],
+                top["species"],
+                top["score"] * 100,
             )
 
-        if not all_preds:
-            continue
+            timestamp = None
+            if entry["photo"]["timestamp"]:
+                try:
+                    timestamp = dt.fromisoformat(entry["photo"]["timestamp"])
+                except Exception:
+                    pass
 
-        top = all_preds[0]
-        log.info(
-            '%s: "%s" at %.0f%%',
-            entry["photo"]["filename"],
-            top["species"],
-            top["score"] * 100,
-        )
+            # Build alternatives list (predictions 2..top_k)
+            alternatives = []
+            for alt_pred in all_preds[1:top_k]:
+                alternatives.append({
+                    "species": alt_pred["species"],
+                    "confidence": alt_pred["score"],
+                    "taxonomy": alt_pred.get("taxonomy"),
+                })
 
-        timestamp = None
-        if entry["photo"]["timestamp"]:
-            try:
-                timestamp = dt.fromisoformat(entry["photo"]["timestamp"])
-            except Exception:
-                pass
-
-        # Build alternatives list (predictions 2..top_k)
-        alternatives = []
-        for alt_pred in all_preds[1:top_k]:
-            alternatives.append({
-                "species": alt_pred["species"],
-                "confidence": alt_pred["score"],
-                "taxonomy": alt_pred.get("taxonomy"),
-            })
-
-        raw_results.append(
-            {
-                "photo": entry["photo"],
-                "detection_id": entry.get("detection_id"),
-                "folder_path": entry["folder_path"],
-                "image_path": entry["image_path"],
-                "prediction": top["species"],
-                "confidence": top["score"],
-                "timestamp": timestamp,
-                "filename": entry["photo"]["filename"],
-                "embedding": embedding,
-                "taxonomy": top.get("taxonomy"),
-                "alternatives": alternatives,
-            }
-        )
+            raw_results.append(
+                {
+                    "photo": entry["photo"],
+                    "detection_id": entry.get("detection_id"),
+                    "folder_path": entry["folder_path"],
+                    "image_path": entry["image_path"],
+                    "prediction": top["species"],
+                    "confidence": top["score"],
+                    "timestamp": timestamp,
+                    "filename": entry["photo"]["filename"],
+                    "embedding": embedding,
+                    "taxonomy": top.get("taxonomy"),
+                    "alternatives": alternatives,
+                }
+            )
+    finally:
+        # Close all PIL images to avoid resource leaks
+        for entry in batch:
+            entry["img"].close()
 
     return failed
 
@@ -881,268 +892,271 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             pre-extracted working copy JPEGs instead of decoding RAW files.
     """
     thread_db = Database(db_path)
-    thread_db.set_active_workspace(workspace_id)
-    job["_start_time"] = time.time()
+    try:
+        thread_db.set_active_workspace(workspace_id)
+        job["_start_time"] = time.time()
 
-    runner.set_steps(job["id"], [
-        {"id": "load_taxonomy", "label": "Load taxonomy"},
-        {"id": "load_photos", "label": "Load photos"},
-        {"id": "load_model", "label": "Load model"},
-        {"id": "detect", "label": "Detect subjects"},
-        {"id": "classify", "label": "Classify species"},
-        {"id": "finalize", "label": "Finalize results"},
-    ])
+        runner.set_steps(job["id"], [
+            {"id": "load_taxonomy", "label": "Load taxonomy"},
+            {"id": "load_photos", "label": "Load photos"},
+            {"id": "load_model", "label": "Load model"},
+            {"id": "detect", "label": "Detect subjects"},
+            {"id": "classify", "label": "Classify species"},
+            {"id": "finalize", "label": "Finalize results"},
+        ])
 
-    # Resolve model
-    if params.model_id:
-        all_models = get_models()
-        active_model = next(
-            (m for m in all_models if m["id"] == params.model_id and m["downloaded"]),
-            None,
-        )
+        # Resolve model
+        if params.model_id:
+            all_models = get_models()
+            active_model = next(
+                (m for m in all_models if m["id"] == params.model_id and m["downloaded"]),
+                None,
+            )
+            if not active_model:
+                raise RuntimeError(
+                    f"Model '{params.model_id}' not found or not downloaded."
+                )
+        else:
+            active_model = get_active_model()
         if not active_model:
-            raise RuntimeError(
-                f"Model '{params.model_id}' not found or not downloaded."
-            )
-    else:
-        active_model = get_active_model()
-    if not active_model:
-        raise RuntimeError("No model available. Download one in Settings.")
+            raise RuntimeError("No model available. Download one in Settings.")
 
-    model_str = active_model["model_str"]
-    weights_path = active_model["weights_path"]
-    effective_name = active_model["name"]
-    model_type = active_model.get("model_type", "bioclip")
-    model_name = params.model_name or effective_name
+        model_str = active_model["model_str"]
+        weights_path = active_model["weights_path"]
+        effective_name = active_model["name"]
+        model_type = active_model.get("model_type", "bioclip")
+        model_name = params.model_name or effective_name
 
-    # Phase 1: Load taxonomy
-    runner.update_step(job["id"], "load_taxonomy", status="running")
-    runner.push_event(
-        job["id"],
-        "progress",
-        {
-            "current": 0,
-            "total": 0,
-            "current_file": "Loading taxonomy...",
-            "rate": 0,
-            "phase": "Step 1/5: Loading taxonomy",
-        },
-    )
-    taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-    tax = _load_taxonomy(taxonomy_path)
-
-    # Phase 2: Load labels
-    labels, use_tol = _load_labels(
-        model_type=model_type,
-        model_str=model_str,
-        labels_file=params.labels_file,
-        labels_files=params.labels_files,
-        db=thread_db,
-    )
-    tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
-    labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
-    runner.update_step(
-        job["id"], "load_taxonomy", status="completed",
-        summary=f"{tax_summary}, {labels_summary}",
-    )
-
-    # Phase 3: Get photos from collection
-    runner.update_step(job["id"], "load_photos", status="running")
-    runner.push_event(
-        job["id"],
-        "progress",
-        {
-            "current": 0,
-            "total": 0,
-            "current_file": "Loading collection photos...",
-            "rate": 0,
-            "phase": "Step 2/5: Loading photos",
-        },
-    )
-    photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
-    folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
-    total = len(photos)
-    job["progress"]["total"] = total
-    runner.update_step(
-        job["id"], "load_photos", status="completed",
-        summary=f"{total} photos",
-    )
-
-    log.info(
-        "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
-    )
-
-    if params.reclassify:
-        photo_ids = [p["id"] for p in photos]
-        thread_db.clear_predictions(model=effective_name, collection_photo_ids=photo_ids)
-        # Also clear existing detections so they get re-detected
-        for pid in photo_ids:
-            thread_db.clear_detections(pid)
-        log.info(
-            "Cleared existing predictions and detections for %d photos, model=%s (re-classify)",
-            len(photo_ids),
-            effective_name,
+        # Phase 1: Load taxonomy
+        runner.update_step(job["id"], "load_taxonomy", status="running")
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": 0,
+                "current_file": "Loading taxonomy...",
+                "rate": 0,
+                "phase": "Step 1/5: Loading taxonomy",
+            },
         )
+        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+        tax = _load_taxonomy(taxonomy_path)
 
-    # Phase 4: Initialize classifier
-    runner.update_step(job["id"], "load_model", status="running")
-    if model_type == "timm":
-        phase_msg = f"Loading {effective_name} timm model..."
-    elif use_tol:
-        phase_msg = f"Loading {effective_name} Tree of Life classifier..."
-    else:
-        phase_msg = f"Loading {effective_name} model and computing label embeddings..."
-
-    runner.push_event(
-        job["id"],
-        "progress",
-        {
-            "current": 0,
-            "total": total,
-            "current_file": phase_msg,
-            "rate": 0,
-            "phase": "Step 3/5: Loading model",
-        },
-    )
-
-    if model_type == "timm":
-        clf = TimmClassifier(model_str, taxonomy=tax)
-    else:
-        def _emb_progress(current, emb_total):
-            runner.update_step(
-                job["id"], "load_model",
-                progress={"current": current, "total": emb_total},
-            )
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": current,
-                    "total": emb_total,
-                    "current_file": f"Computing label embeddings ({current}/{emb_total})...",
-                    "rate": 0,
-                    "phase": "Step 3/5: Computing embeddings",
-                },
-            )
-
-        clf = Classifier(
-            labels=None if use_tol else labels,
+        # Phase 2: Load labels
+        labels, use_tol = _load_labels(
+            model_type=model_type,
             model_str=model_str,
-            pretrained_str=weights_path,
-            embedding_progress_callback=_emb_progress,
+            labels_file=params.labels_file,
+            labels_files=params.labels_files,
+            db=thread_db,
         )
-    runner.update_step(
-        job["id"], "load_model", status="completed",
-        summary=effective_name,
-    )
+        tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
+        labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
+        runner.update_step(
+            job["id"], "load_taxonomy", status="completed",
+            summary=f"{tax_summary}, {labels_summary}",
+        )
 
-    # Phase 5: Detect subjects
-    runner.update_step(job["id"], "detect", status="running")
-    detection_map, detected = _detect_subjects(
-        photos=photos,
-        folders=folders,
-        runner=runner,
-        job=job,
-        reclassify=params.reclassify,
-        db=thread_db,
-    )
-    runner.update_step(
-        job["id"], "detect", status="completed",
-        summary=f"{detected} animals detected in {total} photos",
-    )
+        # Phase 3: Get photos from collection
+        runner.update_step(job["id"], "load_photos", status="running")
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": 0,
+                "current_file": "Loading collection photos...",
+                "rate": 0,
+                "phase": "Step 2/5: Loading photos",
+            },
+        )
+        photos = thread_db.get_collection_photos(params.collection_id, per_page=999999)
+        folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+        total = len(photos)
+        job["progress"]["total"] = total
+        runner.update_step(
+            job["id"], "load_photos", status="completed",
+            summary=f"{total} photos",
+        )
 
-    # Phase 6: Classify each photo
-    existing_preds = set()
-    if not params.reclassify:
-        existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
-        if existing_preds:
+        log.info(
+            "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
+        )
+
+        if params.reclassify:
+            photo_ids = [p["id"] for p in photos]
+            thread_db.clear_predictions(model=effective_name, collection_photo_ids=photo_ids)
+            # Also clear existing detections so they get re-detected
+            for pid in photo_ids:
+                thread_db.clear_detections(pid)
             log.info(
-                "Skipping %d photos with existing predictions (model=%s)",
-                len(existing_preds),
-                model_name,
+                "Cleared existing predictions and detections for %d photos, model=%s (re-classify)",
+                len(photo_ids),
+                effective_name,
             )
 
-    job["_start_time"] = time.time()  # reset rate timer for classification phase
+        # Phase 4: Initialize classifier
+        runner.update_step(job["id"], "load_model", status="running")
+        if model_type == "timm":
+            phase_msg = f"Loading {effective_name} timm model..."
+        elif use_tol:
+            phase_msg = f"Loading {effective_name} Tree of Life classifier..."
+        else:
+            phase_msg = f"Loading {effective_name} model and computing label embeddings..."
 
-    import config as cfg
-    effective_cfg = thread_db.get_effective_config(cfg.load())
-    top_k = effective_cfg.get("top_k_predictions", 5)
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": 0,
+                "total": total,
+                "current_file": phase_msg,
+                "rate": 0,
+                "phase": "Step 3/5: Loading model",
+            },
+        )
 
-    runner.update_step(job["id"], "classify", status="running")
-    raw_results, failed, skipped_existing = _classify_photos(
-        photos=photos,
-        folders=folders,
-        detection_map=detection_map,
-        existing_preds=existing_preds,
-        clf=clf,
-        model_type=model_type,
-        model_name=model_name,
-        runner=runner,
-        job=job,
-        db=thread_db,
-        top_k=top_k,
-        vireo_dir=vireo_dir,
-    )
-    classified_count = len(raw_results) - skipped_existing
-    parts = [f"{classified_count} classified"]
-    if skipped_existing:
-        parts.append(f"{skipped_existing} cached")
-    if failed:
-        parts.append(f"{failed} failed")
-    runner.update_step(
-        job["id"], "classify", status="completed",
-        summary=", ".join(parts),
-    )
+        if model_type == "timm":
+            clf = TimmClassifier(model_str, taxonomy=tax)
+        else:
+            def _emb_progress(current, emb_total):
+                runner.update_step(
+                    job["id"], "load_model",
+                    progress={"current": current, "total": emb_total},
+                )
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": emb_total,
+                        "current_file": f"Computing label embeddings ({current}/{emb_total})...",
+                        "rate": 0,
+                        "phase": "Step 3/5: Computing embeddings",
+                    },
+                )
 
-    # Phase 7: Group and store predictions
-    runner.update_step(job["id"], "finalize", status="running")
-    runner.push_event(
-        job["id"],
-        "progress",
-        {
-            "current": total,
+            clf = Classifier(
+                labels=None if use_tol else labels,
+                model_str=model_str,
+                pretrained_str=weights_path,
+                embedding_progress_callback=_emb_progress,
+            )
+        runner.update_step(
+            job["id"], "load_model", status="completed",
+            summary=effective_name,
+        )
+
+        # Phase 5: Detect subjects
+        runner.update_step(job["id"], "detect", status="running")
+        detection_map, detected = _detect_subjects(
+            photos=photos,
+            folders=folders,
+            runner=runner,
+            job=job,
+            reclassify=params.reclassify,
+            db=thread_db,
+        )
+        runner.update_step(
+            job["id"], "detect", status="completed",
+            summary=f"{detected} animals detected in {total} photos",
+        )
+
+        # Phase 6: Classify each photo
+        existing_preds = set()
+        if not params.reclassify:
+            existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
+            if existing_preds:
+                log.info(
+                    "Skipping %d photos with existing predictions (model=%s)",
+                    len(existing_preds),
+                    model_name,
+                )
+
+        job["_start_time"] = time.time()  # reset rate timer for classification phase
+
+        import config as cfg
+        effective_cfg = thread_db.get_effective_config(cfg.load())
+        top_k = effective_cfg.get("top_k_predictions", 5)
+
+        runner.update_step(job["id"], "classify", status="running")
+        raw_results, failed, skipped_existing = _classify_photos(
+            photos=photos,
+            folders=folders,
+            detection_map=detection_map,
+            existing_preds=existing_preds,
+            clf=clf,
+            model_type=model_type,
+            model_name=model_name,
+            runner=runner,
+            job=job,
+            db=thread_db,
+            top_k=top_k,
+            vireo_dir=vireo_dir,
+        )
+        classified_count = len(raw_results) - skipped_existing
+        parts = [f"{classified_count} classified"]
+        if skipped_existing:
+            parts.append(f"{skipped_existing} cached")
+        if failed:
+            parts.append(f"{failed} failed")
+        runner.update_step(
+            job["id"], "classify", status="completed",
+            summary=", ".join(parts),
+        )
+
+        # Phase 7: Group and store predictions
+        runner.update_step(job["id"], "finalize", status="running")
+        runner.push_event(
+            job["id"],
+            "progress",
+            {
+                "current": total,
+                "total": total,
+                "current_file": "Grouping bursts and computing consensus...",
+                "rate": 0,
+                "phase": "Finalizing results",
+            },
+        )
+
+        group_result = _store_grouped_predictions(
+            raw_results=raw_results,
+            job_id=job["id"],
+            model_name=model_name,
+            grouping_window=params.grouping_window,
+            similarity_threshold=params.similarity_threshold,
+            tax=tax,
+            db=thread_db,
+        )
+        finalize_parts = [f"{group_result['predictions_stored']} predictions"]
+        if group_result["burst_groups"]:
+            finalize_parts.append(f"{group_result['burst_groups']} burst groups")
+        if group_result["already_labeled"]:
+            finalize_parts.append(f"{group_result['already_labeled']} already labeled")
+        runner.update_step(
+            job["id"], "finalize", status="completed",
+            summary=", ".join(finalize_parts),
+        )
+
+        log.info(
+            "Classification complete: %d photos processed, %d predictions stored, "
+            "%d already classified, %d already labeled, %d failed",
+            total,
+            group_result["predictions_stored"],
+            skipped_existing,
+            group_result["already_labeled"],
+            failed,
+        )
+
+        return {
             "total": total,
-            "current_file": "Grouping bursts and computing consensus...",
-            "rate": 0,
-            "phase": "Finalizing results",
-        },
-    )
-
-    group_result = _store_grouped_predictions(
-        raw_results=raw_results,
-        job_id=job["id"],
-        model_name=model_name,
-        grouping_window=params.grouping_window,
-        similarity_threshold=params.similarity_threshold,
-        tax=tax,
-        db=thread_db,
-    )
-    finalize_parts = [f"{group_result['predictions_stored']} predictions"]
-    if group_result["burst_groups"]:
-        finalize_parts.append(f"{group_result['burst_groups']} burst groups")
-    if group_result["already_labeled"]:
-        finalize_parts.append(f"{group_result['already_labeled']} already labeled")
-    runner.update_step(
-        job["id"], "finalize", status="completed",
-        summary=", ".join(finalize_parts),
-    )
-
-    log.info(
-        "Classification complete: %d photos processed, %d predictions stored, "
-        "%d already classified, %d already labeled, %d failed",
-        total,
-        group_result["predictions_stored"],
-        skipped_existing,
-        group_result["already_labeled"],
-        failed,
-    )
-
-    return {
-        "total": total,
-        "predictions_stored": group_result["predictions_stored"],
-        "burst_groups": group_result["burst_groups"],
-        "already_classified": skipped_existing,
-        "already_labeled": group_result["already_labeled"],
-        "detected": detected,
-        "failed": failed,
-    }
+            "predictions_stored": group_result["predictions_stored"],
+            "burst_groups": group_result["burst_groups"],
+            "already_classified": skipped_existing,
+            "already_labeled": group_result["already_labeled"],
+            "detected": detected,
+            "failed": failed,
+        }
+    finally:
+        thread_db.conn.close()

@@ -393,7 +393,9 @@ def test_classify_photos_iterates_over_detections(tmp_path):
     mock_db = MagicMock()
     mock_db.get_photo_embedding.return_value = None
 
-    with patch("classify_job.load_image", return_value=Image.new("RGB", (200, 200))):
+    # Use side_effect to return a fresh Image each call, since _prepare_image
+    # closes the original image after cropping (resource leak fix).
+    with patch("classify_job.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
             folders=folders,
@@ -452,7 +454,9 @@ def test_classify_photos_new_photo(tmp_path):
     mock_db = MagicMock()
     mock_db.get_photo_embedding.return_value = None
 
-    with patch("classify_job.load_image", return_value=Image.new("RGB", (200, 200))):
+    # Use side_effect to return a fresh Image each call, since _flush_batch
+    # closes images after classification (resource leak fix).
+    with patch("classify_job.load_image", side_effect=lambda *a, **kw: Image.new("RGB", (200, 200))):
         raw_results, failed, skipped = _classify_photos(
             photos=photos,
             folders=folders,
