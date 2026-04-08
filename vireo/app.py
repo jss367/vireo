@@ -2534,7 +2534,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 for user_dir in sorted(os.listdir(run_media)):
                     user_path = os.path.join(run_media, user_dir)
                     if os.path.isdir(user_path):
-                        for name in sorted(os.listdir(user_path)):
+                        try:
+                            entries = sorted(os.listdir(user_path))
+                        except PermissionError:
+                            continue
+                        for name in entries:
                             _add_volume(name, os.path.join(user_path, name))
             # /mnt — traditional mount point
             _scan_dir("/mnt")
