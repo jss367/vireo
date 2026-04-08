@@ -4,7 +4,7 @@
 
 Vireo is a desktop app with two layers:
 
-- **Python backend** — Flask server handling all routes, SQLite database, ML inference (BioCLIP, PyTorch Wildlife, DINOv2), background job runner
+- **Python backend** — Flask server handling all routes, SQLite database, ML inference (BioCLIP, DINOv2, MegaDetector, SAM2), background job runner
 - **Tauri shell** — Rust-based native window that wraps the Flask app, providing OS-native chrome, file dialogs, system tray, menu bar, and auto-updates
 
 In development, these run as separate processes. In production, Tauri spawns the Python backend as a sidecar process automatically.
@@ -40,10 +40,10 @@ This script:
 1. Reads the current version from `pyproject.toml`
 2. Bumps it (patch/minor/major or explicit)
 3. Syncs the version across all manifests (`sync_version.py`)
-4. Builds the Python sidecar via PyInstaller
-5. Builds the Tauri app (`.dmg` on Mac)
+4. Runs E2E tests
+5. **Without `--publish`**: builds the Python sidecar via PyInstaller, builds the Tauri app (`.dmg` on Mac)
 6. Commits the version bump
-7. With `--publish`: tags, pushes, creates a GitHub Release with the `.dmg` attached
+7. **With `--publish`**: tags, pushes — CI then builds all platforms and creates a draft GitHub Release (no local build)
 
 ### Manual steps (if you prefer)
 
@@ -86,6 +86,7 @@ Users see the version on the Settings page (About section) via `GET /api/version
 | `~/.vireo/config.json` | Global settings                    |
 | `~/.vireo/thumbnails/` | Thumbnail cache                    |
 | `~/.vireo/labels/`     | Species label files                |
+| `~/.vireo/working/`    | Working copies (JPEGs from RAW)    |
 | `~/.vireo/previews/`   | Photo preview cache                |
 
 ## Tauri Sidecar Lifecycle
@@ -96,7 +97,8 @@ In production (packaged app):
 2. Finds a free port, spawns `vireo-server` sidecar with `--port N --no-browser`
 3. Polls `GET /api/health` every 200ms until the sidecar responds (30s timeout)
 4. Navigates the webview to `http://127.0.0.1:N`
-5. On window close: sends `POST /api/shutdown` (with `X-Vireo-Shutdown` header), waits 500ms, force-kills if needed
+5. On window close: hides the window (minimizes to system tray)
+6. On app exit: sends `POST /api/shutdown` (with `X-Vireo-Shutdown` header), waits 500ms, force-kills if needed
 
 In development (`cargo tauri dev`):
 
