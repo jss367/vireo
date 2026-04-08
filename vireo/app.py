@@ -6299,7 +6299,14 @@ def create_app(db_path, thumb_cache_dir=None):
         wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        if extract_working_copy(image_path, wc_abs, max_size=0, quality=quality):
+        # Prefer companion JPEG as extraction source — avoids slow RAW decode
+        source_for_extraction = image_path
+        if photo["companion_path"]:
+            companion_abs = os.path.join(folder["path"], photo["companion_path"])
+            if os.path.exists(companion_abs):
+                source_for_extraction = companion_abs
+
+        if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
             from PIL import Image as _PILImage
