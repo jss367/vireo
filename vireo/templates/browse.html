@@ -649,6 +649,20 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+.export-var-pill {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: monospace;
+}
+.export-var-pill:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .inat-badge {
   position: absolute; top: 4px; right: 4px;
   background: rgba(116,172,0,0.85); color: var(--text-primary);
@@ -790,8 +804,54 @@ body {
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="openInEditorBatch()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Open in Editor</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
+      <button onclick="openExportModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Export</button>
       <button onclick="batchDelete()" style="background:var(--danger);color:white;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;" title="Delete selected photos">Delete</button>
       <button onclick="clearSelection()" style="background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;margin-left:auto;">Clear</button>
+    </div>
+
+    <!-- Export Modal -->
+    <div id="exportOverlay" class="modal-overlay">
+      <div class="modal" style="width:500px;">
+        <h3>Export Photos</h3>
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Destination folder</label>
+        <input id="exportDest" class="modal-input" type="text" placeholder="/path/to/export/folder">
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Resize (max long edge)</label>
+        <select id="exportResize" class="modal-input" style="cursor:pointer;">
+          <option value="">Original size</option>
+          <option value="4096">4096 px</option>
+          <option value="2048">2048 px</option>
+          <option value="1920">1920 px</option>
+          <option value="1080">1080 px</option>
+          <option value="custom">Custom...</option>
+        </select>
+        <input id="exportResizeCustom" class="modal-input" type="number" placeholder="Max pixels (long edge)" min="100" max="20000" style="display:none;">
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Quality</label>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+          <input id="exportQuality" type="range" min="1" max="100" value="92" style="flex:1;">
+          <span id="exportQualityVal" style="font-size:13px;color:var(--text-secondary);min-width:32px;">92</span>
+        </div>
+
+        <label style="font-size:12px;color:var(--text-secondary);display:block;margin-bottom:4px;">Naming template</label>
+        <input id="exportTemplate" class="modal-input" type="text" value="{original}">
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+          <button class="export-var-pill" onclick="insertTemplateVar('{original}')">{original}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{date}')">{date}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{datetime}')">{datetime}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{species}')">{species}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{rating}')">{rating}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{seq}')">{seq}</button>
+          <button class="export-var-pill" onclick="insertTemplateVar('{folder}')">{folder}</button>
+        </div>
+        <div id="exportPreview" style="font-size:11px;color:var(--text-muted);margin-bottom:12px;font-family:monospace;"></div>
+
+        <div class="modal-actions">
+          <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" onclick="startExport()">Export</button>
+          <button class="modal-btn modal-btn-cancel" onclick="closeExportModal()">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <!-- Grid -->
@@ -2749,6 +2809,102 @@ function openInEditorBatch() {
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
 })();
+
+/* ---------- Export Modal ---------- */
+function openExportModal() {
+  if (selectedPhotos.size === 0) return;
+  document.getElementById('exportSubmitBtn').textContent = 'Export ' + selectedPhotos.size + ' photo' + (selectedPhotos.size === 1 ? '' : 's');
+  document.getElementById('exportOverlay').classList.add('open');
+  updateExportPreview();
+}
+
+function closeExportModal() {
+  document.getElementById('exportOverlay').classList.remove('open');
+}
+
+function insertTemplateVar(v) {
+  var input = document.getElementById('exportTemplate');
+  var start = input.selectionStart;
+  var end = input.selectionEnd;
+  var val = input.value;
+  input.value = val.substring(0, start) + v + val.substring(end);
+  input.selectionStart = input.selectionEnd = start + v.length;
+  input.focus();
+  updateExportPreview();
+}
+
+function updateExportPreview() {
+  var template = document.getElementById('exportTemplate').value;
+  if (!template) { document.getElementById('exportPreview').textContent = ''; return; }
+  // Use first selected photo for preview
+  var firstId = Array.from(selectedPhotos)[0];
+  var photo = photos.find(function(p) { return p.id === firstId; });
+  if (!photo) { document.getElementById('exportPreview').textContent = ''; return; }
+  var stem = photo.filename.replace(/\.[^.]+$/, '');
+  var ts = photo.timestamp || '';
+  var datePart = ts ? ts.substring(0, 10) : 'unknown-date';
+  var timePart = ts && ts.length >= 19 ? ts.substring(11, 19).replace(/:/g, '') : '000000';
+  var species = (photo.species && photo.species.length > 0) ? photo.species[0] : 'unknown';
+  var preview = template
+    .replace('{original}', stem)
+    .replace('{date}', datePart)
+    .replace('{datetime}', datePart + '_' + timePart)
+    .replace('{species}', species)
+    .replace('{rating}', String(photo.rating || 0))
+    .replace('{seq}', '001')
+    .replace('{folder}', '');
+  document.getElementById('exportPreview').textContent = 'Preview: ' + preview + '.jpg';
+}
+
+document.getElementById('exportTemplate').addEventListener('input', updateExportPreview);
+
+document.getElementById('exportResize').addEventListener('change', function() {
+  document.getElementById('exportResizeCustom').style.display =
+    this.value === 'custom' ? 'block' : 'none';
+});
+
+document.getElementById('exportQuality').addEventListener('input', function() {
+  document.getElementById('exportQualityVal').textContent = this.value;
+});
+
+function startExport() {
+  var dest = document.getElementById('exportDest').value.trim();
+  if (!dest) { alert('Please enter a destination folder.'); return; }
+
+  var resizeSelect = document.getElementById('exportResize').value;
+  var maxSize = null;
+  if (resizeSelect === 'custom') {
+    maxSize = parseInt(document.getElementById('exportResizeCustom').value) || null;
+  } else if (resizeSelect) {
+    maxSize = parseInt(resizeSelect);
+  }
+
+  var quality = parseInt(document.getElementById('exportQuality').value) || 92;
+  var template = document.getElementById('exportTemplate').value || '{original}';
+
+  safeFetch('/api/jobs/export', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      photo_ids: Array.from(selectedPhotos),
+      destination: dest,
+      naming_template: template,
+      max_size: maxSize,
+      quality: quality,
+    }),
+  }).then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) { alert('Export error: ' + data.error); return; }
+      closeExportModal();
+      showToast('Export started (' + selectedPhotos.size + ' photos)');
+    })
+    .catch(function(err) { alert('Export failed: ' + err.message); });
+}
+
+// Close on overlay click
+document.getElementById('exportOverlay').addEventListener('click', function(e) {
+  if (e.target === this) closeExportModal();
+});
 </script>
 
 
