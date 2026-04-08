@@ -3842,8 +3842,10 @@ def create_app(db_path, thumb_cache_dir=None):
                     },
                 )
 
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             thumb_result = generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb
+                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
+                vireo_dir=vireo_dir,
             )
             from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",
@@ -3884,8 +3886,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 )
 
             job["_start_time"] = time.time()
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             return generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=progress_cb
+                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=progress_cb,
+                vireo_dir=vireo_dir,
             )
 
         job_id = runner.start("thumbnails", work, workspace_id=active_ws)
@@ -4250,9 +4254,11 @@ def create_app(db_path, thumb_cache_dir=None):
                     "phase": "Generating thumbnails",
                 })
 
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             thumb_result = generate_all(
                 thread_db, app.config["THUMB_CACHE_DIR"],
                 progress_callback=thumb_cb,
+                vireo_dir=vireo_dir,
             )
             from thumbnails import format_summary as thumb_summary
             runner.update_step(job["id"], "thumbnails", status="completed",

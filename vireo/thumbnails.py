@@ -47,7 +47,7 @@ def get_thumb_path(photo_id, cache_dir):
     return None
 
 
-def generate_all(db, cache_dir, progress_callback=None, config=None):
+def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=None):
     """Generate thumbnails for photos that don't have one yet.
 
     Only processes photos missing thumbnails, so re-running is fast.
@@ -57,6 +57,8 @@ def generate_all(db, cache_dir, progress_callback=None, config=None):
         cache_dir: thumbnail cache directory
         progress_callback: optional callable(current, total)
         config: optional config dict; if None, loads from disk
+        vireo_dir: optional path to ~/.vireo/; when set, working copies
+            are preferred over original files as thumbnail source
     """
     import config as cfg
     user_cfg = config or cfg.load()
@@ -89,8 +91,15 @@ def generate_all(db, cache_dir, progress_callback=None, config=None):
     generated = 0
     failed = 0
     for i, photo in enumerate(needed):
-        folder_path = folders.get(photo["folder_id"], "")
-        source_path = os.path.join(folder_path, photo["filename"])
+        # Prefer working copy for source
+        source_path = None
+        if vireo_dir and photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                source_path = wc
+        if source_path is None:
+            folder_path = folders.get(photo["folder_id"], "")
+            source_path = os.path.join(folder_path, photo["filename"])
         if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:
             generated += 1
         else:
