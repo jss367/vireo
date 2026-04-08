@@ -117,12 +117,14 @@ def load_working_image(photo, vireo_dir, max_size=1024, folders=None):
         if os.path.exists(wc_path):
             return _load_standard(wc_path, max_size)
 
-    # No working copy — load original (JPEG source or missing working copy)
+    # No working copy — load original using the RAW-capable path so that
+    # RAW files (NEF, CR2, ARW, …) are decoded correctly even when no
+    # working copy has been extracted yet.
     if folders is None:
         return None
     folder_path = folders.get(photo["folder_id"], "")
     source_path = os.path.join(folder_path, photo["filename"])
-    return _load_standard(source_path, max_size)
+    return load_image(source_path, max_size=max_size)
 
 
 def extract_working_copy(source_path, output_path, max_size=4096, quality=92):

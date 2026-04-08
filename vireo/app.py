@@ -6293,13 +6293,22 @@ def create_app(db_path, thumb_cache_dir=None):
         if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp") and not photo["working_copy_path"] and os.path.exists(image_path):
             return send_file(image_path)
 
-        # Extract full-res working copy (on-demand upgrade)
+        # Extract full-res working copy (on-demand upgrade).
+        # Prefer companion JPEG (RAW+JPEG pair) as source — it is always
+        # available even when libraw cannot decode the RAW variant.
         from image_loader import extract_working_copy, load_image
         wc_rel = f"working/{photo_id}.jpg"
         wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        if extract_working_copy(image_path, wc_abs, max_size=0, quality=quality):
+        companion_path = photo["companion_path"] if "companion_path" in photo.keys() else None
+        extract_source = image_path
+        if companion_path:
+            companion_abs = os.path.join(folder["path"], companion_path)
+            if os.path.exists(companion_abs):
+                extract_source = companion_abs
+
+        if extract_working_copy(extract_source, wc_abs, max_size=0, quality=quality):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
             from PIL import Image as _PILImage
@@ -6318,8 +6327,8 @@ def create_app(db_path, thumb_cache_dir=None):
             db.conn.commit()
             return send_file(wc_abs, mimetype="image/jpeg")
 
-        # Fallback: serve via load_image
-        img = load_image(image_path, max_size=None)
+        # Fallback: serve via load_image (also uses companion if available)
+        img = load_image(extract_source, max_size=None)
         if img is None:
             return "Could not load image", 500
         originals_dir = os.path.join(vireo_dir, "originals")
