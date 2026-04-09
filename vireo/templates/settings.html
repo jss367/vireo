@@ -737,13 +737,6 @@
     </div>
     <div class="setting-row">
       <div class="setting-label">
-        Python
-        <small id="pythonDetail"></small>
-      </div>
-      <span class="setting-value" id="pythonVersion">-</span>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
         ONNX Runtime
         <small id="onnxrtProviders"></small>
       </div>
@@ -1248,7 +1241,6 @@ async function loadSystemInfo() {
     var d = await safeFetch('/api/system/info', {}, { toast: false });
     document.getElementById('deviceName').textContent = d.device;
     document.getElementById('deviceDetail').textContent = d.device_detail;
-    document.getElementById('pythonVersion').textContent = d.python_version;
     document.getElementById('onnxrtVersion').textContent = d.onnxruntime_version || 'Not installed';
     document.getElementById('onnxrtProviders').textContent = (d.onnxruntime_providers || []).join(', ');
     var mdStatus = document.getElementById('megadetectorStatus');
