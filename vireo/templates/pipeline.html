@@ -607,6 +607,10 @@ body { padding-bottom: 36px; }
                        oninput="updateStartButton();markFolderPreviewStale()">
                 <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
               </div>
+              <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
+                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
+                <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+              </div>
             </div>
           </div>
           <div class="setting-row">
@@ -938,6 +942,21 @@ function initPipelinePage() {
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
+
+      // Populate recent destinations
+      var recents = data.recent_destinations || [];
+      if (recents.length > 0) {
+        var container = document.getElementById('recentDestList');
+        container.innerHTML = recents.map(function(path) {
+          var name = path.split('/').filter(Boolean).slice(-1)[0] || path;
+          return '<button class="btn btn-secondary" '
+            + 'style="font-size:11px;padding:2px 8px;" '
+            + 'title="' + escapeHtml(path) + '" '
+            + 'onclick="selectRecentDestination(\'' + escapeHtml(path).replace(/'/g, "\\'") + '\')">'
+            + escapeHtml(name) + '</button>';
+        }).join('');
+        document.getElementById('recentDestinations').style.display = '';
+      }
     })
     .catch(function(e) {
       console.error('Failed to load pipeline page data:', e);
@@ -1271,6 +1290,14 @@ function renderSourceFolders() {
     return '<div class="folder-tag"><span>' + escapeHtml(f) +
       '</span> <span class="folder-tag-remove" onclick="removeSourceFolder(' + i + ')">&times;</span></div>';
   }).join('');
+}
+
+function selectRecentDestination(path) {
+  document.getElementById('chkCopyPhotos').checked = true;
+  onCopyModeChange();
+  document.getElementById('cfgDestination').value = path;
+  updateStartButton();
+  markFolderPreviewStale();
 }
 
 function onCopyModeChange() {
