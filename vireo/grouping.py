@@ -198,12 +198,11 @@ def read_exif_timestamp(image_path):
                 )
                 if dt_str:
                     return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
-        # Pillow opened the file but found no timestamp — no point trying exifread
-        return None
     except Exception:
         pass
 
-    # Pillow failed (likely a RAW file) — fall back to exifread
+    # Pillow didn't produce a timestamp — try exifread (handles RAW and
+    # TIFF variants where Pillow may open the file but miss EXIF fields)
     try:
         import exifread
 

@@ -198,6 +198,38 @@ def test_read_exif_timestamp_pillow_works(monkeypatch, tmp_path):
     assert result == datetime(2024, 1, 10, 8, 0, 0)
 
 
+def test_read_exif_timestamp_pillow_opens_but_no_exif_falls_through(monkeypatch, tmp_path):
+    """When Pillow opens the file but has no timestamp, exifread is still tried."""
+    from grouping import read_exif_timestamp
+
+    tiff_file = tmp_path / "image.tiff"
+    tiff_file.write_bytes(b"\x00" * 100)
+
+    import PIL.Image
+
+    class MockImg:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def getexif(self):
+            return {}  # Pillow opened it but no EXIF tags
+
+    monkeypatch.setattr(PIL.Image, "open", lambda path: MockImg())
+
+    import exifread
+
+    def mock_process_file(f, **kwargs):
+        return {"EXIF DateTimeOriginal": MockTag("2024:03:01 12:00:00")}
+
+    monkeypatch.setattr(exifread, "process_file", mock_process_file)
+
+    result = read_exif_timestamp(str(tiff_file))
+    assert result == datetime(2024, 3, 1, 12, 0, 0)
+
+
 def test_read_exif_timestamp_exifread_digitized_fallback(monkeypatch, tmp_path):
     """exifread fallback uses DateTimeDigitized when DateTimeOriginal is missing."""
     from grouping import read_exif_timestamp
