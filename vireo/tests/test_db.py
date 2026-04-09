@@ -1956,6 +1956,55 @@ def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_b,)).fetchone() is not None
 
 
+def test_relocate_folder_merge_updates_photo_count(tmp_path):
+    """_merge_into_existing recomputes photo_count on the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    # Create files on disk so they survive the existence check
+    (tmp_path / "existing" / "photo_a.jpg").write_bytes(b"\xff\xd8")
+
+    db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    row = db.conn.execute("SELECT photo_count FROM folders WHERE id = ?", (fid_existing,)).fetchone()
+    assert row["photo_count"] == 2
+
+
+def test_relocate_folder_merge_marks_target_ok(tmp_path):
+    """_merge_into_existing sets target folder status to ok."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    # Mark both as missing
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_existing,)).fetchone()
+    assert row["status"] == "ok"
+
+
 def test_relocate_folder_merge_reparents_children(tmp_path):
     """_merge_into_existing reparents child folders to the target folder."""
     from db import Database

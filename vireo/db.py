@@ -1097,6 +1097,14 @@ class Database:
             "DELETE FROM folders WHERE id = ?", (source_folder_id,)
         )
 
+        # Ensure target folder is marked ok and recompute its photo count
+        self.conn.execute(
+            "UPDATE folders SET status = 'ok', photo_count = "
+            "(SELECT COUNT(*) FROM photos WHERE folder_id = ?) "
+            "WHERE id = ?",
+            (target_folder_id, target_folder_id),
+        )
+
         # Cascade to missing children (same logic as relocate_folder)
         cascaded = []
         skipped_prefixes = []
