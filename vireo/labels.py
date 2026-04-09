@@ -4,12 +4,16 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.parse
 import urllib.request
 
-from vireo.ssl_ctx import ssl_ctx
+import certifi
 
 log = logging.getLogger(__name__)
+
+# Use certifi's CA bundle so HTTPS works on macOS without Install Certificates.command
+_ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 INAT_API = "https://api.inaturalist.org/v1"
 
@@ -42,7 +46,7 @@ def search_places(query):
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Vireo/1.0"})
-        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
             data = json.loads(resp.read())
     except Exception:
         log.warning(
@@ -137,7 +141,7 @@ def fetch_species_list(
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "Vireo/1.0"}
                     )
-                    with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
+                    with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
                         data = json.loads(resp.read())
                     break
                 except Exception:
