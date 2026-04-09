@@ -3419,11 +3419,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/system/info")
     def api_system_info():
-        """Return system information: ONNX Runtime, Python, hardware."""
+        """Return system information: ONNX Runtime, hardware."""
         import platform
 
         info = {
-            "python_version": platform.python_version(),
             "platform": platform.platform(),
             "device": "CPU",
             "device_detail": "No GPU acceleration",

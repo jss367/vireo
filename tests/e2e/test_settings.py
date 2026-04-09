@@ -14,11 +14,6 @@ def test_settings_system_info_renders(live_server, page):
     # Allow a generous timeout for the async fetch to complete.
     api_timeout = 30_000
 
-    # Python version should be populated (not the initial placeholder)
-    python_version = page.locator("#pythonVersion")
-    expect(python_version).not_to_have_text("-", timeout=api_timeout)
-    expect(python_version).to_contain_text("3.")
-
     # Compute device should be populated
     device_name = page.locator("#deviceName")
     expect(device_name).not_to_have_text("-", timeout=api_timeout)
