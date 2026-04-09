@@ -73,95 +73,97 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
     photos_map = db.get_photos_by_ids(photo_ids)
 
-    for i, pid in enumerate(photo_ids):
-        photo = photos_map.get(pid)
-        if not photo:
-            errors.append(f"Photo {pid} not found in database")
-            continue
+    try:
+        for i, pid in enumerate(photo_ids):
+            photo = photos_map.get(pid)
+            if not photo:
+                errors.append(f"Photo {pid} not found in database")
+                continue
 
-        folder_row = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-        ).fetchone()
-        src_dir = folder_row["path"]
-        src_file = os.path.join(src_dir, photo["filename"])
+            folder_row = db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            src_dir = folder_row["path"]
+            src_file = os.path.join(src_dir, photo["filename"])
 
-        if not os.path.isfile(src_file):
-            log.warning("Move skipped for %s: source file missing", photo["filename"])
-            errors.append(f"{photo['filename']}: source file missing")
-            continue
+            if not os.path.isfile(src_file):
+                log.warning("Move skipped for %s: source file missing", photo["filename"])
+                errors.append(f"{photo['filename']}: source file missing")
+                continue
 
-        dst_file = os.path.join(destination, photo["filename"])
-        if os.path.exists(dst_file):
-            log.warning("Move skipped for %s: already exists at destination", photo["filename"])
-            errors.append(f"{photo['filename']}: already exists at destination")
-            continue
+            dst_file = os.path.join(destination, photo["filename"])
+            if os.path.exists(dst_file):
+                log.warning("Move skipped for %s: already exists at destination", photo["filename"])
+                errors.append(f"{photo['filename']}: already exists at destination")
+                continue
 
-        # Gather companion files
-        companions = _companion_files(photo, src_dir)
+            # Gather companion files
+            companions = _companion_files(photo, src_dir)
 
-        # Check companion collisions
-        comp_collision = False
-        for comp in companions:
-            if os.path.exists(os.path.join(destination, comp)):
-                errors.append(f"{comp}: companion file already exists at destination")
-                comp_collision = True
-                break
-        if comp_collision:
-            continue
+            # Check companion collisions
+            comp_collision = False
+            for comp in companions:
+                if os.path.exists(os.path.join(destination, comp)):
+                    errors.append(f"{comp}: companion file already exists at destination")
+                    comp_collision = True
+                    break
+            if comp_collision:
+                continue
 
-        # Copy main file
-        if not _copy_and_verify(src_file, dst_file):
-            log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
-            errors.append(f"{photo['filename']}: verification failed after copy")
-            continue
+            # Copy main file
+            if not _copy_and_verify(src_file, dst_file):
+                log.warning("Move skipped for %s: verification failed after copy", photo["filename"])
+                errors.append(f"{photo['filename']}: verification failed after copy")
+                continue
 
-        # Copy companions
-        comp_ok = True
-        copied_companions = []
-        for comp in companions:
-            comp_src = os.path.join(src_dir, comp)
-            comp_dst = os.path.join(destination, comp)
-            if not _copy_and_verify(comp_src, comp_dst):
-                errors.append(f"{comp}: companion verification failed")
-                # Clean up what we copied
-                os.remove(dst_file)
-                for cc in copied_companions:
-                    os.remove(os.path.join(destination, cc))
-                comp_ok = False
-                break
-            copied_companions.append(comp)
+            # Copy companions
+            comp_ok = True
+            copied_companions = []
+            for comp in companions:
+                comp_src = os.path.join(src_dir, comp)
+                comp_dst = os.path.join(destination, comp)
+                if not _copy_and_verify(comp_src, comp_dst):
+                    errors.append(f"{comp}: companion verification failed")
+                    # Clean up what we copied
+                    os.remove(dst_file)
+                    for cc in copied_companions:
+                        os.remove(os.path.join(destination, cc))
+                    comp_ok = False
+                    break
+                copied_companions.append(comp)
 
-        if not comp_ok:
-            continue
+            if not comp_ok:
+                continue
 
-        # Verification passed — link destination folder to workspace on first success
-        if not workspace_linked and db._active_workspace_id is not None:
-            db.add_workspace_folder(db._active_workspace_id, dest_folder_id)
-            workspace_linked = True
+            # Verification passed — link destination folder to workspace on first success
+            if not workspace_linked and db._active_workspace_id is not None:
+                db.add_workspace_folder(db._active_workspace_id, dest_folder_id)
+                workspace_linked = True
 
-        # Update DB before deleting originals
-        # This ensures a crash leaves duplicates (safe) rather than orphans
-        db.conn.execute(
-            "UPDATE photos SET folder_id = ? WHERE id = ?",
-            (dest_folder_id, pid),
-        )
-        db.conn.commit()
+            # Update DB before deleting originals
+            # This ensures a crash leaves duplicates (safe) rather than orphans
+            db.conn.execute(
+                "UPDATE photos SET folder_id = ? WHERE id = ?",
+                (dest_folder_id, pid),
+            )
+            db.conn.commit()
 
-        # Now safe to delete originals
-        os.remove(src_file)
-        for comp in companions:
-            comp_src = os.path.join(src_dir, comp)
-            if os.path.isfile(comp_src):
-                os.remove(comp_src)
+            # Now safe to delete originals
+            os.remove(src_file)
+            for comp in companions:
+                comp_src = os.path.join(src_dir, comp)
+                if os.path.isfile(comp_src):
+                    os.remove(comp_src)
 
-        moved += 1
+            moved += 1
 
-        if progress_cb:
-            progress_cb(i + 1, total, photo["filename"])
-
-    # Update folder counts
-    if moved > 0:
-        db.update_folder_counts()
+            if progress_cb:
+                progress_cb(i + 1, total, photo["filename"])
+    finally:
+        # Always update folder counts so they stay consistent even if an
+        # exception interrupts the move loop after some photos were committed.
+        if moved > 0:
+            db.update_folder_counts()
 
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
