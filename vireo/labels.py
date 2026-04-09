@@ -7,6 +7,8 @@ import re
 import urllib.parse
 import urllib.request
 
+from vireo.ssl_ctx import ssl_ctx
+
 log = logging.getLogger(__name__)
 
 INAT_API = "https://api.inaturalist.org/v1"
@@ -40,7 +42,7 @@ def search_places(query):
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Vireo/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
             data = json.loads(resp.read())
     except Exception:
         log.warning(
@@ -135,7 +137,7 @@ def fetch_species_list(
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "Vireo/1.0"}
                     )
-                    with urllib.request.urlopen(req, timeout=60) as resp:
+                    with urllib.request.urlopen(req, timeout=60, context=ssl_ctx) as resp:
                         data = json.loads(resp.read())
                     break
                 except Exception:

@@ -27,6 +27,8 @@ from datetime import date
 
 import requests
 
+from vireo.ssl_ctx import ssl_ctx
+
 log = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ def _download_with_resume(url, dest_path, progress_callback=None,
                         progress_callback(f"Retrying download (attempt {attempt})...")
                     log.info("Retrying download (attempt %d)", attempt)
 
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=120, context=ssl_ctx) as resp:
                 # If server returned 200 (not 206), it doesn't support Range —
                 # start from scratch.  Don't reset downloaded_before: it's the
                 # stall-detection baseline (did we get further than last time?).
@@ -258,7 +260,7 @@ class Taxonomy:
             url = f"https://api.inaturalist.org/v1/taxa/autocomplete?q={q}&per_page=5&rank=species,subspecies,genus,family,order,class,phylum,kingdom"
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "vireo-taxonomy/1.0")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
                 data = json.loads(resp.read())
         except Exception:
             log.debug("iNat API lookup failed for '%s'", name, exc_info=True)
