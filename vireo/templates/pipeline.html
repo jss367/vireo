@@ -1128,6 +1128,8 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  // Cancel any in-flight duplicate check when preview context changes
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
 }
 
 function showPreviewError(msg) {
@@ -1233,6 +1235,7 @@ function checkForDuplicates() {
   if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
 
   if (!_previewData || !_previewData.files.length) return;
+  if (!_copyMode) return;
   if (!document.getElementById('chkSkipDuplicates').checked) return;
 
   _duplicateResults = {};
@@ -1323,6 +1326,7 @@ function onSkipDuplicatesToggle() {
   if (!checked) {
     // Abort any in-flight check so SSE callbacks stop updating the UI
     if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+    _duplicateResults = {};
   }
   if (Object.keys(_duplicateResults).length > 0) {
     applyDuplicateVisuals();
