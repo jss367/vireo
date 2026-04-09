@@ -3075,6 +3075,7 @@ let _relocatingFolderId = null;
 let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null for current dir
 let _relocateBrowserPath = '';
 let _pendingCascaded = [];
+let _browseRelocateGen = 0;
 
 function openMissingFoldersModal() {
   document.getElementById('missingFoldersModal').classList.add('open');
@@ -3152,7 +3153,9 @@ async function browseRelocate(path) {
   _relocateSelectedSub = null;
   updateRelocateBtn();
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
+  const gen = ++_browseRelocateGen;
   const data = await safeFetch(url);
+  if (gen !== _browseRelocateGen) return;  // stale response, discard
   _relocateBrowserPath = data.path;
 
   document.getElementById('relocateBreadcrumb').textContent = data.path;
