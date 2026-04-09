@@ -105,6 +105,7 @@ def test_check_duplicates_all_new(app_and_db, tmp_path):
 
     events = parse_sse_events(resp.data)
     done = [e for e in events if e.get("done")]
+    assert len(done) == 1
     assert done[0]["duplicate_count"] == 0
 
 
