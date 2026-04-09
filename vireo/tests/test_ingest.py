@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from datetime import datetime
 
 from db import Database
-from ingest import build_destination_path, discover_source_files, ingest
+from ingest import build_destination_path, discover_source_files, ingest, preview_destination
 from PIL import Image
 
 
@@ -22,6 +22,38 @@ def test_build_destination_path_custom_template():
 
 def test_build_destination_path_none_returns_unsorted():
     assert build_destination_path(None) == "unsorted"
+
+
+def test_build_destination_path_rejects_absolute_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "/tmp/%Y")
+
+
+def test_build_destination_path_rejects_traversal_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "../outside/%Y")
+
+
+def test_build_destination_path_rejects_backslash_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "..\\outside\\%Y")
+
+
+def test_build_destination_path_rejects_drive_relative_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "C:%Y")
 
 
 def _create_test_files(root, filenames):
@@ -324,3 +356,139 @@ def test_ingest_then_scan_end_to_end(tmp_path):
     result2 = ingest(str(src), str(dst), db=db, skip_duplicates=True)
     assert result2["copied"] == 0
     assert result2["skipped_duplicate"] == 3
+
+
+def test_preview_destination_groups_by_date(tmp_path):
+    """Preview groups files into date-based folders."""
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    # Create 3 photos with different mtimes (2 on same day, 1 different)
+    for i, (name, day) in enumerate([
+        ("a.jpg", 25), ("b.jpg", 25), ("c.jpg", 26)
+    ]):
+        img = Image.new("RGB", (100, 100), color=(i * 80, 0, 0))
+        img.save(str(src / name))
+        mtime = datetime(2026, 3, day, 10, 0, 0).timestamp()
+        os.utime(str(src / name), (mtime, mtime))
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    assert result["total_photos"] == 3
+    assert result["total_folders"] == 2
+    # All folders are new (dst is empty)
+    assert result["new_folders"] == 2
+    assert result["existing_folders"] == 0
+
+    by_path = {f["path"]: f for f in result["folders"]}
+    assert "2026/2026-03-25" in by_path
+    assert by_path["2026/2026-03-25"]["count"] == 2
+    assert by_path["2026/2026-03-25"]["exists"] is False
+    assert "2026/2026-03-26" in by_path
+    assert by_path["2026/2026-03-26"]["count"] == 1
+
+
+def test_preview_destination_detects_existing_folders(tmp_path):
+    """Preview marks folders that already exist on disk."""
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100))
+    img.save(str(src / "photo.jpg"))
+    mtime = datetime(2026, 3, 25, 10, 0, 0).timestamp()
+    os.utime(str(src / "photo.jpg"), (mtime, mtime))
+
+    # Pre-create the destination folder
+    (dst / "2026" / "2026-03-25").mkdir(parents=True)
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    assert result["existing_folders"] == 1
+    assert result["new_folders"] == 0
+    assert result["folders"][0]["exists"] is True
+
+
+def test_preview_destination_custom_template(tmp_path):
+    """Preview respects custom folder template."""
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100))
+    img.save(str(src / "photo.jpg"))
+    mtime = datetime(2026, 3, 25, 10, 0, 0).timestamp()
+    os.utime(str(src / "photo.jpg"), (mtime, mtime))
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="%Y/%m",
+    )
+
+    assert result["folders"][0]["path"] == "2026/03"
+
+
+def test_preview_destination_flat_template(tmp_path):
+    """Empty template means files go directly in destination root."""
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100))
+    img.save(str(src / "photo.jpg"))
+
+    result = preview_destination(
+        sources=[str(src)],
+        destination=str(dst),
+        folder_template="",
+    )
+
+    assert result["total_folders"] == 1
+    assert result["folders"][0]["path"] == "."
+    # dst itself exists, so flat folder should show exists=True
+    assert result["folders"][0]["exists"] is True
+
+
+def test_preview_destination_multiple_sources(tmp_path):
+    """Preview aggregates files from multiple source folders."""
+
+    src1 = tmp_path / "card1"
+    src2 = tmp_path / "card2"
+    dst = tmp_path / "nas"
+    src1.mkdir()
+    src2.mkdir()
+    dst.mkdir()
+
+    mtime = datetime(2026, 3, 25, 10, 0, 0).timestamp()
+    for src_dir, name in [(src1, "a.jpg"), (src2, "b.jpg")]:
+        img = Image.new("RGB", (100, 100))
+        img.save(str(src_dir / name))
+        os.utime(str(src_dir / name), (mtime, mtime))
+
+    result = preview_destination(
+        sources=[str(src1), str(src2)],
+        destination=str(dst),
+        folder_template="%Y/%Y-%m-%d",
+    )
+
+    assert result["total_photos"] == 2
+    assert result["total_folders"] == 1
+    assert result["folders"][0]["count"] == 2

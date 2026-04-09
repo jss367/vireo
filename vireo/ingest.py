@@ -13,6 +13,27 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
+def _is_unsafe_path(s):
+    """Check if a path string could escape the destination directory."""
+    if not s:
+        return False
+    # Reject backslashes (Windows traversal), absolute paths, '..' segments,
+    # and colons (Windows drive-relative paths like C:2026 or C:%Y)
+    if "\\" in s or ":" in s:
+        return True
+    p = Path(s)
+    if p.is_absolute():
+        return True
+    return ".." in p.parts
+
+
+def _sanitize_template(template):
+    """Reject folder templates that could escape the destination directory."""
+    if template and _is_unsafe_path(template):
+        raise ValueError(f"unsafe folder template: {template!r}")
+    return template
+
+
 def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     """Build relative destination folder path from EXIF timestamp.
 
@@ -23,9 +44,68 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     Returns:
         Relative path string, or "unsorted" if no timestamp
     """
+    _sanitize_template(template)
     if exif_timestamp is None:
         return "unsorted"
-    return exif_timestamp.strftime(template)
+    result = exif_timestamp.strftime(template)
+    # Double-check the rendered result is still safe
+    if result and _is_unsafe_path(result):
+        raise ValueError(f"folder template produced unsafe path: {result!r}")
+    return result
+
+
+def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
+                        file_types="both", recursive=True, exclude_paths=None):
+    """Dry-run preview of destination folder structure.
+
+    Scans source files, reads EXIF timestamps, and groups them by the
+    folder template without copying anything.
+
+    Returns:
+        dict with folders list, total_photos, total_folders,
+        new_folders, existing_folders
+    """
+    all_files = []
+    for src in sources:
+        all_files.extend(discover_source_files(src, file_types, recursive=recursive))
+    if exclude_paths:
+        skip = set(exclude_paths)
+        all_files = [f for f in all_files if str(f) not in skip]
+
+    folder_counts = {}
+    for source_file in all_files:
+        exif_dt = None
+        with contextlib.suppress(OSError, ValueError):
+            exif_dt = read_exif_timestamp(str(source_file))
+        if exif_dt is None:
+            with contextlib.suppress(OSError, ValueError, OverflowError):
+                exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+
+        rel_folder = build_destination_path(exif_dt, folder_template)
+        if not rel_folder:
+            rel_folder = "."
+        folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
+
+    dest_path = Path(destination)
+    folders = []
+    for path in sorted(folder_counts):
+        check_path = dest_path if path == "." else dest_path / path
+        folders.append({
+            "path": path,
+            "count": folder_counts[path],
+            "exists": check_path.is_dir(),
+        })
+
+    new_count = sum(1 for f in folders if not f["exists"])
+    existing_count = sum(1 for f in folders if f["exists"])
+
+    return {
+        "folders": folders,
+        "total_photos": len(all_files),
+        "total_folders": len(folders),
+        "new_folders": new_count,
+        "existing_folders": existing_count,
+    }
 
 
 def discover_source_files(source_dir, file_types="both", recursive=True):
