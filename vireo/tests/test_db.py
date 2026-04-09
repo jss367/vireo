@@ -233,8 +233,9 @@ def test_inclusive_date_to_edge_cases():
     """_inclusive_date_to handles non-string and short fractional inputs."""
     from db import _inclusive_date_to
 
-    # Non-string input returns stringified
-    assert _inclusive_date_to(20240615) == "20240615"
+    # Non-string input returns None (fail closed)
+    assert _inclusive_date_to(20240615) is None
+    assert _inclusive_date_to(True) is None
 
     # Short fractional seconds are padded with 9s
     assert _inclusive_date_to("2024-06-15T23:59:59.5") == "2024-06-15T23:59:59.599999"

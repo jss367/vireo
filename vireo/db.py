@@ -24,7 +24,7 @@ def _inclusive_date_to(date_to):
     if date_to is None:
         return None
     if not isinstance(date_to, str):
-        return str(date_to)
+        return None
     if len(date_to) == 10:  # bare date
         return date_to + "T23:59:59.999999"
     if len(date_to) == 19:  # date + time, no fractional seconds
