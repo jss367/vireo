@@ -522,3 +522,75 @@ def test_job_export_relative_destination(app_and_db):
         "destination": "relative/path",
     })
     assert resp.status_code == 400
+
+
+def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypatch):
+    """Starting a pipeline with a destination saves it to recent_destinations in config."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    app, db = app_and_db
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(src / "bird.jpg"))
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+
+    config = cfg.load()
+    assert config["ingest"]["recent_destinations"] == [str(dst)]
+
+
+def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monkeypatch):
+    """Recent destinations deduplicates and limits to 5 entries."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    app, db = app_and_db
+    src = tmp_path / "src"
+    src.mkdir()
+
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(src / "bird.jpg"))
+
+    # Create 6 destination directories
+    dsts = []
+    for i in range(6):
+        d = tmp_path / f"dst{i}"
+        d.mkdir()
+        dsts.append(str(d))
+
+    with app.test_client() as c:
+        # Fill up 6 destinations
+        for d in dsts:
+            c.post("/api/jobs/pipeline", json={
+                "sources": [str(src)],
+                "destination": d,
+            })
+
+    config = cfg.load()
+    recents = config["ingest"]["recent_destinations"]
+    assert len(recents) == 5
+    # Most recent first
+    assert recents[0] == dsts[5]
+    # Oldest dropped
+    assert dsts[0] not in recents
+
+    # Re-use dst1 — should move to front
+    with app.test_client() as c:
+        c.post("/api/jobs/pipeline", json={
+            "sources": [str(src)],
+            "destination": dsts[1],
+        })
+    config = cfg.load()
+    recents = config["ingest"]["recent_destinations"]
+    assert recents[0] == dsts[1]
+    assert len(recents) == 5

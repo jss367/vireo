@@ -5580,6 +5580,20 @@ def create_app(db_path, thumb_cache_dir=None):
                 params.skip_regroup = True
                 model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
 
+        # Save destination to recent list
+        if destination:
+            import config as cfg
+            _cfg = cfg.load()
+            ingest_cfg = _cfg.get("ingest", {})
+            recents = list(ingest_cfg.get("recent_destinations", []))
+            if destination in recents:
+                recents.remove(destination)
+            recents.insert(0, destination)
+            recents = recents[:5]
+            ingest_cfg["recent_destinations"] = recents
+            _cfg["ingest"] = ingest_cfg
+            cfg.save(_cfg)
+
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
