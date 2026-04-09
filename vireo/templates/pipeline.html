@@ -1018,6 +1018,8 @@ var _sourceFolders = [];
 var _previewData = null;       // response from /api/import/folder-preview
 var _previewSelected = {};     // { filePath: true/false }
 var _previewAbort = null;      // AbortController for in-flight request
+var _duplicateResults = {};    // path -> true for duplicates (cache)
+var _duplicateCheckAbort = null;  // AbortController for in-flight check
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
@@ -1083,6 +1085,7 @@ function fetchFolderPreview() {
         _previewSelected[f.path] = !f.duplicate;
       });
       renderPreview();
+      checkForDuplicates();
     })
     .catch(function(err) {
       if (err.name === 'AbortError') return;
@@ -1200,6 +1203,95 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
+}
+
+function checkForDuplicates() {
+  // Abort any in-flight check
+  if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
+
+  if (!_previewData || !_previewData.files.length) return;
+  if (!document.getElementById('chkSkipDuplicates').checked) return;
+
+  _duplicateResults = {};
+  _duplicateCheckAbort = new AbortController();
+
+  var paths = _previewData.files.map(function(f) { return f.path; });
+
+  fetch('/api/import/check-duplicates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: paths }),
+    signal: _duplicateCheckAbort.signal,
+  }).then(function(response) {
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = '';
+
+    function read() {
+      reader.read().then(function(result) {
+        if (result.done) return;
+        buffer += decoder.decode(result.value, { stream: true });
+        var parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        parts.forEach(function(part) {
+          var match = part.match(/^data: (.+)$/m);
+          if (!match) return;
+          var data = JSON.parse(match[1]);
+          if (data.duplicates) {
+            data.duplicates.forEach(function(p) {
+              _duplicateResults[p] = true;
+            });
+            applyDuplicateVisuals();
+          }
+          updateDuplicateSummary(data);
+        });
+        read();
+      }).catch(function() {});
+    }
+    read();
+  }).catch(function() {});
+}
+
+function applyDuplicateVisuals() {
+  var skipChecked = document.getElementById('chkSkipDuplicates').checked;
+  var grid = document.getElementById('previewGrid');
+  var thumbs = grid.querySelectorAll('.preview-thumb');
+  thumbs.forEach(function(el) {
+    var path = el.dataset.path;
+    var isDup = _duplicateResults[path];
+    if (isDup && skipChecked) {
+      el.classList.add('duplicate');
+      if (!el.querySelector('.duplicate-badge')) {
+        var badge = document.createElement('span');
+        badge.className = 'duplicate-badge';
+        badge.textContent = 'DUPLICATE';
+        el.appendChild(badge);
+      }
+    } else {
+      el.classList.remove('duplicate');
+      var badge = el.querySelector('.duplicate-badge');
+      if (badge) badge.remove();
+    }
+  });
+}
+
+function updateDuplicateSummary(data) {
+  var summary = document.getElementById('previewSummary');
+  // Remove any existing duplicate status
+  var existing = summary.querySelector('.dup-status');
+  if (existing) existing.remove();
+
+  var span = document.createElement('span');
+  span.className = 'stat dup-status';
+  if (data.done) {
+    if (data.duplicate_count > 0) {
+      span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+    }
+    // If 0 duplicates, show nothing
+  } else {
+    span.textContent = 'Checking duplicates\u2026 ' + data.checked + '/' + data.total;
+  }
+  if (span.innerHTML || span.textContent) summary.appendChild(span);
 }
 
 function setupThumbnailObserver() {
