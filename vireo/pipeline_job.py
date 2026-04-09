@@ -914,7 +914,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
                 stages["extract_masks"]["count"] = i + 1
                 runner.update_step(job["id"], "extract_masks",
-                                   progress={"current": i + 1, "total": total})
+                                   progress={"current": i + 1, "total": total},
+                                   error_count=em_failed)
                 runner.push_event(job["id"], "progress", {
                     "phase": "Extracting features (SAM2 + DINOv2)",
                     "stage_id": "extract_masks",
