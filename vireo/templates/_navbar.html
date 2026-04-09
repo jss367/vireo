@@ -868,6 +868,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-size: 13px;
 }
 .relocate-folder-item:hover { background: var(--bg-hover); }
+.relocate-folder-item.selected {
+  background: var(--bg-hover);
+  border-left: 3px solid var(--accent, #4a9eff);
+  padding-left: 7px; /* 10px original minus 3px border */
+}
 .missing-folders-banner {
   background: var(--warning-bg, #fff3cd);
   color: var(--warning-text, #856404);
@@ -3067,6 +3072,7 @@ setInterval(checkMissingFolders, 600000);
 
 /* ---------- Missing Folders Modal ---------- */
 let _relocatingFolderId = null;
+let _relocateSelectedSub = null; // {name, path} of clicked subfolder, or null for current dir
 let _relocateBrowserPath = '';
 let _pendingCascaded = [];
 
@@ -3150,15 +3156,35 @@ async function browseRelocate(path) {
   document.getElementById('relocateBreadcrumb').textContent = data.path;
 
   const list = document.getElementById('relocateFolderList');
+  _relocateSelectedSub = null;
+  updateRelocateBtn();
   let html = '';
   const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   if (data.path !== '/') {
     html += `<div class="relocate-folder-item" ondblclick="browseRelocate('${parent.replace(/'/g, "\\'")}')">\u{1F4C2} ..</div>`;
   }
   html += data.dirs.map(d =>
-    `<div class="relocate-folder-item" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
+    `<div class="relocate-folder-item" onclick="selectRelocateFolder(this, '${d.name.replace(/'/g, "\\'")}', '${d.path.replace(/'/g, "\\'")}')" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
   ).join('');
   list.innerHTML = html;
+}
+
+function selectRelocateFolder(el, name, path) {
+  document.querySelectorAll('#relocateFolderList .relocate-folder-item.selected').forEach(function(item) {
+    item.classList.remove('selected');
+  });
+  el.classList.add('selected');
+  _relocateSelectedSub = {name: name, path: path};
+  updateRelocateBtn();
+}
+
+function updateRelocateBtn() {
+  const btn = document.getElementById('relocateSelectBtn');
+  if (_relocateSelectedSub) {
+    btn.textContent = 'Select "' + _relocateSelectedSub.name + '"';
+  } else {
+    btn.textContent = 'Select This Folder';
+  }
 }
 
 async function confirmRelocate() {
@@ -3166,7 +3192,7 @@ async function confirmRelocate() {
   const data = await safeFetch(`/api/folders/${_relocatingFolderId}/relocate`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: _relocateBrowserPath}),
+    body: JSON.stringify({path: _relocateSelectedSub ? _relocateSelectedSub.path : _relocateBrowserPath}),
   });
   closeRelocateBrowser();
 
