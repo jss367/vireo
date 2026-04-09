@@ -28,6 +28,57 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     return exif_timestamp.strftime(template)
 
 
+def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
+                        file_types="both", recursive=True):
+    """Dry-run preview of destination folder structure.
+
+    Scans source files, reads EXIF timestamps, and groups them by the
+    folder template without copying anything.
+
+    Returns:
+        dict with folders list, total_photos, total_folders,
+        new_folders, existing_folders
+    """
+    all_files = []
+    for src in sources:
+        all_files.extend(discover_source_files(src, file_types, recursive=recursive))
+
+    folder_counts = {}
+    for source_file in all_files:
+        exif_dt = None
+        with contextlib.suppress(OSError, ValueError):
+            exif_dt = read_exif_timestamp(str(source_file))
+        if exif_dt is None:
+            with contextlib.suppress(OSError, ValueError, OverflowError):
+                exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
+
+        rel_folder = build_destination_path(exif_dt, folder_template)
+        if not rel_folder:
+            rel_folder = "."
+        folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
+
+    dest_path = Path(destination)
+    folders = []
+    for path in sorted(folder_counts):
+        check_path = dest_path if path == "." else dest_path / path
+        folders.append({
+            "path": path,
+            "count": folder_counts[path],
+            "exists": check_path.is_dir(),
+        })
+
+    new_count = sum(1 for f in folders if not f["exists"])
+    existing_count = sum(1 for f in folders if f["exists"])
+
+    return {
+        "folders": folders,
+        "total_photos": len(all_files),
+        "total_folders": len(folders),
+        "new_folders": new_count,
+        "existing_folders": existing_count,
+    }
+
+
 def discover_source_files(source_dir, file_types="both", recursive=True):
     """Discover image files in source directory.
 
