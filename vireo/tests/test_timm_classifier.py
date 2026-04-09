@@ -30,7 +30,7 @@ def _make_model_dir(tmp_path, label_descriptions=None):
 
     Returns the model directory path.
     """
-    model_dir = tmp_path / "timm-eva02-large-inat21"
+    model_dir = tmp_path / "timm-inat21-eva02-l"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     class_names = [

@@ -1,7 +1,7 @@
 """timm-based classifier for species classification (iNaturalist 2021).
 
 Uses ONNX Runtime for inference with pre-exported EVA-02 models.
-Model files are stored in ~/.vireo/models/timm-eva02-large-inat21/.
+Model files are stored in ~/.vireo/models/timm-inat21-eva02-l/.
 """
 
 import json
@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 # Map model_str identifiers to local model directory names
 _MODEL_DIR_MAP = {
-    "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21": "timm-eva02-large-inat21",
+    "hf-hub:timm/eva02_large_patch14_clip_336.merged2b_ft_inat21": "timm-inat21-eva02-l",
 }
 
 _MODELS_ROOT = os.path.expanduser("~/.vireo/models")
