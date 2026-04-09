@@ -625,7 +625,7 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);" onchange="onSkipDuplicatesToggle()"> Skip duplicates
               </label>
             </div>
           </div>
@@ -1292,6 +1292,25 @@ function updateDuplicateSummary(data) {
     span.textContent = 'Checking duplicates\u2026 ' + data.checked + '/' + data.total;
   }
   if (span.innerHTML || span.textContent) summary.appendChild(span);
+}
+
+function onSkipDuplicatesToggle() {
+  if (Object.keys(_duplicateResults).length > 0) {
+    applyDuplicateVisuals();
+    // Update summary: re-show or remove duplicate count
+    var dupCount = Object.keys(_duplicateResults).length;
+    var summary = document.getElementById('previewSummary');
+    var existing = summary.querySelector('.dup-status');
+    if (existing) existing.remove();
+    if (document.getElementById('chkSkipDuplicates').checked && dupCount > 0) {
+      var span = document.createElement('span');
+      span.className = 'stat dup-status';
+      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
+      summary.appendChild(span);
+    }
+  } else if (document.getElementById('chkSkipDuplicates').checked) {
+    checkForDuplicates();
+  }
 }
 
 function setupThumbnailObserver() {
