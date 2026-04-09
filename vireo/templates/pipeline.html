@@ -597,7 +597,7 @@ body { padding-bottom: 36px; }
               <div style="display:flex;gap:6px;">
                 <input type="text" class="setting-select" id="cfgDestination"
                        placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                       oninput="updateStartButton()">
+                       oninput="updateStartButton();markFolderPreviewStale()">
                 <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
               </div>
             </div>
@@ -607,6 +607,51 @@ body { padding-bottom: 36px; }
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
                 <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
               </label>
+            </div>
+          </div>
+          <!-- Folder Organization -->
+          <div style="border-top:1px solid var(--border-primary,#14374E);margin:12px 0;"></div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <div class="setting-label">Folder structure</div>
+              <div style="display:flex;gap:6px;align-items:center;">
+                <select id="cfgFolderTemplate" class="setting-select" style="font-family:inherit;max-width:240px;" onchange="onFolderTemplateChange()">
+                  <option value="%Y/%Y-%m-%d">Year / Date &mdash; 2026/2026-04-08</option>
+                  <option value="%Y-%m-%d">Date only &mdash; 2026-04-08</option>
+                  <option value="%Y/%m">Year / Month &mdash; 2026/04</option>
+                  <option value="%Y">Year only &mdash; 2026</option>
+                  <option value="">Flat &mdash; no subfolders</option>
+                  <option value="__custom__">Custom&hellip;</option>
+                </select>
+              </div>
+              <div id="customTemplateRow" style="display:none;margin-top:6px;">
+                <input type="text" class="setting-select" id="cfgCustomTemplate"
+                       placeholder="%Y/%B" style="font-family:inherit;max-width:240px;"
+                       onblur="if(_folderPreviewShown)previewDestinationFolders()"
+                       onkeydown="if(event.key==='Enter'&&_folderPreviewShown)previewDestinationFolders()"
+                       data-testid="custom-template-input">
+                <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
+                  Uses strftime format &mdash; e.g. %Y/%B for Year/Month Name
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-item">
+              <button id="btnPreviewFolders" class="btn btn-secondary" onclick="previewDestinationFolders()" disabled
+                      style="font-size:12px;padding:4px 12px;" data-testid="preview-folders-btn">
+                Preview folder structure
+              </button>
+              <span id="previewFoldersHint" style="font-size:11px;color:var(--text-dim);margin-left:8px;">
+                Select source and destination to preview
+              </span>
+            </div>
+          </div>
+          <div id="folderPreviewResults" style="display:none;margin-top:8px;" data-testid="folder-preview-results">
+            <div id="folderPreviewSummary" style="font-size:12px;font-weight:600;margin-bottom:6px;"></div>
+            <div id="folderPreviewList" style="font-size:12px;max-height:200px;overflow-y:auto;"></div>
+            <div id="folderPreviewStale" style="display:none;font-size:11px;color:var(--warning,#f0ad4e);margin-top:4px;">
+              Source or destination changed &mdash; click Refresh to update
             </div>
           </div>
         </div>
@@ -945,6 +990,7 @@ function onDestWorkspaceChange() {
 // -- Card 1: Source --
 var _sourceMode = 'import'; // 'import' or 'collection'
 var _copyMode = false;
+var _folderPreviewShown = false;
 var _sourceWasReady = false;
 var _sourceFolders = [];
 
@@ -1165,6 +1211,7 @@ function addSourceFolder() {
   var val = input.value.trim();
   if (!val || _sourceFolders.indexOf(val) !== -1) return;
   _sourceFolders.push(val);
+  markFolderPreviewStale();
   input.value = '';
   renderSourceFolders();
   updateStartButton();
@@ -1173,6 +1220,7 @@ function addSourceFolder() {
 
 function removeSourceFolder(idx) {
   _sourceFolders.splice(idx, 1);
+  markFolderPreviewStale();
   renderSourceFolders();
   updateStartButton();
   fetchFolderPreview();
@@ -1197,6 +1245,103 @@ function onCopyModeChange() {
     copyFields.style.display = 'none';
   }
   updateStartButton();
+}
+
+function getSelectedFolderTemplate() {
+  var sel = document.getElementById('cfgFolderTemplate');
+  if (sel.value === '__custom__') {
+    return document.getElementById('cfgCustomTemplate').value.trim() || '%Y/%Y-%m-%d';
+  }
+  return sel.value;
+}
+
+function onFolderTemplateChange() {
+  var sel = document.getElementById('cfgFolderTemplate');
+  var customRow = document.getElementById('customTemplateRow');
+  customRow.style.display = sel.value === '__custom__' ? '' : 'none';
+
+  // Auto-refresh if preview is already showing
+  if (_folderPreviewShown) {
+    previewDestinationFolders();
+  }
+}
+
+async function previewDestinationFolders() {
+  var btn = document.getElementById('btnPreviewFolders');
+  var hint = document.getElementById('previewFoldersHint');
+  var resultsDiv = document.getElementById('folderPreviewResults');
+  var summaryDiv = document.getElementById('folderPreviewSummary');
+  var listDiv = document.getElementById('folderPreviewList');
+  var staleDiv = document.getElementById('folderPreviewStale');
+
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  hint.textContent = '';
+  staleDiv.style.display = 'none';
+
+  var sources = _sourceFolders.length > 0 ? _sourceFolders : [];
+  var destination = document.getElementById('cfgDestination').value.trim();
+
+  try {
+    var data = await safeFetch('/api/import/destination-preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        sources: sources,
+        destination: destination,
+        folder_template: getSelectedFolderTemplate(),
+        file_types: getIngestFileTypes(),
+        recursive: document.getElementById('chkIncludeSubfolders').checked,
+      }),
+    }, { toast: false });
+
+    if (data.error) {
+      hint.textContent = data.error;
+      btn.textContent = 'Preview folder structure';
+      btn.disabled = false;
+      return;
+    }
+
+    // Render summary
+    var newCount = data.new_folders;
+    var existCount = data.existing_folders;
+    var parts = [data.total_photos + ' photo' + (data.total_photos !== 1 ? 's' : '')];
+    parts.push(data.total_folders + ' folder' + (data.total_folders !== 1 ? 's' : ''));
+    var detail = [];
+    if (newCount > 0) detail.push(newCount + ' new');
+    if (existCount > 0) detail.push(existCount + ' existing');
+    summaryDiv.textContent = parts.join(' \u2192 ') + (detail.length ? ' (' + detail.join(', ') + ')' : '');
+
+    // Render folder list
+    listDiv.innerHTML = data.folders.map(function(f) {
+      var tag = f.exists
+        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;">exists</span>'
+        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;">new</span>';
+      var label = f.path === '.' ? '(destination root)' : f.path + '/';
+      return '<div style="padding:3px 0;display:flex;align-items:center;gap:4px;">'
+        + '<span style="font-family:monospace;color:var(--text-secondary);">' + label + '</span>'
+        + tag
+        + '<span style="color:var(--text-dim);margin-left:auto;">' + f.count + ' photo' + (f.count !== 1 ? 's' : '') + '</span>'
+        + '</div>';
+    }).join('');
+
+    resultsDiv.style.display = '';
+    _folderPreviewShown = true;
+    btn.textContent = 'Refresh preview';
+    btn.disabled = false;
+
+  } catch(e) {
+    hint.textContent = 'Preview failed';
+    btn.textContent = 'Preview folder structure';
+    btn.disabled = false;
+  }
+}
+
+function markFolderPreviewStale() {
+  if (!_folderPreviewShown) return;
+  document.getElementById('folderPreviewStale').style.display = '';
+  document.getElementById('btnPreviewFolders').disabled = false;
+  document.getElementById('btnPreviewFolders').textContent = 'Refresh preview';
 }
 
 function selectSourceMode(mode) {
@@ -1319,6 +1464,21 @@ function updateStartButton() {
     }
   }
 
+  // Update preview button state
+  var previewBtn = document.getElementById('btnPreviewFolders');
+  var previewHint = document.getElementById('previewFoldersHint');
+  if (previewBtn) {
+    var hasSources = _sourceFolders.length > 0;
+    var hasDest = _copyMode && document.getElementById('cfgDestination').value.trim();
+    if (hasSources && hasDest) {
+      if (!_folderPreviewShown) previewBtn.disabled = false;
+      previewHint.textContent = '';
+    } else {
+      previewBtn.disabled = true;
+      previewHint.textContent = 'Select source and destination to preview';
+    }
+  }
+
   // Update stage 1 indicator and auto-expand stage 2 when source is ready
   var sourceReady = !btn.disabled;
   var numSource = document.getElementById('numSource');
@@ -1428,6 +1588,7 @@ async function startPipeline() {
     if (_copyMode) {
       body.destination = document.getElementById('cfgDestination').value.trim();
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+      body.folder_template = getSelectedFolderTemplate();
     }
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
@@ -1771,6 +1932,7 @@ async function runImportStep() {
     if (_copyMode) {
       body.destination = destination;
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+      body.folder_template = getSelectedFolderTemplate();
     }
 
     var data = await safeFetch('/api/jobs/import-full', {
@@ -2217,6 +2379,7 @@ async function browseForFolder() {
     var path = await pickDirectory('Select photo folder');
     if (path && _sourceFolders.indexOf(path) === -1) {
       _sourceFolders.push(path);
+      markFolderPreviewStale();
       renderSourceFolders();
       updateStartButton();
       fetchFolderPreview();
@@ -2429,6 +2592,7 @@ function selectFolder() {
   if (_fbMode === 'source') {
     if (_sourceFolders.indexOf(_fbSelectedDir) === -1) {
       _sourceFolders.push(_fbSelectedDir);
+      markFolderPreviewStale();
       renderSourceFolders();
     }
   } else {
