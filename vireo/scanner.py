@@ -593,10 +593,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             progress_callback(processed_count, total)
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
-    # Wrap post-processing in try/finally so folder counts are always updated
-    # even if pairing or working-copy extraction raises an exception.
-    # Rollback on error to avoid persisting partial post-processing writes
-    # (e.g. half-merged RAW/JPEG pairs) that haven't been committed yet.
+    # Wrap post-processing so folder counts are always updated, even on failure.
+    # On exception, roll back any uncommitted partial writes before updating
+    # counts — otherwise update_folder_counts()'s commit would persist
+    # half-applied pairing or working-copy records.
     try:
         _pair_raw_jpeg_companions(db)
 
