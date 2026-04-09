@@ -13,6 +13,13 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
+def _sanitize_template(template):
+    """Reject folder templates that could escape the destination directory."""
+    if template and (template.startswith("/") or ".." in template.split("/")):
+        raise ValueError(f"unsafe folder template: {template!r}")
+    return template
+
+
 def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     """Build relative destination folder path from EXIF timestamp.
 
@@ -23,9 +30,14 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     Returns:
         Relative path string, or "unsorted" if no timestamp
     """
+    _sanitize_template(template)
     if exif_timestamp is None:
         return "unsorted"
-    return exif_timestamp.strftime(template)
+    result = exif_timestamp.strftime(template)
+    # Double-check the rendered result is still safe
+    if result and (result.startswith("/") or ".." in result.split("/")):
+        raise ValueError(f"folder template produced unsafe path: {result!r}")
+    return result
 
 
 def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",

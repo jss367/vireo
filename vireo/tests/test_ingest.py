@@ -24,6 +24,22 @@ def test_build_destination_path_none_returns_unsorted():
     assert build_destination_path(None) == "unsorted"
 
 
+def test_build_destination_path_rejects_absolute_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "/tmp/%Y")
+
+
+def test_build_destination_path_rejects_traversal_template():
+    import pytest
+
+    dt = datetime(2026, 3, 28, 14, 30, 0)
+    with pytest.raises(ValueError, match="unsafe folder template"):
+        build_destination_path(dt, "../outside/%Y")
+
+
 def _create_test_files(root, filenames):
     """Create test image/raw files in a directory."""
     os.makedirs(root, exist_ok=True)

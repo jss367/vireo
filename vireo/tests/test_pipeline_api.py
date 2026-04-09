@@ -239,3 +239,30 @@ def test_destination_preview_requires_destination(setup, tmp_path):
             "sources": [str(src)],
         })
         assert resp.status_code == 400
+
+
+def test_destination_preview_rejects_traversal_template(setup, tmp_path):
+    app, _ = setup
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(tmp_path / "dst"),
+            "folder_template": "../escape/%Y",
+        })
+        assert resp.status_code == 400
+        assert "relative path" in resp.get_json()["error"]
+
+
+def test_destination_preview_rejects_absolute_template(setup, tmp_path):
+    app, _ = setup
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(tmp_path / "dst"),
+            "folder_template": "/tmp/%Y",
+        })
+        assert resp.status_code == 400

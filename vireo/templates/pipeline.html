@@ -1319,7 +1319,7 @@ async function previewDestinationFolders() {
       var tag = f.exists
         ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;">exists</span>'
         : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;">new</span>';
-      var label = f.path === '.' ? '(destination root)' : f.path + '/';
+      var label = f.path === '.' ? '(destination root)' : escapeHtml(f.path) + '/';
       return '<div style="padding:3px 0;display:flex;align-items:center;gap:4px;">'
         + '<span style="font-family:monospace;color:var(--text-secondary);">' + label + '</span>'
         + tag

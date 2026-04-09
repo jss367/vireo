@@ -2777,10 +2777,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
         from ingest import preview_destination
 
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        if folder_template and (
+            folder_template.startswith("/") or ".." in folder_template.split("/")
+        ):
+            return json_error("folder_template must be a relative path without '..'", 400)
+
         result = preview_destination(
             sources=sources,
             destination=destination,
-            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            folder_template=folder_template,
             file_types=body.get("file_types", "both"),
             recursive=body.get("recursive", True),
         )
