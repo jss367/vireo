@@ -947,14 +947,16 @@ function initPipelinePage() {
       var recents = data.recent_destinations || [];
       if (recents.length > 0) {
         var container = document.getElementById('recentDestList');
-        container.innerHTML = recents.map(function(path) {
+        recents.forEach(function(path) {
           var name = path.split('/').filter(Boolean).slice(-1)[0] || path;
-          return '<button class="btn btn-secondary" '
-            + 'style="font-size:11px;padding:2px 8px;" '
-            + 'title="' + escapeHtml(path) + '" '
-            + 'onclick="selectRecentDestination(\'' + escapeHtml(path).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">'
-            + escapeHtml(name) + '</button>';
-        }).join('');
+          var btn = document.createElement('button');
+          btn.className = 'btn btn-secondary';
+          btn.style.cssText = 'font-size:11px;padding:2px 8px;';
+          btn.title = path;
+          btn.textContent = name;
+          btn.addEventListener('click', function() { selectRecentDestination(path); });
+          container.appendChild(btn);
+        });
         document.getElementById('recentDestinations').style.display = '';
       }
     })
