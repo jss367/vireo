@@ -70,6 +70,9 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             naming_template: str (default "{original}")
             max_size: int or None -- max long-edge pixels
             quality: int 1-100 (default 92)
+            working_copy_max_size: int -- the cap used when generating
+                working copies (default 4096); used to decide whether
+                the working copy can satisfy the requested max_size.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -78,7 +81,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     options = options or {}
     template = options.get("naming_template", "{original}")
     max_size = options.get("max_size")
+    if max_size is not None:
+        max_size = int(max_size)
     quality = options.get("quality", 92)
+    try:
+        wc_max = int(options.get("working_copy_max_size", 4096))
+    except (ValueError, TypeError):
+        wc_max = 4096
 
     os.makedirs(destination, exist_ok=True)
 
@@ -101,11 +110,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path.  When no resize is requested we always prefer
-        # the original file to avoid silently downscaling via a capped working
-        # copy.  Working copies are only used when resizing, where their
-        # pre-decoded JPEG provides a fast path that avoids a full RAW decode.
-        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=bool(max_size))
+        # Resolve source path.  Use the working copy only when resizing to
+        # a size the working copy can satisfy (i.e. max_size <= wc cap).
+        # Otherwise use the original to avoid silent downscaling.
+        use_wc = bool(max_size) and max_size <= wc_max
+        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
