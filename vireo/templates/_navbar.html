@@ -3158,15 +3158,23 @@ async function browseRelocate(path) {
   document.getElementById('relocateBreadcrumb').textContent = data.path;
 
   const list = document.getElementById('relocateFolderList');
-  let html = '';
+  list.innerHTML = '';
   const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   if (data.path !== '/') {
-    html += `<div class="relocate-folder-item" ondblclick="browseRelocate('${parent.replace(/'/g, "\\'")}')">\u{1F4C2} ..</div>`;
+    const parentEl = document.createElement('div');
+    parentEl.className = 'relocate-folder-item';
+    parentEl.textContent = '\u{1F4C2} ..';
+    parentEl.addEventListener('dblclick', function() { browseRelocate(parent); });
+    list.appendChild(parentEl);
   }
-  html += data.dirs.map(d =>
-    `<div class="relocate-folder-item" onclick="selectRelocateFolder(this, '${d.name.replace(/'/g, "\\'")}', '${d.path.replace(/'/g, "\\'")}')" ondblclick="browseRelocate('${d.path.replace(/'/g, "\\'")}')">\u{1F4C2} ${d.name}</div>`
-  ).join('');
-  list.innerHTML = html;
+  data.dirs.forEach(function(d) {
+    const el = document.createElement('div');
+    el.className = 'relocate-folder-item';
+    el.textContent = '\u{1F4C2} ' + d.name;
+    el.addEventListener('click', function() { selectRelocateFolder(el, d.name, d.path); });
+    el.addEventListener('dblclick', function() { browseRelocate(d.path); });
+    list.appendChild(el);
+  });
 }
 
 function selectRelocateFolder(el, name, path) {
