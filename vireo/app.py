@@ -4161,14 +4161,18 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_job_export():
         """Export selected photos to a destination directory."""
         body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
+        raw_ids = body.get("photo_ids", [])
         destination = body.get("destination", "")
         naming_template = body.get("naming_template", "{original}")
         max_size = body.get("max_size")
         quality = body.get("quality", 92)
 
-        if not photo_ids:
+        if not raw_ids:
             return json_error("photo_ids required")
+        try:
+            photo_ids = [int(pid) for pid in raw_ids]
+        except (ValueError, TypeError):
+            return json_error("photo_ids must be integers")
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
@@ -4178,7 +4182,8 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = db._active_workspace_id
 
-        # Filter to only photos visible in the active workspace
+        # Filter to only photos visible in the active workspace,
+        # preserving the caller's original ordering.
         placeholders = ",".join("?" for _ in photo_ids)
         visible = db.conn.execute(
             f"""SELECT p.id FROM photos p
@@ -4186,7 +4191,8 @@ def create_app(db_path, thumb_cache_dir=None):
                 WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
             [active_ws] + list(photo_ids),
         ).fetchall()
-        photo_ids = [r["id"] for r in visible]
+        visible_set = {r["id"] for r in visible}
+        photo_ids = [pid for pid in photo_ids if pid in visible_set]
         if not photo_ids:
             return json_error("no exportable photos in current workspace")
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
