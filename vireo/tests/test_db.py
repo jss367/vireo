@@ -229,6 +229,25 @@ def test_date_filter_inclusive_with_subsec(tmp_path):
     assert photos[0]['filename'] == 'b.jpg'
 
 
+def test_inclusive_date_to_edge_cases():
+    """_inclusive_date_to handles non-string and short fractional inputs."""
+    from db import _inclusive_date_to
+
+    # Non-string input returns stringified
+    assert _inclusive_date_to(20240615) == "20240615"
+
+    # Short fractional seconds are padded with 9s
+    assert _inclusive_date_to("2024-06-15T23:59:59.5") == "2024-06-15T23:59:59.599999"
+    assert _inclusive_date_to("2024-06-15T23:59:59.50") == "2024-06-15T23:59:59.509999"
+    assert _inclusive_date_to("2024-06-15T23:59:59.500") == "2024-06-15T23:59:59.500999"
+
+    # Already 6 digits — unchanged
+    assert _inclusive_date_to("2024-06-15T23:59:59.500000") == "2024-06-15T23:59:59.500000"
+
+    # None passthrough
+    assert _inclusive_date_to(None) is None
+
+
 def test_update_photo_rating(tmp_path):
     """update_photo_rating changes the rating."""
     from db import Database

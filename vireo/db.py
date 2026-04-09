@@ -18,13 +18,23 @@ def _inclusive_date_to(date_to):
     'YYYY-MM-DDTHH:MM:SS' (timeline click).  With sub-second precision
     timestamps like '23:59:59.500000', a naive '<= 23:59:59' comparison
     excludes them.  Append '.999999' so the bound covers the full second.
+    Fractional seconds shorter than 6 digits are padded with '9's so that
+    lexical comparison remains inclusive (e.g. '.5' → '.599999').
     """
     if date_to is None:
         return None
+    if not isinstance(date_to, str):
+        return str(date_to)
     if len(date_to) == 10:  # bare date
         return date_to + "T23:59:59.999999"
     if len(date_to) == 19:  # date + time, no fractional seconds
         return date_to + ".999999"
+    # Has fractional seconds — pad to 6 digits with '9' for inclusive upper bound
+    dot_idx = date_to.rfind(".")
+    if dot_idx >= 0:
+        frac = date_to[dot_idx + 1:]
+        if len(frac) < 6:
+            return date_to + "9" * (6 - len(frac))
     return date_to
 
 
