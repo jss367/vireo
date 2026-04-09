@@ -183,7 +183,8 @@ var modelAlreadyDownloaded = false;
 async function checkModelStatus() {
   try {
     var data = await safeFetch('/api/models/status', {}, { toast: false });
-    if (data.classification && data.classification.ready) {
+    var match = (data.available_models || []).find(function(m) { return m.id === MODEL_ID; });
+    if (match && match.downloaded) {
       modelAlreadyDownloaded = true;
     }
   } catch(e) {
