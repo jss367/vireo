@@ -862,7 +862,7 @@ body { padding-bottom: 36px; }
     <div class="preview-placeholder" id="previewPlaceholder">
       <div style="text-align:center;padding:60px 20px;color:var(--text-dim);">
         <div style="font-size:32px;margin-bottom:12px;">&#128247;</div>
-        <div style="font-size:14px;">Select a folder to see a preview</div>
+        <div style="font-size:14px;">Select a source to see a preview</div>
       </div>
     </div>
     <div id="previewContent" style="display:none;">
@@ -1007,11 +1007,42 @@ var _previewSelected = {};     // { filePath: true/false }
 var _previewAbort = null;      // AbortController for in-flight request
 
 function fetchFolderPreview() {
-  // Cancel any in-flight request
   if (_previewAbort) _previewAbort.abort();
 
+  // Collection mode: fetch from collection-preview endpoint
+  if (_sourceMode === 'collection') {
+    var collId = document.getElementById('collectionPicker').value;
+    if (!collId) {
+      showPreviewPlaceholder();
+      return;
+    }
+    showPreviewLoading();
+    _previewAbort = new AbortController();
+    fetch('/api/import/collection-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ collection_id: parseInt(collId) }),
+      signal: _previewAbort.signal,
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        _previewData = data;
+        _previewSelected = {};
+        data.files.forEach(function(f) {
+          _previewSelected[f.path] = !f.duplicate;
+        });
+        renderPreview();
+      })
+      .catch(function(err) {
+        if (err.name === 'AbortError') return;
+        showPreviewError('Failed to load preview: ' + err.message);
+      });
+    return;
+  }
+
+  // Import mode: existing behavior
   var folders = _sourceFolders;
-  if (!folders.length || _sourceMode !== 'import') {
+  if (!folders.length) {
     showPreviewPlaceholder();
     return;
   }
@@ -1034,7 +1065,6 @@ function fetchFolderPreview() {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       _previewData = data;
-      // Initialize selection: all checked by default, duplicates unchecked
       _previewSelected = {};
       data.files.forEach(function(f) {
         _previewSelected[f.path] = !f.duplicate;
@@ -1131,6 +1161,7 @@ function renderPreview() {
       var thumb = document.createElement('div');
       thumb.className = 'preview-thumb skeleton' + (f.duplicate ? ' duplicate' : '');
       thumb.dataset.path = f.path;
+      if (f.thumb_url) thumb.dataset.thumbUrl = f.thumb_url;
 
       var check = document.createElement('input');
       check.type = 'checkbox';
@@ -1170,7 +1201,7 @@ function setupThumbnailObserver() {
       var img = el.querySelector('img');
       img.onload = function() { el.classList.remove('skeleton'); };
       img.onerror = function() { el.classList.remove('skeleton'); };
-      img.src = '/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path);
+      img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
       observer.unobserve(el);
     });
   }, { root: grid, rootMargin: '200px' });
@@ -1394,6 +1425,7 @@ function selectSourceMode(mode) {
   }
 
   updateStartButton();
+  fetchFolderPreview();
 }
 
 function onCollectionChange() {
@@ -1402,6 +1434,7 @@ function onCollectionChange() {
   if (!collId) {
     countEl.textContent = '';
     updateStartButton();
+    fetchFolderPreview();
     return;
   }
   safeFetch('/api/collections/' + collId + '/photos?per_page=1', {}, { toast: false })
@@ -1410,6 +1443,7 @@ function onCollectionChange() {
     })
     .catch(function() { countEl.textContent = ''; });
   updateStartButton();
+  fetchFolderPreview();
 }
 
 async function loadVolumes() {
