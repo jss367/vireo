@@ -2774,6 +2774,8 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("sources required", 400)
         if not destination:
             return json_error("destination required", 400)
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path", 400)
 
         from ingest import _is_unsafe_path, preview_destination
 
@@ -4068,6 +4070,9 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error(f"source directory not found: {source}")
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+        from ingest import _is_unsafe_path
+        if folder_template and _is_unsafe_path(folder_template):
+            return json_error("folder_template must be a relative path without '..' or backslashes")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -4347,6 +4352,9 @@ def create_app(db_path, thumb_cache_dir=None):
                 return json_error("source and destination are required")
             if not os.path.isabs(destination):
                 return json_error("destination must be an absolute path")
+            from ingest import _is_unsafe_path
+            if folder_template and _is_unsafe_path(folder_template):
+                return json_error("folder_template must be a relative path without '..' or backslashes")
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
@@ -5466,13 +5474,19 @@ def create_app(db_path, thumb_cache_dir=None):
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        if destination and folder_template:
+            from ingest import _is_unsafe_path
+            if _is_unsafe_path(folder_template):
+                return json_error("folder_template must be a relative path without '..' or backslashes")
+
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
             sources=sources,
             destination=destination,
             file_types=body.get("file_types", "both"),
-            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
