@@ -1881,8 +1881,8 @@ def test_relocate_folder_cascade(tmp_path):
     assert row["status"] == "ok"
 
 
-def test_relocate_folder_duplicate_path(tmp_path):
-    """relocate_folder raises ValueError when target path already exists in DB."""
+def test_relocate_folder_merge_into_existing(tmp_path):
+    """relocate_folder merges photos into existing folder when paths conflict."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -1891,19 +1891,37 @@ def test_relocate_folder_duplicate_path(tmp_path):
     existing_path = str(tmp_path / "existing")
     os.makedirs(existing_path)
 
-    fid = db.add_folder("/old/path", name="photos")
-    db.add_folder(existing_path, name="existing")
-    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    # Create two folders: one missing, one existing at target path
+    fid_missing = db.add_folder("/old/path", name="photos")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
-    import pytest
-    with pytest.raises(ValueError, match="already tracked"):
-        db.relocate_folder(fid, existing_path)
+    # Add photos to both folders
+    # Missing folder has photo_a.jpg (unique) and photo_b.jpg (duplicate)
+    pid_a = db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    pid_b_missing = db.add_photo(fid_missing, "photo_b.jpg", ".jpg", 1000, 1.0)
+    # Existing folder has photo_b.jpg (will win) and photo_c.jpg
+    pid_b_existing = db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
+    pid_c = db.add_photo(fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
 
-    # Verify original folder was NOT modified
-    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
-    assert row["path"] == "/old/path"
-    assert row["status"] == "missing"
+    cascaded = db.relocate_folder(fid_missing, existing_path)
+
+    # Missing folder should be deleted
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
+
+    # photo_a should now belong to existing folder
+    row_a = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?", (pid_a,)).fetchone()
+    assert row_a["folder_id"] == fid_existing
+
+    # photo_b from missing folder should be deleted (existing version wins)
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_missing,)).fetchone() is None
+
+    # photo_b and photo_c in existing folder should be untouched
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_existing,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_c,)).fetchone() is not None
+
+    assert cascaded == []
 
 
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):

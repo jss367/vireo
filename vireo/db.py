@@ -966,8 +966,10 @@ class Database:
         Also checks if missing child folders exist at corresponding paths
         under new_path. If they do, relocates them too.
 
+        If new_path is already tracked by another folder, merges photos from
+        the missing folder into the existing one and removes the missing folder.
+
         Returns list of child folder dicts that were also relocated.
-        Raises ValueError if new_path is already tracked by another folder.
         """
         # Check for duplicate path
         conflict = self.conn.execute(
@@ -975,9 +977,7 @@ class Database:
             (new_path, folder_id),
         ).fetchone()
         if conflict:
-            raise ValueError(
-                f"Path is already tracked as folder {conflict['id']}"
-            )
+            return self._merge_into_existing(folder_id, conflict["id"], new_path)
 
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
@@ -1004,6 +1004,88 @@ class Database:
             candidate = new_path + relative
             if os.path.exists(candidate):
                 # Skip if another folder already has this path
+                child_conflict = self.conn.execute(
+                    "SELECT id FROM folders WHERE path = ? AND id != ?",
+                    (candidate, child["id"]),
+                ).fetchone()
+                if child_conflict:
+                    skipped_prefixes.append(child["path"])
+                    continue
+                self.conn.execute(
+                    "UPDATE folders SET path = ?, status = 'ok' WHERE id = ?",
+                    (candidate, child["id"]),
+                )
+                cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+
+        self.conn.commit()
+        return cascaded
+
+    def _merge_into_existing(self, source_folder_id, target_folder_id, new_path):
+        """Merge photos from a missing folder into an existing folder at the same path.
+
+        - Photos with matching filenames in the target are dropped from source
+        - Other photos are reassigned to the target folder
+        - The source folder entry is deleted
+        - Missing child folders are cascade-relocated using old_path -> new_path
+
+        Returns list of child folder dicts that were also relocated (same as relocate_folder).
+        """
+        old_row = self.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
+        # Get photos from the missing folder
+        source_photos = self.conn.execute(
+            "SELECT id, filename FROM photos WHERE folder_id = ?",
+            (source_folder_id,),
+        ).fetchall()
+
+        # Reassign or drop each photo
+        drop_ids = []
+        for photo in source_photos:
+            existing = self.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (target_folder_id, photo["filename"]),
+            ).fetchone()
+            if existing:
+                drop_ids.append(photo["id"])
+            else:
+                self.conn.execute(
+                    "UPDATE photos SET folder_id = ? WHERE id = ?",
+                    (target_folder_id, photo["id"]),
+                )
+
+        # Delete duplicate photos and their associated data
+        if drop_ids:
+            ph = ",".join("?" for _ in drop_ids)
+            self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", drop_ids)
+            self.conn.execute(f"DELETE FROM pending_changes WHERE photo_id IN ({ph})", drop_ids)
+            self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
+            self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)
+
+        # Remove source folder
+        self.conn.execute(
+            "DELETE FROM workspace_folders WHERE folder_id = ?",
+            (source_folder_id,),
+        )
+        self.conn.execute(
+            "DELETE FROM folders WHERE id = ?", (source_folder_id,)
+        )
+
+        # Cascade to missing children (same logic as relocate_folder)
+        cascaded = []
+        skipped_prefixes = []
+        children = self.conn.execute(
+            "SELECT id, path FROM folders WHERE status = 'missing' AND path LIKE ? ORDER BY path",
+            (old_path + "/%",),
+        ).fetchall()
+        for child in children:
+            if any(child["path"].startswith(p + "/") for p in skipped_prefixes):
+                continue
+            relative = child["path"][len(old_path):]
+            candidate = new_path + relative
+            if os.path.exists(candidate):
                 child_conflict = self.conn.execute(
                     "SELECT id FROM folders WHERE path = ? AND id != ?",
                     (candidate, child["id"]),
