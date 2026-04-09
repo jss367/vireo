@@ -1081,6 +1081,7 @@ function fetchFolderPreview() {
     .then(function(data) {
       _previewData = data;
       _previewSelected = {};
+      _duplicateResults = {};
       data.files.forEach(function(f) {
         _previewSelected[f.path] = !f.duplicate;
       });
@@ -1202,6 +1203,8 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
+  // Reapply cached duplicate markers after DOM rebuild
+  if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
 }
 
 function checkForDuplicates() {
