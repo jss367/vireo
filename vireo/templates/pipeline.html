@@ -1107,7 +1107,7 @@ function fetchFolderPreview() {
         _previewSelected[f.path] = !f.duplicate;
       });
       renderPreview();
-      checkForDuplicates();
+      if (_copyMode) checkForDuplicates();
     })
     .catch(function(err) {
       if (err.name === 'AbortError') return;
@@ -1265,9 +1265,12 @@ function checkForDuplicates() {
             data.duplicates.forEach(function(p) {
               _duplicateResults[p] = true;
             });
-            applyDuplicateVisuals();
           }
-          updateDuplicateSummary(data);
+          // Only update UI if the user still wants to skip duplicates
+          if (document.getElementById('chkSkipDuplicates').checked) {
+            if (data.duplicates) applyDuplicateVisuals();
+            updateDuplicateSummary(data);
+          }
         });
         read();
       }).catch(function() {});
@@ -1323,21 +1326,15 @@ function onSkipDuplicatesToggle() {
   if (!checked) {
     // Abort any in-flight check so SSE callbacks stop updating the UI
     if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
-  }
-  if (Object.keys(_duplicateResults).length > 0) {
+    // Remove duplicate visuals and summary
     applyDuplicateVisuals();
-    // Update summary: re-show or remove duplicate count
-    var dupCount = Object.keys(_duplicateResults).length;
     var summary = document.getElementById('previewSummary');
     var existing = summary.querySelector('.dup-status');
     if (existing) existing.remove();
-    if (checked && dupCount > 0) {
-      var span = document.createElement('span');
-      span.className = 'stat dup-status';
-      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
-      summary.appendChild(span);
-    }
-  } else if (checked) {
+  } else {
+    // Re-check: if a prior scan was aborted partway, _duplicateCheckAbort was cleared
+    // to null but _duplicateResults may be partial. Always re-run for a fresh result.
+    _duplicateResults = {};
     checkForDuplicates();
   }
 }
@@ -1560,6 +1557,8 @@ function markFolderPreviewStale() {
 }
 
 function selectSourceMode(mode) {
+  // Cancel any in-flight duplicate scan before switching context
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
   document.getElementById('radioImport').checked = (mode === 'import');
   document.getElementById('radioCollection').checked = (mode === 'collection');
