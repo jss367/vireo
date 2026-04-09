@@ -1464,6 +1464,18 @@ def test_api_folders_missing(app_and_db):
     assert data[0]["photo_count"] >= 1
 
 
+def test_api_folders_check_health(app_and_db):
+    """POST /api/folders/check-health triggers health check and returns missing folders."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/folders/check-health")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "changed" in data
+    assert "missing" in data
+    assert isinstance(data["missing"], list)
+
+
 def test_api_folder_relocate(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate updates path and status."""
     app, db = app_and_db

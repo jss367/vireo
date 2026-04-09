@@ -967,6 +967,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     </p>
     <div id="missingFoldersList"></div>
     <div class="modal-actions">
+      <button class="modal-btn" onclick="loadMissingFolders()">Check Again</button>
       <button class="modal-btn modal-btn-cancel" onclick="closeMissingFoldersModal()">Close</button>
     </div>
   </div>
@@ -3088,22 +3089,31 @@ function closeMissingFoldersModal() {
 }
 
 async function loadMissingFolders() {
-  const folders = await safeFetch('/api/folders/missing');
   const container = document.getElementById('missingFoldersList');
-  if (folders.length === 0) {
-    container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
-    return;
-  }
-  container.innerHTML = folders.map(f => `
-    <div class="missing-folder-row">
-      <div class="missing-folder-path" title="${f.path}">${f.path}</div>
-      <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
-      <div class="missing-folder-actions">
-        <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')}')">Relocate</button>
-        <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
+  container.innerHTML = '<p style="color:var(--text-secondary);">Checking folders…</p>';
+  try {
+    const resp = await fetch('/api/folders/check-health', { method: 'POST' });
+    if (!resp.ok) throw new Error('check failed');
+    const data = await resp.json();
+    const folders = data.missing;
+    if (folders.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-secondary);">All folders are accounted for.</p>';
+      checkMissingFolders();  // update banner
+      return;
+    }
+    container.innerHTML = folders.map(f => `
+      <div class="missing-folder-row">
+        <div class="missing-folder-path" title="${f.path}">${f.path}</div>
+        <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
+        <div class="missing-folder-actions">
+          <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&amp;quot;')}')">Relocate</button>
+          <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
+        </div>
       </div>
-    </div>
-  `).join('');
+    `).join('');
+  } catch (e) {
+    container.innerHTML = '<p style="color:var(--text-secondary);">Failed to check folders.</p>';
+  }
 }
 
 function startRelocate(folderId, originalPath) {
