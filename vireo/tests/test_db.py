@@ -450,6 +450,29 @@ def test_collection_recent_days_rule(tmp_path):
     assert photos[0]['filename'] == 'recent.jpg'
 
 
+def test_collection_timestamp_between_subsec(tmp_path):
+    """Collection timestamp 'between' rule includes sub-second photos."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
+
+    rules = [{"field": "timestamp", "op": "between",
+              "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
+    cid = db.add_collection('June 15', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert len(photos) == 2
+
+
 def test_collection_has_species_rule(tmp_path):
     """get_collection_photos filters by has_species rule."""
     import json

@@ -3656,7 +3656,8 @@ class Database:
             elif field == "timestamp":
                 if op == "between" and isinstance(value, list) and len(value) == 2:
                     conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
-                    params.extend(value)
+                    params.append(value[0])
+                    params.append(_inclusive_date_to(value[1]))
                 elif op == "recent_days":
                     conditions.append("p.timestamp >= datetime('now', ?)")
                     params.append(f"-{value} days")
