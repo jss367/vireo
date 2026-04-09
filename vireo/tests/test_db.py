@@ -185,6 +185,70 @@ def test_get_photos_sort(tmp_path):
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
+def test_sort_date_tiebreaker(tmp_path):
+    """Photos with identical timestamps sort by filename as tiebreaker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    # Insert in non-alphabetical order
+    db.add_photo(folder_id=fid, filename='IMG_003.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+    db.add_photo(folder_id=fid, filename='IMG_001.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+    db.add_photo(folder_id=fid, filename='IMG_002.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+
+    by_date = db.get_photos(sort='date')
+    assert [p['filename'] for p in by_date] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
+
+    by_date_desc = db.get_photos(sort='date_desc')
+    assert [p['filename'] for p in by_date_desc] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
+
+
+def test_date_filter_inclusive_with_subsec(tmp_path):
+    """date_to filter includes photos with sub-second timestamps."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T12:00:00')
+
+    # Bare date bound should include both photos
+    photos = db.get_photos(date_to='2024-06-15')
+    assert len(photos) == 2
+
+    # Second-precision bound should still include sub-second photo
+    photos = db.get_photos(date_to='2024-06-15T23:59:59')
+    assert len(photos) == 2
+
+    # Bound before the sub-second photo should exclude it
+    photos = db.get_photos(date_to='2024-06-15T23:59:58')
+    assert len(photos) == 1
+    assert photos[0]['filename'] == 'b.jpg'
+
+
+def test_inclusive_date_to_edge_cases():
+    """_inclusive_date_to handles non-string and short fractional inputs."""
+    from db import _inclusive_date_to
+
+    # Non-string input returns None (fail closed)
+    assert _inclusive_date_to(20240615) is None
+    assert _inclusive_date_to(True) is None
+
+    # Short fractional seconds are padded with 9s
+    assert _inclusive_date_to("2024-06-15T23:59:59.5") == "2024-06-15T23:59:59.599999"
+    assert _inclusive_date_to("2024-06-15T23:59:59.50") == "2024-06-15T23:59:59.509999"
+    assert _inclusive_date_to("2024-06-15T23:59:59.500") == "2024-06-15T23:59:59.500999"
+
+    # Already 6 digits — unchanged
+    assert _inclusive_date_to("2024-06-15T23:59:59.500000") == "2024-06-15T23:59:59.500000"
+
+    # None passthrough
+    assert _inclusive_date_to(None) is None
+
+
 def test_update_photo_rating(tmp_path):
     """update_photo_rating changes the rating."""
     from db import Database
@@ -404,6 +468,29 @@ def test_collection_recent_days_rule(tmp_path):
     photos = db.get_collection_photos(cid)
     assert len(photos) == 1
     assert photos[0]['filename'] == 'recent.jpg'
+
+
+def test_collection_timestamp_between_subsec(tmp_path):
+    """Collection timestamp 'between' rule includes sub-second photos."""
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
+
+    rules = [{"field": "timestamp", "op": "between",
+              "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
+    cid = db.add_collection('June 15', json.dumps(rules))
+
+    photos = db.get_collection_photos(cid)
+    assert len(photos) == 2
 
 
 def test_collection_has_species_rule(tmp_path):

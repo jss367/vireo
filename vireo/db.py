@@ -11,6 +11,33 @@ log = logging.getLogger(__name__)
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
 
+def _inclusive_date_to(date_to):
+    """Pad a date_to bound so it includes sub-second timestamps.
+
+    The frontend sends either 'YYYY-MM-DD' (date picker) or
+    'YYYY-MM-DDTHH:MM:SS' (timeline click).  With sub-second precision
+    timestamps like '23:59:59.500000', a naive '<= 23:59:59' comparison
+    excludes them.  Append '.999999' so the bound covers the full second.
+    Fractional seconds shorter than 6 digits are padded with '9's so that
+    lexical comparison remains inclusive (e.g. '.5' → '.599999').
+    """
+    if date_to is None:
+        return None
+    if not isinstance(date_to, str):
+        return None
+    if len(date_to) == 10:  # bare date
+        return date_to + "T23:59:59.999999"
+    if len(date_to) == 19:  # date + time, no fractional seconds
+        return date_to + ".999999"
+    # Has fractional seconds — pad to 6 digits with '9' for inclusive upper bound
+    dot_idx = date_to.rfind(".")
+    if dot_idx >= 0:
+        frac = date_to[dot_idx + 1:]
+        if len(frac) < 6:
+            return date_to + "9" * (6 - len(frac))
+    return date_to
+
+
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
 
@@ -1686,7 +1713,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1712,16 +1739,16 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
 
         sort_map = {
-            "date": "p.timestamp ASC",
-            "date_desc": "p.timestamp DESC",
-            "name": "p.filename ASC",
-            "name_desc": "p.filename DESC",
-            "rating": "p.rating DESC",
-            "sharpness": "p.sharpness DESC",
-            "sharpness_asc": "p.sharpness ASC",
-            "quality": "p.quality_score DESC",
+            "date": "p.timestamp ASC, p.filename ASC, p.id ASC",
+            "date_desc": "p.timestamp DESC, p.filename ASC, p.id ASC",
+            "name": "p.filename ASC, p.id ASC",
+            "name_desc": "p.filename DESC, p.id ASC",
+            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
         }
-        order = sort_map.get(sort, "p.timestamp ASC")
+        order = sort_map.get(sort, "p.timestamp ASC, p.filename ASC, p.id ASC")
 
         page = max(1, page)
         offset = (page - 1) * per_page
@@ -1763,7 +1790,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1823,7 +1850,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
@@ -1967,7 +1994,7 @@ class Database:
             params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            params.append(date_to)
+            params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -2002,7 +2029,7 @@ class Database:
             {where}
             GROUP BY p.id
             {having_clause}
-            ORDER BY p.timestamp ASC
+            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
         params.insert(0, self._ws_id())  # for the subquery
         params.extend(having_params)
@@ -3639,7 +3666,8 @@ class Database:
             elif field == "timestamp":
                 if op == "between" and isinstance(value, list) and len(value) == 2:
                     conditions.append("p.timestamp >= ? AND p.timestamp <= ?")
-                    params.extend(value)
+                    params.append(value[0])
+                    params.append(_inclusive_date_to(value[1]))
                 elif op == "recent_days":
                     conditions.append("p.timestamp >= datetime('now', ?)")
                     params.append(f"-{value} days")
@@ -3713,7 +3741,7 @@ class Database:
             {folder_join}
             {join_clause}
             {where}
-            ORDER BY p.timestamp ASC
+            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()

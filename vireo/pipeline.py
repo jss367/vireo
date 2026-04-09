@@ -82,7 +82,7 @@ def load_photo_features(db, collection_id=None, config=None):
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 WHERE wf.workspace_id = ? AND p.id IN ({placeholders})
-                ORDER BY p.timestamp""",
+                ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
             (ws_id, *collection_photo_ids),
         ).fetchall()
     else:
@@ -91,7 +91,7 @@ def load_photo_features(db, collection_id=None, config=None):
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                 WHERE wf.workspace_id = ?
-                ORDER BY p.timestamp""",
+                ORDER BY p.timestamp, p.filename ASC, p.id ASC""",
             (ws_id,),
         ).fetchall()
 
