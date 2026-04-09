@@ -1499,6 +1499,9 @@ def test_api_folder_relocate_merge(app_and_db, tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
     db.conn.commit()
 
+    # Create photo1.jpg on disk in the target folder
+    (tmp_path / "folder_b" / "photo1.jpg").write_bytes(b"\xff\xd8")
+
     # Add a photo to each folder
     db.add_photo(fid_a, "photo1.jpg", ".jpg", 1000, 1.0)
     db.add_photo(fid_b, "photo2.jpg", ".jpg", 1000, 1.0)

@@ -1897,10 +1897,14 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
     db.conn.commit()
 
+    # Create photo_a.jpg on disk so it will be found during merge
+    (tmp_path / "existing" / "photo_a.jpg").write_bytes(b"\xff\xd8")
+
     # Add photos to both folders
-    # Missing folder has photo_a.jpg (unique) and photo_b.jpg (duplicate)
+    # Missing folder: photo_a.jpg (exists on disk), photo_b.jpg (duplicate), photo_d.jpg (NOT on disk)
     pid_a = db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
     pid_b_missing = db.add_photo(fid_missing, "photo_b.jpg", ".jpg", 1000, 1.0)
+    pid_d = db.add_photo(fid_missing, "photo_d.jpg", ".jpg", 1000, 1.0)
     # Existing folder has photo_b.jpg (will win) and photo_c.jpg
     pid_b_existing = db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
     pid_c = db.add_photo(fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
@@ -1910,12 +1914,15 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     # Missing folder should be deleted
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
 
-    # photo_a should now belong to existing folder
+    # photo_a exists on disk at target — should be reassigned to existing folder
     row_a = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?", (pid_a,)).fetchone()
     assert row_a["folder_id"] == fid_existing
 
-    # photo_b from missing folder should be deleted (existing version wins)
+    # photo_b from missing folder should be deleted (duplicate in target)
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_missing,)).fetchone() is None
+
+    # photo_d does NOT exist on disk at target — should be deleted
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_d,)).fetchone() is None
 
     # photo_b and photo_c in existing folder should be untouched
     assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_existing,)).fetchone() is not None

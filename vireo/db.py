@@ -1050,11 +1050,14 @@ class Database:
             ).fetchone()
             if existing:
                 drop_ids.append(photo["id"])
-            else:
+            elif os.path.exists(os.path.join(new_path, photo["filename"])):
                 self.conn.execute(
                     "UPDATE photos SET folder_id = ? WHERE id = ?",
                     (target_folder_id, photo["id"]),
                 )
+            else:
+                # File doesn't exist on disk at target — drop phantom record
+                drop_ids.append(photo["id"])
 
         # Delete duplicate photos and their associated data
         if drop_ids:
