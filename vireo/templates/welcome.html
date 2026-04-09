@@ -119,7 +119,7 @@
   </ul>
 
   <div>
-    <button class="btn-primary" id="downloadBtn" onclick="getStarted()">
+    <button class="btn-primary" id="downloadBtn" onclick="getStarted()" disabled>
       Get Started
     </button>
   </div>
@@ -278,7 +278,9 @@ async function skipSetup() {
   window.location.href = '/browse';
 }
 
-checkModelStatus();
+checkModelStatus().then(function() {
+  document.getElementById('downloadBtn').disabled = false;
+});
 </script>
 </body>
 </html>
