@@ -1,6 +1,7 @@
 """User configuration for Vireo (persisted to ~/.vireo/config.json)."""
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -136,7 +137,7 @@ def _deep_merge(base, override):
 
 def load():
     """Load config, returning defaults for any missing keys."""
-    config = dict(DEFAULTS)
+    config = copy.deepcopy(DEFAULTS)
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH) as f:

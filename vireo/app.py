@@ -5585,7 +5585,7 @@ def create_app(db_path, thumb_cache_dir=None):
         if destination:
             import config as cfg
             _cfg = cfg.load()
-            ingest_cfg = _cfg.get("ingest", {})
+            ingest_cfg = dict(_cfg.get("ingest", {}))
             recents = list(ingest_cfg.get("recent_destinations", []))
             if destination in recents:
                 recents.remove(destination)
