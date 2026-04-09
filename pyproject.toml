@@ -17,6 +17,7 @@ dependencies = [
     "rawpy>=0.26.1",
     "requests>=2.32.0",
     "scipy>=1.17.1",
+    "exifread>=3.0",
     "send2trash>=1.8.0",
     "tokenizers>=0.21.0",
 ]

@@ -174,6 +174,9 @@ def consensus_prediction(predictions):
 def read_exif_timestamp(image_path):
     """Read EXIF DateTimeOriginal from an image file.
 
+    Tries Pillow first (works for JPEG/TIFF), then falls back to exifread
+    which handles RAW formats (NEF, CR2, CR3, ARW, etc.).
+
     Args:
         image_path: path to JPEG/TIFF/RAW file
 
@@ -185,19 +188,35 @@ def read_exif_timestamp(image_path):
     from PIL import Image
     from PIL.ExifTags import Base as ExifBase
 
+    # Try Pillow first (fast path for JPEG/TIFF)
     try:
         with Image.open(str(image_path)) as img:
             exif = img.getexif()
-            if not exif:
-                return None
-
-            # DateTimeOriginal tag
-            dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(
-                ExifBase.DateTimeDigitized
-            )
-            if dt_str:
-                return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+            if exif:
+                dt_str = exif.get(ExifBase.DateTimeOriginal) or exif.get(
+                    ExifBase.DateTimeDigitized
+                )
+                if dt_str:
+                    return datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+        # Pillow opened the file but found no timestamp — no point trying exifread
+        return None
     except Exception:
-        log.warning("Could not read EXIF from %s", image_path)
+        pass
 
+    # Pillow failed (likely a RAW file) — fall back to exifread
+    try:
+        import exifread
+
+        with open(str(image_path), "rb") as f:
+            tags = exifread.process_file(f, details=False)
+        if tags:
+            tag = tags.get("EXIF DateTimeOriginal") or tags.get(
+                "EXIF DateTimeDigitized"
+            )
+            if tag:
+                return datetime.strptime(str(tag.values), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+
+    log.warning("Could not read EXIF from %s", image_path)
     return None

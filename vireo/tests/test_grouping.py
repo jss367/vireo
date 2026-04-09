@@ -96,3 +96,125 @@ def test_consensus_prediction_single():
     assert result['confidence'] == 0.85
     assert result['vote_count'] == 1
     assert result['total_votes'] == 1
+
+
+class MockTag:
+    """Mock exifread tag with a .values attribute."""
+
+    def __init__(self, value):
+        self.values = value
+
+
+def test_read_exif_timestamp_exifread_fallback(monkeypatch, tmp_path):
+    """When Pillow fails (e.g. RAW file), exifread is used as fallback."""
+    from grouping import read_exif_timestamp
+
+    # Create a dummy file so the path exists
+    raw_file = tmp_path / "DSC_1074.NEF"
+    raw_file.write_bytes(b"\x00" * 100)
+
+    # Make Pillow's Image.open raise an exception (simulating RAW file failure)
+    import PIL.Image
+    original_open = PIL.Image.open
+
+    def failing_open(path):
+        raise Exception("cannot identify image file")
+
+    monkeypatch.setattr(PIL.Image, "open", failing_open)
+
+    # Mock exifread.process_file to return EXIF data
+    import exifread
+    def mock_process_file(f, **kwargs):
+        return {"EXIF DateTimeOriginal": MockTag("2024:06:15 14:30:00")}
+
+    monkeypatch.setattr(exifread, "process_file", mock_process_file)
+
+    result = read_exif_timestamp(str(raw_file))
+    assert result == datetime(2024, 6, 15, 14, 30, 0)
+
+
+def test_read_exif_timestamp_both_fail(monkeypatch, tmp_path):
+    """Returns None when both Pillow and exifread fail."""
+    from grouping import read_exif_timestamp
+
+    raw_file = tmp_path / "DSC_1075.NEF"
+    raw_file.write_bytes(b"\x00" * 100)
+
+    # Make Pillow fail
+    import PIL.Image
+
+    def failing_open(path):
+        raise Exception("cannot identify image file")
+
+    monkeypatch.setattr(PIL.Image, "open", failing_open)
+
+    # Make exifread return empty dict (no tags)
+    import exifread
+
+    def mock_process_file(f, **kwargs):
+        return {}
+
+    monkeypatch.setattr(exifread, "process_file", mock_process_file)
+
+    result = read_exif_timestamp(str(raw_file))
+    assert result is None
+
+
+def test_read_exif_timestamp_pillow_works(monkeypatch, tmp_path):
+    """Pillow path still works for JPEG files (no fallback needed)."""
+    from grouping import read_exif_timestamp
+
+    jpg_file = tmp_path / "DSC_0001.jpg"
+    jpg_file.write_bytes(b"\x00" * 100)
+
+    # Mock Pillow to succeed with EXIF data
+    import PIL.Image
+    from PIL.ExifTags import Base as ExifBase
+
+    class MockExif(dict):
+        pass
+
+    class MockImg:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def getexif(self):
+            exif = MockExif()
+            exif[ExifBase.DateTimeOriginal] = "2024:01:10 08:00:00"
+            return exif
+
+    def mock_open(path):
+        return MockImg()
+
+    monkeypatch.setattr(PIL.Image, "open", mock_open)
+
+    result = read_exif_timestamp(str(jpg_file))
+    assert result == datetime(2024, 1, 10, 8, 0, 0)
+
+
+def test_read_exif_timestamp_exifread_digitized_fallback(monkeypatch, tmp_path):
+    """exifread fallback uses DateTimeDigitized when DateTimeOriginal is missing."""
+    from grouping import read_exif_timestamp
+
+    raw_file = tmp_path / "DSC_1076.CR2"
+    raw_file.write_bytes(b"\x00" * 100)
+
+    import PIL.Image
+
+    def failing_open(path):
+        raise Exception("cannot identify image file")
+
+    monkeypatch.setattr(PIL.Image, "open", failing_open)
+
+    import exifread
+
+    def mock_process_file(f, **kwargs):
+        return {"EXIF DateTimeDigitized": MockTag("2024:07:20 09:15:30")}
+
+    monkeypatch.setattr(exifread, "process_file", mock_process_file)
+
+    result = read_exif_timestamp(str(raw_file))
+    assert result == datetime(2024, 7, 20, 9, 15, 30)
