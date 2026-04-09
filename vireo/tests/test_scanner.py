@@ -927,3 +927,45 @@ def test_scan_uses_companion_jpeg_for_working_copy(tmp_path, monkeypatch):
     assert sources_used[0].endswith("IMG_001.jpg"), (
         f"Expected companion JPEG as source, got: {sources_used[0]}"
     )
+
+
+# --- _extract_timestamp tests ---
+
+def test_extract_timestamp_subsec():
+    """_extract_timestamp includes sub-second precision from SubSecTimeOriginal."""
+    from scanner import _extract_timestamp
+    exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "123"}
+    ts = _extract_timestamp(exif)
+    assert ts == "2024-06-15T14:30:00.123000"
+
+
+def test_extract_timestamp_no_subsec():
+    """_extract_timestamp works without SubSecTimeOriginal."""
+    from scanner import _extract_timestamp
+    exif = {"DateTimeOriginal": "2024:06:15 14:30:00"}
+    ts = _extract_timestamp(exif)
+    assert ts == "2024-06-15T14:30:00"
+
+
+def test_extract_timestamp_garbage_subsec():
+    """_extract_timestamp ignores non-numeric SubSecTimeOriginal."""
+    from scanner import _extract_timestamp
+    exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "abc"}
+    ts = _extract_timestamp(exif)
+    assert ts == "2024-06-15T14:30:00"
+
+
+def test_extract_timestamp_subsec_fallback():
+    """_extract_timestamp falls back to SubSecTime when SubSecTimeOriginal is absent."""
+    from scanner import _extract_timestamp
+    exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTime": "50"}
+    ts = _extract_timestamp(exif)
+    assert ts == "2024-06-15T14:30:00.500000"
+
+
+def test_extract_timestamp_subsec_long():
+    """_extract_timestamp truncates sub-second values longer than 6 digits."""
+    from scanner import _extract_timestamp
+    exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "12345678"}
+    ts = _extract_timestamp(exif)
+    assert ts == "2024-06-15T14:30:00.123456"

@@ -99,6 +99,8 @@ def _extract_timestamp(exif_group):
     """Extract and normalize timestamp from ExifTool EXIF group.
 
     Checks EXIF:DateTimeOriginal first, then EXIF:CreateDate.
+    If SubSecTimeOriginal (or SubSecTime) is present and numeric,
+    it is included as fractional seconds for sub-second precision.
     Returns ISO format string or None.
     """
     dto = exif_group.get("DateTimeOriginal") or exif_group.get("CreateDate")
@@ -106,6 +108,14 @@ def _extract_timestamp(exif_group):
         return None
     try:
         dt = datetime.strptime(str(dto), "%Y:%m:%d %H:%M:%S")
+        # Attempt to add sub-second precision
+        subsec = exif_group.get("SubSecTimeOriginal") or exif_group.get("SubSecTime")
+        if subsec is not None:
+            subsec_str = str(subsec).strip()
+            if subsec_str.isdigit():
+                # Pad or truncate to 6 digits (microseconds)
+                us_str = subsec_str[:6].ljust(6, "0")
+                dt = dt.replace(microsecond=int(us_str))
         return dt.isoformat()
     except (ValueError, TypeError):
         log.debug("Unparseable EXIF timestamp dropped: %r", dto)

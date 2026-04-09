@@ -185,6 +185,26 @@ def test_get_photos_sort(tmp_path):
     assert by_date_desc[0]['filename'] == 'b.jpg'
 
 
+def test_sort_date_tiebreaker(tmp_path):
+    """Photos with identical timestamps sort by filename as tiebreaker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    # Insert in non-alphabetical order
+    db.add_photo(folder_id=fid, filename='IMG_003.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+    db.add_photo(folder_id=fid, filename='IMG_001.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+    db.add_photo(folder_id=fid, filename='IMG_002.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T14:30:00')
+
+    by_date = db.get_photos(sort='date')
+    assert [p['filename'] for p in by_date] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
+
+    by_date_desc = db.get_photos(sort='date_desc')
+    assert [p['filename'] for p in by_date_desc] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
+
+
 def test_update_photo_rating(tmp_path):
     """update_photo_rating changes the rating."""
     from db import Database
