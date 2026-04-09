@@ -1452,6 +1452,13 @@ function onCopyModeChange() {
     copyFields.style.display = 'none';
     _folderPreviewShown = false;
     document.getElementById('folderPreviewResults').style.display = 'none';
+    // Clear duplicate state when copy mode is disabled
+    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var dupStatus = summary ? summary.querySelector('.dup-status') : null;
+    if (dupStatus) dupStatus.remove();
+    _duplicateResults = {};
   }
   updateStartButton();
 }
