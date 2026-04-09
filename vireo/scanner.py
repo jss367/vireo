@@ -595,12 +595,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
     # Wrap post-processing in try/finally so folder counts are always updated
     # even if pairing or working-copy extraction raises an exception.
+    # Rollback on error to avoid persisting partial post-processing writes
+    # (e.g. half-merged RAW/JPEG pairs) that haven't been committed yet.
     try:
         _pair_raw_jpeg_companions(db)
 
         # Extract working copies for RAW photos (after pairing so companion is known)
         if vireo_dir:
             _extract_working_copies(db, vireo_dir, progress_callback, status_callback)
+    except BaseException:
+        db.conn.rollback()
+        raise
     finally:
         db.update_folder_counts()
     log.info("Scan complete: %d photos indexed", total)

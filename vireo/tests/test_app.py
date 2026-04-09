@@ -544,6 +544,22 @@ def test_pipeline_page_init_api(app_and_db):
     assert data['total_photos'] == 3
 
 
+def test_pipeline_page_init_includes_recent_destinations(app_and_db):
+    """page-init response includes recent_destinations from ingest config."""
+    import config as cfg
+    app, _ = app_and_db
+    # Write config with recent_destinations
+    config = cfg.load()
+    config.setdefault("ingest", {})["recent_destinations"] = ["/photos/out1", "/photos/out2"]
+    cfg.save(config)
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "recent_destinations" in data
+        assert data["recent_destinations"] == ["/photos/out1", "/photos/out2"]
+
+
 def test_templates_jinja_free_except_includes():
     """All .html templates must be free of Jinja2 syntax except {% include '...' %}."""
     import os
