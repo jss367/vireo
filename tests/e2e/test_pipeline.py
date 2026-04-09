@@ -72,3 +72,41 @@ def test_pipeline_stage_cards_collapse_expand(live_server, page):
     expect(source_card).not_to_have_class(re.compile("expanded"))
     page.click("#card-source .stage-header")
     expect(source_card).to_have_class(re.compile("expanded"))
+
+
+def test_pipeline_folder_template_visible_when_copy_enabled(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+    template = page.locator("#cfgFolderTemplate")
+    expect(template).to_be_visible()
+
+
+def test_pipeline_folder_template_hidden_when_copy_disabled(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    # Don't check the copy toggle
+    template = page.locator("#cfgFolderTemplate")
+    expect(template).to_be_hidden()
+
+
+def test_pipeline_custom_template_shown_on_select(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+    custom_input = page.locator("[data-testid='custom-template-input']")
+    expect(custom_input).to_be_hidden()
+    page.select_option("#cfgFolderTemplate", "__custom__")
+    expect(custom_input).to_be_visible()
+
+
+def test_pipeline_preview_button_disabled_without_source_dest(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    page.click("#card-destination .stage-header")
+    page.check("[data-testid='copy-photos-toggle']")
+    btn = page.locator("[data-testid='preview-folders-btn']")
+    expect(btn).to_be_disabled()
