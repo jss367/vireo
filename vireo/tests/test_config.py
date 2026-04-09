@@ -90,6 +90,13 @@ def test_ingest_defaults_present():
     assert ingest["file_types"] == "both"
 
 
+def test_ingest_recent_destinations_default():
+    """Ingest config includes empty recent_destinations list by default."""
+    from config import DEFAULTS
+
+    assert DEFAULTS["ingest"]["recent_destinations"] == []
+
+
 def test_working_copy_defaults(tmp_path, monkeypatch):
     """Config includes working copy defaults."""
     import config as cfg
