@@ -99,10 +99,13 @@ def test_consensus_prediction_single():
 
 
 class MockTag:
-    """Mock exifread tag with a .values attribute."""
+    """Mock exifread IfdTag with str() returning the value."""
 
     def __init__(self, value):
         self.values = value
+
+    def __str__(self):
+        return self.values
 
 
 def test_read_exif_timestamp_exifread_fallback(monkeypatch, tmp_path):

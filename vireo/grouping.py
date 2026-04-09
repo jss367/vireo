@@ -210,11 +210,14 @@ def read_exif_timestamp(image_path):
         with open(str(image_path), "rb") as f:
             tags = exifread.process_file(f, details=False)
         if tags:
-            tag = tags.get("EXIF DateTimeOriginal") or tags.get(
-                "EXIF DateTimeDigitized"
+            tag = (
+                tags.get("EXIF DateTimeOriginal")
+                or tags.get("EXIF DateTimeDigitized")
+                or tags.get("Image DateTimeOriginal")
+                or tags.get("Image DateTime")
             )
             if tag:
-                return datetime.strptime(str(tag.values), "%Y:%m:%d %H:%M:%S")
+                return datetime.strptime(str(tag), "%Y:%m:%d %H:%M:%S")
     except Exception:
         pass
 
