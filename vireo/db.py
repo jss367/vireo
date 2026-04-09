@@ -1739,16 +1739,16 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
 
         sort_map = {
-            "date": "p.timestamp ASC, p.filename ASC",
-            "date_desc": "p.timestamp DESC, p.filename ASC",
-            "name": "p.filename ASC",
-            "name_desc": "p.filename DESC",
-            "rating": "p.rating DESC, p.filename ASC",
-            "sharpness": "p.sharpness DESC, p.filename ASC",
-            "sharpness_asc": "p.sharpness ASC, p.filename ASC",
-            "quality": "p.quality_score DESC, p.filename ASC",
+            "date": "p.timestamp ASC, p.filename ASC, p.id ASC",
+            "date_desc": "p.timestamp DESC, p.filename ASC, p.id ASC",
+            "name": "p.filename ASC, p.id ASC",
+            "name_desc": "p.filename DESC, p.id ASC",
+            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
         }
-        order = sort_map.get(sort, "p.timestamp ASC, p.filename ASC")
+        order = sort_map.get(sort, "p.timestamp ASC, p.filename ASC, p.id ASC")
 
         page = max(1, page)
         offset = (page - 1) * per_page
@@ -2029,7 +2029,7 @@ class Database:
             {where}
             GROUP BY p.id
             {having_clause}
-            ORDER BY p.timestamp ASC, p.filename ASC
+            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
         params.insert(0, self._ws_id())  # for the subquery
         params.extend(having_params)
@@ -3741,7 +3741,7 @@ class Database:
             {folder_join}
             {join_clause}
             {where}
-            ORDER BY p.timestamp ASC, p.filename ASC
+            ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
             LIMIT ? OFFSET ?
         """
         return self.conn.execute(query, params).fetchall()
