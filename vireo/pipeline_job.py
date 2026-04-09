@@ -45,6 +45,7 @@ class PipelineParams:
     download_taxonomy: bool = True
     preview_max_size: int = 1920
     exclude_paths: set | None = None
+    exclude_photo_ids: set | None = None
     recursive: bool = True
 
 
@@ -128,6 +129,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     loaded_models = {}  # populated by model_loader thread
 
     skip_scan = collection_id is not None
+
+    def _filter_excluded(photos):
+        """Remove photos excluded by user selection in preview."""
+        if not params.exclude_photo_ids:
+            return photos
+        return [p for p in photos if p["id"] not in params.exclude_photo_ids]
 
     # Mark ingest as skipped when not in copy mode so SSE events
     # don't show a perpetually-pending stage.
@@ -465,7 +472,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             os.makedirs(preview_dir, exist_ok=True)
 
             if collection_id:
-                photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+                photos = _filter_excluded(thread_db.get_collection_photos(collection_id, per_page=999999))
             elif not skip_scan:
                 # Scan ran but produced no photos — skip previews to avoid
                 # unexpectedly processing the entire workspace.
@@ -675,7 +682,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             model_name = loaded_models["model_name"]
             tax = loaded_models["tax"]
 
-            photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            photos = _filter_excluded(thread_db.get_collection_photos(collection_id, per_page=999999))
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
 
@@ -828,7 +835,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             masks_dir = os.path.join(os.path.dirname(db_path), "masks")
             os.makedirs(masks_dir, exist_ok=True)
 
-            photos = thread_db.get_collection_photos(collection_id, per_page=999999)
+            photos = _filter_excluded(thread_db.get_collection_photos(collection_id, per_page=999999))
 
             # Build a map of photo_id -> primary detection (highest confidence)
             # from the detections table. Only photos with detections and without
@@ -962,6 +969,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
             photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
+            if params.exclude_photo_ids:
+                photos = [p for p in photos if p["id"] not in params.exclude_photo_ids]
             if not photos:
                 result["stages"]["regroup"] = {"error": "No photos with pipeline features found."}
                 stages["regroup"]["status"] = "completed"

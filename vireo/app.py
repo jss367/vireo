@@ -2801,6 +2801,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "mtime": p["file_mtime"] or 0,
                 "thumb_url": f"/thumbnails/{p['id']}.jpg",
                 "duplicate": False,
+                "photo_id": p["id"],
             })
 
             type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
@@ -5548,6 +5549,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
+            exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
             recursive=body.get("recursive", True),
         )
 

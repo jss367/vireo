@@ -1651,6 +1651,14 @@ async function startPipeline() {
     }
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
+    // Add excluded photo IDs from preview selection
+    if (_previewData && _previewSelected) {
+      var excludedIds = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path] && f.photo_id) excludedIds.push(f.photo_id);
+      });
+      if (excludedIds.length > 0) body.exclude_photo_ids = excludedIds;
+    }
   }
 
   // Preview quality
