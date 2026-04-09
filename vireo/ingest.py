@@ -17,8 +17,9 @@ def _is_unsafe_path(s):
     """Check if a path string could escape the destination directory."""
     if not s:
         return False
-    # Reject backslashes (Windows traversal), absolute paths, and '..' segments
-    if "\\" in s:
+    # Reject backslashes (Windows traversal), absolute paths, '..' segments,
+    # and colons (Windows drive-relative paths like C:2026 or C:%Y)
+    if "\\" in s or ":" in s:
         return True
     p = Path(s)
     if p.is_absolute():
