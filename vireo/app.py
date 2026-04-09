@@ -2776,7 +2776,6 @@ def create_app(db_path, thumb_cache_dir=None):
 
         db = _get_db()
         photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
-        total = db.count_collection_photos(collection_id)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
         folder_map = {r["id"]: r for r in folder_rows}
@@ -2800,7 +2799,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "size": size,
                 "extension": ext,
                 "mtime": p["file_mtime"] or 0,
-                "thumb_url": f"/api/photos/{p['id']}/thumb",
+                "thumb_url": f"/thumbnails/{p['id']}.jpg",
                 "duplicate": False,
             })
 
@@ -2808,7 +2807,7 @@ def create_app(db_path, thumb_cache_dir=None):
             total_size += size
 
         return jsonify({
-            "total_count": total,
+            "total_count": len(files),
             "total_size": total_size,
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,
