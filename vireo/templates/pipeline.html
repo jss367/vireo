@@ -1295,13 +1295,23 @@ async function previewDestinationFolders() {
     var data = await safeFetch('/api/import/destination-preview', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        sources: sources,
-        destination: destination,
-        folder_template: getSelectedFolderTemplate(),
-        file_types: getIngestFileTypes(),
-        recursive: document.getElementById('chkIncludeSubfolders').checked,
-      }),
+      body: JSON.stringify(function() {
+        var req = {
+          sources: sources,
+          destination: destination,
+          folder_template: getSelectedFolderTemplate(),
+          file_types: getIngestFileTypes(),
+          recursive: document.getElementById('chkIncludeSubfolders').checked,
+        };
+        if (_previewData && _previewSelected) {
+          var excluded = [];
+          _previewData.files.forEach(function(f) {
+            if (!_previewSelected[f.path]) excluded.push(f.path);
+          });
+          if (excluded.length > 0) req.exclude_paths = excluded;
+        }
+        return req;
+      }()),
     }, { toast: false });
 
     if (data.error) {
@@ -1349,8 +1359,12 @@ async function previewDestinationFolders() {
 function markFolderPreviewStale() {
   if (!_folderPreviewShown) return;
   document.getElementById('folderPreviewStale').style.display = '';
-  document.getElementById('btnPreviewFolders').disabled = false;
-  document.getElementById('btnPreviewFolders').textContent = 'Refresh preview';
+  var btn = document.getElementById('btnPreviewFolders');
+  btn.textContent = 'Refresh preview';
+  // Only enable if prerequisites are still met (sources + destination)
+  var hasSources = _sourceFolders.length > 0;
+  var hasDest = document.getElementById('cfgDestination').value.trim();
+  btn.disabled = !(hasSources && hasDest);
 }
 
 function selectSourceMode(mode) {

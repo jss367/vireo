@@ -55,7 +55,7 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
 
 
 def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
-                        file_types="both", recursive=True):
+                        file_types="both", recursive=True, exclude_paths=None):
     """Dry-run preview of destination folder structure.
 
     Scans source files, reads EXIF timestamps, and groups them by the
@@ -68,6 +68,9 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
     all_files = []
     for src in sources:
         all_files.extend(discover_source_files(src, file_types, recursive=recursive))
+    if exclude_paths:
+        skip = set(exclude_paths)
+        all_files = [f for f in all_files if str(f) not in skip]
 
     folder_counts = {}
     for source_file in all_files:

@@ -2781,13 +2781,17 @@ def create_app(db_path, thumb_cache_dir=None):
         if folder_template and _is_unsafe_path(folder_template):
             return json_error("folder_template must be a relative path without '..' or backslashes", 400)
 
-        result = preview_destination(
-            sources=sources,
-            destination=destination,
-            folder_template=folder_template,
-            file_types=body.get("file_types", "both"),
-            recursive=body.get("recursive", True),
-        )
+        try:
+            result = preview_destination(
+                sources=sources,
+                destination=destination,
+                folder_template=folder_template,
+                file_types=body.get("file_types", "both"),
+                recursive=body.get("recursive", True),
+                exclude_paths=body.get("exclude_paths"),
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
         return jsonify(result)
 
     @app.route("/api/import/folder-preview/thumbnail")
