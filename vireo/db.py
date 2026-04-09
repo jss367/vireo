@@ -1067,6 +1067,19 @@ class Database:
             self.conn.execute(f"DELETE FROM detections WHERE photo_id IN ({ph})", drop_ids)
             self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", drop_ids)
 
+        # Reparent child folders from source to target
+        self.conn.execute(
+            "UPDATE folders SET parent_id = ? WHERE parent_id = ?",
+            (target_folder_id, source_folder_id),
+        )
+
+        # Transfer workspace visibility from source to target
+        self.conn.execute(
+            "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
+            "SELECT workspace_id, ? FROM workspace_folders WHERE folder_id = ?",
+            (target_folder_id, source_folder_id),
+        )
+
         # Remove source folder
         self.conn.execute(
             "DELETE FROM workspace_folders WHERE folder_id = ?",

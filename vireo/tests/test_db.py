@@ -1931,6 +1931,75 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     assert cascaded == []
 
 
+def test_relocate_folder_merge_reparents_children(tmp_path):
+    """_merge_into_existing reparents child folders to the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    # Child folder whose parent is the missing folder
+    fid_child = db.add_folder("/old/path/sub", name="sub", parent_id=fid_missing)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    # Source folder should be gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
+
+    # Child folder should now point to the target as its parent
+    row = db.conn.execute("SELECT parent_id FROM folders WHERE id = ?", (fid_child,)).fetchone()
+    assert row["parent_id"] == fid_existing
+
+
+def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
+    """_merge_into_existing transfers workspace visibility to the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    db.set_active_workspace(ws1)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    # Create source folder in ws1
+    fid_missing = db.add_folder("/old/path", name="missing")
+
+    # Create a second workspace and add target folder to it (NOT to ws1)
+    ws2 = db.conn.execute(
+        "INSERT INTO workspaces (name) VALUES (?)", ("Second",)
+    ).lastrowid
+    db.conn.commit()
+    fid_existing = db.conn.execute(
+        "INSERT INTO folders (path, name) VALUES (?, ?)", (existing_path, "existing")
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws2, fid_existing),
+    )
+    db.conn.commit()
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    # Target folder should now be visible in BOTH workspaces
+    ws_links = db.conn.execute(
+        "SELECT workspace_id FROM workspace_folders WHERE folder_id = ? ORDER BY workspace_id",
+        (fid_existing,),
+    ).fetchall()
+    ws_ids = {row["workspace_id"] for row in ws_links}
+    assert ws1 in ws_ids, "target folder should be visible in source's workspace"
+    assert ws2 in ws_ids, "target folder should retain its original workspace"
+
+
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):
     """relocate_folder skips cascading a child if its target path is already tracked."""
     from db import Database
