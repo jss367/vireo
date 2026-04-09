@@ -11,6 +11,23 @@ log = logging.getLogger(__name__)
 _UNSET = object()  # sentinel for "not provided" vs explicit None
 
 
+def _inclusive_date_to(date_to):
+    """Pad a date_to bound so it includes sub-second timestamps.
+
+    The frontend sends either 'YYYY-MM-DD' (date picker) or
+    'YYYY-MM-DDTHH:MM:SS' (timeline click).  With sub-second precision
+    timestamps like '23:59:59.500000', a naive '<= 23:59:59' comparison
+    excludes them.  Append '.999999' so the bound covers the full second.
+    """
+    if date_to is None:
+        return None
+    if len(date_to) == 10:  # bare date
+        return date_to + "T23:59:59.999999"
+    if len(date_to) == 19:  # date + time, no fractional seconds
+        return date_to + ".999999"
+    return date_to
+
+
 class Database:
     """Local SQLite database that caches photo metadata from XMP sidecars.
 
@@ -1686,7 +1703,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1763,7 +1780,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
@@ -1823,7 +1840,7 @@ class Database:
             where_params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            where_params.append(date_to)
+            where_params.append(_inclusive_date_to(date_to))
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
@@ -1967,7 +1984,7 @@ class Database:
             params.append(date_from)
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
-            params.append(date_to)
+            params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")

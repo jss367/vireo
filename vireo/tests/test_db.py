@@ -205,6 +205,30 @@ def test_sort_date_tiebreaker(tmp_path):
     assert [p['filename'] for p in by_date_desc] == ['IMG_001.jpg', 'IMG_002.jpg', 'IMG_003.jpg']
 
 
+def test_date_filter_inclusive_with_subsec(tmp_path):
+    """date_to filter includes photos with sub-second timestamps."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T23:59:59.500000')
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T12:00:00')
+
+    # Bare date bound should include both photos
+    photos = db.get_photos(date_to='2024-06-15')
+    assert len(photos) == 2
+
+    # Second-precision bound should still include sub-second photo
+    photos = db.get_photos(date_to='2024-06-15T23:59:59')
+    assert len(photos) == 2
+
+    # Bound before the sub-second photo should exclude it
+    photos = db.get_photos(date_to='2024-06-15T23:59:58')
+    assert len(photos) == 1
+    assert photos[0]['filename'] == 'b.jpg'
+
+
 def test_update_photo_rating(tmp_path):
     """update_photo_rating changes the rating."""
     from db import Database
