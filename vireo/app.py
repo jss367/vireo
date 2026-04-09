@@ -14,6 +14,7 @@ import subprocess
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 from db import Database
 from flask import (
@@ -2746,6 +2747,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "size": stat.st_size,
                     "extension": f.suffix.lower(),
                     "mtime": stat.st_mtime,
+                    "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(str(f)),
                 })
 
         # Build summary
@@ -2762,6 +2764,55 @@ def create_app(db_path, thumb_cache_dir=None):
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,
             "files": all_files,
+        })
+
+    @app.route("/api/import/collection-preview", methods=["POST"])
+    def api_import_collection_preview():
+        """Return preview data for photos in a collection."""
+        body = request.get_json(silent=True) or {}
+        collection_id = body.get("collection_id")
+        if not collection_id:
+            return json_error("collection_id required", 400)
+
+        db = _get_db()
+        photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+
+        folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
+        folder_map = {r["id"]: dict(r) for r in folder_rows}
+
+        files = []
+        type_breakdown = {}
+        total_size = 0
+
+        for p in photos:
+            folder = folder_map.get(p["folder_id"], {})
+            folder_name = folder.get("name", "Unknown")
+            ext = (p["extension"] or "").lower()
+            size = p["file_size"] or 0
+            folder_path = folder.get("path", "")
+            full_path = os.path.join(folder_path, p["filename"]) if folder_path else p["filename"]
+
+            files.append({
+                "path": full_path,
+                "filename": p["filename"],
+                "subfolder": folder_name,
+                "size": size,
+                "extension": ext,
+                "mtime": p["file_mtime"] or 0,
+                "thumb_url": f"/thumbnails/{p['id']}.jpg",
+                "duplicate": False,
+                "photo_id": p["id"],
+            })
+
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += size
+
+        return jsonify({
+            "total_count": len(files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": files,
         })
 
     @app.route("/api/import/destination-preview", methods=["POST"])
@@ -5498,6 +5549,7 @@ def create_app(db_path, thumb_cache_dir=None):
             skip_regroup=body.get("skip_regroup", False),
             preview_max_size=body.get("preview_max_size", 1920),
             exclude_paths=set(body.get("exclude_paths", [])) or None,
+            exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
             recursive=body.get("recursive", True),
         )
 
