@@ -13,9 +13,22 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
+def _is_unsafe_path(s):
+    """Check if a path string could escape the destination directory."""
+    if not s:
+        return False
+    # Reject backslashes (Windows traversal), absolute paths, and '..' segments
+    if "\\" in s:
+        return True
+    p = Path(s)
+    if p.is_absolute():
+        return True
+    return ".." in p.parts
+
+
 def _sanitize_template(template):
     """Reject folder templates that could escape the destination directory."""
-    if template and (template.startswith("/") or ".." in template.split("/")):
+    if template and _is_unsafe_path(template):
         raise ValueError(f"unsafe folder template: {template!r}")
     return template
 
@@ -35,7 +48,7 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
         return "unsorted"
     result = exif_timestamp.strftime(template)
     # Double-check the rendered result is still safe
-    if result and (result.startswith("/") or ".." in result.split("/")):
+    if result and _is_unsafe_path(result):
         raise ValueError(f"folder template produced unsafe path: {result!r}")
     return result
 

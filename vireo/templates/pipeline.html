@@ -472,7 +472,7 @@ body { padding-bottom: 36px; }
                 </div>
                 <div id="sourceFolderList" style="margin-top:6px;"></div>
                 <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-top:6px;display:inline-flex;align-items:center;gap:4px;">
-                  <input type="checkbox" id="chkIncludeSubfolders" checked style="accent-color:var(--accent);" onchange="fetchFolderPreview()"> Include subfolders
+                  <input type="checkbox" id="chkIncludeSubfolders" checked style="accent-color:var(--accent);" onchange="fetchFolderPreview();markFolderPreviewStale()"> Include subfolders
                 </label>
               </div>
             </div>
@@ -1410,6 +1410,7 @@ function onGroupToggle(group) {
   children.forEach(function(cb) { cb.checked = checked; });
   updateStartButton();
   fetchFolderPreview();
+  markFolderPreviewStale();
 }
 
 function onExtToggle(group) {
@@ -1426,6 +1427,7 @@ function onExtToggle(group) {
   parent.indeterminate = anyChecked && !allChecked;
   updateStartButton();
   fetchFolderPreview();
+  markFolderPreviewStale();
 }
 
 function getIngestFileTypes() {

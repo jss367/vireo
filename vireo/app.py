@@ -2775,13 +2775,11 @@ def create_app(db_path, thumb_cache_dir=None):
         if not destination:
             return json_error("destination required", 400)
 
-        from ingest import preview_destination
+        from ingest import _is_unsafe_path, preview_destination
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        if folder_template and (
-            folder_template.startswith("/") or ".." in folder_template.split("/")
-        ):
-            return json_error("folder_template must be a relative path without '..'", 400)
+        if folder_template and _is_unsafe_path(folder_template):
+            return json_error("folder_template must be a relative path without '..' or backslashes", 400)
 
         result = preview_destination(
             sources=sources,
