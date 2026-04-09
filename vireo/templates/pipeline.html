@@ -952,7 +952,7 @@ function initPipelinePage() {
           return '<button class="btn btn-secondary" '
             + 'style="font-size:11px;padding:2px 8px;" '
             + 'title="' + escapeHtml(path) + '" '
-            + 'onclick="selectRecentDestination(\'' + escapeHtml(path).replace(/'/g, "\\'") + '\')">'
+            + 'onclick="selectRecentDestination(\'' + escapeHtml(path).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + '\')">'
             + escapeHtml(name) + '</button>';
         }).join('');
         document.getElementById('recentDestinations').style.display = '';
