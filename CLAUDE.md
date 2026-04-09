@@ -61,14 +61,12 @@ Workspace management: `workspaces`, `workspace_folders`
 
 **All feature work, bug fixes, and non-trivial changes MUST be done in a git worktree.** Do not make changes directly on `main`. At the start of any implementation task, create a worktree before writing code.
 
-**IMPORTANT: Once a PR is created for a branch, that branch is frozen. All subsequent changes — review fixes, bug fixes, CI failures — must go in a new branch off the PR's branch with a new fix PR targeting it. NEVER push additional commits to a branch that already has a PR. Exception: merge conflict resolution may be pushed directly to a branch with an open PR. The commit must contain only conflict resolution — no other fixes or changes.**
-
 1. Create a worktree and feature branch for the task.
 2. Do all implementation work in the worktree.
 3. Run tests before finishing: `python -m pytest tests/test_workspaces.py vireo/tests/test_db.py vireo/tests/test_app.py vireo/tests/test_photos_api.py vireo/tests/test_edits_api.py vireo/tests/test_jobs_api.py vireo/tests/test_darktable_api.py vireo/tests/test_config.py -v`
-4. **Create a PR** using `gh pr create`. Include what was changed and test results in the PR description.
-5. **After a PR is created, NEVER push additional commits to its branch** (except merge conflict resolution). Any further changes — review fixes, bug fixes, CI failures — must go in a new branch off the PR's branch with a new fix PR targeting that branch.
-6. **Before pushing to an existing branch**, check if its PR is still open (`gh pr view <branch> --json state`). If the PR is already merged or closed, create a new branch from `main`, apply your changes there, and open a new PR. Pushing to a merged PR's branch does nothing — the changes won't reach `main`.
+4. **Create a PR** using `gh pr create`. Include what changed and test results in the PR description.
+5. When review feedback arrives, push fixes to the **same branch**. The review bot re-reviews automatically on push.
+6. Squash-merge when approved.
 
 ## Debugging tips
 
@@ -83,30 +81,13 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 ### How it works
 
 1. Someone comments `/claude-fix` on a PR to activate the agent.
-2. Claude reads review comments, creates a **new fix PR** targeting the original PR's branch.
-3. The fix PR gets the `claude-agent` label automatically.
-4. When a review is submitted on a `claude-agent` PR (not an approval), Claude creates another fix PR.
-5. When **Codex Connect** submits a review on any PR (even without the `claude-agent` label), Claude addresses the feedback in a fix PR and adds the `claude-agent` label so future comments are handled automatically.
-6. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
-7. When an **approving review** is submitted or someone comments **👍**, the merge chain starts.
-8. The chain squash-merges from leaf to root, running tests between each merge.
-9. Branches are deleted after merge.
-
-### PR chain structure
-
-Each fix PR includes `Parent PR: #N` in its body. This is how the merge chain traces the ancestry:
-
-```
-main ← feature-v1 (PR A, original)
-         ← feature-v1-fix-1 (PR B, fixes round 1)
-            ← feature-v1-fix-1-fix-2 (PR C, fixes round 2)
-```
-
-### Conflict detection
-
-When `main` receives a push, the workflow checks all open `claude-agent` PRs for merge conflicts and resolves them automatically.
+2. Claude reads review comments and pushes fixes to the **same branch**.
+3. When a review is submitted on a `claude-agent` PR (not an approval), Claude pushes fixes to the branch.
+4. When **Codex Connect** submits a review on any PR, Claude addresses the feedback by pushing to the branch and adds the `claude-agent` label so future comments are handled automatically.
+5. When the **Tests workflow fails** on any PR, Claude reads the failure logs and pushes a fix directly to the PR branch. Loop prevention: skips if the failing commit was already a CI fix attempt.
+6. When an **approving review** is submitted or someone comments **👍**, the PR is squash-merged.
+7. Branches are deleted after merge.
 
 ### Key files
 
 - `.github/workflows/pr-agent.yml` — Workflow with all jobs
-- `.github/scripts/merge-chain.sh` — Squash-merge chain logic
