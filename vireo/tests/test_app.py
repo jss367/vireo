@@ -1499,6 +1499,9 @@ def test_api_folder_relocate_merge(app_and_db, tmp_path):
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
     db.conn.commit()
 
+    # Remove dir_a from disk so the source is truly missing
+    os.rmdir(dir_a)
+
     # Create photo1.jpg on disk in the target folder
     (tmp_path / "folder_b" / "photo1.jpg").write_bytes(b"\xff\xd8")
 

@@ -978,10 +978,20 @@ class Database:
         ).fetchone()
         if conflict:
             # Only merge if source folder is missing; for ok folders, reject
-            source_status = self.conn.execute(
-                "SELECT status FROM folders WHERE id = ?", (folder_id,)
+            source_row = self.conn.execute(
+                "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
             ).fetchone()
-            if source_status and source_status["status"] == "missing":
+            if source_row and source_row["status"] == "missing":
+                # Revalidate: if original path came back, refresh status instead
+                if os.path.isdir(source_row["path"]):
+                    self.conn.execute(
+                        "UPDATE folders SET status = 'ok' WHERE id = ?",
+                        (folder_id,),
+                    )
+                    self.conn.commit()
+                    raise ValueError(
+                        f"Path is already tracked as folder {conflict['id']}"
+                    )
                 return self._merge_into_existing(folder_id, conflict["id"], new_path)
             raise ValueError(
                 f"Path is already tracked as folder {conflict['id']}"

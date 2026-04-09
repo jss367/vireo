@@ -1931,6 +1931,34 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     assert cascaded == []
 
 
+def test_relocate_folder_merge_revalidates_source_path(tmp_path):
+    """relocate_folder rejects merge if source path came back on disk."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    source_path = str(tmp_path / "source")
+    target_path = str(tmp_path / "target")
+    os.makedirs(source_path)
+    os.makedirs(target_path)
+
+    fid_source = db.add_folder(source_path, name="source")
+    fid_target = db.add_folder(target_path, name="target")
+    # Mark source as missing, but the directory still exists on disk (simulating reconnected drive)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_source,))
+    db.conn.commit()
+
+    import pytest
+    with pytest.raises(ValueError, match="already tracked"):
+        db.relocate_folder(fid_source, target_path)
+
+    # Source should be refreshed to ok, not deleted
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_source,)).fetchone()
+    assert row is not None
+    assert row["status"] == "ok"
+
+
 def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
     """relocate_folder raises ValueError when source folder is not missing."""
     from db import Database
