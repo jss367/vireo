@@ -1243,6 +1243,8 @@ function onCopyModeChange() {
     copyFields.style.display = '';
   } else {
     copyFields.style.display = 'none';
+    _folderPreviewShown = false;
+    document.getElementById('folderPreviewResults').style.display = 'none';
   }
   updateStartButton();
 }
@@ -2395,6 +2397,7 @@ async function browseForDestination() {
     if (path) {
       document.getElementById('cfgDestination').value = path;
       updateStartButton();
+      markFolderPreviewStale();
       return;
     }
   }
@@ -2597,6 +2600,7 @@ function selectFolder() {
     }
   } else {
     document.getElementById('cfgDestination').value = _fbSelectedDir;
+    markFolderPreviewStale();
   }
   updateStartButton();
   fetchFolderPreview();
