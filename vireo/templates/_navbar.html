@@ -3149,6 +3149,8 @@ function closeRelocateBrowser() {
 }
 
 async function browseRelocate(path) {
+  _relocateSelectedSub = null;
+  updateRelocateBtn();
   const url = path ? `/api/browse?path=${encodeURIComponent(path)}` : '/api/browse';
   const data = await safeFetch(url);
   _relocateBrowserPath = data.path;
@@ -3156,8 +3158,6 @@ async function browseRelocate(path) {
   document.getElementById('relocateBreadcrumb').textContent = data.path;
 
   const list = document.getElementById('relocateFolderList');
-  _relocateSelectedSub = null;
-  updateRelocateBtn();
   let html = '';
   const parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   if (data.path !== '/') {
