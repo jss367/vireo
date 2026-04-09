@@ -603,7 +603,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # Extract working copies for RAW photos (after pairing so companion is known)
         if vireo_dir:
             _extract_working_copies(db, vireo_dir, progress_callback, status_callback)
-    except Exception:
+    except BaseException:
         db.conn.rollback()
         raise
     finally:
