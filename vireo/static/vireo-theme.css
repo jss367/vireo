@@ -1,7 +1,7 @@
 /* ---------- Themes ---------- */
 
-/* Vireo Dark (default) — matches the teal/navy logo */
-:root, :root[data-theme="vireo-dark"] {
+/* Vireo Dark — matches the teal/navy logo */
+:root[data-theme="vireo-dark"] {
   --bg-primary: #0A1F2E;
   --bg-secondary: #0E2A3D;
   --bg-tertiary: #14374E;
@@ -78,8 +78,8 @@
   --info: #7ec8e3;
 }
 
-/* Vireo Gold — warm yellow/grey palette matching the yellow logo variant */
-:root[data-theme="vireo-gold"] {
+/* Vireo Gold (default) — warm yellow/grey palette matching the logo */
+:root, :root[data-theme="vireo-gold"] {
   --bg-primary: #FDFAF0;
   --bg-secondary: #FFFEF8;
   --bg-tertiary: #F5F0E0;
