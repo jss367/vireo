@@ -3106,7 +3106,7 @@ async function loadMissingFolders() {
         <div class="missing-folder-path" title="${f.path}">${f.path}</div>
         <div class="missing-folder-count">${f.photo_count} photo${f.photo_count !== 1 ? 's' : ''}</div>
         <div class="missing-folder-actions">
-          <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&amp;quot;')}')">Relocate</button>
+          <button onclick="startRelocate(${f.id}, '${f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;')}')">Relocate</button>
           <button class="danger" onclick="startRemoveFolder(${f.id}, '${f.path.replace(/'/g, "\\'")}', ${f.photo_count})">Remove</button>
         </div>
       </div>
