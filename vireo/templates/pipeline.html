@@ -1447,6 +1447,7 @@ function onCopyModeChange() {
 
   if (_copyMode) {
     copyFields.style.display = '';
+    checkForDuplicates();
   } else {
     copyFields.style.display = 'none';
     _folderPreviewShown = false;
