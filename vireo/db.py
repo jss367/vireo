@@ -977,7 +977,15 @@ class Database:
             (new_path, folder_id),
         ).fetchone()
         if conflict:
-            return self._merge_into_existing(folder_id, conflict["id"], new_path)
+            # Only merge if source folder is missing; for ok folders, reject
+            source_status = self.conn.execute(
+                "SELECT status FROM folders WHERE id = ?", (folder_id,)
+            ).fetchone()
+            if source_status and source_status["status"] == "missing":
+                return self._merge_into_existing(folder_id, conflict["id"], new_path)
+            raise ValueError(
+                f"Path is already tracked as folder {conflict['id']}"
+            )
 
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)

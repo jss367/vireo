@@ -1931,6 +1931,31 @@ def test_relocate_folder_merge_into_existing(tmp_path):
     assert cascaded == []
 
 
+def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
+    """relocate_folder raises ValueError when source folder is not missing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    dir_a = str(tmp_path / "folder_a")
+    dir_b = str(tmp_path / "folder_b")
+    os.makedirs(dir_a)
+    os.makedirs(dir_b)
+
+    fid_a = db.add_folder(dir_a, name="a")
+    fid_b = db.add_folder(dir_b, name="b")
+    # folder_a is NOT missing — status is 'ok'
+
+    import pytest
+    with pytest.raises(ValueError, match="already tracked"):
+        db.relocate_folder(fid_a, dir_b)
+
+    # Both folders should remain unchanged
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_a,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_b,)).fetchone() is not None
+
+
 def test_relocate_folder_merge_reparents_children(tmp_path):
     """_merge_into_existing reparents child folders to the target folder."""
     from db import Database
