@@ -4169,7 +4169,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         if not raw_ids:
             return json_error("photo_ids required")
-        photo_ids = [int(pid) for pid in raw_ids]
+        try:
+            photo_ids = [int(pid) for pid in raw_ids]
+        except (ValueError, TypeError):
+            return json_error("photo_ids must be integers")
         if not destination:
             return json_error("destination required")
         if not os.path.isabs(destination):
