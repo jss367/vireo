@@ -475,3 +475,50 @@ def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
     preview_step = next(s for s in data['steps'] if s['id'] == 'previews')
     assert 'progress' in preview_step
     assert preview_step['progress']['total'] > 0
+
+
+def test_job_export_returns_job_id(app_and_db, tmp_path):
+    """POST /api/jobs/export starts a background export and returns job_id."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchall()
+    photo_ids = [p["id"] for p in photos]
+    dest = str(tmp_path / "export_out")
+
+    resp = client.post("/api/jobs/export", json={
+        "photo_ids": photo_ids,
+        "destination": dest,
+        "naming_template": "{original}",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data
+    assert data["job_id"].startswith("export-")
+
+
+def test_job_export_missing_photo_ids(app_and_db):
+    """POST /api/jobs/export without photo_ids returns 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/export", json={"destination": "/tmp/out"})
+    assert resp.status_code == 400
+
+
+def test_job_export_missing_destination(app_and_db):
+    """POST /api/jobs/export without destination returns 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/export", json={"photo_ids": [1]})
+    assert resp.status_code == 400
+
+
+def test_job_export_relative_destination(app_and_db):
+    """POST /api/jobs/export with relative destination returns 400."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/export", json={
+        "photo_ids": [1],
+        "destination": "relative/path",
+    })
+    assert resp.status_code == 400

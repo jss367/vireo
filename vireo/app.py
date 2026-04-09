@@ -4155,6 +4155,98 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         return jsonify({"job_id": job_id})
 
+    # -- Export job route --
+
+    @app.route("/api/jobs/export", methods=["POST"])
+    def api_job_export():
+        """Export selected photos to a destination directory."""
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("photo_ids", [])
+        destination = body.get("destination", "")
+        naming_template = body.get("naming_template", "{original}")
+        max_size = body.get("max_size")
+        quality = body.get("quality", 92)
+
+        if not raw_ids:
+            return json_error("photo_ids required")
+        try:
+            photo_ids = [int(pid) for pid in raw_ids]
+        except (ValueError, TypeError):
+            return json_error("photo_ids must be integers")
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+
+        # Filter to only photos visible in the active workspace,
+        # preserving the caller's original ordering.
+        placeholders = ",".join("?" for _ in photo_ids)
+        visible = db.conn.execute(
+            f"""SELECT p.id FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+            [active_ws] + list(photo_ids),
+        ).fetchall()
+        visible_set = {r["id"] for r in visible}
+        photo_ids = [pid for pid in photo_ids if pid in visible_set]
+        if not photo_ids:
+            return json_error("no exportable photos in current workspace")
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        effective_cfg = db.get_effective_config(cfg.load())
+        wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+
+        def work(job):
+            from export import export_photos
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+
+            job["_start_time"] = time.time()
+            job["progress"]["total"] = len(photo_ids)
+
+            def progress_cb(current, total, filename):
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "rate": round(
+                        current / max(time.time() - job["_start_time"], 0.01), 1
+                    ),
+                    "phase": "Exporting photos",
+                })
+
+            return export_photos(
+                db=thread_db,
+                vireo_dir=vireo_dir,
+                photo_ids=photo_ids,
+                destination=destination,
+                options={
+                    "naming_template": naming_template,
+                    "max_size": max_size,
+                    "quality": quality,
+                    "working_copy_max_size": wc_max_size,
+                },
+                progress_cb=progress_cb,
+            )
+
+        job_id = runner.start(
+            "export", work,
+            config={
+                "photo_ids": photo_ids,
+                "destination": destination,
+                "naming_template": naming_template,
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
