@@ -1135,8 +1135,7 @@ function renderPreview() {
   summary.innerHTML =
     '<span class="stat"><span class="stat-value">' + data.total_count + '</span> photos</span>' +
     '<span class="stat"><span class="stat-value">' + sizeStr + '</span></span>' +
-    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>' +
-    (data.duplicate_count > 0 ? '<span class="stat"><span class="stat-value">' + data.duplicate_count + '</span> already imported</span>' : '');
+    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>';
 
   // Group files by subfolder
   var groups = {};
@@ -1223,6 +1222,7 @@ function checkForDuplicates() {
     body: JSON.stringify({ paths: paths }),
     signal: _duplicateCheckAbort.signal,
   }).then(function(response) {
+    if (!response.ok) return;
     var reader = response.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
@@ -1236,7 +1236,7 @@ function checkForDuplicates() {
         parts.forEach(function(part) {
           var match = part.match(/^data: (.+)$/m);
           if (!match) return;
-          var data = JSON.parse(match[1]);
+          try { var data = JSON.parse(match[1]); } catch(e) { return; }
           if (data.duplicates) {
             data.duplicates.forEach(function(p) {
               _duplicateResults[p] = true;
