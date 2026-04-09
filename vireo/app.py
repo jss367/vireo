@@ -499,6 +499,16 @@ def create_app(db_path, thumb_cache_dir=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
+    @app.route("/api/folders/check-health", methods=["POST"])
+    def api_folders_check_health():
+        db = _get_db()
+        changed = db.check_folder_health()
+        missing = db.get_missing_folders()
+        return jsonify({
+            "changed": changed,
+            "missing": [dict(f) for f in missing],
+        })
+
     @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
     def api_folder_relocate(folder_id):
         db = _get_db()
