@@ -84,7 +84,8 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     if max_size is not None:
         max_size = int(max_size)
     quality = options.get("quality", 92)
-    wc_max = int(options.get("working_copy_max_size", 4096))
+    wc_max_raw = options.get("working_copy_max_size")
+    wc_max = int(wc_max_raw) if wc_max_raw is not None else 4096
 
     os.makedirs(destination, exist_ok=True)
 
