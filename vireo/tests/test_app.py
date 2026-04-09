@@ -1485,26 +1485,41 @@ def test_api_folder_relocate(app_and_db, tmp_path):
     assert row["path"] == new_path
 
 
-def test_api_folder_relocate_duplicate_path(app_and_db, tmp_path):
-    """POST /api/folders/<id>/relocate returns 409 when target path is already tracked."""
+def test_api_folder_relocate_merge(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate merges into existing folder when paths conflict."""
     app, db = app_and_db
 
-    # Create two folders with real disk paths
     dir_a = str(tmp_path / "folder_a")
     dir_b = str(tmp_path / "folder_b")
     os.makedirs(dir_a)
     os.makedirs(dir_b)
 
     fid_a = db.add_folder(dir_a, name="a")
-    db.add_folder(dir_b, name="b")
+    fid_b = db.add_folder(dir_b, name="b")
     db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_a,))
     db.conn.commit()
 
-    # Try to relocate folder_a to folder_b's path
+    # Remove dir_a from disk so the source is truly missing
+    os.rmdir(dir_a)
+
+    # Create photo1.jpg on disk in the target folder
+    (tmp_path / "folder_b" / "photo1.jpg").write_bytes(b"\xff\xd8")
+
+    # Add a photo to each folder
+    db.add_photo(fid_a, "photo1.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(fid_b, "photo2.jpg", ".jpg", 1000, 1.0)
+
     client = app.test_client()
     resp = client.post(f"/api/folders/{fid_a}/relocate", json={"path": dir_b})
-    assert resp.status_code == 409
-    assert "already tracked" in resp.get_json()["error"]
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+    # Folder A should be gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_a,)).fetchone() is None
+    # Both photos should now be in folder B
+    photos = db.conn.execute("SELECT filename FROM photos WHERE folder_id = ?", (fid_b,)).fetchall()
+    filenames = {p["filename"] for p in photos}
+    assert filenames == {"photo1.jpg", "photo2.jpg"}
 
 
 def test_api_folder_delete(app_and_db):

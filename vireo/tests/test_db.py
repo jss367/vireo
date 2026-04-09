@@ -1881,8 +1881,8 @@ def test_relocate_folder_cascade(tmp_path):
     assert row["status"] == "ok"
 
 
-def test_relocate_folder_duplicate_path(tmp_path):
-    """relocate_folder raises ValueError when target path already exists in DB."""
+def test_relocate_folder_merge_into_existing(tmp_path):
+    """relocate_folder merges photos into existing folder when paths conflict."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws = db.ensure_default_workspace()
@@ -1891,19 +1891,215 @@ def test_relocate_folder_duplicate_path(tmp_path):
     existing_path = str(tmp_path / "existing")
     os.makedirs(existing_path)
 
-    fid = db.add_folder("/old/path", name="photos")
-    db.add_folder(existing_path, name="existing")
-    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    # Create two folders: one missing, one existing at target path
+    fid_missing = db.add_folder("/old/path", name="photos")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    # Create photo_a.jpg on disk so it will be found during merge
+    (tmp_path / "existing" / "photo_a.jpg").write_bytes(b"\xff\xd8")
+
+    # Add photos to both folders
+    # Missing folder: photo_a.jpg (exists on disk), photo_b.jpg (duplicate), photo_d.jpg (NOT on disk)
+    pid_a = db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    pid_b_missing = db.add_photo(fid_missing, "photo_b.jpg", ".jpg", 1000, 1.0)
+    pid_d = db.add_photo(fid_missing, "photo_d.jpg", ".jpg", 1000, 1.0)
+    # Existing folder has photo_b.jpg (will win) and photo_c.jpg
+    pid_b_existing = db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 2000, 2.0)
+    pid_c = db.add_photo(fid_existing, "photo_c.jpg", ".jpg", 1000, 1.0)
+
+    cascaded = db.relocate_folder(fid_missing, existing_path)
+
+    # Missing folder should be deleted
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
+
+    # photo_a exists on disk at target — should be reassigned to existing folder
+    row_a = db.conn.execute("SELECT folder_id FROM photos WHERE id = ?", (pid_a,)).fetchone()
+    assert row_a["folder_id"] == fid_existing
+
+    # photo_b from missing folder should be deleted (duplicate in target)
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_missing,)).fetchone() is None
+
+    # photo_d does NOT exist on disk at target — should be deleted
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_d,)).fetchone() is None
+
+    # photo_b and photo_c in existing folder should be untouched
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_b_existing,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM photos WHERE id = ?", (pid_c,)).fetchone() is not None
+
+    assert cascaded == []
+
+
+def test_relocate_folder_merge_revalidates_source_path(tmp_path):
+    """relocate_folder rejects merge if source path came back on disk."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    source_path = str(tmp_path / "source")
+    target_path = str(tmp_path / "target")
+    os.makedirs(source_path)
+    os.makedirs(target_path)
+
+    fid_source = db.add_folder(source_path, name="source")
+    fid_target = db.add_folder(target_path, name="target")
+    # Mark source as missing, but the directory still exists on disk (simulating reconnected drive)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_source,))
     db.conn.commit()
 
     import pytest
     with pytest.raises(ValueError, match="already tracked"):
-        db.relocate_folder(fid, existing_path)
+        db.relocate_folder(fid_source, target_path)
 
-    # Verify original folder was NOT modified
-    row = db.conn.execute("SELECT path, status FROM folders WHERE id = ?", (fid,)).fetchone()
-    assert row["path"] == "/old/path"
-    assert row["status"] == "missing"
+    # Source should be refreshed to ok, not deleted
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_source,)).fetchone()
+    assert row is not None
+    assert row["status"] == "ok"
+
+
+def test_relocate_folder_rejects_conflict_for_ok_folder(tmp_path):
+    """relocate_folder raises ValueError when source folder is not missing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    dir_a = str(tmp_path / "folder_a")
+    dir_b = str(tmp_path / "folder_b")
+    os.makedirs(dir_a)
+    os.makedirs(dir_b)
+
+    fid_a = db.add_folder(dir_a, name="a")
+    fid_b = db.add_folder(dir_b, name="b")
+    # folder_a is NOT missing — status is 'ok'
+
+    import pytest
+    with pytest.raises(ValueError, match="already tracked"):
+        db.relocate_folder(fid_a, dir_b)
+
+    # Both folders should remain unchanged
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_a,)).fetchone() is not None
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_b,)).fetchone() is not None
+
+
+def test_relocate_folder_merge_updates_photo_count(tmp_path):
+    """_merge_into_existing recomputes photo_count on the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    # Create files on disk so they survive the existence check
+    (tmp_path / "existing" / "photo_a.jpg").write_bytes(b"\xff\xd8")
+
+    db.add_photo(fid_missing, "photo_a.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(fid_existing, "photo_b.jpg", ".jpg", 1000, 1.0)
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    row = db.conn.execute("SELECT photo_count FROM folders WHERE id = ?", (fid_existing,)).fetchone()
+    assert row["photo_count"] == 2
+
+
+def test_relocate_folder_merge_marks_target_ok(tmp_path):
+    """_merge_into_existing sets target folder status to ok."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    # Mark both as missing
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    row = db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid_existing,)).fetchone()
+    assert row["status"] == "ok"
+
+
+def test_relocate_folder_merge_reparents_children(tmp_path):
+    """_merge_into_existing reparents child folders to the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    fid_missing = db.add_folder("/old/path", name="missing")
+    fid_existing = db.add_folder(existing_path, name="existing")
+    # Child folder whose parent is the missing folder
+    fid_child = db.add_folder("/old/path/sub", name="sub", parent_id=fid_missing)
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    # Source folder should be gone
+    assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid_missing,)).fetchone() is None
+
+    # Child folder should now point to the target as its parent
+    row = db.conn.execute("SELECT parent_id FROM folders WHERE id = ?", (fid_child,)).fetchone()
+    assert row["parent_id"] == fid_existing
+
+
+def test_relocate_folder_merge_preserves_workspace_links(tmp_path):
+    """_merge_into_existing transfers workspace visibility to the target folder."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    db.set_active_workspace(ws1)
+
+    existing_path = str(tmp_path / "existing")
+    os.makedirs(existing_path)
+
+    # Create source folder in ws1
+    fid_missing = db.add_folder("/old/path", name="missing")
+
+    # Create a second workspace and add target folder to it (NOT to ws1)
+    ws2 = db.conn.execute(
+        "INSERT INTO workspaces (name) VALUES (?)", ("Second",)
+    ).lastrowid
+    db.conn.commit()
+    fid_existing = db.conn.execute(
+        "INSERT INTO folders (path, name) VALUES (?, ?)", (existing_path, "existing")
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws2, fid_existing),
+    )
+    db.conn.commit()
+
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_missing,))
+    db.conn.commit()
+
+    db.relocate_folder(fid_missing, existing_path)
+
+    # Target folder should now be visible in BOTH workspaces
+    ws_links = db.conn.execute(
+        "SELECT workspace_id FROM workspace_folders WHERE folder_id = ? ORDER BY workspace_id",
+        (fid_existing,),
+    ).fetchall()
+    ws_ids = {row["workspace_id"] for row in ws_links}
+    assert ws1 in ws_ids, "target folder should be visible in source's workspace"
+    assert ws2 in ws_ids, "target folder should retain its original workspace"
 
 
 def test_relocate_folder_cascade_skips_duplicate(tmp_path):
