@@ -4170,6 +4170,9 @@ def create_app(db_path, thumb_cache_dir=None):
         if not raw_ids:
             return json_error("photo_ids required")
         try:
+            for pid in raw_ids:
+                if isinstance(pid, float):
+                    raise ValueError("float")
             photo_ids = [int(pid) for pid in raw_ids]
         except (ValueError, TypeError):
             return json_error("photo_ids must be integers")
