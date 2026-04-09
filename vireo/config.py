@@ -81,6 +81,7 @@ DEFAULTS = {
         "folder_template": "%Y/%Y-%m-%d",
         "skip_duplicates": True,
         "file_types": "both",
+        "recent_destinations": [],
     },
     "keyboard_shortcuts": {
         "navigation": {
