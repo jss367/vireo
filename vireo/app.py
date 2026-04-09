@@ -485,6 +485,7 @@ def create_app(db_path, thumb_cache_dir=None):
             },
             "results": results,
             "workspace_overrides": ws_overrides,
+            "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
 
     @app.route("/api/folders")
