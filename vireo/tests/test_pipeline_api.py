@@ -2,9 +2,11 @@
 import os
 import shutil
 import tempfile
+from datetime import datetime
 
 import pytest
 from app import create_app
+from PIL import Image
 
 
 @pytest.fixture
@@ -189,3 +191,51 @@ def test_pipeline_accepts_preview_max_size(setup):
             "preview_max_size": 2560,
         })
         assert resp.status_code == 200
+
+
+def test_destination_preview_returns_folder_structure(setup, tmp_path):
+    app, db_path = setup
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+
+    img = Image.new("RGB", (100, 100))
+    img.save(str(src / "photo.jpg"))
+    mtime = datetime(2026, 3, 25, 10, 0, 0).timestamp()
+    os.utime(str(src / "photo.jpg"), (mtime, mtime))
+
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+            "destination": str(dst),
+            "folder_template": "%Y/%Y-%m-%d",
+        })
+        data = resp.get_json()
+        assert resp.status_code == 200
+        assert data["total_photos"] == 1
+        assert data["total_folders"] == 1
+        assert data["new_folders"] == 1
+        assert len(data["folders"]) == 1
+        assert data["folders"][0]["path"] == "2026/2026-03-25"
+        assert data["folders"][0]["exists"] is False
+
+
+def test_destination_preview_requires_sources(setup):
+    app, _ = setup
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "destination": "/tmp/dst",
+        })
+        assert resp.status_code == 400
+
+
+def test_destination_preview_requires_destination(setup, tmp_path):
+    app, _ = setup
+    src = tmp_path / "src"
+    src.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/import/destination-preview", json={
+            "sources": [str(src)],
+        })
+        assert resp.status_code == 400

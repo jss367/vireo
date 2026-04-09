@@ -2764,6 +2764,28 @@ def create_app(db_path, thumb_cache_dir=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/destination-preview", methods=["POST"])
+    def api_import_destination_preview():
+        """Preview destination folder structure without copying files."""
+        body = request.get_json(silent=True) or {}
+        sources = body.get("sources", [])
+        destination = body.get("destination", "")
+        if not sources:
+            return json_error("sources required", 400)
+        if not destination:
+            return json_error("destination required", 400)
+
+        from ingest import preview_destination
+
+        result = preview_destination(
+            sources=sources,
+            destination=destination,
+            folder_template=body.get("folder_template", "%Y/%Y-%m-%d"),
+            file_types=body.get("file_types", "both"),
+            recursive=body.get("recursive", True),
+        )
+        return jsonify(result)
+
     @app.route("/api/import/folder-preview/thumbnail")
     def api_import_folder_preview_thumbnail():
         """Generate an on-the-fly thumbnail for a source file (not yet imported)."""
