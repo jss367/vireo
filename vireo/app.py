@@ -2778,7 +2778,7 @@ def create_app(db_path, thumb_cache_dir=None):
         photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
-        folder_map = {r["id"]: r for r in folder_rows}
+        folder_map = {r["id"]: dict(r) for r in folder_rows}
 
         files = []
         type_breakdown = {}
