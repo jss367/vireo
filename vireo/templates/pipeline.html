@@ -1246,7 +1246,13 @@ function checkForDuplicates() {
     .filter(function(f) { return _previewSelected[f.path] !== false; })
     .map(function(f) { return f.path; });
 
-  if (!paths.length) return;
+  if (!paths.length) {
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var ds = summary ? summary.querySelector('.dup-status') : null;
+    if (ds) ds.remove();
+    return;
+  }
 
   fetch('/api/import/check-duplicates', {
     method: 'POST',
