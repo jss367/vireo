@@ -59,6 +59,65 @@ def test_job_runner_tracks_failure(tmp_path):
     assert 'something broke' in job['errors'][0]
 
 
+def test_job_runner_does_not_duplicate_preexisting_errors():
+    """When work_fn records its own errors into job['errors'] and then raises
+    with the same message, the failure handler must not double-count it.
+
+    Pipelines do exactly this: stages append to job['errors'] directly, and
+    run_pipeline_job re-raises with errors[0]. Without the dedupe, the error
+    shows up twice and inflates error_count in job_history.
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def failing_work(job):
+        job['errors'].append("[model_loader] Fatal: model_path must not be empty")
+        raise RuntimeError("[model_loader] Fatal: model_path must not be empty")
+
+    job_id = runner.start('test', failing_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    job = runner.get(job_id)
+    assert job['status'] == 'failed'
+    # Exactly one error entry — the one the work function already recorded.
+    assert job['errors'] == [
+        "[model_loader] Fatal: model_path must not be empty"
+    ], f"Expected single error entry, got: {job['errors']}"
+
+
+def test_job_runner_still_records_novel_exception_text():
+    """If the exception from work_fn is *different* from any pre-recorded
+    error, it should still be appended (the dedupe is targeted, not blanket).
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def failing_work(job):
+        job['errors'].append("stage warning: something odd")
+        raise RuntimeError("orchestrator failure: unexpected state")
+
+    job_id = runner.start('test', failing_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    job = runner.get(job_id)
+    assert job['status'] == 'failed'
+    assert len(job['errors']) == 2
+    assert "stage warning: something odd" in job['errors']
+    assert "orchestrator failure: unexpected state" in job['errors']
+
+
 def test_job_runner_list_jobs():
     """JobRunner.list_jobs returns all jobs."""
     from jobs import JobRunner

@@ -159,7 +159,14 @@ class JobRunner:
                     self._cancelled.discard(job_id)
                 else:
                     job["status"] = "failed"
-                    job["errors"].append(str(e))
+                    # Avoid duplicating an error the work function already
+                    # recorded. Pipelines capture stage errors directly into
+                    # job["errors"] and then re-raise with the same message,
+                    # so a naive append here would double-count them and
+                    # inflate error_count in the persisted history.
+                    err_str = str(e)
+                    if err_str not in job["errors"]:
+                        job["errors"].append(err_str)
             if job["status"] == "failed":
                 log.exception("Job %s failed", job["id"])
         finally:
