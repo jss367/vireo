@@ -2803,13 +2803,19 @@ def create_app(db_path, thumb_cache_dir=None):
             total = len(paths)
             duplicate_count = 0
             batch_duplicates = []
+            # Also track hashes seen in this run so identical source files
+            # (not yet in DB) are reported as duplicates of each other,
+            # matching the behaviour of the actual import step.
+            seen_hashes = set()
 
             for checked, path in enumerate(paths, 1):
                 try:
                     file_hash = compute_file_hash(path)
-                    if file_hash in known_hashes:
+                    if file_hash in known_hashes or file_hash in seen_hashes:
                         batch_duplicates.append(path)
                         duplicate_count += 1
+                    else:
+                        seen_hashes.add(file_hash)
                 except OSError:
                     pass  # Skip unreadable/missing files
 

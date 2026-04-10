@@ -1107,7 +1107,7 @@ function fetchFolderPreview() {
         _previewSelected[f.path] = !f.duplicate;
       });
       renderPreview();
-      checkForDuplicates();
+      if (_copyMode) checkForDuplicates();
     })
     .catch(function(err) {
       if (err.name === 'AbortError') return;
@@ -1241,7 +1241,21 @@ function checkForDuplicates() {
   _duplicateResults = {};
   _duplicateCheckAbort = new AbortController();
 
-  var paths = _previewData.files.map(function(f) { return f.path; });
+  // Only send selected files: deselected files are excluded from import and
+  // should not influence which other files are flagged as run-duplicates,
+  // matching the behaviour of the actual import step (exclude_paths applied
+  // before duplicate filtering).
+  var paths = _previewData.files
+    .filter(function(f) { return _previewSelected[f.path] !== false; })
+    .map(function(f) { return f.path; });
+
+  if (!paths.length) {
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var ds = summary ? summary.querySelector('.dup-status') : null;
+    if (ds) ds.remove();
+    return;
+  }
 
   fetch('/api/import/check-duplicates', {
     method: 'POST',
@@ -1268,9 +1282,12 @@ function checkForDuplicates() {
             data.duplicates.forEach(function(p) {
               _duplicateResults[p] = true;
             });
-            applyDuplicateVisuals();
           }
-          updateDuplicateSummary(data);
+          // Only update UI if the user still wants to skip duplicates
+          if (document.getElementById('chkSkipDuplicates').checked) {
+            if (data.duplicates) applyDuplicateVisuals();
+            updateDuplicateSummary(data);
+          }
         });
         read();
       }).catch(function() {});
@@ -1575,6 +1592,8 @@ function markFolderPreviewStale() {
 }
 
 function selectSourceMode(mode) {
+  // Cancel any in-flight duplicate scan before switching context
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
   document.getElementById('radioImport').checked = (mode === 'import');
   document.getElementById('radioCollection').checked = (mode === 'collection');
