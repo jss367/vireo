@@ -434,6 +434,19 @@ body { padding-bottom: 36px; }
 .preview-thumb.duplicate {
   opacity: 0.4;
 }
+.preview-thumb .duplicate-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  background: rgba(0,0,0,0.7);
+  color: #ccc;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  pointer-events: none;
+}
 .preview-error {
   padding: 16px;
   font-size: 13px;
@@ -616,7 +629,7 @@ body { padding-bottom: 36px; }
           <div class="setting-row">
             <div class="setting-item">
               <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);"> Skip duplicates
+                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);" onchange="onSkipDuplicatesToggle()"> Skip duplicates
               </label>
             </div>
           </div>
@@ -1026,6 +1039,8 @@ var _sourceFolders = [];
 var _previewData = null;       // response from /api/import/folder-preview
 var _previewSelected = {};     // { filePath: true/false }
 var _previewAbort = null;      // AbortController for in-flight request
+var _duplicateResults = {};    // path -> true for duplicates (cache)
+var _duplicateCheckAbort = null;  // AbortController for in-flight check
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
@@ -1087,10 +1102,12 @@ function fetchFolderPreview() {
     .then(function(data) {
       _previewData = data;
       _previewSelected = {};
+      _duplicateResults = {};
       data.files.forEach(function(f) {
         _previewSelected[f.path] = !f.duplicate;
       });
       renderPreview();
+      if (_copyMode) checkForDuplicates();
     })
     .catch(function(err) {
       if (err.name === 'AbortError') return;
@@ -1111,6 +1128,8 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  // Cancel any in-flight duplicate check when preview context changes
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
 }
 
 function showPreviewError(msg) {
@@ -1140,8 +1159,7 @@ function renderPreview() {
   summary.innerHTML =
     '<span class="stat"><span class="stat-value">' + data.total_count + '</span> photos</span>' +
     '<span class="stat"><span class="stat-value">' + sizeStr + '</span></span>' +
-    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>' +
-    (data.duplicate_count > 0 ? '<span class="stat"><span class="stat-value">' + data.duplicate_count + '</span> already imported</span>' : '');
+    '<span class="stat">' + typeStrs.join(' &middot; ') + '</span>';
 
   // Group files by subfolder
   var groups = {};
@@ -1208,6 +1226,144 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
+  // Reapply cached duplicate markers after DOM rebuild
+  if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
+}
+
+function checkForDuplicates() {
+  // Abort any in-flight check
+  if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
+
+  if (!_previewData || !_previewData.files.length) return;
+  if (!_copyMode) return;
+  if (!document.getElementById('chkSkipDuplicates').checked) return;
+
+  _duplicateResults = {};
+  _duplicateCheckAbort = new AbortController();
+
+  // Only send selected files: deselected files are excluded from import and
+  // should not influence which other files are flagged as run-duplicates,
+  // matching the behaviour of the actual import step (exclude_paths applied
+  // before duplicate filtering).
+  var paths = _previewData.files
+    .filter(function(f) { return _previewSelected[f.path] !== false; })
+    .map(function(f) { return f.path; });
+
+  if (!paths.length) {
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var ds = summary ? summary.querySelector('.dup-status') : null;
+    if (ds) ds.remove();
+    return;
+  }
+
+  fetch('/api/import/check-duplicates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: paths }),
+    signal: _duplicateCheckAbort.signal,
+  }).then(function(response) {
+    if (!response.ok) return;
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = '';
+
+    function read() {
+      reader.read().then(function(result) {
+        if (result.done) return;
+        buffer += decoder.decode(result.value, { stream: true });
+        var parts = buffer.split('\n\n');
+        buffer = parts.pop();
+        parts.forEach(function(part) {
+          var match = part.match(/^data: (.+)$/m);
+          if (!match) return;
+          try { var data = JSON.parse(match[1]); } catch(e) { return; }
+          if (data.duplicates) {
+            data.duplicates.forEach(function(p) {
+              _duplicateResults[p] = true;
+            });
+          }
+          // Only update UI if the user still wants to skip duplicates
+          if (document.getElementById('chkSkipDuplicates').checked) {
+            if (data.duplicates) applyDuplicateVisuals();
+            updateDuplicateSummary(data);
+          }
+        });
+        read();
+      }).catch(function() {});
+    }
+    read();
+  }).catch(function() {});
+}
+
+function applyDuplicateVisuals() {
+  var skipChecked = document.getElementById('chkSkipDuplicates').checked;
+  var grid = document.getElementById('previewGrid');
+  var thumbs = grid.querySelectorAll('.preview-thumb');
+  thumbs.forEach(function(el) {
+    var path = el.dataset.path;
+    var isDup = _duplicateResults[path];
+    if (isDup && skipChecked) {
+      el.classList.add('duplicate');
+      if (!el.querySelector('.duplicate-badge')) {
+        var badge = document.createElement('span');
+        badge.className = 'duplicate-badge';
+        badge.textContent = 'DUPLICATE';
+        el.appendChild(badge);
+      }
+    } else {
+      el.classList.remove('duplicate');
+      var badge = el.querySelector('.duplicate-badge');
+      if (badge) badge.remove();
+    }
+  });
+}
+
+function updateDuplicateSummary(data) {
+  var summary = document.getElementById('previewSummary');
+  // Remove any existing duplicate status
+  var existing = summary.querySelector('.dup-status');
+  if (existing) existing.remove();
+
+  var span = document.createElement('span');
+  span.className = 'stat dup-status';
+  if (data.done) {
+    if (data.duplicate_count > 0) {
+      span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
+    }
+    // If 0 duplicates, show nothing
+  } else {
+    span.textContent = 'Checking duplicates\u2026 ' + data.checked + '/' + data.total;
+  }
+  if (span.innerHTML || span.textContent) summary.appendChild(span);
+}
+
+function onSkipDuplicatesToggle() {
+  var checked = document.getElementById('chkSkipDuplicates').checked;
+  if (!checked) {
+    // Abort any in-flight check so SSE callbacks stop updating the UI
+    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+    // Remove visuals and summary before clearing cache
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var existing = summary.querySelector('.dup-status');
+    if (existing) existing.remove();
+    _duplicateResults = {};
+  } else if (Object.keys(_duplicateResults).length > 0) {
+    applyDuplicateVisuals();
+    var dupCount = Object.keys(_duplicateResults).length;
+    var summary = document.getElementById('previewSummary');
+    var existing = summary.querySelector('.dup-status');
+    if (existing) existing.remove();
+    if (dupCount > 0) {
+      var span = document.createElement('span');
+      span.className = 'stat dup-status';
+      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
+      summary.appendChild(span);
+    }
+  } else {
+    checkForDuplicates();
+  }
 }
 
 function setupThumbnailObserver() {
@@ -1308,10 +1464,18 @@ function onCopyModeChange() {
 
   if (_copyMode) {
     copyFields.style.display = '';
+    checkForDuplicates();
   } else {
     copyFields.style.display = 'none';
     _folderPreviewShown = false;
     document.getElementById('folderPreviewResults').style.display = 'none';
+    // Clear duplicate state when copy mode is disabled
+    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var dupStatus = summary ? summary.querySelector('.dup-status') : null;
+    if (dupStatus) dupStatus.remove();
+    _duplicateResults = {};
   }
   updateStartButton();
 }
@@ -1428,6 +1592,8 @@ function markFolderPreviewStale() {
 }
 
 function selectSourceMode(mode) {
+  // Cancel any in-flight duplicate scan before switching context
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
   document.getElementById('radioImport').checked = (mode === 'import');
   document.getElementById('radioCollection').checked = (mode === 'collection');

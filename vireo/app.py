@@ -2777,6 +2777,60 @@ def create_app(db_path, thumb_cache_dir=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/check-duplicates", methods=["POST"])
+    def api_import_check_duplicates():
+        """Stream duplicate detection results via SSE.
+
+        Accepts {"paths": [...]}, hashes each file, checks against DB,
+        and streams batches of duplicate paths back to the client.
+        """
+        body = request.get_json(silent=True) or {}
+        paths = body.get("paths", [])
+        if not paths:
+            return json_error("paths required", 400)
+
+        from scanner import compute_file_hash
+
+        db = _get_db()
+        rows = db.conn.execute(
+            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
+        ).fetchall()
+        known_hashes = {r["file_hash"] for r in rows}
+
+        BATCH_SIZE = 20
+
+        def generate():
+            total = len(paths)
+            duplicate_count = 0
+            batch_duplicates = []
+            # Also track hashes seen in this run so identical source files
+            # (not yet in DB) are reported as duplicates of each other,
+            # matching the behaviour of the actual import step.
+            seen_hashes = set()
+
+            for checked, path in enumerate(paths, 1):
+                try:
+                    file_hash = compute_file_hash(path)
+                    if file_hash in known_hashes or file_hash in seen_hashes:
+                        batch_duplicates.append(path)
+                        duplicate_count += 1
+                    else:
+                        seen_hashes.add(file_hash)
+                except OSError:
+                    pass  # Skip unreadable/missing files
+
+                if checked % BATCH_SIZE == 0 or checked == total:
+                    yield f"data: {json.dumps({'duplicates': batch_duplicates, 'checked': checked, 'total': total})}\n\n"
+                    batch_duplicates = []
+
+            yield f"data: {json.dumps({'done': True, 'duplicate_count': duplicate_count, 'checked': total, 'total': total})}\n\n"
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.route("/api/import/collection-preview", methods=["POST"])
     def api_import_collection_preview():
         """Return preview data for photos in a collection."""
