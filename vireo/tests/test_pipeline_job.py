@@ -144,6 +144,7 @@ def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
 
     params = PipelineParams(
         collection_id=col_id,
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -221,11 +222,13 @@ def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch
 
 
 def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
-    """Pipeline with nonexistent source still returns result with errors.
+    """Pipeline with nonexistent source should complete gracefully.
 
     The scanner silently returns for nonexistent dirs (no photos found).
-    The model_loader will abort because no model is available in test env.
-    Either way, the pipeline should return a valid result dict with errors.
+    With skip_classify=True we bypass model_loader (no model in test env),
+    so the pipeline finishes without raising. If any stage regresses into
+    a real failure, the fail-propagation path in run_pipeline_job now
+    raises, which also fails the test.
     """
     import config as cfg
     from db import Database
@@ -240,6 +243,7 @@ def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
     params = PipelineParams(
         source=str(tmp_path / "nonexistent_dir"),
         destination=str(tmp_path / "dest"),
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -251,8 +255,9 @@ def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
 
     assert isinstance(result, dict)
     assert "duration" in result
-    # Should have errors (model_loader will fail in test env without models)
-    assert len(result["errors"]) > 0
+    # With skip_classify set, the scanner should handle the missing source
+    # gracefully and end without error. If this regresses — i.e. a real stage
+    # failure creeps in — the pipeline now raises, which also fails the test.
 
 
 def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
@@ -277,6 +282,7 @@ def test_pipeline_scan_thumbnail_collection_stages(tmp_path, monkeypatch):
 
     params = PipelineParams(
         source=str(photo_dir),
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -325,6 +331,7 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
 
     params = PipelineParams(
         source=str(photo_dir),
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -374,6 +381,7 @@ def test_pipeline_scan_and_thumbnail_overlap(tmp_path, monkeypatch):
 
     params = PipelineParams(
         source=str(photo_dir),
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -419,6 +427,7 @@ def test_pipeline_skips_scan_with_collection_id(tmp_path, monkeypatch):
 
     params = PipelineParams(
         collection_id=col_id,
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -451,6 +460,7 @@ def test_pipeline_nonexistent_source_scans_nothing(tmp_path, monkeypatch):
 
     params = PipelineParams(
         source="/nonexistent/path/that/does/not/exist",
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -480,6 +490,7 @@ def test_pipeline_result_has_duration(tmp_path, monkeypatch):
 
     params = PipelineParams(
         collection_id=col_id,
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -516,6 +527,7 @@ def test_pipeline_collection_created_after_scan(tmp_path, monkeypatch):
 
     params = PipelineParams(
         source=str(photo_dir),
+        skip_classify=True,
         skip_extract_masks=True,
         skip_regroup=True,
     )
@@ -1231,3 +1243,201 @@ def test_pipeline_collection_mode_marks_scan_skipped(tmp_path, monkeypatch):
     }
     assert "skipped" in scan_statuses, \
         f"scan should be 'skipped' in collection mode, saw: {scan_statuses}"
+
+
+# ---------------------------------------------------------------------------
+# Stage failure propagation (fixes the silent model-loader failure incident)
+# ---------------------------------------------------------------------------
+
+
+def _make_stage_failer(monkeypatch, stage_name, err_message):
+    """Monkeypatch a specific pipeline stage to raise when invoked."""
+    import pipeline_job
+
+    real_run = pipeline_job.run_pipeline_job
+
+    def wrapped(job, runner, db_path, ws_id, params):
+        # Replace the stage function inside run_pipeline_job by patching the
+        # classifier module that model_loader_stage imports lazily. We use a
+        # targeted env toggle instead so the test stays hermetic.
+        raise NotImplementedError(
+            "Use direct classifier monkeypatch in the test instead."
+        )
+
+    return real_run
+
+
+def _setup_fake_downloaded_model(tmp_path, monkeypatch):
+    """Put a validation-passing fake model on disk so model_loader_stage can
+    get past the model-lookup / labels / taxonomy steps and into Classifier().
+    Returns the model id that was set active.
+    """
+    import classify_job
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"stub")
+    with open(model_dir / "image_encoder.onnx.data", "wb") as f:
+        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+    (model_dir / "text_encoder.onnx").write_bytes(b"stub")
+    with open(model_dir / "text_encoder.onnx.data", "wb") as f:
+        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
+    models.set_active_model("bioclip-vit-b-16")
+    # Short-circuit taxonomy and label loading so the test stays focused on
+    # model-loading behavior.
+    monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
+    monkeypatch.setattr(
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+    )
+    return "bioclip-vit-b-16"
+
+
+def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
+    """If any pipeline stage ends in 'failed', run_pipeline_job must raise.
+
+    This is the fix for the silent model-loader crash incident: a stage
+    caught its own exception and returned normally, so jobs.py recorded the
+    run as 'completed' despite the failure. Now stage failures propagate.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("model_path must not be empty")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The pipeline must stash its structured result on the job before raising,
+    # so the pipeline UI's _onPipelineComplete handler can still read
+    # result.result.errors and map the "[model_loader] Fatal: ..." prefix to
+    # the right stage card. Without this, users on a failed run lose the
+    # actionable "Failed: <stage error>" label on the card that broke.
+    assert isinstance(job["result"], dict), \
+        "Failed pipeline must leave a dict result on the job for UI rendering"
+    assert "errors" in job["result"]
+    assert any(
+        "model_loader" in e for e in job["result"]["errors"]
+    ), f"Expected a [model_loader]-prefixed error, got: {job['result']['errors']}"
+    assert "duration" in job["result"]
+    assert "stages" in job["result"]
+
+
+def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
+    """Model loader failures from missing external-data get a friendly message.
+
+    Users should see "open Settings → Models and click Repair" rather than
+    the raw ONNXRuntime stack.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(
+            "[ONNXRuntimeError] model_path must not be empty. Ensure that "
+            "a path is provided when the model is created or loaded."
+        )
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError) as exc:
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Either the model_loader stage raised with the friendly message directly,
+    # or the pipeline raised its own failure wrapping the original; in either
+    # case the errors list (accessible via the model_loader step update) should
+    # contain the actionable "Repair" hint.
+    model_loader_errors = [
+        kwargs.get("error", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and "error" in kwargs
+    ]
+    assert any("Repair" in e for e in model_loader_errors), \
+        f"Expected a Repair hint in model_loader errors, saw: {model_loader_errors}"
+
+
+def test_pipeline_cancellation_takes_precedence_over_failure(tmp_path, monkeypatch):
+    """A cancelled pipeline must not be recorded as 'failed' even if a stage
+    crashed on the way down. Cancellation intent beats failure.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("model_path must not be empty")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # Mark cancelled BEFORE the pipeline starts so the post-stage check sees it.
+    runner.cancelled_ids.add(job["id"])
+
+    # Should NOT raise — cancellation wins over stage failure.
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    assert isinstance(result, dict)

@@ -148,11 +148,27 @@ class JobRunner:
                     job["status"] = "completed"
                 job["result"] = result
         except Exception as e:
-            job["status"] = "failed"
-            job["errors"].append(str(e))
-            log.exception("Job %s failed", job["id"])
+            # Cancellation takes precedence over failure: if the user cancelled
+            # while the work function was raising (e.g. a stage crash happened
+            # during shutdown), honor the cancel rather than recording a
+            # misleading "failed" status.
             with self._lock:
-                self._cancelled.discard(job["id"])
+                job_id = job["id"]
+                if job_id in self._cancelled:
+                    job["status"] = "cancelled"
+                    self._cancelled.discard(job_id)
+                else:
+                    job["status"] = "failed"
+                    # Avoid duplicating an error the work function already
+                    # recorded. Pipelines capture stage errors directly into
+                    # job["errors"] and then re-raise with the same message,
+                    # so a naive append here would double-count them and
+                    # inflate error_count in the persisted history.
+                    err_str = str(e)
+                    if err_str not in job["errors"]:
+                        job["errors"].append(err_str)
+            if job["status"] == "failed":
+                log.exception("Job %s failed", job["id"])
         finally:
             elapsed = time.time() - start_time
             job["finished_at"] = datetime.now().isoformat()
@@ -179,7 +195,19 @@ class JobRunner:
 
         result_data = job["result"]
         if job["status"] == "failed" and job["errors"]:
-            result_data = {"error": job["errors"][0]}
+            # Preserve a structured result (e.g. the pipeline's stages dict)
+            # when the work function stashed one before raising. Otherwise
+            # fall back to a minimal {"error": ...} payload so the history
+            # row still carries something useful.
+            # Use the pre-selected fatal error when available (pipeline jobs
+            # set _fatal_error to a "[stage] Fatal: …" message, which is the
+            # true failure cause). Fall back to errors[0] for non-pipeline
+            # jobs or edge cases where _fatal_error wasn't set.
+            primary_error = job.get("_fatal_error") or job["errors"][0]
+            if isinstance(result_data, dict):
+                result_data = {**result_data, "error": primary_error}
+            else:
+                result_data = {"error": primary_error}
 
         tree_json = json.dumps(job.get("steps", []))
         summary = self._build_summary(job)

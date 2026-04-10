@@ -12,6 +12,18 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+def _make_fake_data_file(path, size_bytes=None):
+    """Create a sparse file of the given size for .onnx.data stubs in tests.
+
+    Defaults to a size that clears the _ONNX_DATA_MIN_BYTES floor in models.py.
+    """
+    import models as _models
+    if size_bytes is None:
+        size_bytes = _models._ONNX_DATA_MIN_BYTES + 1024
+    with open(path, "wb") as f:
+        f.truncate(size_bytes)
+
+
 # ---------------------------------------------------------------------------
 # Config load / save
 # ---------------------------------------------------------------------------
@@ -151,9 +163,9 @@ def test_get_models_downloaded_flag(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
@@ -188,9 +200,9 @@ def test_set_and_get_active_model(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
@@ -212,9 +224,9 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
-    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
@@ -411,3 +423,161 @@ def test_download_model_unknown_id(tmp_path, monkeypatch):
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "Unknown model" in str(e)
+
+
+# ---------------------------------------------------------------------------
+# Model state classification (self-heal detection)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_state_missing_directory(tmp_path):
+    """Nonexistent directory reports 'missing'."""
+    import models
+    assert models._classify_model_state(
+        str(tmp_path / "nope"), ["a.onnx", "a.onnx.data"]
+    ) == "missing"
+
+
+def test_classify_state_empty_directory(tmp_path):
+    """Directory with no required files reports 'missing'."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "missing"
+
+
+def test_classify_state_partial_files(tmp_path):
+    """Directory with some but not all required files reports 'incomplete'."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    # missing text_encoder files
+    assert models._classify_model_state(
+        str(d),
+        [
+            "image_encoder.onnx", "image_encoder.onnx.data",
+            "text_encoder.onnx", "text_encoder.onnx.data",
+        ],
+    ) == "incomplete"
+
+
+def test_classify_state_truncated_data_file(tmp_path):
+    """An .onnx.data file below the size floor reports 'incomplete'."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    # Sub-threshold data file — the exact failure mode from the incident.
+    _make_fake_data_file(d / "image_encoder.onnx.data", size_bytes=1024)
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "incomplete"
+
+
+def test_classify_state_ok(tmp_path):
+    """All files present and data file meets floor reports 'ok'."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "ok"
+
+
+def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
+    """get_models reports state='incomplete' and downloaded=False when a known
+    model directory exists but the .onnx.data sidecar is under the size floor.
+
+    This is the exact disk state that caused the incident: graph stubs were
+    downloaded before the manifest learned about external-data files.
+    """
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data", size_bytes=2048)
+    (model_dir / "text_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data", size_bytes=2048)
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
+
+    result = models.get_models()
+    entry = next(m for m in result if m["id"] == "bioclip-vit-b-16")
+    assert entry["state"] == "incomplete"
+    assert entry["downloaded"] is False
+
+
+# ---------------------------------------------------------------------------
+# download_model post-download validation
+# ---------------------------------------------------------------------------
+
+
+def test_download_model_rejects_truncated_result(tmp_path, monkeypatch):
+    """download_model raises if the downloaded files fail validation.
+
+    Simulates the regression window where the downloader would fetch ONNX
+    graph stubs but the .onnx.data file was missing/truncated. The fix: fail
+    the job instead of registering a broken model.
+    """
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename.endswith(".onnx.data"):
+            # Truncated sidecar — below the size floor.
+            with open(dest, "wb") as f:
+                f.truncate(1024)
+        else:
+            with open(dest, "wb") as f:
+                f.write(b"stub")
+        return dest
+
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+
+    import pytest
+    with pytest.raises(RuntimeError, match="failed validation"):
+        models.download_model("bioclip-vit-b-16")
+
+    # The broken model must not have been registered.
+    cfg = models._load_config()
+    assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
+    """download_model registers the model when validation passes."""
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename.endswith(".onnx.data"):
+            with open(dest, "wb") as f:
+                f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+        else:
+            with open(dest, "wb") as f:
+                f.write(b"stub")
+        return dest
+
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+
+    result = models.download_model("bioclip-vit-b-16")
+    assert result.endswith("bioclip-vit-b-16")
+
+    cfg = models._load_config()
+    assert any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))

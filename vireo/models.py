@@ -17,6 +17,13 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
 
+# Minimum size for an ONNX external-data sidecar file (.onnx.data). Real weights
+# are always hundreds of MB; anything smaller means the download was truncated
+# or the .data file was never fetched. 10 MB is a generous floor that catches
+# the observed failure mode (graph stub with no weights) without risking any
+# legitimate file.
+_ONNX_DATA_MIN_BYTES = 10 * 1024 * 1024
+
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
 # within the HF repo where they live.
@@ -122,51 +129,86 @@ def _save_config(config):
 
 
 def _check_onnx_downloaded(model_dir, files):
-    """Check if all required model files exist in a model directory.
+    """Check if all required model files exist and look usable.
 
-    Args:
-        model_dir: path to the model directory
-        files: list of filenames that must be present
+    Requires each listed file to exist, and requires any ONNX external-data
+    sidecar (*.onnx.data) to be at least _ONNX_DATA_MIN_BYTES so that graph
+    stubs without weights are detected as incomplete.
 
     Returns:
-        True if the directory exists and contains all required files
+        True only if the directory exists, every file in `files` is present,
+        and every *.onnx.data file meets the size floor.
+    """
+    return _classify_model_state(model_dir, files) == "ok"
+
+
+def _classify_model_state(model_dir, files):
+    """Return 'ok', 'missing', or 'incomplete' for a model directory.
+
+    - 'missing':    directory doesn't exist, or no required file is present.
+    - 'incomplete': directory exists with some but not all required files,
+                    OR an .onnx.data sidecar exists but is below the size
+                    floor (indicating a truncated / stubs-only download).
+    - 'ok':         all files present and sidecars meet the size floor.
     """
     if not os.path.isdir(model_dir):
-        return False
-    return all(
-        os.path.isfile(os.path.join(model_dir, f))
-        for f in files
-    )
+        return "missing"
+
+    present = [
+        f for f in files if os.path.isfile(os.path.join(model_dir, f))
+    ]
+    if not present:
+        return "missing"
+    if len(present) < len(files):
+        return "incomplete"
+
+    for f in files:
+        if f.endswith(".onnx.data"):
+            size = os.path.getsize(os.path.join(model_dir, f))
+            if size < _ONNX_DATA_MIN_BYTES:
+                return "incomplete"
+
+    return "ok"
 
 
 def get_models():
-    """Return list of all models (known + custom) with download status."""
+    """Return list of all models (known + custom) with download status.
+
+    Each entry includes a `state` field with one of:
+      - "ok":         model files are all present and pass validation
+      - "incomplete": model directory exists but some files are missing or
+                      an .onnx.data sidecar is below the size floor
+      - "missing":    model directory doesn't exist or has no files
+
+    The legacy `downloaded` boolean is True only for state == "ok".
+    """
     config = _load_config()
     registered = {m["id"]: m for m in config.get("models", [])}
 
     result = []
     for km in KNOWN_MODELS:
         model_dir = os.path.join(DEFAULT_MODELS_DIR, km["id"])
-        downloaded = _check_onnx_downloaded(model_dir, km.get("files", []))
+        files = km.get("files", [])
+        state = _classify_model_state(model_dir, files)
 
+        # If the default dir doesn't have the model, check any custom
+        # registered path before giving up.
+        if state != "ok" and km["id"] in registered:
+            reg_path = registered[km["id"]].get("weights_path", "")
+            if reg_path and reg_path != model_dir:
+                reg_state = _classify_model_state(reg_path, files)
+                if reg_state == "ok":
+                    model_dir = reg_path
+                    state = "ok"
+
+        downloaded = state == "ok"
         entry = {
             **km,
             "downloaded": downloaded,
+            "state": state,
             "weights_path": model_dir if downloaded else None,
             "model_type": km.get("model_type", "bioclip"),
         }
-
-        # Also check registered path if different
-        if not downloaded and km["id"] in registered:
-            reg = registered[km["id"]]
-            reg_path = reg.get("weights_path", "")
-            if reg_path and os.path.isdir(reg_path) and all(
-                os.path.isfile(os.path.join(reg_path, f))
-                for f in km.get("files", [])
-            ):
-                entry["downloaded"] = True
-                entry["weights_path"] = reg_path
-
         result.append(entry)
 
     # Add custom models
@@ -194,6 +236,7 @@ def get_models():
                     "description": m.get("description", "Custom model"),
                     "weights_path": path,
                     "downloaded": downloaded,
+                    "state": "ok" if downloaded else "missing",
                 }
             )
 
@@ -427,6 +470,18 @@ def download_model(model_id, progress_callback=None):
             model_dir,
             subfolder=hf_subdir,
             progress_callback=progress_callback,
+        )
+
+    # Validate that what landed on disk is actually usable before we register
+    # the model. This catches truncated downloads (e.g. ONNX graph stubs with
+    # no external data sidecar) so the download-model job surfaces the
+    # failure instead of silently registering a broken model.
+    state = _classify_model_state(model_dir, files)
+    if state != "ok":
+        raise RuntimeError(
+            f"Downloaded {km['name']} failed validation ({state}). "
+            f"Some files may be missing or truncated in {model_dir}. "
+            f"Try the download again — it will resume from the cache."
         )
 
     if progress_callback:

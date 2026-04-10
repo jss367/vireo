@@ -59,6 +59,152 @@ def test_job_runner_tracks_failure(tmp_path):
     assert 'something broke' in job['errors'][0]
 
 
+def test_job_runner_does_not_duplicate_preexisting_errors():
+    """When work_fn records its own errors into job['errors'] and then raises
+    with the same message, the failure handler must not double-count it.
+
+    Pipelines do exactly this: stages append to job['errors'] directly, and
+    run_pipeline_job re-raises with errors[0]. Without the dedupe, the error
+    shows up twice and inflates error_count in job_history.
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def failing_work(job):
+        job['errors'].append("[model_loader] Fatal: model_path must not be empty")
+        raise RuntimeError("[model_loader] Fatal: model_path must not be empty")
+
+    job_id = runner.start('test', failing_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    job = runner.get(job_id)
+    assert job['status'] == 'failed'
+    # Exactly one error entry — the one the work function already recorded.
+    assert job['errors'] == [
+        "[model_loader] Fatal: model_path must not be empty"
+    ], f"Expected single error entry, got: {job['errors']}"
+
+
+def test_job_runner_still_records_novel_exception_text():
+    """If the exception from work_fn is *different* from any pre-recorded
+    error, it should still be appended (the dedupe is targeted, not blanket).
+    """
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def failing_work(job):
+        job['errors'].append("stage warning: something odd")
+        raise RuntimeError("orchestrator failure: unexpected state")
+
+    job_id = runner.start('test', failing_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    job = runner.get(job_id)
+    assert job['status'] == 'failed'
+    assert len(job['errors']) == 2
+    assert "stage warning: something odd" in job['errors']
+    assert "orchestrator failure: unexpected state" in job['errors']
+
+
+def test_failed_job_history_preserves_structured_result(tmp_path):
+    """When a work function stashes a structured result on job['result']
+    before raising, _persist_job must preserve that structure in history
+    (merging the error into it) rather than replacing it with {"error": ...}.
+
+    This is what lets the pipeline UI render per-stage details on a failed
+    run — it reads result.result.stages and result.result.errors.
+    """
+    import json as _json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def failing_pipeline_like(job):
+        # Simulate pipeline_job's behavior: build a result dict, attach it to
+        # the job, and raise with the first error message.
+        job['result'] = {
+            "stages": {
+                "scan": {"status": "completed", "count": 10},
+                "model_loader": {"status": "failed"},
+            },
+            "errors": ["[model_loader] Fatal: model_path must not be empty"],
+            "duration": 1.2,
+        }
+        job['errors'].append("[model_loader] Fatal: model_path must not be empty")
+        raise RuntimeError("[model_loader] Fatal: model_path must not be empty")
+
+    job_id = runner.start('pipeline', failing_pipeline_like)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    # Let the finally block persist
+    time.sleep(0.15)
+
+    row = db.conn.execute(
+        "SELECT result, error_count FROM job_history WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row is not None
+
+    stored = _json.loads(row["result"])
+    # Structured result must survive — the stages dict is what the UI needs.
+    assert "stages" in stored, f"expected stages in stored result, got: {stored}"
+    assert stored["stages"]["model_loader"]["status"] == "failed"
+    # The error must be merged in, not replacing the structure.
+    assert stored.get("error") == "[model_loader] Fatal: model_path must not be empty"
+    # Exactly one error entry (dedupe is working) → error_count == 1.
+    assert row["error_count"] == 1, f"expected error_count=1, got {row['error_count']}"
+
+
+def test_failed_job_history_falls_back_when_no_structured_result(tmp_path):
+    """When work_fn raises without stashing a result, persist the minimal
+    {"error": ...} payload as before — the fallback path still works."""
+    import json as _json
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def failing_work(job):
+        raise RuntimeError("boom")
+
+    job_id = runner.start('test', failing_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job['status'] == 'failed':
+            break
+        time.sleep(0.05)
+
+    time.sleep(0.15)
+
+    row = db.conn.execute(
+        "SELECT result FROM job_history WHERE id = ?", (job_id,)
+    ).fetchone()
+    stored = _json.loads(row["result"])
+    assert stored == {"error": "boom"}
+
+
 def test_job_runner_list_jobs():
     """JobRunner.list_jobs returns all jobs."""
     from jobs import JobRunner
