@@ -148,11 +148,20 @@ class JobRunner:
                     job["status"] = "completed"
                 job["result"] = result
         except Exception as e:
-            job["status"] = "failed"
-            job["errors"].append(str(e))
-            log.exception("Job %s failed", job["id"])
+            # Cancellation takes precedence over failure: if the user cancelled
+            # while the work function was raising (e.g. a stage crash happened
+            # during shutdown), honor the cancel rather than recording a
+            # misleading "failed" status.
             with self._lock:
-                self._cancelled.discard(job["id"])
+                job_id = job["id"]
+                if job_id in self._cancelled:
+                    job["status"] = "cancelled"
+                    self._cancelled.discard(job_id)
+                else:
+                    job["status"] = "failed"
+                    job["errors"].append(str(e))
+            if job["status"] == "failed":
+                log.exception("Job %s failed", job["id"])
         finally:
             elapsed = time.time() - start_time
             job["finished_at"] = datetime.now().isoformat()

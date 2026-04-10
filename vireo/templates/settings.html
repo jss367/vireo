@@ -1583,8 +1583,15 @@ async function loadModels() {
     var html = '';
     models.forEach(function(m) {
       var isActive = m.id === activeId;
-      var statusColor = m.downloaded ? 'var(--accent)' : 'var(--text-faint)';
-      var statusText = m.downloaded ? 'Downloaded' : 'Not downloaded';
+      var state = m.state || (m.downloaded ? 'ok' : 'missing');
+      var statusColor, statusText;
+      if (state === 'ok') {
+        statusColor = 'var(--accent)'; statusText = 'Downloaded';
+      } else if (state === 'incomplete') {
+        statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
+      } else {
+        statusColor = 'var(--text-faint)'; statusText = 'Not downloaded';
+      }
       var activeTag = isActive ? ' <span style="color:var(--accent);font-size:10px;font-weight:600;">ACTIVE</span>' : '';
 
       html += '<div style="padding:10px 0;border-bottom:1px solid var(--border-subtle);">';
@@ -1596,21 +1603,26 @@ async function loadModels() {
       html += activeTag;
       html += '</div>';
       html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
+      if (state === 'incomplete') {
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Model files are missing or truncated. Click Repair to finish the download — already-downloaded files will not be re-fetched.</div>';
+      }
       html += '<div style="display:flex;align-items:center;gap:8px;">';
       html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
 
-      if (m.downloaded && m.weights_path) {
+      if (state === 'ok' && m.weights_path) {
         html += '<span style="font-size:11px;color:var(--text-invisible);">' + escapeHtml(m.weights_path) + '</span>';
       }
 
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
-      if (!m.downloaded && m.source !== 'custom') {
+      if (state === 'incomplete' && m.source !== 'custom') {
+        html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+      } else if (state === 'missing' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
-      if (!isActive) {
+      if (!isActive && state === 'ok') {
         html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
-      if (m.downloaded) {
+      if (state !== 'missing') {
         html += '<button onclick="removeModel(\'' + m.id + '\')" style="background:none;color:var(--danger);border:1px solid var(--danger);border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Remove</button>';
       }
       html += '</span>';

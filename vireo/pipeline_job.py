@@ -54,6 +54,24 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
+def _incomplete_model_message(model_name):
+    return (
+        f"Model '{model_name}' is incomplete. "
+        f"Open Settings → Models and click Repair to finish the download."
+    )
+
+
+def _looks_like_missing_external_data(err):
+    """Heuristic: does this exception look like ONNXRuntime failing to find
+    an external-data sidecar? Matches the specific message the runtime
+    raises when a graph references external weights that aren't on disk."""
+    msg = str(err).lower()
+    return (
+        "model_path must not be empty" in msg
+        or "external data" in msg
+    )
+
+
 def _update_stages(runner, job_id, stages):
     """Push a stages progress update."""
     runner.push_event(job_id, "progress", {
@@ -613,16 +631,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 "stages": {k: dict(v) for k, v in stages.items()},
             })
 
-            if model_type == "timm":
-                from timm_classifier import TimmClassifier
-                clf = TimmClassifier(model_str, taxonomy=tax)
-            else:
-                from classifier import Classifier
-                clf = Classifier(
-                    labels=None if use_tol else labels,
-                    model_str=model_str,
-                    pretrained_str=weights_path,
-                )
+            # Preflight: validate the on-disk model before handing it to
+            # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
+            # the user deleted a .onnx.data file, or the download manifest
+            # changed) would otherwise surface as an opaque ONNXRuntime crash.
+            from models import _classify_model_state
+            files = active_model.get("files", [])
+            if files and weights_path:
+                state = _classify_model_state(weights_path, files)
+                if state != "ok":
+                    raise RuntimeError(_incomplete_model_message(model_name))
+
+            try:
+                if model_type == "timm":
+                    from timm_classifier import TimmClassifier
+                    clf = TimmClassifier(model_str, taxonomy=tax)
+                else:
+                    from classifier import Classifier
+                    clf = Classifier(
+                        labels=None if use_tol else labels,
+                        model_str=model_str,
+                        pretrained_str=weights_path,
+                    )
+            except Exception as load_err:
+                # ONNXRuntime signals missing external-data with a
+                # "model_path must not be empty" / "Initializer" error. Treat
+                # any load failure as an incomplete-model hint for the user.
+                if _looks_like_missing_external_data(load_err):
+                    raise RuntimeError(
+                        _incomplete_model_message(model_name)
+                    ) from load_err
+                raise
 
             loaded_models["clf"] = clf
             loaded_models["model_type"] = model_type
@@ -1034,5 +1073,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     elapsed = time.time() - job["_start_time"]
     result["duration"] = round(elapsed, 1)
     result["errors"] = list(errors)
+
+    # If any stage ended in 'failed' and the job wasn't cancelled, propagate
+    # the failure so JobRunner marks the whole job as failed rather than
+    # silently recording it as completed. Cancellation takes precedence:
+    # a cancelled job stays cancelled even if stages crashed on the way down.
+    failed_stages = [
+        name for name, s in stages.items() if s.get("status") == "failed"
+    ]
+    if failed_stages and not runner.is_cancelled(job["id"]):
+        first_error = errors[0] if errors else f"stage '{failed_stages[0]}' failed"
+        raise RuntimeError(first_error)
 
     return result
