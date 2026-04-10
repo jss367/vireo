@@ -1246,6 +1246,8 @@ function checkForDuplicates() {
     .filter(function(f) { return _previewSelected[f.path] !== false; })
     .map(function(f) { return f.path; });
 
+  if (!paths.length) return;
+
   fetch('/api/import/check-duplicates', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
