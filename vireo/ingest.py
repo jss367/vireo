@@ -227,14 +227,28 @@ def ingest(
         #      since the last scan and the caller didn't refresh folder
         #      health first.
         # A folder passes only if all four guards agree.
-        # Lexically normalise: collapses trailing separators and any ".."
-        # components so the SQL exact-match and Python is_relative_to guard
-        # both operate on a canonical string (no trailing slash, no dot
-        # segments). os.path.normpath is used instead of Path.resolve() to
-        # avoid filesystem access and symlink expansion, which could diverge
-        # from the raw paths stored in folders.path.
-        dest_path = Path(os.path.normpath(destination_dir))
-        dest_path_str = str(dest_path)
+        #
+        # The SQL prefilter compares against ``dest_path_str`` (derived
+        # from ``str(Path(destination_dir))``, i.e. raw lexical form minus
+        # the trailing slash that ``Path`` already strips). We deliberately
+        # do NOT apply ``os.path.normpath`` before querying: scanner.scan
+        # persists folder paths via ``str(Path(...))``, which keeps ``..``
+        # segments intact, so a library that was previously scanned with
+        # an unnormalized root (e.g. ``/mnt/photos/../library``) stores
+        # rows with those ``..`` segments in place. A pre-normalized query
+        # string would silently drop those rows from the prefilter and
+        # leave ``known_hash_folders`` empty for duplicate-only ingests
+        # into such destinations. ``rstrip("/")`` is kept so the root
+        # destination (``"/"``) produces LIKE prefix ``"/%"`` rather than
+        # ``"//%"``.
+        #
+        # ``dest_path_normalized`` is a separate ``Path`` used ONLY by the
+        # Python ``is_relative_to`` guard below. ``os.path.normpath`` is
+        # used instead of ``Path.resolve()`` to avoid filesystem access
+        # and symlink expansion, which could diverge from the raw paths
+        # stored in ``folders.path``.
+        dest_path_str = str(Path(destination_dir))
+        dest_path_normalized = Path(os.path.normpath(dest_path_str))
         dest_like_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
@@ -247,13 +261,13 @@ def ingest(
         ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
-            # Normalise stored paths before the subtree check: a path like
-            # "/dest/sub/../other" is lexically NOT relative to "/dest/sub"
-            # but IS relative to "/dest". Without normpath, is_relative_to
-            # gives the wrong answer for paths with ".." segments that happen
-            # to share a prefix with dest_path.
-            candidate = Path(os.path.normpath(folder_path))
-            if not candidate.is_relative_to(dest_path):
+            # Normalise both sides before the subtree check: a stored path
+            # like "/dest/sub/../other" is lexically NOT relative to
+            # "/dest/sub" but IS relative to "/dest". Without normpath,
+            # is_relative_to gives the wrong answer for paths with ".."
+            # segments that happen to share a prefix with dest.
+            candidate_normalized = Path(os.path.normpath(folder_path))
+            if not candidate_normalized.is_relative_to(dest_path_normalized):
                 continue
             if not Path(folder_path).is_dir():
                 continue

@@ -614,6 +614,65 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_matches_unnormalized_stored_path(tmp_path):
+    """When the DB holds a folder row whose path contains ``..`` segments
+    because a previous scan was run with an unnormalized root, ingesting
+    into that same unnormalized destination must still find the row via
+    the SQL prefilter.
+
+    Regression: pre-normalizing ``destination_dir`` before building the
+    SQL query (with ``os.path.normpath``) turns ``/.../other/../library``
+    into ``/.../library`` and queries ``/.../library`` / ``/.../library/%``,
+    neither of which matches the raw stored ``/.../other/../library/...``
+    string that scanner.scan persists (``Path`` does not collapse ``..``
+    segments). ``known_hash_folders`` stays empty and the caller's scan
+    then walks the full destination subtree unnecessarily.
+    """
+    import shutil
+
+    from scanner import scan
+
+    src = tmp_path / "sd_card"
+    real_dst = tmp_path / "library"
+    sibling = tmp_path / "other"
+    for d in [src, real_dst, sibling]:
+        d.mkdir()
+
+    # Seed the destination library with a photo and scan it so a folder
+    # row exists in the DB.
+    Image.new("RGB", (64, 64), color="teal").save(str(real_dst / "keeper.jpg"))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(real_dst), db)
+
+    # Rewrite the folder row to an equivalent path that routes through a
+    # ``..`` segment. This mimics the state left behind by a prior scan
+    # started with an unnormalized root like ``{tmp}/other/../library``.
+    unnorm_path = f"{sibling}/../library"
+    assert os.path.isdir(unnorm_path)
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE path = ?",
+        (unnorm_path, str(real_dst)),
+    )
+    db.conn.commit()
+
+    # Stage the same file on the "SD card" so it's a byte-for-byte
+    # duplicate of the one already in the destination library.
+    shutil.copy2(str(real_dst / "keeper.jpg"), str(src / "keeper.jpg"))
+
+    # Ingest into the SAME unnormalized form the DB holds. skip_duplicates
+    # should recognise the duplicate AND record the stored folder in
+    # duplicate_folders so the post-ingest restrict scan can link it.
+    result = ingest(str(src), unnorm_path, db=db, skip_duplicates=True)
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    dup_folders = result.get("duplicate_folders", [])
+    assert unnorm_path in dup_folders, (
+        f"expected unnormalized stored path {unnorm_path!r} in "
+        f"duplicate_folders; got {dup_folders!r}"
+    )
+
+
 def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
     """A DB folder path containing ``..`` segments that lexically starts
     with destination_dir but resolves outside it must not leak into
