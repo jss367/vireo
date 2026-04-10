@@ -871,7 +871,7 @@ def test_api_route_calls_run_classify_job(app_and_db):
 
     captured = {}
 
-    def fake_run(job, runner, db_path, workspace_id, params):
+    def fake_run(job, runner, db_path, workspace_id, params, vireo_dir=None):
         captured["params"] = params
         captured["workspace_id"] = workspace_id
         return {

@@ -30,7 +30,9 @@ KNOWN_MODELS = [
         "hf_subdir": "bioclip-vit-b-16",
         "files": [
             "image_encoder.onnx",
+            "image_encoder.onnx.data",
             "text_encoder.onnx",
+            "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
         ],
@@ -48,7 +50,9 @@ KNOWN_MODELS = [
         "hf_subdir": "bioclip-2",
         "files": [
             "image_encoder.onnx",
+            "image_encoder.onnx.data",
             "text_encoder.onnx",
+            "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
             "tol_embeddings.npy",
@@ -68,7 +72,9 @@ KNOWN_MODELS = [
         "hf_subdir": "bioclip-2.5-vith14",
         "files": [
             "image_encoder.onnx",
+            "image_encoder.onnx.data",
             "text_encoder.onnx",
+            "text_encoder.onnx.data",
             "tokenizer.json",
             "config.json",
         ],
@@ -86,6 +92,7 @@ KNOWN_MODELS = [
         "hf_subdir": "timm-eva02-large-inat21",
         "files": [
             "model.onnx",
+            "model.onnx.data",
             "class_names.json",
             "config.json",
         ],
