@@ -151,7 +151,9 @@ def test_get_models_downloaded_flag(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
@@ -186,7 +188,9 @@ def test_set_and_get_active_model(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
@@ -208,7 +212,9 @@ def test_get_active_model_fallback(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "image_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "text_encoder.onnx").write_bytes(b"fake")
+    (model_dir / "text_encoder.onnx.data").write_bytes(b"fake")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
 
