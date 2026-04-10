@@ -13,6 +13,17 @@ from scanner import compute_file_hash
 log = logging.getLogger(__name__)
 
 
+def _escape_sql_like(s):
+    """Escape SQL LIKE wildcard metacharacters in a literal string.
+
+    SQLite's LIKE treats ``%`` and ``_`` as wildcards unconditionally. The
+    ESCAPE clause lets us declare an escape character so a literal ``%``
+    or ``_`` in the pattern is matched literally. We pair this helper with
+    ``... LIKE ? ESCAPE '\\'`` at the call site.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _is_unsafe_path(s):
     """Check if a path string could escape the destination directory."""
     if not s:
@@ -182,7 +193,7 @@ def ingest(
     # Load known hashes from database for duplicate detection and merge with
     # any hashes accumulated by previous ingest() calls in the same session.
     known_hashes = set()
-    known_hash_folder: dict[str, str] = {}
+    known_hash_folders: dict[str, set[str]] = {}
     if skip_duplicates:
         # Global hash set for dedup decisions. A source file matching any
         # existing photo in the DB (even in another library root) is skipped
@@ -191,44 +202,47 @@ def ingest(
             "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
         ).fetchall()
         known_hashes = {r["file_hash"] for r in rows}
-        # Destination-scoped hash -> folder-path map for populating the
-        # caller's post-ingest scan restrict_dirs. Four guards, layered:
+        # Destination-scoped hash -> set-of-folder-paths map for populating
+        # the caller's post-ingest scan restrict_dirs. The same hash can
+        # legitimately appear in more than one destination subfolder (e.g.,
+        # the user copied the same photo into multiple date folders), and
+        # every matching folder needs to be walked so all of them get
+        # linked to the active workspace. Four guards, layered:
         #   1. SQL ``f.status = 'ok'`` — exclude folders the DB already
         #      knows are missing (cheap and visible to static analysis).
-        #   2. SQL prefix match on ``f.path`` — rough subtree cut so we
-        #      don't haul the whole library into memory on large DBs.
+        #   2. SQL prefix match on ``f.path`` with an explicit ``ESCAPE``
+        #      clause — rough subtree cut so we don't haul the whole
+        #      library into memory on large DBs. Escaping is required
+        #      because destination paths may legally contain SQL LIKE
+        #      wildcard characters (``_`` and ``%``).
         #   3. Python ``Path.is_relative_to`` — strict path-component
-        #      comparison that catches LIKE wildcard leaks (``_``/``%``
-        #      in destination_dir can otherwise match sibling subtrees).
+        #      comparison that catches any residual LIKE wildcard leaks.
         #   4. Python ``Path.is_dir`` — catches stale ``status='ok'``
         #      rows when the folder was deleted since the last scan and
         #      the caller didn't refresh folder health first.
-        # A folder passes only if all four guards agree. Without this,
-        # restrict_dirs can end up with out-of-tree, wildcard-aliased, or
-        # non-existent paths, any of which breaks the post-ingest scan.
+        # A folder passes only if all four guards agree.
         dest_path = Path(destination_dir)
         dest_path_str = str(dest_path)
-        dest_like_prefix = dest_path_str.rstrip("/") + "/%"
+        dest_like_prefix = (
+            _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
+        )
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
                WHERE p.file_hash IS NOT NULL
                  AND f.status = 'ok'
-                 AND (f.path = ? OR f.path LIKE ?)""",
+                 AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')""",
             (dest_path_str, dest_like_prefix),
         ).fetchall()
         for r in folder_rows:
-            fh = r["file_hash"]
-            if fh in known_hash_folder:
-                continue
             folder_path = r["folder_path"]
             candidate = Path(folder_path)
             if not candidate.is_relative_to(dest_path):
                 continue
             if not candidate.is_dir():
                 continue
-            known_hash_folder[fh] = folder_path
+            known_hash_folders.setdefault(r["file_hash"], set()).add(folder_path)
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 
@@ -245,9 +259,14 @@ def ingest(
 
             if skip_duplicates and file_hash in known_hashes:
                 skipped_duplicate += 1
-                existing_folder = known_hash_folder.get(file_hash)
-                if existing_folder:
-                    duplicate_folders.add(existing_folder)
+                # Record every destination folder that holds a copy of
+                # this file, not just one. The pipeline uses this set
+                # verbatim as restrict_dirs, so if we only report one
+                # folder the others never get linked to the active
+                # workspace.
+                duplicate_folders.update(
+                    known_hash_folders.get(file_hash, ())
+                )
                 if progress_callback:
                     progress_callback(i + 1, total, source_file.name)
                 continue

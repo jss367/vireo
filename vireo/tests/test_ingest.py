@@ -496,6 +496,49 @@ def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_tracks_all_destination_matches(tmp_path):
+    """When the same hash lives in multiple destination subfolders, every
+    one of them must appear in duplicate_folders.
+
+    Regression: the hash→folder map kept only the first row per hash
+    (``if fh in known_hash_folder: continue``). In the all-duplicates
+    pipeline path, that reduced list was used as restrict_dirs, so the
+    other matching folders were never scanned and therefore never linked
+    into the active workspace. The user would see one of the duplicate's
+    locations but not the others.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    folder_a = dst / "2024" / "2024-03-10"
+    folder_b = dst / "2024" / "2024-05-20"
+    for d in [src, folder_a, folder_b]:
+        d.mkdir(parents=True)
+
+    # Byte-identical file in both destination subfolders — same hash twice.
+    img = Image.new("RGB", (100, 100), color="olive")
+    img.save(str(folder_a / "shot.jpg"))
+    shutil.copy2(str(folder_a / "shot.jpg"), str(folder_b / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(folder_a / "shot.jpg"), str(src / "shot.jpg"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = set(result.get("duplicate_folders", []))
+    assert str(folder_a) in dup_folders, (
+        f"duplicate_folders missing {str(folder_a)!r}; got {dup_folders!r}"
+    )
+    assert str(folder_b) in dup_folders, (
+        f"duplicate_folders missing {str(folder_b)!r}; got {dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
