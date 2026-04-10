@@ -287,10 +287,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # to '/', so restrict_dirs must contain only descendants of
                 # params.destination. ingest() already enforces this, but
                 # we re-check here to keep the invariant local and obvious.
-                dest_p = Path(params.destination)
+                # Both sides are lexically normalized via os.path.normpath so
+                # a stored path containing ``..`` can't defeat the check.
+                import os as _os
+                dest_p = Path(_os.path.normpath(params.destination))
 
                 def _under_destination(path: str) -> bool:
-                    return Path(path).is_relative_to(dest_p)
+                    return Path(_os.path.normpath(path)).is_relative_to(dest_p)
 
                 restrict_set: set[str] = set()
                 if all_copied_paths:
