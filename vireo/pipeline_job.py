@@ -1083,6 +1083,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     ]
     if failed_stages and not runner.is_cancelled(job["id"]):
         first_error = errors[0] if errors else f"stage '{failed_stages[0]}' failed"
+        # Preserve the structured stage/error data on the job before raising so
+        # the completion event and frontend (which reads result.result.errors and
+        # result.result.stages) still has the per-stage breakdown even though the
+        # job is marked as failed.
+        job["result"] = result
         raise RuntimeError(first_error)
 
     return result
