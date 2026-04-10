@@ -290,6 +290,57 @@ def test_ingest_skip_duplicates_via_db_hash(tmp_path):
     assert not list(dst.rglob("new_copy.jpg"))
 
 
+def test_ingest_duplicate_folders_only_under_destination(tmp_path):
+    """duplicate_folders must only contain paths under destination_dir.
+
+    Regression test: ingest() globally joins photos+folders to find where
+    existing duplicates live. If the match is in a library root other than
+    the current destination, returning that out-of-tree path causes the
+    pipeline to feed scanner.scan() restrict_dirs that aren't descendants
+    of its root, making scanner._ensure_folder() recurse parents all the
+    way up to '/' — polluting the active workspace with folders from an
+    unrelated library.
+    """
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "new_library"
+    old_library = tmp_path / "old_library" / "2023" / "2023-05-10"
+    for d in [src, dst, old_library]:
+        d.mkdir(parents=True)
+
+    # A photo already lives in an unrelated library root.
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(old_library / "old_shot.jpg"))
+    # And a byte-identical copy is on the card, about to be ingested into
+    # the new library.
+    import shutil
+    shutil.copy2(str(old_library / "old_shot.jpg"), str(src / "old_shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    # Scan the old library so its photo ends up in the DB with a file_hash.
+    from scanner import scan
+    scan(str(old_library.parent.parent), db)
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    # File should still be skipped (cross-library dedup behavior preserved).
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+
+    # But duplicate_folders must NOT leak the old library's path — it is
+    # not a descendant of the destination and must never end up in the
+    # pipeline's scan restrict_dirs.
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(old_library) not in dup_folders, (
+        f"duplicate_folders leaked out-of-tree path {str(old_library)!r}; "
+        f"got {dup_folders!r}"
+    )
+    for d in dup_folders:
+        assert d.startswith(str(dst)), (
+            f"duplicate_folders contains {d!r} which is not under "
+            f"destination {str(dst)!r}"
+        )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

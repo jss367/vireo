@@ -184,9 +184,14 @@ def ingest(
     # Also build a hash -> folder-path map so we can tell the caller where
     # the existing duplicates live; the pipeline uses this to restrict the
     # post-ingest scan to just the relevant subdirectories instead of
-    # walking the entire destination tree.
+    # walking the entire destination tree. Only folders that are descendants
+    # of ``destination_dir`` are tracked here — cross-library duplicates are
+    # still skipped via ``known_hashes`` but must NOT leak out-of-tree paths
+    # into the caller's scan restrict_dirs (that would make the scanner
+    # recurse parents all the way up to '/').
+    dest_path_for_filter = Path(destination_dir)
     known_hashes = set()
-    known_hash_folder = {}
+    known_hash_folder: dict[str, str] = {}
     if skip_duplicates:
         rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
@@ -195,8 +200,13 @@ def ingest(
                WHERE p.file_hash IS NOT NULL"""
         ).fetchall()
         for r in rows:
-            known_hashes.add(r["file_hash"])
-            known_hash_folder.setdefault(r["file_hash"], r["folder_path"])
+            fh = r["file_hash"]
+            known_hashes.add(fh)
+            if fh in known_hash_folder:
+                continue
+            folder_path = r["folder_path"]
+            if Path(folder_path).is_relative_to(dest_path_for_filter):
+                known_hash_folder[fh] = folder_path
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 
