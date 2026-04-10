@@ -54,7 +54,12 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
-def _incomplete_model_message(model_name):
+def _incomplete_model_message(model_name, is_custom=False):
+    if is_custom:
+        return (
+            f"Model '{model_name}' appears to be missing required files. "
+            f"Ensure all model files are present in the model directory."
+        )
     return (
         f"Model '{model_name}' is incomplete. "
         f"Open Settings → Models and click Repair to finish the download."
@@ -587,6 +592,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             weights_path = active_model["weights_path"]
             model_type = active_model.get("model_type", "bioclip")
             model_name = active_model["name"]
+            model_is_custom = active_model.get("source") == "custom"
             runner.update_step(job["id"], "model_loader", current_file=model_name)
 
             # Download taxonomy if missing and requested
@@ -640,7 +646,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if files and weights_path:
                 state = _classify_model_state(weights_path, files)
                 if state != "ok":
-                    raise RuntimeError(_incomplete_model_message(model_name))
+                    raise RuntimeError(_incomplete_model_message(model_name, model_is_custom))
 
             try:
                 if model_type == "timm":
@@ -659,7 +665,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # any load failure as an incomplete-model hint for the user.
                 if _looks_like_missing_external_data(load_err):
                     raise RuntimeError(
-                        _incomplete_model_message(model_name)
+                        _incomplete_model_message(model_name, model_is_custom)
                     ) from load_err
                 raise
 
