@@ -395,6 +395,107 @@ def test_ingest_duplicate_folders_prefers_live_folder_over_stale(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
+    """duplicate_folders must not leak siblings that only match because of
+    SQL LIKE wildcard characters in the destination path.
+
+    Regression: the subtree filter was expressed as ``f.path LIKE ?`` with
+    the destination path spliced in directly. SQLite's LIKE treats ``_`` as
+    a single-char wildcard, so a destination like ``.../dest_x`` combined
+    with the ``.../dest_x/%`` pattern can match ``.../destXx/sub``, leaking
+    a sibling subtree into duplicate_folders and reopening the out-of-tree
+    scan problem on destinations whose names contain ``_`` or ``%``.
+    """
+    src = tmp_path / "sd_card"
+    dest_under = tmp_path / "dest_x"
+    # Sibling matches the SQL LIKE pattern ``dest_x/%`` because ``_`` is a
+    # single-char wildcard. A nested subfolder is required because the
+    # pattern demands a literal ``/`` after the wildcard-matched char.
+    sibling_nested = tmp_path / "destXx" / "photos"
+    for d in [src, dest_under, sibling_nested]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="teal")
+    img.save(str(sibling_nested / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(tmp_path), db)
+
+    import shutil
+    shutil.copy2(str(sibling_nested / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dest_under), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(sibling_nested) not in dup_folders, (
+        f"duplicate_folders leaked LIKE-wildcard sibling {str(sibling_nested)!r}; "
+        f"got {dup_folders!r}"
+    )
+    # Also verify no path that's not under the destination slipped in.
+    for f in dup_folders:
+        assert f == str(dest_under) or f.startswith(str(dest_under) + "/"), (
+            f"duplicate_folders contains {f!r} which is not under "
+            f"destination {str(dest_under)!r}"
+        )
+
+
+def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
+    """duplicate_folders must not contain folders that no longer exist on
+    disk, even if their DB status is stale ('ok').
+
+    Regression: the pipeline path does not refresh folder health before
+    ingest, so a folder deleted since the last scan can still be marked
+    ``status='ok'`` in the DB. If such a folder is returned first and
+    recorded in duplicate_folders, the post-ingest scan walks a missing
+    root and logs a warning without touching anything — the still-existing
+    live duplicate folder never gets linked to the active workspace.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    gone_dir = dst / "2024" / "2024-01-01"
+    live_dir = dst / "2024" / "2024-02-02"
+    for d in [src, gone_dir, live_dir]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(gone_dir / "shot.jpg"))
+    img.save(str(live_dir / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    # Simulate the filesystem disappearing since the last scan, without
+    # refreshing DB folder health. gone_dir's row keeps status='ok'.
+    shutil.rmtree(str(gone_dir))
+    assert not gone_dir.exists()
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (str(gone_dir),)
+    ).fetchone()
+    assert row and row["status"] == "ok", \
+        "precondition: DB status must still be stale-ok"
+
+    shutil.copy2(str(live_dir / "shot.jpg"), str(src / "shot.jpg"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(gone_dir) not in dup_folders, (
+        f"duplicate_folders contained deleted folder {str(gone_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+    assert str(live_dir) in dup_folders, (
+        f"duplicate_folders should contain the live folder {str(live_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

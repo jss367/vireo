@@ -192,14 +192,22 @@ def ingest(
         ).fetchall()
         known_hashes = {r["file_hash"] for r in rows}
         # Destination-scoped hash -> folder-path map for populating the
-        # caller's post-ingest scan restrict_dirs. Constrain at the SQL
-        # level to folders that are (a) descendants of destination_dir and
-        # (b) live on disk (status='ok'). This prevents restrict_dirs from
-        # leaking out-of-tree paths (which would make scanner._ensure_folder
-        # recurse parents all the way to '/') or stale paths (which would
-        # make scanner.scan() warn on a missing root and fail to link the
-        # real duplicate folder to the active workspace).
-        dest_path_str = str(Path(destination_dir))
+        # caller's post-ingest scan restrict_dirs. Four guards, layered:
+        #   1. SQL ``f.status = 'ok'`` — exclude folders the DB already
+        #      knows are missing (cheap and visible to static analysis).
+        #   2. SQL prefix match on ``f.path`` — rough subtree cut so we
+        #      don't haul the whole library into memory on large DBs.
+        #   3. Python ``Path.is_relative_to`` — strict path-component
+        #      comparison that catches LIKE wildcard leaks (``_``/``%``
+        #      in destination_dir can otherwise match sibling subtrees).
+        #   4. Python ``Path.is_dir`` — catches stale ``status='ok'``
+        #      rows when the folder was deleted since the last scan and
+        #      the caller didn't refresh folder health first.
+        # A folder passes only if all four guards agree. Without this,
+        # restrict_dirs can end up with out-of-tree, wildcard-aliased, or
+        # non-existent paths, any of which breaks the post-ingest scan.
+        dest_path = Path(destination_dir)
+        dest_path_str = str(dest_path)
         dest_like_prefix = dest_path_str.rstrip("/") + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
@@ -211,7 +219,16 @@ def ingest(
             (dest_path_str, dest_like_prefix),
         ).fetchall()
         for r in folder_rows:
-            known_hash_folder.setdefault(r["file_hash"], r["folder_path"])
+            fh = r["file_hash"]
+            if fh in known_hash_folder:
+                continue
+            folder_path = r["folder_path"]
+            candidate = Path(folder_path)
+            if not candidate.is_relative_to(dest_path):
+                continue
+            if not candidate.is_dir():
+                continue
+            known_hash_folder[fh] = folder_path
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 

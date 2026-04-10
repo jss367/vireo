@@ -281,13 +281,26 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # at the destination, preserving parent folder links. Include
                 # folders that received copies AND folders that already hold
                 # duplicates of the source files — both need to be linked to
-                # the active workspace.
+                # the active workspace. Guard every candidate at this seam:
+                # scanner._ensure_folder recurses parents until it equals the
+                # scan root; a non-descendant path would recurse all the way
+                # to '/', so restrict_dirs must contain only descendants of
+                # params.destination. ingest() already enforces this, but
+                # we re-check here to keep the invariant local and obvious.
+                dest_p = Path(params.destination)
+
+                def _under_destination(path: str) -> bool:
+                    return Path(path).is_relative_to(dest_p)
+
                 restrict_set: set[str] = set()
                 if all_copied_paths:
                     restrict_set.update(
                         str(Path(p).parent) for p in all_copied_paths
+                        if _under_destination(str(Path(p).parent))
                     )
-                restrict_set.update(all_duplicate_folders)
+                restrict_set.update(
+                    f for f in all_duplicate_folders if _under_destination(f)
+                )
                 restrict = sorted(restrict_set) if restrict_set else None
                 # Flip scan to running and reset job progress so status
                 # events during enumeration don't carry ingest's numbers.
