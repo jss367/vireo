@@ -76,7 +76,10 @@ async fn do_update_check(
             log::info!("No update available");
             if user_initiated {
                 app.dialog()
-                    .message("You're running the latest version of Vireo.")
+                    .message(format!(
+                        "You're running the latest version of Vireo (v{}).",
+                        env!("CARGO_PKG_VERSION")
+                    ))
                     .title("Up to Date")
                     .kind(MessageDialogKind::Info)
                     .show(|_| {});

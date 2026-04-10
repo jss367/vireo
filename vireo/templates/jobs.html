@@ -687,12 +687,24 @@
     var cancelBtn = e.target.closest('[data-cancel-job]');
     if (cancelBtn) {
       var jobId = cancelBtn.getAttribute('data-cancel-job');
+      cancelBtn.disabled = true;
       fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
         .then(function(r) {
-          if (r.ok) fetchJobs();
-          else if (typeof showToast === 'function') showToast('Cancel not yet implemented', 'info');
+          if (r.ok) {
+            if (typeof showToast === 'function') showToast('Cancelling job…', 'info');
+            fetchJobs();
+          } else {
+            return r.json().then(function(data) {
+              var msg = (data && data.error) || 'Unable to cancel job';
+              if (typeof showToast === 'function') showToast(msg, 'error');
+              cancelBtn.disabled = false;
+            });
+          }
         })
-        .catch(function() {});
+        .catch(function() {
+          if (typeof showToast === 'function') showToast('Unable to cancel job', 'error');
+          cancelBtn.disabled = false;
+        });
     }
   });
 

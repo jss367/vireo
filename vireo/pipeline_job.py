@@ -114,6 +114,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
 
+    # Bridge user-initiated cancellation (runner.cancel_job) to the local
+    # abort Event so all stages that already honor `abort` stop promptly.
+    cancel_watcher_stop = threading.Event()
+
+    def _cancel_watcher():
+        while not cancel_watcher_stop.is_set():
+            if runner.is_cancelled(job["id"]):
+                abort.set()
+                return
+            if cancel_watcher_stop.wait(0.25):
+                return
+
+    cancel_watcher = threading.Thread(target=_cancel_watcher, daemon=True)
+    cancel_watcher.start()
+
     stages = {
         "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
         "scan": {"status": "pending", "count": 0, "label": "Scanning photos"},
@@ -1075,6 +1090,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     # Phase 4: regroup (needs extract-masks output)
     if not abort.is_set():
         regroup_stage()
+
+    cancel_watcher_stop.set()
 
     elapsed = time.time() - job["_start_time"]
     result["duration"] = round(elapsed, 1)

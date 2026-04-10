@@ -594,3 +594,70 @@ def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monke
     recents = config["ingest"]["recent_destinations"]
     assert recents[0] == dsts[1]
     assert len(recents) == 5
+
+
+def test_job_cancel_unknown_job_returns_404(app_and_db):
+    """POST /api/jobs/<id>/cancel returns 404 for unknown job."""
+    app, _ = app_and_db
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/does-not-exist/cancel")
+        assert resp.status_code == 404
+
+
+def test_job_cancel_running_job_marks_cancelled(app_and_db):
+    """POST /api/jobs/<id>/cancel signals a running job, which then finishes
+    with status 'cancelled' instead of 'completed'."""
+    app, _ = app_and_db
+    runner = app._job_runner
+
+    release = {"go": False}
+
+    def slow_work(job):
+        # Poll for cancellation so the work function exits promptly.
+        for _ in range(200):
+            if runner.is_cancelled(job["id"]):
+                return {"stopped": True}
+            if release["go"]:
+                return {"stopped": False}
+            time.sleep(0.05)
+        return {"stopped": False}
+
+    job_id = runner.start("test", slow_work)
+
+    with app.test_client() as c:
+        resp = c.post(f"/api/jobs/{job_id}/cancel")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data.get("cancelled") is True
+
+    # Wait for the work function to observe cancellation and exit.
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job and job["status"] in ("completed", "failed", "cancelled"):
+            break
+        time.sleep(0.05)
+
+    job = runner.get(job_id)
+    assert job is not None
+    assert job["status"] == "cancelled"
+
+
+def test_job_cancel_finished_job_returns_404(app_and_db):
+    """Cancelling a job that has already finished returns 404."""
+    app, _ = app_and_db
+    runner = app._job_runner
+
+    def quick_work(job):
+        return {"ok": True}
+
+    job_id = runner.start("test", quick_work)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job and job["status"] == "completed":
+            break
+        time.sleep(0.05)
+
+    with app.test_client() as c:
+        resp = c.post(f"/api/jobs/{job_id}/cancel")
+        assert resp.status_code == 404
