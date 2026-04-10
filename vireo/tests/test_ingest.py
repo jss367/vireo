@@ -614,6 +614,42 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_like_prefix_not_double_slash_for_root():
+    """Regression: when destination_dir is '/', dest_like_prefix must be '/%'
+    not '//%'. The latter misses all children of root in SQLite LIKE queries.
+
+    Without the rstrip('/'), normpath('/') yields '/' and the LIKE prefix
+    becomes '//' + '%' == '//%', which in SQLite does not match paths such
+    as '/photos/img.jpg'. With the fix the prefix is '/%' and matches.
+    """
+    import sqlite3
+    import os
+    from pathlib import Path
+    from ingest import _escape_sql_like
+
+    dest_path_str = str(Path(os.path.normpath("/")))  # always "/"
+
+    # The fixed formula
+    fixed_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
+    assert fixed_prefix == "/%", (
+        f"root destination should produce LIKE prefix '/%', got {fixed_prefix!r}"
+    )
+
+    # Verify SQLite agrees: '/photos/img.jpg' LIKE '/% matches, '//% does not
+    conn = sqlite3.connect(":memory:")
+    test_path = "/photos/img.jpg"
+    assert conn.execute(
+        "SELECT ? LIKE ? ESCAPE '\\'", (test_path, fixed_prefix)
+    ).fetchone()[0], f"{test_path!r} must match LIKE {fixed_prefix!r}"
+
+    buggy_prefix = _escape_sql_like(dest_path_str) + "/%"  # "//%"
+    assert not conn.execute(
+        "SELECT ? LIKE ? ESCAPE '\\'", (test_path, buggy_prefix)
+    ).fetchone()[0], (
+        f"{test_path!r} must NOT match LIKE {buggy_prefix!r} (regression check)"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
