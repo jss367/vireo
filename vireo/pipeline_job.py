@@ -1122,6 +1122,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             (e for e in errors if any(e.startswith(f"[{s}] Fatal:") for s in failed_stages)),
             errors[0] if errors else f"stage '{failed_stages[0]}' failed",
         )
+        # Record the fatal error for _persist_job so it can store the stage
+        # failure message rather than job["errors"][0], which may be a
+        # non-fatal per-photo warning that was logged before this failure.
+        job["_fatal_error"] = first_error
         raise RuntimeError(first_error)
 
     return result
