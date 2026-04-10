@@ -4869,6 +4869,21 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("job not found", 404)
         return jsonify(job)
 
+    @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
+    def api_job_cancel(job_id):
+        """Request cancellation of a running job.
+
+        Returns 200 if the job was found running and marked for cancellation,
+        404 if the job does not exist or is no longer running.
+        """
+        runner = app._job_runner
+        if runner.cancel_job(job_id):
+            return jsonify({"cancelled": True, "job_id": job_id})
+        job = runner.get(job_id)
+        if job is None:
+            return json_error("job not found", 404)
+        return json_error(f"job is not running (status={job['status']})", 404)
+
     @app.route("/api/jobs/<job_id>/stream")
     def api_job_stream(job_id):
         """SSE stream of job progress events."""
