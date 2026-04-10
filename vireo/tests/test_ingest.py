@@ -539,6 +539,81 @@ def test_ingest_duplicate_folders_tracks_all_destination_matches(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_matches_dest_root_with_trailing_slash(tmp_path):
+    """When destination_dir has a trailing slash and the duplicate lives
+    directly at the destination root, duplicate_folders must still contain
+    that root.
+
+    Regression guard: path normalization between destination_dir (the
+    caller's input) and folder paths stored in the DB (which are
+    str(Path(...)) without trailing slashes) must agree. If they disagree,
+    the ``f.path = ?`` branch of the subtree guard misses duplicates at
+    the destination root, duplicate_folders stays empty, and the pipeline
+    falls back to a full-tree scan.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    for d in [src, dst]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="cyan")
+    img.save(str(dst / "root_shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(dst / "root_shot.jpg"), str(src / "root_shot.jpg"))
+
+    # Call ingest with a trailing slash on destination_dir.
+    result = ingest(str(src), str(dst) + "/", db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(dst) in dup_folders, (
+        f"duplicate_folders should contain destination root {str(dst)!r} "
+        f"even when destination_dir has a trailing slash; got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
+    """Flat imports (folder_template='') put every file directly in the
+    destination root. A matching duplicate at the root must show up in
+    duplicate_folders so the pipeline scan targets it.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "flat_lib"
+    for d in [src, dst]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(dst / "at_root.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(dst / "at_root.jpg"), str(src / "at_root.jpg"))
+
+    result = ingest(
+        str(src), str(dst), db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(dst) in dup_folders, (
+        f"flat-import root duplicate should be tracked; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"
