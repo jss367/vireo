@@ -1131,6 +1131,20 @@ def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         run_pipeline_job(job, runner, db_path, ws_id, params)
 
+    # The pipeline must stash its structured result on the job before raising,
+    # so the pipeline UI's _onPipelineComplete handler can still read
+    # result.result.errors and map the "[model_loader] Fatal: ..." prefix to
+    # the right stage card. Without this, users on a failed run lose the
+    # actionable "Failed: <stage error>" label on the card that broke.
+    assert isinstance(job["result"], dict), \
+        "Failed pipeline must leave a dict result on the job for UI rendering"
+    assert "errors" in job["result"]
+    assert any(
+        "model_loader" in e for e in job["result"]["errors"]
+    ), f"Expected a [model_loader]-prefixed error, got: {job['result']['errors']}"
+    assert "duration" in job["result"]
+    assert "stages" in job["result"]
+
 
 def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
     """Model loader failures from missing external-data get a friendly message.

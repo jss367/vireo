@@ -1082,6 +1082,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         name for name, s in stages.items() if s.get("status") == "failed"
     ]
     if failed_stages and not runner.is_cancelled(job["id"]):
+        # Stash the structured result on the job BEFORE raising so the
+        # completion event and job_history still carry per-stage details
+        # (stages dict, errors list). Without this, the pipeline UI loses
+        # the "Failed: [stage_name]" mapping on the card that owned the
+        # failure because it reads result.result.stages / .errors.
+        job["result"] = result
         first_error = errors[0] if errors else f"stage '{failed_stages[0]}' failed"
         raise RuntimeError(first_error)
 

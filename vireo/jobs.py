@@ -195,7 +195,14 @@ class JobRunner:
 
         result_data = job["result"]
         if job["status"] == "failed" and job["errors"]:
-            result_data = {"error": job["errors"][0]}
+            # Preserve a structured result (e.g. the pipeline's stages dict)
+            # when the work function stashed one before raising. Otherwise
+            # fall back to a minimal {"error": ...} payload so the history
+            # row still carries something useful.
+            if isinstance(result_data, dict):
+                result_data = {**result_data, "error": job["errors"][0]}
+            else:
+                result_data = {"error": job["errors"][0]}
 
         tree_json = json.dumps(job.get("steps", []))
         summary = self._build_summary(job)
