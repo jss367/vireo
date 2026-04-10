@@ -230,7 +230,7 @@ def ingest(
         # from the raw paths stored in folders.path.
         dest_path = Path(os.path.normpath(destination_dir))
         dest_path_str = str(dest_path)
-        dest_like_prefix = _escape_sql_like(dest_path_str) + "/%"
+        dest_like_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
