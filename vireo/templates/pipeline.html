@@ -1186,6 +1186,7 @@ function renderPreview() {
     folderCheck.onchange = function() {
       files.forEach(function(f) { _previewSelected[f.path] = folderCheck.checked; });
       renderPreview();
+      checkForDuplicates();
     };
     header.appendChild(folderCheck);
     header.appendChild(document.createTextNode(' ' + subfolder + ' (' + files.length + ')'));
@@ -1208,6 +1209,7 @@ function renderPreview() {
         e.stopPropagation();
         _previewSelected[f.path] = check.checked;
         updatePreviewCounts();
+        checkForDuplicates();
       };
       thumb.appendChild(check);
 
@@ -1397,6 +1399,7 @@ function toggleSelectAll() {
   if (_previewData) {
     _previewData.files.forEach(function(f) { _previewSelected[f.path] = checked; });
     renderPreview();
+    checkForDuplicates();
   }
 }
 
