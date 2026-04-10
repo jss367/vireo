@@ -1368,22 +1368,49 @@ function onSkipDuplicatesToggle() {
 
 function setupThumbnailObserver() {
   var grid = document.getElementById('previewGrid');
-  var thumbs = grid.querySelectorAll('.preview-thumb.skeleton');
+  var pendingQueue = Array.from(grid.querySelectorAll('.preview-thumb.skeleton'));
+  var visibleSet = new Set();
+  var inFlight = 0;
+  var CONCURRENCY = 4;
+
+  function dispatch(el) {
+    var path = el.dataset.path;
+    var img = el.querySelector('img');
+    inFlight++;
+    var done = function() {
+      el.classList.remove('skeleton');
+      inFlight--;
+      pump();
+    };
+    img.onload = done;
+    img.onerror = done;
+    img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
+  }
+
+  function pump() {
+    while (inFlight < CONCURRENCY && pendingQueue.length > 0) {
+      // Prefer a visible thumb; fall back to the top of the queue.
+      var idx = 0;
+      for (var i = 0; i < pendingQueue.length; i++) {
+        if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
+      }
+      dispatch(pendingQueue.splice(idx, 1)[0]);
+    }
+  }
 
   var observer = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
-      if (!entry.isIntersecting) return;
-      var el = entry.target;
-      var path = el.dataset.path;
-      var img = el.querySelector('img');
-      img.onload = function() { el.classList.remove('skeleton'); };
-      img.onerror = function() { el.classList.remove('skeleton'); };
-      img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
-      observer.unobserve(el);
+      if (entry.isIntersecting) {
+        visibleSet.add(entry.target);
+      } else {
+        visibleSet.delete(entry.target);
+      }
     });
+    pump();
   }, { root: grid, rootMargin: '200px' });
 
-  thumbs.forEach(function(t) { observer.observe(t); });
+  pendingQueue.forEach(function(t) { observer.observe(t); });
+  pump();
 }
 
 function updatePreviewCounts() {
