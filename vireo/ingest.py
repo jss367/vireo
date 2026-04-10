@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -221,11 +222,15 @@ def ingest(
         #      rows when the folder was deleted since the last scan and
         #      the caller didn't refresh folder health first.
         # A folder passes only if all four guards agree.
-        dest_path = Path(destination_dir)
+        # Lexically normalise: collapses trailing separators and any ".."
+        # components so the SQL exact-match and Python is_relative_to guard
+        # both operate on a canonical string (no trailing slash, no dot
+        # segments). os.path.normpath is used instead of Path.resolve() to
+        # avoid filesystem access and symlink expansion, which could diverge
+        # from the raw paths stored in folders.path.
+        dest_path = Path(os.path.normpath(destination_dir))
         dest_path_str = str(dest_path)
-        dest_like_prefix = (
-            _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
-        )
+        dest_like_prefix = _escape_sql_like(dest_path_str) + "/%"
         folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
@@ -237,7 +242,12 @@ def ingest(
         ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
-            candidate = Path(folder_path)
+            # Normalise stored paths before the subtree check: a path like
+            # "/dest/sub/../other" is lexically NOT relative to "/dest/sub"
+            # but IS relative to "/dest". Without normpath, is_relative_to
+            # gives the wrong answer for paths with ".." segments that happen
+            # to share a prefix with dest_path.
+            candidate = Path(os.path.normpath(folder_path))
             if not candidate.is_relative_to(dest_path):
                 continue
             if not candidate.is_dir():
