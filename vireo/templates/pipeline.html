@@ -1041,6 +1041,7 @@ var _previewSelected = {};     // { filePath: true/false }
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
+var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
@@ -1367,11 +1368,24 @@ function onSkipDuplicatesToggle() {
 }
 
 function setupThumbnailObserver() {
+  // Cancel any previous scheduler so its done-callbacks don't keep pumping
+  // on elements that were removed from the DOM by a re-render.
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+
   var grid = document.getElementById('previewGrid');
   var pendingQueue = Array.from(grid.querySelectorAll('.preview-thumb.skeleton'));
   var visibleSet = new Set();
   var inFlight = 0;
   var CONCURRENCY = 4;
+  var cancelled = false;
+
+  // Register a cancel function so the next call to setupThumbnailObserver can
+  // stop this scheduler before it finishes draining its queue.
+  _thumbSchedulerCancel = function() {
+    cancelled = true;
+    pendingQueue.length = 0;
+    observer.disconnect();
+  };
 
   function dispatch(el) {
     var path = el.dataset.path;
@@ -1380,7 +1394,7 @@ function setupThumbnailObserver() {
     var done = function() {
       el.classList.remove('skeleton');
       inFlight--;
-      pump();
+      if (!cancelled) pump();
     };
     img.onload = done;
     img.onerror = done;
@@ -1406,7 +1420,7 @@ function setupThumbnailObserver() {
         visibleSet.delete(entry.target);
       }
     });
-    pump();
+    if (!cancelled) pump();
   }, { root: grid, rootMargin: '200px' });
 
   pendingQueue.forEach(function(t) { observer.observe(t); });
