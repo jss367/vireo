@@ -1128,6 +1128,8 @@ function showPreviewLoading() {
   document.getElementById('previewContent').style.display = 'none';
   document.getElementById('previewLoading').style.display = '';
   document.getElementById('previewError').style.display = 'none';
+  // Cancel any in-flight duplicate check when preview context changes
+  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
 }
 
 function showPreviewError(msg) {
@@ -1233,6 +1235,7 @@ function checkForDuplicates() {
   if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
 
   if (!_previewData || !_previewData.files.length) return;
+  if (!_copyMode) return;
   if (!document.getElementById('chkSkipDuplicates').checked) return;
 
   _duplicateResults = {};
@@ -1340,15 +1343,25 @@ function onSkipDuplicatesToggle() {
   if (!checked) {
     // Abort any in-flight check so SSE callbacks stop updating the UI
     if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
-    // Remove duplicate visuals and summary
+    // Remove visuals and summary before clearing cache
     applyDuplicateVisuals();
     var summary = document.getElementById('previewSummary');
     var existing = summary.querySelector('.dup-status');
     if (existing) existing.remove();
-  } else {
-    // Re-check: if a prior scan was aborted partway, _duplicateCheckAbort was cleared
-    // to null but _duplicateResults may be partial. Always re-run for a fresh result.
     _duplicateResults = {};
+  } else if (Object.keys(_duplicateResults).length > 0) {
+    applyDuplicateVisuals();
+    var dupCount = Object.keys(_duplicateResults).length;
+    var summary = document.getElementById('previewSummary');
+    var existing = summary.querySelector('.dup-status');
+    if (existing) existing.remove();
+    if (dupCount > 0) {
+      var span = document.createElement('span');
+      span.className = 'stat dup-status';
+      span.innerHTML = '<span class="stat-value">' + dupCount + '</span> already imported';
+      summary.appendChild(span);
+    }
+  } else {
     checkForDuplicates();
   }
 }
@@ -1451,11 +1464,18 @@ function onCopyModeChange() {
 
   if (_copyMode) {
     copyFields.style.display = '';
-    if (_previewData) checkForDuplicates();
+    checkForDuplicates();
   } else {
     copyFields.style.display = 'none';
     _folderPreviewShown = false;
     document.getElementById('folderPreviewResults').style.display = 'none';
+    // Clear duplicate state when copy mode is disabled
+    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+    applyDuplicateVisuals();
+    var summary = document.getElementById('previewSummary');
+    var dupStatus = summary ? summary.querySelector('.dup-status') : null;
+    if (dupStatus) dupStatus.remove();
+    _duplicateResults = {};
   }
   updateStartButton();
 }
