@@ -614,6 +614,67 @@ def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
     )
 
 
+def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
+    """A DB folder path containing ``..`` segments that lexically starts
+    with destination_dir but resolves outside it must not leak into
+    duplicate_folders.
+
+    Regression: ``Path.is_relative_to`` is a lexical check on path parts,
+    so a stored path like ``/library/../other/photos`` passes
+    ``is_relative_to(Path("/library"))`` even though ``os.path.normpath``
+    would resolve it to ``/other/photos``. Scanner stores raw strings, so
+    a previous scan with an unnormalized root (or any manual DB edit)
+    could persist such paths, and without normalization they would end
+    up in restrict_dirs and get walked as if under destination.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    escape_target = tmp_path / "other"
+    for d in [src, dst, escape_target]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="navy")
+    img.save(str(escape_target / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(escape_target), db)
+
+    # Rewrite the folder row to use a lexical escape that still resolves
+    # to the same real directory on disk. The ``..`` leg pretends to be
+    # anchored at dst, so is_relative_to(dst) lexically succeeds, but the
+    # actual resolution points outside dst.
+    escape_path = f"{dst}/../other"
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE path = ?",
+        (escape_path, str(escape_target)),
+    )
+    db.conn.commit()
+
+    shutil.copy2(str(escape_target / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert escape_path not in dup_folders, (
+        f"duplicate_folders accepted lexical .. escape {escape_path!r}; "
+        f"got {dup_folders!r}"
+    )
+    # And make sure nothing outside dst slipped through under a different
+    # disguise.
+    import os
+    for f in dup_folders:
+        resolved = os.path.normpath(f)
+        assert resolved == str(dst) or resolved.startswith(str(dst) + os.sep), (
+            f"duplicate_folders contains {f!r} (normpath={resolved!r}) "
+            f"which is not under destination {str(dst)!r}"
+        )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

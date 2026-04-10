@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -215,14 +216,19 @@ def ingest(
         #      library into memory on large DBs. Escaping is required
         #      because destination paths may legally contain SQL LIKE
         #      wildcard characters (``_`` and ``%``).
-        #   3. Python ``Path.is_relative_to`` — strict path-component
-        #      comparison that catches any residual LIKE wildcard leaks.
-        #   4. Python ``Path.is_dir`` — catches stale ``status='ok'``
-        #      rows when the folder was deleted since the last scan and
-        #      the caller didn't refresh folder health first.
+        #   3. Python ``Path.is_relative_to`` on lexically-normalized
+        #      paths — strict path-component comparison that catches any
+        #      residual LIKE wildcard leaks. ``os.path.normpath`` is
+        #      applied to both sides first so ``..`` segments in a
+        #      stored folder path can't lexically appear to be under
+        #      the destination while actually resolving outside it.
+        #   4. Python ``Path.is_dir`` on the raw stored path — catches
+        #      stale ``status='ok'`` rows when the folder was deleted
+        #      since the last scan and the caller didn't refresh folder
+        #      health first.
         # A folder passes only if all four guards agree.
-        dest_path = Path(destination_dir)
-        dest_path_str = str(dest_path)
+        dest_path_str = str(Path(destination_dir))
+        dest_path_normalized = Path(os.path.normpath(dest_path_str))
         dest_like_prefix = (
             _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
         )
@@ -237,10 +243,10 @@ def ingest(
         ).fetchall()
         for r in folder_rows:
             folder_path = r["folder_path"]
-            candidate = Path(folder_path)
-            if not candidate.is_relative_to(dest_path):
+            candidate_normalized = Path(os.path.normpath(folder_path))
+            if not candidate_normalized.is_relative_to(dest_path_normalized):
                 continue
-            if not candidate.is_dir():
+            if not Path(folder_path).is_dir():
                 continue
             known_hash_folders.setdefault(r["file_hash"], set()).add(folder_path)
         if extra_known_hashes:
