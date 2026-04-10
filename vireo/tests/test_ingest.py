@@ -290,6 +290,450 @@ def test_ingest_skip_duplicates_via_db_hash(tmp_path):
     assert not list(dst.rglob("new_copy.jpg"))
 
 
+def test_ingest_duplicate_folders_only_under_destination(tmp_path):
+    """duplicate_folders must only contain paths under destination_dir.
+
+    Regression test: ingest() globally joins photos+folders to find where
+    existing duplicates live. If the match is in a library root other than
+    the current destination, returning that out-of-tree path causes the
+    pipeline to feed scanner.scan() restrict_dirs that aren't descendants
+    of its root, making scanner._ensure_folder() recurse parents all the
+    way up to '/' — polluting the active workspace with folders from an
+    unrelated library.
+    """
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "new_library"
+    old_library = tmp_path / "old_library" / "2023" / "2023-05-10"
+    for d in [src, dst, old_library]:
+        d.mkdir(parents=True)
+
+    # A photo already lives in an unrelated library root.
+    img = Image.new("RGB", (100, 100), color="purple")
+    img.save(str(old_library / "old_shot.jpg"))
+    # And a byte-identical copy is on the card, about to be ingested into
+    # the new library.
+    import shutil
+    shutil.copy2(str(old_library / "old_shot.jpg"), str(src / "old_shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    # Scan the old library so its photo ends up in the DB with a file_hash.
+    from scanner import scan
+    scan(str(old_library.parent.parent), db)
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    # File should still be skipped (cross-library dedup behavior preserved).
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+
+    # But duplicate_folders must NOT leak the old library's path — it is
+    # not a descendant of the destination and must never end up in the
+    # pipeline's scan restrict_dirs.
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(old_library) not in dup_folders, (
+        f"duplicate_folders leaked out-of-tree path {str(old_library)!r}; "
+        f"got {dup_folders!r}"
+    )
+    for d in dup_folders:
+        assert d.startswith(str(dst)), (
+            f"duplicate_folders contains {d!r} which is not under "
+            f"destination {str(dst)!r}"
+        )
+
+
+def test_ingest_duplicate_folders_prefers_live_folder_over_stale(tmp_path):
+    """When a hash exists in multiple destination subfolders, duplicate_folders
+    must not select one whose DB status is not 'ok'.
+
+    Regression: ingest's hash→folder map kept the first row returned by the
+    query, which has no ordering or health filter. If a stale/missing folder
+    was returned first, restrict_dirs pointed the post-ingest scan at a
+    non-existent directory, which the scanner warns on and skips — so the
+    live duplicate folder never got linked to the active workspace.
+    """
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    stale_dir = dst / "2024" / "2024-01-01"
+    live_dir = dst / "2024" / "2024-02-02"
+    for d in [src, stale_dir, live_dir]:
+        d.mkdir(parents=True)
+
+    # Two byte-identical files, one in each destination subfolder.
+    img = Image.new("RGB", (100, 100), color="orange")
+    img.save(str(stale_dir / "shot.jpg"))
+    img.save(str(live_dir / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    # Mark one of the folders as stale at the DB level, as check_folder_health
+    # would if the directory had disappeared between scans.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE path = ?",
+        (str(stale_dir),),
+    )
+    db.conn.commit()
+
+    # Source file with the same hash.
+    import shutil
+    shutil.copy2(str(live_dir / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(stale_dir) not in dup_folders, (
+        f"duplicate_folders picked the stale folder {str(stale_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+    assert str(live_dir) in dup_folders, (
+        f"duplicate_folders should contain the live folder {str(live_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_rejects_sql_like_wildcard_siblings(tmp_path):
+    """duplicate_folders must not leak siblings that only match because of
+    SQL LIKE wildcard characters in the destination path.
+
+    Regression: the subtree filter was expressed as ``f.path LIKE ?`` with
+    the destination path spliced in directly. SQLite's LIKE treats ``_`` as
+    a single-char wildcard, so a destination like ``.../dest_x`` combined
+    with the ``.../dest_x/%`` pattern can match ``.../destXx/sub``, leaking
+    a sibling subtree into duplicate_folders and reopening the out-of-tree
+    scan problem on destinations whose names contain ``_`` or ``%``.
+    """
+    src = tmp_path / "sd_card"
+    dest_under = tmp_path / "dest_x"
+    # Sibling matches the SQL LIKE pattern ``dest_x/%`` because ``_`` is a
+    # single-char wildcard. A nested subfolder is required because the
+    # pattern demands a literal ``/`` after the wildcard-matched char.
+    sibling_nested = tmp_path / "destXx" / "photos"
+    for d in [src, dest_under, sibling_nested]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="teal")
+    img.save(str(sibling_nested / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(tmp_path), db)
+
+    import shutil
+    shutil.copy2(str(sibling_nested / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dest_under), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(sibling_nested) not in dup_folders, (
+        f"duplicate_folders leaked LIKE-wildcard sibling {str(sibling_nested)!r}; "
+        f"got {dup_folders!r}"
+    )
+    # Also verify no path that's not under the destination slipped in.
+    for f in dup_folders:
+        assert f == str(dest_under) or f.startswith(str(dest_under) + "/"), (
+            f"duplicate_folders contains {f!r} which is not under "
+            f"destination {str(dest_under)!r}"
+        )
+
+
+def test_ingest_duplicate_folders_excludes_folder_deleted_from_disk(tmp_path):
+    """duplicate_folders must not contain folders that no longer exist on
+    disk, even if their DB status is stale ('ok').
+
+    Regression: the pipeline path does not refresh folder health before
+    ingest, so a folder deleted since the last scan can still be marked
+    ``status='ok'`` in the DB. If such a folder is returned first and
+    recorded in duplicate_folders, the post-ingest scan walks a missing
+    root and logs a warning without touching anything — the still-existing
+    live duplicate folder never gets linked to the active workspace.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    gone_dir = dst / "2024" / "2024-01-01"
+    live_dir = dst / "2024" / "2024-02-02"
+    for d in [src, gone_dir, live_dir]:
+        d.mkdir(parents=True)
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(gone_dir / "shot.jpg"))
+    img.save(str(live_dir / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    # Simulate the filesystem disappearing since the last scan, without
+    # refreshing DB folder health. gone_dir's row keeps status='ok'.
+    shutil.rmtree(str(gone_dir))
+    assert not gone_dir.exists()
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (str(gone_dir),)
+    ).fetchone()
+    assert row and row["status"] == "ok", \
+        "precondition: DB status must still be stale-ok"
+
+    shutil.copy2(str(live_dir / "shot.jpg"), str(src / "shot.jpg"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(gone_dir) not in dup_folders, (
+        f"duplicate_folders contained deleted folder {str(gone_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+    assert str(live_dir) in dup_folders, (
+        f"duplicate_folders should contain the live folder {str(live_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_tracks_all_destination_matches(tmp_path):
+    """When the same hash lives in multiple destination subfolders, every
+    one of them must appear in duplicate_folders.
+
+    Regression: the hash→folder map kept only the first row per hash
+    (``if fh in known_hash_folder: continue``). In the all-duplicates
+    pipeline path, that reduced list was used as restrict_dirs, so the
+    other matching folders were never scanned and therefore never linked
+    into the active workspace. The user would see one of the duplicate's
+    locations but not the others.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    folder_a = dst / "2024" / "2024-03-10"
+    folder_b = dst / "2024" / "2024-05-20"
+    for d in [src, folder_a, folder_b]:
+        d.mkdir(parents=True)
+
+    # Byte-identical file in both destination subfolders — same hash twice.
+    img = Image.new("RGB", (100, 100), color="olive")
+    img.save(str(folder_a / "shot.jpg"))
+    shutil.copy2(str(folder_a / "shot.jpg"), str(folder_b / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(folder_a / "shot.jpg"), str(src / "shot.jpg"))
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = set(result.get("duplicate_folders", []))
+    assert str(folder_a) in dup_folders, (
+        f"duplicate_folders missing {str(folder_a)!r}; got {dup_folders!r}"
+    )
+    assert str(folder_b) in dup_folders, (
+        f"duplicate_folders missing {str(folder_b)!r}; got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_matches_dest_root_with_trailing_slash(tmp_path):
+    """When destination_dir has a trailing slash and the duplicate lives
+    directly at the destination root, duplicate_folders must still contain
+    that root.
+
+    Regression guard: path normalization between destination_dir (the
+    caller's input) and folder paths stored in the DB (which are
+    str(Path(...)) without trailing slashes) must agree. If they disagree,
+    the ``f.path = ?`` branch of the subtree guard misses duplicates at
+    the destination root, duplicate_folders stays empty, and the pipeline
+    falls back to a full-tree scan.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    for d in [src, dst]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="cyan")
+    img.save(str(dst / "root_shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(dst / "root_shot.jpg"), str(src / "root_shot.jpg"))
+
+    # Call ingest with a trailing slash on destination_dir.
+    result = ingest(str(src), str(dst) + "/", db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(dst) in dup_folders, (
+        f"duplicate_folders should contain destination root {str(dst)!r} "
+        f"even when destination_dir has a trailing slash; got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_flat_import_root_duplicate(tmp_path):
+    """Flat imports (folder_template='') put every file directly in the
+    destination root. A matching duplicate at the root must show up in
+    duplicate_folders so the pipeline scan targets it.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "flat_lib"
+    for d in [src, dst]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="magenta")
+    img.save(str(dst / "at_root.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    shutil.copy2(str(dst / "at_root.jpg"), str(src / "at_root.jpg"))
+
+    result = ingest(
+        str(src), str(dst), db=db,
+        skip_duplicates=True, folder_template="",
+    )
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(dst) in dup_folders, (
+        f"flat-import root duplicate should be tracked; "
+        f"got duplicate_folders={dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_matches_unnormalized_stored_path(tmp_path):
+    """When the DB holds a folder row whose path contains ``..`` segments
+    because a previous scan was run with an unnormalized root, ingesting
+    into that same unnormalized destination must still find the row via
+    the SQL prefilter.
+
+    Regression: pre-normalizing ``destination_dir`` before building the
+    SQL query (with ``os.path.normpath``) turns ``/.../other/../library``
+    into ``/.../library`` and queries ``/.../library`` / ``/.../library/%``,
+    neither of which matches the raw stored ``/.../other/../library/...``
+    string that scanner.scan persists (``Path`` does not collapse ``..``
+    segments). ``known_hash_folders`` stays empty and the caller's scan
+    then walks the full destination subtree unnecessarily.
+    """
+    import shutil
+
+    from scanner import scan
+
+    src = tmp_path / "sd_card"
+    real_dst = tmp_path / "library"
+    sibling = tmp_path / "other"
+    for d in [src, real_dst, sibling]:
+        d.mkdir()
+
+    # Seed the destination library with a photo and scan it so a folder
+    # row exists in the DB.
+    Image.new("RGB", (64, 64), color="teal").save(str(real_dst / "keeper.jpg"))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(real_dst), db)
+
+    # Rewrite the folder row to an equivalent path that routes through a
+    # ``..`` segment. This mimics the state left behind by a prior scan
+    # started with an unnormalized root like ``{tmp}/other/../library``.
+    unnorm_path = f"{sibling}/../library"
+    assert os.path.isdir(unnorm_path)
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE path = ?",
+        (unnorm_path, str(real_dst)),
+    )
+    db.conn.commit()
+
+    # Stage the same file on the "SD card" so it's a byte-for-byte
+    # duplicate of the one already in the destination library.
+    shutil.copy2(str(real_dst / "keeper.jpg"), str(src / "keeper.jpg"))
+
+    # Ingest into the SAME unnormalized form the DB holds. skip_duplicates
+    # should recognise the duplicate AND record the stored folder in
+    # duplicate_folders so the post-ingest restrict scan can link it.
+    result = ingest(str(src), unnorm_path, db=db, skip_duplicates=True)
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    dup_folders = result.get("duplicate_folders", [])
+    assert unnorm_path in dup_folders, (
+        f"expected unnormalized stored path {unnorm_path!r} in "
+        f"duplicate_folders; got {dup_folders!r}"
+    )
+
+
+def test_ingest_duplicate_folders_rejects_dot_dot_escape(tmp_path):
+    """A DB folder path containing ``..`` segments that lexically starts
+    with destination_dir but resolves outside it must not leak into
+    duplicate_folders.
+
+    Regression: ``Path.is_relative_to`` is a lexical check on path parts,
+    so a stored path like ``/library/../other/photos`` passes
+    ``is_relative_to(Path("/library"))`` even though ``os.path.normpath``
+    would resolve it to ``/other/photos``. Scanner stores raw strings, so
+    a previous scan with an unnormalized root (or any manual DB edit)
+    could persist such paths, and without normalization they would end
+    up in restrict_dirs and get walked as if under destination.
+    """
+    import shutil
+
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    escape_target = tmp_path / "other"
+    for d in [src, dst, escape_target]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="navy")
+    img.save(str(escape_target / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(escape_target), db)
+
+    # Rewrite the folder row to use a lexical escape that still resolves
+    # to the same real directory on disk. The ``..`` leg pretends to be
+    # anchored at dst, so is_relative_to(dst) lexically succeeds, but the
+    # actual resolution points outside dst.
+    escape_path = f"{dst}/../other"
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE path = ?",
+        (escape_path, str(escape_target)),
+    )
+    db.conn.commit()
+
+    shutil.copy2(str(escape_target / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+    dup_folders = result.get("duplicate_folders", [])
+    assert escape_path not in dup_folders, (
+        f"duplicate_folders accepted lexical .. escape {escape_path!r}; "
+        f"got {dup_folders!r}"
+    )
+    # And make sure nothing outside dst slipped through under a different
+    # disguise.
+    import os
+    for f in dup_folders:
+        resolved = os.path.normpath(f)
+        assert resolved == str(dst) or resolved.startswith(str(dst) + os.sep), (
+            f"duplicate_folders contains {f!r} (normpath={resolved!r}) "
+            f"which is not under destination {str(dst)!r}"
+        )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

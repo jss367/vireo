@@ -869,6 +869,169 @@ def test_pipeline_ingest_step_present_only_with_destination(tmp_path, monkeypatc
         "ingest step should come before scan"
 
 
+def test_pipeline_all_duplicates_restricts_scan_to_existing_folders(tmp_path, monkeypatch):
+    """When every source file is a duplicate of an existing photo in the DB,
+    the scan phase must be restricted to just the folders that hold those
+    existing duplicates — not left with restrict_dirs=None, which makes the
+    scanner walk the entire destination tree.
+
+    Regression test: user selects N photos from an SD card that have already
+    been imported, clicks pipeline, and expects those photos to become linked
+    to their current workspace. With restrict_dirs=None the scan either takes
+    far too long (17+ minutes for a 50k-file library) or skips folder linking
+    entirely for the workspaces the user cares about.
+    """
+    import shutil
+
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Destination tree with two populated date folders plus an unrelated
+    # folder that should NOT be walked by the restricted scan.
+    dest = tmp_path / "dest"
+    duplicate_home = dest / "2024" / "2024-06-15"
+    duplicate_home.mkdir(parents=True)
+    unrelated = dest / "2023" / "2023-01-01"
+    unrelated.mkdir(parents=True)
+    for i in range(2):
+        Image.new("RGB", (100, 100), (i * 80, 50, 50)).save(
+            str(duplicate_home / f"dup_{i}.jpg")
+        )
+    Image.new("RGB", (100, 100), "blue").save(str(unrelated / "unrelated.jpg"))
+
+    # Scan so the existing photos land in the DB with their hashes.
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    from scanner import scan as do_scan
+    do_scan(str(dest), db)
+
+    # Source is a fresh directory containing byte-identical copies of the
+    # duplicates (same hashes), simulating an SD card that still has the
+    # already-imported photos on it.
+    src = tmp_path / "source"
+    src.mkdir()
+    for i in range(2):
+        shutil.copy2(
+            str(duplicate_home / f"dup_{i}.jpg"),
+            str(src / f"dup_{i}.jpg"),
+        )
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    scan_calls = []
+    from unittest.mock import patch
+
+    import scanner as scanner_mod
+    original_scan = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        scan_calls.append({
+            "root": str(root),
+            "restrict_dirs": kwargs.get("restrict_dirs"),
+        })
+        return original_scan(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Find the pipeline's scan-stage call (root == destination).
+    pipeline_scans = [c for c in scan_calls if c["root"] == str(dest)]
+    assert pipeline_scans, \
+        f"Pipeline did not call scan on destination; calls={scan_calls}"
+    call = pipeline_scans[-1]
+
+    restrict = call["restrict_dirs"]
+    assert restrict is not None, (
+        "When every file is a duplicate, pipeline should restrict the scan "
+        "to the existing-duplicates' folders instead of walking the entire "
+        "destination tree (restrict_dirs=None)."
+    )
+    restrict_set = set(restrict)
+    assert str(duplicate_home) in restrict_set, (
+        f"Expected {duplicate_home!r} in restrict_dirs; got {restrict_set!r}"
+    )
+    assert str(unrelated) not in restrict_set, (
+        f"Unrelated folder {unrelated!r} must not be in restrict_dirs; "
+        f"got {restrict_set!r}"
+    )
+
+
+def test_pipeline_all_duplicates_links_existing_folders_to_workspace(tmp_path, monkeypatch):
+    """When every source file is a duplicate, the folders holding those
+    existing duplicates should end up linked to the active workspace after
+    the pipeline runs — even if the workspace had no folders linked before.
+    """
+    import shutil
+
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    dest = tmp_path / "dest"
+    dup_folder = dest / "2024" / "2024-06-15"
+    dup_folder.mkdir(parents=True)
+    for i in range(2):
+        Image.new("RGB", (100, 100), (i * 80, 40, 40)).save(
+            str(dup_folder / f"dup_{i}.jpg")
+        )
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    default_ws = db._active_workspace_id
+
+    from scanner import scan as do_scan
+    do_scan(str(dest), db)
+
+    # Switch to a fresh workspace that has no folders.
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    assert db.get_folder_tree() == []
+
+    src = tmp_path / "source"
+    src.mkdir()
+    for i in range(2):
+        shutil.copy2(
+            str(dup_folder / f"dup_{i}.jpg"),
+            str(src / f"dup_{i}.jpg"),
+        )
+
+    params = PipelineParams(
+        source=str(src),
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, other_ws, params)
+
+    # Re-open DB to pick up writes made on the worker thread's own connection.
+    db2 = Database(db_path)
+    db2.set_active_workspace(other_ws)
+    other_folders = {f["path"] for f in db2.get_folder_tree()}
+    assert str(dup_folder) in other_folders, (
+        f"Expected {dup_folder!r} to be linked to Other workspace after "
+        f"pipeline dedupped all source files; got {other_folders!r}"
+    )
+
+
 def test_pipeline_copy_mode_scans_subfolders(tmp_path, monkeypatch):
     """After ingest, scan should use restrict_dirs to target only subfolders
     that received files, while keeping the destination as root for folder hierarchy."""

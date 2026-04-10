@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,17 @@ from image_loader import IMAGE_EXTENSIONS, RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
+
+
+def _escape_sql_like(s):
+    """Escape SQL LIKE wildcard metacharacters in a literal string.
+
+    SQLite's LIKE treats ``%`` and ``_`` as wildcards unconditionally. The
+    ESCAPE clause lets us declare an escape character so a literal ``%``
+    or ``_`` in the pattern is matched literally. We pair this helper with
+    ``... LIKE ? ESCAPE '\\'`` at the call site.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _is_unsafe_path(s):
@@ -182,11 +194,84 @@ def ingest(
     # Load known hashes from database for duplicate detection and merge with
     # any hashes accumulated by previous ingest() calls in the same session.
     known_hashes = set()
+    known_hash_folders: dict[str, set[str]] = {}
     if skip_duplicates:
+        # Global hash set for dedup decisions. A source file matching any
+        # existing photo in the DB (even in another library root) is skipped
+        # so we don't silently duplicate bytes on disk.
         rows = db.conn.execute(
             "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
         ).fetchall()
         known_hashes = {r["file_hash"] for r in rows}
+        # Destination-scoped hash -> set-of-folder-paths map for populating
+        # the caller's post-ingest scan restrict_dirs. The same hash can
+        # legitimately appear in more than one destination subfolder (e.g.,
+        # the user copied the same photo into multiple date folders), and
+        # every matching folder needs to be walked so all of them get
+        # linked to the active workspace. Four guards, layered:
+        #   1. SQL ``f.status = 'ok'`` — exclude folders the DB already
+        #      knows are missing (cheap and visible to static analysis).
+        #   2. SQL prefix match on ``f.path`` with an explicit ``ESCAPE``
+        #      clause — rough subtree cut so we don't haul the whole
+        #      library into memory on large DBs. Escaping is required
+        #      because destination paths may legally contain SQL LIKE
+        #      wildcard characters (``_`` and ``%``).
+        #   3. Python ``Path.is_relative_to`` on lexically-normalized
+        #      paths — strict path-component comparison that catches any
+        #      residual LIKE wildcard leaks. ``os.path.normpath`` is
+        #      applied to both sides first so ``..`` segments in a
+        #      stored folder path can't lexically appear to be under
+        #      the destination while actually resolving outside it.
+        #   4. Python ``Path.is_dir`` on the raw stored path — catches
+        #      stale ``status='ok'`` rows when the folder was deleted
+        #      since the last scan and the caller didn't refresh folder
+        #      health first.
+        # A folder passes only if all four guards agree.
+        #
+        # The SQL prefilter compares against ``dest_path_str`` (derived
+        # from ``str(Path(destination_dir))``, i.e. raw lexical form minus
+        # the trailing slash that ``Path`` already strips). We deliberately
+        # do NOT apply ``os.path.normpath`` before querying: scanner.scan
+        # persists folder paths via ``str(Path(...))``, which keeps ``..``
+        # segments intact, so a library that was previously scanned with
+        # an unnormalized root (e.g. ``/mnt/photos/../library``) stores
+        # rows with those ``..`` segments in place. A pre-normalized query
+        # string would silently drop those rows from the prefilter and
+        # leave ``known_hash_folders`` empty for duplicate-only ingests
+        # into such destinations. ``rstrip("/")`` is kept so the root
+        # destination (``"/"``) produces LIKE prefix ``"/%"`` rather than
+        # ``"//%"``.
+        #
+        # ``dest_path_normalized`` is a separate ``Path`` used ONLY by the
+        # Python ``is_relative_to`` guard below. ``os.path.normpath`` is
+        # used instead of ``Path.resolve()`` to avoid filesystem access
+        # and symlink expansion, which could diverge from the raw paths
+        # stored in ``folders.path``.
+        dest_path_str = str(Path(destination_dir))
+        dest_path_normalized = Path(os.path.normpath(dest_path_str))
+        dest_like_prefix = _escape_sql_like(dest_path_str.rstrip("/")) + "/%"
+        folder_rows = db.conn.execute(
+            """SELECT p.file_hash, f.path AS folder_path
+               FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               WHERE p.file_hash IS NOT NULL
+                 AND f.status = 'ok'
+                 AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')""",
+            (dest_path_str, dest_like_prefix),
+        ).fetchall()
+        for r in folder_rows:
+            folder_path = r["folder_path"]
+            # Normalise both sides before the subtree check: a stored path
+            # like "/dest/sub/../other" is lexically NOT relative to
+            # "/dest/sub" but IS relative to "/dest". Without normpath,
+            # is_relative_to gives the wrong answer for paths with ".."
+            # segments that happen to share a prefix with dest.
+            candidate_normalized = Path(os.path.normpath(folder_path))
+            if not candidate_normalized.is_relative_to(dest_path_normalized):
+                continue
+            if not Path(folder_path).is_dir():
+                continue
+            known_hash_folders.setdefault(r["file_hash"], set()).add(folder_path)
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 
@@ -194,6 +279,7 @@ def ingest(
     skipped_duplicate = 0
     failed = 0
     copied_paths = []
+    duplicate_folders: set[str] = set()
 
     for i, source_file in enumerate(files):
         try:
@@ -202,6 +288,14 @@ def ingest(
 
             if skip_duplicates and file_hash in known_hashes:
                 skipped_duplicate += 1
+                # Record every destination folder that holds a copy of
+                # this file, not just one. The pipeline uses this set
+                # verbatim as restrict_dirs, so if we only report one
+                # folder the others never get linked to the active
+                # workspace.
+                duplicate_folders.update(
+                    known_hash_folders.get(file_hash, ())
+                )
                 if progress_callback:
                     progress_callback(i + 1, total, source_file.name)
                 continue
@@ -230,6 +324,7 @@ def ingest(
                     # Exact same file already there
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
+                    duplicate_folders.add(str(dest_folder))
                     if progress_callback:
                         progress_callback(i + 1, total, source_file.name)
                     continue
@@ -259,4 +354,5 @@ def ingest(
         "failed": failed,
         "total": total,
         "copied_paths": copied_paths,
+        "duplicate_folders": sorted(duplicate_folders),
     }

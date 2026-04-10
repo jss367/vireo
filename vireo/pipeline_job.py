@@ -249,6 +249,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
                 accumulated_hashes: set = set()
                 all_copied_paths: list = []
+                all_duplicate_folders: set = set()
                 total_copied = 0
                 total_skipped = 0
                 for src_folder in sources:
@@ -265,6 +266,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         recursive=params.recursive,
                     )
                     all_copied_paths.extend(result_info.get("copied_paths", []))
+                    all_duplicate_folders.update(result_info.get("duplicate_folders", []))
                     total_copied += result_info.get("copied", 0)
                     total_skipped += result_info.get("skipped_duplicate", 0)
                     # Collect hashes of files just copied so the next source
@@ -288,15 +290,36 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                    summary=", ".join(parts) or "0 files")
                 _update_stages(runner, job["id"], stages)
 
-                # Scan only the destination subfolders that received files,
-                # not the entire destination tree. We use restrict_dirs so the
-                # scanner still roots the folder hierarchy at the destination,
-                # preserving parent folder links.
-                restrict = None
+                # Scan only the destination subfolders that actually contain
+                # files we care about, not the entire destination tree. Use
+                # restrict_dirs so the scanner still roots the folder hierarchy
+                # at the destination, preserving parent folder links. Include
+                # folders that received copies AND folders that already hold
+                # duplicates of the source files — both need to be linked to
+                # the active workspace. Guard every candidate at this seam:
+                # scanner._ensure_folder recurses parents until it equals the
+                # scan root; a non-descendant path would recurse all the way
+                # to '/', so restrict_dirs must contain only descendants of
+                # params.destination. ingest() already enforces this, but
+                # we re-check here to keep the invariant local and obvious.
+                # Both sides are lexically normalized via os.path.normpath so
+                # a stored path containing ``..`` can't defeat the check.
+                import os as _os
+                dest_p = Path(_os.path.normpath(params.destination))
+
+                def _under_destination(path: str) -> bool:
+                    return Path(_os.path.normpath(path)).is_relative_to(dest_p)
+
+                restrict_set: set[str] = set()
                 if all_copied_paths:
-                    restrict = sorted({
+                    restrict_set.update(
                         str(Path(p).parent) for p in all_copied_paths
-                    })
+                        if _under_destination(str(Path(p).parent))
+                    )
+                restrict_set.update(
+                    f for f in all_duplicate_folders if _under_destination(f)
+                )
+                restrict = sorted(restrict_set) if restrict_set else None
                 # Flip scan to running and reset job progress so status
                 # events during enumeration don't carry ingest's numbers.
                 stages["scan"]["status"] = "running"
