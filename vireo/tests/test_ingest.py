@@ -341,6 +341,60 @@ def test_ingest_duplicate_folders_only_under_destination(tmp_path):
         )
 
 
+def test_ingest_duplicate_folders_prefers_live_folder_over_stale(tmp_path):
+    """When a hash exists in multiple destination subfolders, duplicate_folders
+    must not select one whose DB status is not 'ok'.
+
+    Regression: ingest's hash→folder map kept the first row returned by the
+    query, which has no ordering or health filter. If a stale/missing folder
+    was returned first, restrict_dirs pointed the post-ingest scan at a
+    non-existent directory, which the scanner warns on and skips — so the
+    live duplicate folder never got linked to the active workspace.
+    """
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "library"
+    stale_dir = dst / "2024" / "2024-01-01"
+    live_dir = dst / "2024" / "2024-02-02"
+    for d in [src, stale_dir, live_dir]:
+        d.mkdir(parents=True)
+
+    # Two byte-identical files, one in each destination subfolder.
+    img = Image.new("RGB", (100, 100), color="orange")
+    img.save(str(stale_dir / "shot.jpg"))
+    img.save(str(live_dir / "shot.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(dst), db)
+
+    # Mark one of the folders as stale at the DB level, as check_folder_health
+    # would if the directory had disappeared between scans.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE path = ?",
+        (str(stale_dir),),
+    )
+    db.conn.commit()
+
+    # Source file with the same hash.
+    import shutil
+    shutil.copy2(str(live_dir / "shot.jpg"), str(src / "shot.jpg"))
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
+
+    assert result["skipped_duplicate"] == 1
+    assert result["copied"] == 0
+
+    dup_folders = result.get("duplicate_folders", [])
+    assert str(stale_dir) not in dup_folders, (
+        f"duplicate_folders picked the stale folder {str(stale_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+    assert str(live_dir) in dup_folders, (
+        f"duplicate_folders should contain the live folder {str(live_dir)!r}; "
+        f"got {dup_folders!r}"
+    )
+
+
 def test_ingest_file_types_filter(tmp_path):
     """Only selected file types are copied."""
     src = tmp_path / "sd_card"

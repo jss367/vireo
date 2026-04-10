@@ -181,32 +181,37 @@ def ingest(
 
     # Load known hashes from database for duplicate detection and merge with
     # any hashes accumulated by previous ingest() calls in the same session.
-    # Also build a hash -> folder-path map so we can tell the caller where
-    # the existing duplicates live; the pipeline uses this to restrict the
-    # post-ingest scan to just the relevant subdirectories instead of
-    # walking the entire destination tree. Only folders that are descendants
-    # of ``destination_dir`` are tracked here — cross-library duplicates are
-    # still skipped via ``known_hashes`` but must NOT leak out-of-tree paths
-    # into the caller's scan restrict_dirs (that would make the scanner
-    # recurse parents all the way up to '/').
-    dest_path_for_filter = Path(destination_dir)
     known_hashes = set()
     known_hash_folder: dict[str, str] = {}
     if skip_duplicates:
+        # Global hash set for dedup decisions. A source file matching any
+        # existing photo in the DB (even in another library root) is skipped
+        # so we don't silently duplicate bytes on disk.
         rows = db.conn.execute(
+            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
+        ).fetchall()
+        known_hashes = {r["file_hash"] for r in rows}
+        # Destination-scoped hash -> folder-path map for populating the
+        # caller's post-ingest scan restrict_dirs. Constrain at the SQL
+        # level to folders that are (a) descendants of destination_dir and
+        # (b) live on disk (status='ok'). This prevents restrict_dirs from
+        # leaking out-of-tree paths (which would make scanner._ensure_folder
+        # recurse parents all the way to '/') or stale paths (which would
+        # make scanner.scan() warn on a missing root and fail to link the
+        # real duplicate folder to the active workspace).
+        dest_path_str = str(Path(destination_dir))
+        dest_like_prefix = dest_path_str.rstrip("/") + "/%"
+        folder_rows = db.conn.execute(
             """SELECT p.file_hash, f.path AS folder_path
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
-               WHERE p.file_hash IS NOT NULL"""
+               WHERE p.file_hash IS NOT NULL
+                 AND f.status = 'ok'
+                 AND (f.path = ? OR f.path LIKE ?)""",
+            (dest_path_str, dest_like_prefix),
         ).fetchall()
-        for r in rows:
-            fh = r["file_hash"]
-            known_hashes.add(fh)
-            if fh in known_hash_folder:
-                continue
-            folder_path = r["folder_path"]
-            if Path(folder_path).is_relative_to(dest_path_for_filter):
-                known_hash_folder[fh] = folder_path
+        for r in folder_rows:
+            known_hash_folder.setdefault(r["file_hash"], r["folder_path"])
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 
