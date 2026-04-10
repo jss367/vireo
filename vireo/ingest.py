@@ -181,12 +181,22 @@ def ingest(
 
     # Load known hashes from database for duplicate detection and merge with
     # any hashes accumulated by previous ingest() calls in the same session.
+    # Also build a hash -> folder-path map so we can tell the caller where
+    # the existing duplicates live; the pipeline uses this to restrict the
+    # post-ingest scan to just the relevant subdirectories instead of
+    # walking the entire destination tree.
     known_hashes = set()
+    known_hash_folder = {}
     if skip_duplicates:
         rows = db.conn.execute(
-            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
+            """SELECT p.file_hash, f.path AS folder_path
+               FROM photos p
+               JOIN folders f ON p.folder_id = f.id
+               WHERE p.file_hash IS NOT NULL"""
         ).fetchall()
-        known_hashes = {r["file_hash"] for r in rows}
+        for r in rows:
+            known_hashes.add(r["file_hash"])
+            known_hash_folder.setdefault(r["file_hash"], r["folder_path"])
         if extra_known_hashes:
             known_hashes |= extra_known_hashes
 
@@ -194,6 +204,7 @@ def ingest(
     skipped_duplicate = 0
     failed = 0
     copied_paths = []
+    duplicate_folders: set[str] = set()
 
     for i, source_file in enumerate(files):
         try:
@@ -202,6 +213,9 @@ def ingest(
 
             if skip_duplicates and file_hash in known_hashes:
                 skipped_duplicate += 1
+                existing_folder = known_hash_folder.get(file_hash)
+                if existing_folder:
+                    duplicate_folders.add(existing_folder)
                 if progress_callback:
                     progress_callback(i + 1, total, source_file.name)
                 continue
@@ -230,6 +244,7 @@ def ingest(
                     # Exact same file already there
                     skipped_duplicate += 1
                     known_hashes.add(file_hash)
+                    duplicate_folders.add(str(dest_folder))
                     if progress_callback:
                         progress_callback(i + 1, total, source_file.name)
                     continue
@@ -259,4 +274,5 @@ def ingest(
         "failed": failed,
         "total": total,
         "copied_paths": copied_paths,
+        "duplicate_folders": sorted(duplicate_folders),
     }
