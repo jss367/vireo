@@ -1094,12 +1094,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         # the "Failed: [stage_name]" mapping on the card that owned the
         # failure because it reads result.result.stages / .errors.
         job["result"] = result
-        first_error = errors[0] if errors else f"stage '{failed_stages[0]}' failed"
-        # Preserve the structured stage/error data on the job before raising so
-        # the completion event and frontend (which reads result.result.errors and
-        # result.result.stages) still has the per-stage breakdown even though the
-        # job is marked as failed.
-        job["result"] = result
+        # Prefer a "[stage] Fatal: …" error from one of the failed stages
+        # rather than blindly using errors[0], which may be a non-fatal
+        # per-photo warning (e.g. "Photo <id>: mask extraction failed")
+        # logged before the stage-level failure. Falling back to errors[0]
+        # when no stage-fatal entry exists keeps backward compatibility for
+        # any edge case where a stage marks itself failed without appending a
+        # Fatal error; the final fallback covers an empty errors list.
+        first_error = next(
+            (e for e in errors if any(e.startswith(f"[{s}] Fatal:") for s in failed_stages)),
+            errors[0] if errors else f"stage '{failed_stages[0]}' failed",
+        )
         raise RuntimeError(first_error)
 
     return result
