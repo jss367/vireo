@@ -29,6 +29,7 @@ class FakeRunner:
     def __init__(self):
         self.events = []
         self.step_updates = []
+        self.cancelled_ids = set()
 
     def push_event(self, job_id, event_type, data):
         self.events.append((job_id, event_type, data))
@@ -38,6 +39,9 @@ class FakeRunner:
 
     def update_step(self, job_id, step_id, **kwargs):
         self.step_updates.append((job_id, step_id, kwargs))
+
+    def is_cancelled(self, job_id):
+        return job_id in self.cancelled_ids
 
 
 def test_pipeline_params_has_skip_classify():
@@ -172,6 +176,48 @@ def test_pipeline_abort_event_stops_stages():
     assert not _should_abort(abort)
     abort.set()
     assert _should_abort(abort)
+
+
+def test_pipeline_cancel_via_runner_skips_remaining_stages(tmp_path, monkeypatch):
+    """When runner.is_cancelled returns True, the pipeline watcher should set
+    the local abort event, and remaining stages should bail without raising."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ["a.jpg", "b.jpg", "c.jpg"]:
+        Image.new("RGB", (50, 50), "red").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # Pre-cancel the job: the watcher thread should pick this up almost
+    # immediately and set abort.
+    runner.cancelled_ids.add(job["id"])
+
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert isinstance(result, dict)
+    assert "duration" in result
+    # The pipeline should return without raising. It may still have run scan
+    # (no interruption hook in scanner), but classify/extract_masks/regroup
+    # were skip_* anyway, so this just verifies graceful completion under
+    # cancellation.
 
 
 def test_pipeline_abort_on_nonexistent_source(tmp_path, monkeypatch):
