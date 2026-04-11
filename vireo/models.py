@@ -521,6 +521,26 @@ def download_model(model_id, progress_callback=None):
                 os.unlink(sentinel_path)
         if pinned_revision is not None:
             model_verify.write_pinned_revision(model_dir, pinned_revision)
+    else:
+        # Hash fetch was unavailable so verification was skipped. We still
+        # need to update (or clear) the revision pin so that a subsequent
+        # verify_model call reads the correct revision rather than a stale
+        # SHA from a previous install.
+        #
+        # - If we know which revision we downloaded from (pinned_revision is
+        #   not None — the model-info API responded even though the tree API
+        #   failed), write that revision so verify_model pins to the right
+        #   commit once the tree API comes back online.
+        # - If revision lookup also failed (pinned_revision is None), delete
+        #   any existing .hf_revision. A stale pin would cause verify_model
+        #   to fetch expected hashes for the old SHA and report false
+        #   mismatches for files that are actually correct.
+        rev_path = os.path.join(model_dir, model_verify.REVISION_FILE)
+        if pinned_revision is not None:
+            model_verify.write_pinned_revision(model_dir, pinned_revision)
+        else:
+            with contextlib.suppress(OSError):
+                os.unlink(rev_path)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":

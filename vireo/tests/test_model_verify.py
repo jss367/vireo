@@ -315,12 +315,14 @@ def test_verify_model_without_revision_file_uses_main(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_verify_cache():
-    """verify_if_needed caches results in a module-level set. Reset between
-    tests so cache state from one test doesn't leak into another."""
+    """verify_if_needed caches results in module-level dicts/sets. Reset
+    between tests so cache state from one test doesn't leak into another."""
     import model_verify
     model_verify._verified_this_process.clear()
+    model_verify._verify_error_cache.clear()
     yield
     model_verify._verified_this_process.clear()
+    model_verify._verify_error_cache.clear()
 
 
 def test_verify_if_needed_calls_verify_model_once_per_process(
@@ -555,3 +557,197 @@ def test_verify_all_models_writes_sentinel_on_mismatch(tmp_path, monkeypatch):
 
     model_verify.verify_all_models()
     assert (bad_dir / model_verify.VERIFY_FAILED_SENTINEL).is_file()
+
+
+# ---------------------------------------------------------------------------
+# verify_if_needed — VerifyError failure backoff (Codex P2 on #501 line 207)
+# ---------------------------------------------------------------------------
+
+def test_verify_if_needed_catches_verify_error_and_fails_open(tmp_path, monkeypatch):
+    """When verify_model raises VerifyError (network/HTTP failure), verify_if_needed
+    must NOT write .verify_failed and must NOT raise — it should fail open and
+    let the pipeline proceed, logging the failure for later retry."""
+    import model_verify
+
+    def always_raises(model_dir, hf_subdir):
+        raise model_verify.VerifyError("network timeout")
+
+    monkeypatch.setattr(model_verify, "verify_model", always_raises)
+
+    # Should return without raising.
+    model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+
+    # No sentinel written (network failure ≠ corruption).
+    assert not (tmp_path / model_verify.VERIFY_FAILED_SENTINEL).is_file()
+    # Error time was recorded in the failure cache.
+    assert "bioclip-vit-b-16" in model_verify._verify_error_cache
+
+
+def test_verify_if_needed_skips_network_within_ttl_after_verify_error(tmp_path, monkeypatch):
+    """After a VerifyError, subsequent calls within _VERIFY_ERROR_TTL must skip
+    the network check entirely — no call to verify_model at all.  This avoids
+    repeated 30-second stalls on every pipeline start when HF is unreachable."""
+    import time as _time
+
+    import model_verify
+
+    call_count = {"n": 0}
+
+    def counting_verify(model_dir, hf_subdir):
+        call_count["n"] += 1
+        raise model_verify.VerifyError("still down")
+
+    monkeypatch.setattr(model_verify, "verify_model", counting_verify)
+
+    # First call: hits network, records failure.
+    model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+    assert call_count["n"] == 1
+
+    # Second call within TTL: must NOT call verify_model again.
+    model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+    assert call_count["n"] == 1, (
+        "verify_model was called again within TTL window — this would cause "
+        "repeated network stalls within the same process on failing networks"
+    )
+
+
+def test_verify_if_needed_retries_after_error_ttl_expires(tmp_path, monkeypatch):
+    """After _VERIFY_ERROR_TTL seconds the failure entry expires and the next
+    call retries the network check (so we don't suppress errors forever)."""
+    import model_verify
+
+    call_count = {"n": 0}
+
+    def counting_verify(model_dir, hf_subdir):
+        call_count["n"] += 1
+        raise model_verify.VerifyError("timeout")
+
+    monkeypatch.setattr(model_verify, "verify_model", counting_verify)
+
+    # Seed a stale error timestamp that is already past the TTL.
+    import time as _time
+    model_verify._verify_error_cache["bioclip-vit-b-16"] = (
+        _time.monotonic() - model_verify._VERIFY_ERROR_TTL - 1
+    )
+
+    model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+    assert call_count["n"] == 1, (
+        "Expected verify_model to be called once after TTL expiry but it was not"
+    )
+
+
+def test_clear_verified_cache_also_clears_error_cache(tmp_path, monkeypatch):
+    """clear_verified_cache must evict the model from both caches so that
+    a fresh download triggers a clean re-verification on the next pipeline run."""
+    import model_verify
+
+    model_verify._verify_error_cache["bioclip-vit-b-16"] = 0.0  # stale entry
+    model_verify.clear_verified_cache("bioclip-vit-b-16")
+    assert "bioclip-vit-b-16" not in model_verify._verify_error_cache
+
+
+# ---------------------------------------------------------------------------
+# download_model — revision pin update when verification is skipped (Codex P1
+# on #501 line 517)
+# ---------------------------------------------------------------------------
+
+def test_download_model_writes_revision_when_hash_fetch_fails(tmp_path, monkeypatch):
+    """If fetch_latest_revision succeeds but fetch_expected_hashes fails (tree
+    API outage), download_model must still write .hf_revision with the
+    pinned SHA so that a later verify_model call fetches hashes against the
+    correct (immutable) revision instead of 'main' or a stale pin."""
+    import os
+
+    import model_verify
+    import models as models_mod
+
+    # Reuse the helper from test_models.py's environment patch.
+    monkeypatch.setattr(models_mod, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models_mod, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    pinned_sha = "abc123" * 6 + "abcd"  # 40-char SHA-like
+
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: pinned_sha
+    )
+
+    def hash_fetch_fails(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", hash_fetch_fails)
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s: None)
+    monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
+
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+
+    models_mod.download_model("bioclip-vit-b-16")
+
+    rev_file = model_dir / model_verify.REVISION_FILE
+    assert rev_file.is_file(), (
+        ".hf_revision must be written even when hash fetch fails so that the "
+        "next verify_model call uses the correct immutable revision rather than "
+        "'main' or a stale pin from a previous install."
+    )
+    assert rev_file.read_text().strip() == pinned_sha
+
+
+def test_download_model_clears_stale_revision_when_both_apis_fail(tmp_path, monkeypatch):
+    """When both fetch_latest_revision AND fetch_expected_hashes fail,
+    download_model must DELETE any existing .hf_revision so that the next
+    verify_model falls back to 'main' rather than reading a stale SHA that
+    would cause false mismatch failures for files that are actually correct."""
+    import os
+
+    import model_verify
+    import models as models_mod
+
+    monkeypatch.setattr(models_mod, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models_mod, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+
+    # Pre-existing stale revision pin from a previous install.
+    stale_rev = model_dir / model_verify.REVISION_FILE
+    stale_rev.write_text("stalesha1234567890abcdef1234567890abcdef")
+
+    def both_fail(*args, **kwargs):
+        raise model_verify.VerifyError("offline")
+
+    monkeypatch.setattr(model_verify, "fetch_latest_revision", both_fail)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", both_fail)
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s: None)
+    monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
+
+    # download_model raises because state check sees no sentinel but files
+    # are stub-sized — state = 'ok' with stubs so it won't raise.
+    # Just call it; we care about the revision file.
+    try:
+        models_mod.download_model("bioclip-vit-b-16")
+    except RuntimeError:
+        pass  # may raise on state check; that's acceptable
+
+    assert not stale_rev.exists(), (
+        "Stale .hf_revision must be deleted when both revision and hash APIs "
+        "fail. Leaving it would cause verify_model to fetch expected hashes "
+        "for the old SHA and report false mismatches on files that are "
+        "actually correct but from a different (newer) revision."
+    )
