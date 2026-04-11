@@ -110,6 +110,7 @@ def test_pipeline_params_all_fields():
         labels_file="/labels.txt",
         labels_files=["/a.txt", "/b.txt"],
         model_id="bioclip-2",
+        model_ids=["bioclip-2", "timm-inat21-eva02-l"],
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
@@ -120,11 +121,18 @@ def test_pipeline_params_all_fields():
     assert params.sources == ["/src1", "/src2"]
     assert params.destination == "/dst"
     assert params.file_types == "raw"
+    assert params.model_ids == ["bioclip-2", "timm-inat21-eva02-l"]
     assert params.reclassify is True
     assert params.skip_extract_masks is True
     assert params.skip_regroup is True
     assert params.skip_classify is True
     assert params.preview_max_size == 2560
+
+
+def test_pipeline_params_model_ids_defaults_none():
+    """model_ids defaults to None (single-model / back-compat path)."""
+    params = PipelineParams(collection_id=1)
+    assert params.model_ids is None
 
 
 def test_pipeline_job_with_collection_skips_scan(tmp_path, monkeypatch):
@@ -1267,6 +1275,22 @@ def _make_stage_failer(monkeypatch, stage_name, err_message):
     return real_run
 
 
+def _write_fake_model_files(model_dir, extra_files=()):
+    """Materialize a fake model directory that passes _classify_model_state."""
+    import models
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"stub")
+    with open(model_dir / "image_encoder.onnx.data", "wb") as f:
+        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+    (model_dir / "text_encoder.onnx").write_bytes(b"stub")
+    with open(model_dir / "text_encoder.onnx.data", "wb") as f:
+        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
+    for extra in extra_files:
+        (model_dir / extra).write_text("{}")
+
+
 def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     """Put a validation-passing fake model on disk so model_loader_stage can
     get past the model-lookup / labels / taxonomy steps and into Classifier().
@@ -1276,16 +1300,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
-    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
-    model_dir.mkdir(parents=True)
-    (model_dir / "image_encoder.onnx").write_bytes(b"stub")
-    with open(model_dir / "image_encoder.onnx.data", "wb") as f:
-        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
-    (model_dir / "text_encoder.onnx").write_bytes(b"stub")
-    with open(model_dir / "text_encoder.onnx.data", "wb") as f:
-        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
-    (model_dir / "tokenizer.json").write_text("{}")
-    (model_dir / "config.json").write_text("{}")
+    _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
     models.set_active_model("bioclip-vit-b-16")
     # Short-circuit taxonomy and label loading so the test stays focused on
     # model-loading behavior.
@@ -1294,6 +1309,25 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
     )
     return "bioclip-vit-b-16"
+
+
+def _setup_two_fake_downloaded_models(tmp_path, monkeypatch):
+    """Install two bioclip models side-by-side; both reported as downloaded."""
+    import classify_job
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
+    _write_fake_model_files(
+        tmp_path / "models" / "bioclip-2",
+        extra_files=("tol_embeddings.npy", "tol_classes.json"),
+    )
+    models.set_active_model("bioclip-vit-b-16")
+    monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
+    monkeypatch.setattr(
+        classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+    )
+    return ["bioclip-vit-b-16", "bioclip-2"]
 
 
 def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
@@ -1441,3 +1475,109 @@ def test_pipeline_cancellation_takes_precedence_over_failure(tmp_path, monkeypat
     # Should NOT raise — cancellation wins over stage failure.
     result = run_pipeline_job(job, runner, db_path, ws_id, params)
     assert isinstance(result, dict)
+
+
+def test_pipeline_loops_over_multiple_models(tmp_path, monkeypatch):
+    """When model_ids contains multiple models, each one must be loaded and
+    run through classify. This is the fix for the UI-dropped-multi-select bug:
+    the pipeline page collects multiple checked models but only the first one
+    was forwarded to the backend. The backend now honors model_ids."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    construction_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            construction_calls.append(kwargs)
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(construction_calls) == len(model_ids), (
+        f"Expected Classifier() to be constructed {len(model_ids)} times "
+        f"(one per model_id), got {len(construction_calls)}"
+    )
+    # model_loader must record completion with a summary naming each model.
+    model_loader_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and kwargs.get("status") == "completed"
+    ]
+    joined = " ".join(model_loader_summaries)
+    assert "BioCLIP" in joined and "BioCLIP-2" in joined, (
+        f"model_loader summary should mention both models, saw: {model_loader_summaries}"
+    )
+
+
+def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
+    """A job with only the legacy `model_id` field (no `model_ids`) must still
+    load exactly that one model — preserving back-compat with older callers."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    construction_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            construction_calls.append(kwargs)
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_id="bioclip-vit-b-16",
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(construction_calls) == 1, (
+        f"Legacy model_id should load exactly one classifier, "
+        f"got {len(construction_calls)}"
+    )
