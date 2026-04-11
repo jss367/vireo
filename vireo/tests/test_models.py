@@ -896,3 +896,62 @@ def test_download_model_still_verifies_when_revision_lookup_fails(tmp_path, monk
         "fetch_expected_hashes should have been called once (against 'main') "
         "even when fetch_repo_revision raises VerifyError"
     )
+
+
+def test_download_model_clears_stale_revision_when_revision_lookup_fails(
+    tmp_path, monkeypatch
+):
+    """When fetch_repo_revision fails but fetch_expected_hashes succeeds
+    (verification_ran=True, hf_revision=None), a stale .hf_revision left over
+    from a prior install must be removed.
+
+    Without this, a future verify_model call reads the outdated commit SHA and
+    fetches expected hashes pinned to an older revision.  If the model files
+    on disk are from a newer HEAD, the SHA256s won't match and the model is
+    falsely flagged incomplete.
+
+    Regression test for the second Codex P1 comment on #504 ('Clear stale
+    pinned revision when repo SHA lookup fails').
+    """
+    import hashlib
+    import model_verify
+
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Simulate a stale .hf_revision from a prior successful download.
+    stale_rev_path = model_dir / model_verify.REVISION_FILE
+    stale_rev_path.write_text("stalesha123")
+
+    contents = b"freshbytes" * 100
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    monkeypatch.setattr(models, "_purge_hf_cache_file", lambda filename, subdir: None)
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_repo_revision",
+        lambda repo: (_ for _ in ()).throw(model_verify.VerifyError("repo-info offline")),
+    )
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # The stale .hf_revision must be gone so future verify_model calls fall
+    # back to "main" rather than using the outdated commit SHA.
+    assert not stale_rev_path.exists(), (
+        ".hf_revision must be deleted when revision lookup fails but "
+        "verification still ran against 'main', to prevent future "
+        "verify_model from using a stale commit SHA."
+    )

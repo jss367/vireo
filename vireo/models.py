@@ -521,11 +521,18 @@ def download_model(model_id, progress_callback=None):
         if os.path.isfile(sentinel_path):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel_path)
+        rev_path = os.path.join(model_dir, model_verify.REVISION_FILE)
         if hf_revision:
-            rev_path = os.path.join(model_dir, model_verify.REVISION_FILE)
             with contextlib.suppress(OSError):
                 with open(rev_path, "w") as f:
                     f.write(hf_revision)
+        else:
+            # Revision lookup failed but verification ran against "main".
+            # Remove any stale .hf_revision so future verify_model calls
+            # also verify against "main" instead of an outdated commit SHA
+            # that would produce false hash mismatches.
+            with contextlib.suppress(OSError):
+                os.unlink(rev_path)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":
