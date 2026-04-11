@@ -535,8 +535,25 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
 
 
 def _patch_download_model_env(tmp_path, monkeypatch):
-    """Shared setup: isolate config/models dir and return the model dir path."""
+    """Shared setup: isolate config/models dir and return the model dir path.
+
+    Also stubs huggingface_hub so download_model's import guard succeeds
+    even in environments where the library isn't installed (CI uses the
+    real library; local dev uses this stub).
+    """
+    import sys
+    import types
+
     import models
+
+    # Stub huggingface_hub so the `from huggingface_hub import hf_hub_download`
+    # guard at the top of download_model doesn't raise ImportError.
+    if "huggingface_hub" not in sys.modules:
+        hf_stub = types.ModuleType("huggingface_hub")
+        hf_stub.hf_hub_download = lambda **kwargs: None
+        hf_stub.try_to_load_from_cache = lambda **kwargs: None
+        monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     return models, tmp_path / "models" / "bioclip-vit-b-16"
@@ -576,7 +593,10 @@ def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
 
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_repo_revision", lambda repo: "testsha123abc"
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     result = models.download_model("bioclip-vit-b-16")
@@ -636,7 +656,10 @@ def test_download_model_retries_on_hash_mismatch_then_succeeds(
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_repo_revision", lambda repo: "testsha123abc"
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     result = models.download_model("bioclip-vit-b-16")
@@ -676,7 +699,10 @@ def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_repo_revision", lambda repo: "testsha123abc"
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     import pytest as _pytest
@@ -718,7 +744,10 @@ def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_repo_revision", lambda repo: "testsha123abc"
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     model_verify._verified_this_process.add("bioclip-vit-b-16")
@@ -750,13 +779,16 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
             f.write(b"stub")
         return dest
 
-    def fetch_raises(subdir):
+    def fetch_raises(subdir, revision="main"):
         raise model_verify.VerifyError("tree API offline")
 
     monkeypatch.setattr(
         models, "_purge_hf_cache_file", lambda filename, subdir: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_repo_revision", lambda repo: "testsha123abc"
+    )
     monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
 
     # download_model should raise because _classify_model_state will still
@@ -768,3 +800,46 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
     # Sentinel must still be on disk so a future pipeline run (or a retry
     # after HF is back up) keeps the model flagged as corrupt.
     assert sentinel.is_file()
+
+
+def test_download_model_writes_revision_file(tmp_path, monkeypatch):
+    """After a successful download with SHA256 verification, download_model
+    writes .hf_revision with the resolved HF commit SHA so that future
+    verify_model calls hash against that immutable revision instead of the
+    moving 'main' tip."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"realbytes" * 100
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_repo_revision", lambda repo: "pinned_sha_abc123"
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
+
+    models.download_model("bioclip-vit-b-16")
+
+    rev_file = model_dir / model_verify.REVISION_FILE
+    assert rev_file.is_file()
+    assert rev_file.read_text().strip() == "pinned_sha_abc123"

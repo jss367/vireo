@@ -444,14 +444,19 @@ def download_model(model_id, progress_callback=None):
     total_files = len(files)
 
     # Fetch expected hashes once up front so we can verify each LFS file
-    # against HF's reported SHA256 as we go. A fetch failure here means
-    # we'll proceed without verification, but we must also NOT clear any
-    # preexisting .verify_failed sentinel — otherwise a Repair attempt
-    # during a transient HF outage could silently reclassify a genuinely
-    # corrupt model as healthy.
+    # against HF's reported SHA256 as we go. We also resolve the HEAD
+    # revision so we can pin future verify_model calls to this exact
+    # commit — preventing false failures when upstream later updates files
+    # at the same branch tip.
+    # A fetch failure here means we'll proceed without verification, but we
+    # must also NOT clear any preexisting .verify_failed sentinel — otherwise
+    # a Repair attempt during a transient HF outage could silently reclassify
+    # a genuinely corrupt model as healthy.
     verification_ran = False
+    hf_revision = None
     try:
-        expected_hashes = model_verify.fetch_expected_hashes(hf_subdir)
+        hf_revision = model_verify.fetch_repo_revision(ONNX_REPO)
+        expected_hashes = model_verify.fetch_expected_hashes(hf_subdir, revision=hf_revision)
         verification_ran = True
     except model_verify.VerifyError as e:
         log.warning(
@@ -460,6 +465,7 @@ def download_model(model_id, progress_callback=None):
             hf_subdir, e,
         )
         expected_hashes = {}
+        hf_revision = None
 
     for fi, filename in enumerate(files):
         if progress_callback:
@@ -484,6 +490,8 @@ def download_model(model_id, progress_callback=None):
     # verification and every file matched its expected hash (a hash
     # mismatch would have raised VerifyError out of the loop above, so
     # reaching here with verification_ran=True means everything passed).
+    # Also write .hf_revision to pin future verify_model calls to this
+    # exact commit, preventing false failures when upstream updates files.
     if verification_ran:
         sentinel_path = os.path.join(
             model_dir, model_verify.VERIFY_FAILED_SENTINEL
@@ -491,6 +499,11 @@ def download_model(model_id, progress_callback=None):
         if os.path.isfile(sentinel_path):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel_path)
+        if hf_revision:
+            rev_path = os.path.join(model_dir, model_verify.REVISION_FILE)
+            with contextlib.suppress(OSError):
+                with open(rev_path, "w") as f:
+                    f.write(hf_revision)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":
@@ -595,10 +608,22 @@ def _purge_hf_cache_file(filename, hf_subdir):
         log.debug("HF cache lookup failed for %s: %s", filename, e)
         return
 
-    if isinstance(cached, str) and os.path.isfile(cached):
+    if isinstance(cached, str) and os.path.lexists(cached):
         try:
-            os.unlink(cached)
-            log.info("Purged corrupt blob from HF cache: %s", cached)
+            # The HF snapshot path is typically a symlink into blobs/.
+            # Deleting only the symlink leaves the corrupt blob in place and
+            # hf_hub_download can re-link to it on the next attempt.
+            # Resolve to the underlying blob first and remove that, so
+            # subsequent retries must fetch fresh bytes from the network.
+            blob_path = os.path.realpath(cached)
+            if blob_path != cached and os.path.isfile(blob_path):
+                os.unlink(blob_path)
+                log.info("Purged corrupt blob from HF cache: %s", blob_path)
+            # Also remove the snapshot symlink / file so no dangling pointer
+            # is left behind pointing at the now-deleted blob.
+            if os.path.lexists(cached):
+                os.unlink(cached)
+                log.info("Purged corrupt snapshot entry from HF cache: %s", cached)
         except OSError as e:
             log.warning("Could not purge HF cache entry %s: %s", cached, e)
 

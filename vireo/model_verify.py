@@ -14,11 +14,16 @@ import urllib.request
 from dataclasses import dataclass, field
 
 ONNX_REPO = "jss367/vireo-onnx-models"
-_TREE_API = "https://huggingface.co/api/models/{repo}/tree/main/{subdir}"
+_TREE_API = "https://huggingface.co/api/models/{repo}/tree/{revision}/{subdir}"
+_REPO_API = "https://huggingface.co/api/models/{repo}"
 _FETCH_TIMEOUT = 30  # seconds
 
 
 VERIFY_FAILED_SENTINEL = ".verify_failed"
+# Written by download_model to pin verification to the exact HF commit
+# that was downloaded. verify_model reads this to avoid false failures
+# when upstream later updates model files at the same branch tip.
+REVISION_FILE = ".hf_revision"
 
 
 class VerifyError(Exception):
@@ -69,18 +74,44 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def fetch_expected_hashes(hf_subdir: str) -> dict[str, str]:
-    """Fetch expected SHA256 hashes from the HuggingFace tree API.
+def fetch_repo_revision(repo: str) -> str:
+    """Return the current HEAD commit SHA for the given HuggingFace repo.
 
-    Returns a dict mapping basename -> hex SHA256 for every LFS file under
-    the given subdirectory of ONNX_REPO. Non-LFS files (config.json,
-    tokenizer.json) are omitted — their integrity is covered by
-    _classify_model_state's file-presence check plus the clear parse
-    errors they produce at load time.
+    Used by download_model to record the exact revision that was present
+    when files were downloaded, so that verify_model can compare against
+    that immutable snapshot rather than the moving 'main' tip.
 
     Raises VerifyError on any network or HTTP failure.
     """
-    url = _TREE_API.format(repo=ONNX_REPO, subdir=hf_subdir)
+    url = _REPO_API.format(repo=repo)
+    try:
+        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+        sha = data.get("sha")
+        if not sha:
+            raise VerifyError(f"no sha field in repo info for {repo}")
+        return sha
+    except VerifyError:
+        raise
+    except Exception as e:
+        raise VerifyError(f"failed to fetch revision for {repo}: {e}") from e
+
+
+def fetch_expected_hashes(hf_subdir: str, revision: str = "main") -> dict[str, str]:
+    """Fetch expected SHA256 hashes from the HuggingFace tree API.
+
+    Returns a dict mapping basename -> hex SHA256 for every LFS file under
+    the given subdirectory of ONNX_REPO at the given revision. Non-LFS
+    files (config.json, tokenizer.json) are omitted — their integrity is
+    covered by _classify_model_state's file-presence check plus the clear
+    parse errors they produce at load time.
+
+    Pass an immutable commit SHA as revision to avoid false failures when
+    upstream later updates files at the same branch tip.
+
+    Raises VerifyError on any network or HTTP failure.
+    """
+    url = _TREE_API.format(repo=ONNX_REPO, revision=revision, subdir=hf_subdir)
     try:
         with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
             payload = json.loads(resp.read())
@@ -102,11 +133,25 @@ def fetch_expected_hashes(hf_subdir: str) -> dict[str, str]:
 def verify_model(model_dir: str, hf_subdir: str) -> VerifyResult:
     """Verify that LFS files in model_dir match the hashes HF reports.
 
+    If model_dir contains a .hf_revision file (written by download_model),
+    verification is pinned to that immutable commit so that upstream updates
+    to the 'main' branch tip do not cause false corruption reports for
+    locally valid files.
+
     Non-LFS files (config.json, tokenizer.json) are not checked here —
     that's _classify_model_state's job (file presence) and the model
     loader's job (parse-time validation).
     """
-    expected = fetch_expected_hashes(hf_subdir)
+    revision = "main"
+    rev_path = os.path.join(model_dir, REVISION_FILE)
+    if os.path.isfile(rev_path):
+        try:
+            stored = open(rev_path).read().strip()
+            if stored:
+                revision = stored
+        except OSError:
+            pass
+    expected = fetch_expected_hashes(hf_subdir, revision=revision)
     mismatches: list[str] = []
     missing: list[str] = []
     for basename, expected_sha in expected.items():

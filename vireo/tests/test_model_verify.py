@@ -1,8 +1,8 @@
 """Tests for vireo/model_verify.py — SHA256 verification of model files.
 
 Covers sha256_file, fetch_expected_hashes (HF tree API parsing),
-verify_model (on-disk vs expected), verify_if_needed (lazy + cached),
-and the .verify_failed sentinel file.
+fetch_repo_revision, verify_model (on-disk vs expected, revision pinning),
+verify_if_needed (lazy + cached), and the .verify_failed sentinel file.
 """
 import hashlib
 import json
@@ -129,6 +129,53 @@ def test_fetch_expected_hashes_raises_verify_error_on_network_failure(monkeypatc
     assert "connection refused" in str(excinfo.value)
 
 
+def test_fetch_expected_hashes_uses_revision_in_url(monkeypatch):
+    """When a revision is provided, the tree API URL uses that revision
+    instead of 'main', so verification is pinned to an immutable commit."""
+    import model_verify
+
+    captured_url = {}
+
+    def fake_urlopen(url, timeout=None):
+        captured_url["url"] = url
+        return _FakeResponse(_CANNED_TREE)
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+    model_verify.fetch_expected_hashes("bioclip-vit-b-16", revision="abc123def456")
+
+    assert "abc123def456" in captured_url["url"]
+    assert "main" not in captured_url["url"]
+
+
+# ---------------------------------------------------------------------------
+# fetch_repo_revision — HuggingFace repo info API
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_repo_revision_returns_sha(monkeypatch):
+    """fetch_repo_revision parses the sha field from the HF model info API."""
+    import model_verify
+
+    def fake_urlopen(url, timeout=None):
+        return _FakeResponse({"sha": "deadbeef1234567890abcdef", "modelId": "jss367/vireo-onnx-models"})
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+    sha = model_verify.fetch_repo_revision("jss367/vireo-onnx-models")
+    assert sha == "deadbeef1234567890abcdef"
+
+
+def test_fetch_repo_revision_raises_on_network_failure(monkeypatch):
+    """Network errors from fetch_repo_revision are wrapped in VerifyError."""
+    import model_verify
+
+    def fake_urlopen(url, timeout=None):
+        raise OSError("timeout")
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(model_verify.VerifyError):
+        model_verify.fetch_repo_revision("jss367/vireo-onnx-models")
+
+
 # ---------------------------------------------------------------------------
 # verify_model
 # ---------------------------------------------------------------------------
@@ -153,7 +200,7 @@ def test_verify_model_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": h2,
         },
@@ -163,6 +210,27 @@ def test_verify_model_ok(tmp_path, monkeypatch):
     assert result.ok is True
     assert result.mismatches == []
     assert result.missing == []
+
+
+def test_verify_model_uses_stored_revision(tmp_path, monkeypatch):
+    """When .hf_revision exists, verify_model passes it to fetch_expected_hashes
+    so verification is pinned to the commit the files were downloaded from."""
+    import model_verify
+
+    h1 = _write_with_hash(tmp_path, "image_encoder.onnx", b"graph1" * 1000)
+    pinned_rev = "abc123def456pinned"
+    (tmp_path / model_verify.REVISION_FILE).write_text(pinned_rev)
+
+    captured_rev = {}
+
+    def fake_fetch(subdir, revision="main"):
+        captured_rev["revision"] = revision
+        return {"image_encoder.onnx": h1}
+
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch)
+
+    model_verify.verify_model(str(tmp_path), "bioclip-vit-b-16")
+    assert captured_rev["revision"] == pinned_rev
 
 
 def test_verify_model_detects_mismatch(tmp_path, monkeypatch):
@@ -178,7 +246,7 @@ def test_verify_model_detects_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": bad_expected,
         },
@@ -200,7 +268,7 @@ def test_verify_model_detects_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": "a" * 64,
         },
@@ -237,7 +305,7 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx": h},
+        lambda subdir, revision="main": {"image_encoder.onnx": h},
     )
 
     call_count = {"n": 0}
@@ -268,7 +336,7 @@ def test_verify_if_needed_raises_and_writes_sentinel_on_mismatch(
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx.data": "0" * 64},
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
     )
 
     with pytest.raises(model_verify.ModelCorruptError) as excinfo:
@@ -291,7 +359,7 @@ def test_verify_if_needed_mismatch_does_not_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx.data": "0" * 64},
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
     )
 
     with pytest.raises(model_verify.ModelCorruptError):
@@ -314,7 +382,7 @@ def test_clear_verified_cache_forces_re_verification(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx": h},
+        lambda subdir, revision="main": {"image_encoder.onnx": h},
     )
 
     model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
