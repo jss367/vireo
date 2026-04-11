@@ -454,9 +454,31 @@ def download_model(model_id, progress_callback=None):
     # a genuinely corrupt model as healthy.
     verification_ran = False
     hf_revision = None
+
+    # Step 1: Try to resolve the pinned HF revision for this download.
+    # Failure (repo-info API unreachable) falls back to "main" so that
+    # SHA256 verification can still run against the tree API — the two
+    # APIs are independent and the tree API may be healthy even when the
+    # model-info endpoint is not.
     try:
         hf_revision = model_verify.fetch_repo_revision(ONNX_REPO)
-        expected_hashes = model_verify.fetch_expected_hashes(hf_subdir, revision=hf_revision)
+    except model_verify.VerifyError as e:
+        log.warning(
+            "Could not resolve HF revision for %s: %s. "
+            "Will verify hashes against 'main'.",
+            ONNX_REPO, e,
+        )
+        hf_revision = None  # will fall back to "main" below
+
+    # Step 2: Fetch expected hashes using the resolved revision (or "main"
+    # if the revision lookup above failed). Only if this step also fails do
+    # we skip SHA256 verification entirely — and we must NOT clear any
+    # preexisting .verify_failed sentinel in that case.
+    revision_for_hashes = hf_revision or "main"
+    try:
+        expected_hashes = model_verify.fetch_expected_hashes(
+            hf_subdir, revision=revision_for_hashes
+        )
         verification_ran = True
     except model_verify.VerifyError as e:
         log.warning(
@@ -465,7 +487,7 @@ def download_model(model_id, progress_callback=None):
             hf_subdir, e,
         )
         expected_hashes = {}
-        hf_revision = None
+        hf_revision = None  # no verified revision to pin against
 
     for fi, filename in enumerate(files):
         if progress_callback:
