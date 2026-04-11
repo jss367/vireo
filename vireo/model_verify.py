@@ -14,8 +14,14 @@ import urllib.request
 from dataclasses import dataclass, field
 
 ONNX_REPO = "jss367/vireo-onnx-models"
-_TREE_API = "https://huggingface.co/api/models/{repo}/tree/main/{subdir}"
+_TREE_API = "https://huggingface.co/api/models/{repo}/tree/{revision}/{subdir}"
+_MODEL_INFO_API = "https://huggingface.co/api/models/{repo}"
 _FETCH_TIMEOUT = 30  # seconds
+
+# Filename (inside each model directory) that pins the HF commit SHA the
+# model was downloaded from. Read by verify_if_needed so that upstream
+# updates to main don't flip previously-good local files to "incomplete".
+REVISION_FILE = ".hf_revision"
 
 
 VERIFY_FAILED_SENTINEL = ".verify_failed"
@@ -69,24 +75,55 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def fetch_expected_hashes(hf_subdir: str) -> dict[str, str]:
-    """Fetch expected SHA256 hashes from the HuggingFace tree API.
+def fetch_latest_revision(repo_id: str) -> str:
+    """Return the current commit SHA on main for the given HF repo.
 
-    Returns a dict mapping basename -> hex SHA256 for every LFS file under
-    the given subdirectory of ONNX_REPO. Non-LFS files (config.json,
-    tokenizer.json) are omitted — their integrity is covered by
-    _classify_model_state's file-presence check plus the clear parse
-    errors they produce at load time.
-
-    Raises VerifyError on any network or HTTP failure.
+    Used by download_model to pin new downloads to an immutable revision
+    so that upstream updates to main won't cause previously-downloaded
+    files to fail verification.
     """
-    url = _TREE_API.format(repo=ONNX_REPO, subdir=hf_subdir)
+    url = _MODEL_INFO_API.format(repo=repo_id)
     try:
         with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
             payload = json.loads(resp.read())
     except Exception as e:
         raise VerifyError(
-            f"failed to fetch expected hashes for {hf_subdir}: {e}"
+            f"failed to fetch latest revision for {repo_id}: {e}"
+        ) from e
+    sha = payload.get("sha")
+    if not sha:
+        raise VerifyError(
+            f"HuggingFace model-info for {repo_id} did not include a sha"
+        )
+    return sha
+
+
+def fetch_expected_hashes(
+    hf_subdir: str, revision: str = "main"
+) -> dict[str, str]:
+    """Fetch expected SHA256 hashes from the HuggingFace tree API.
+
+    Returns a dict mapping basename -> hex SHA256 for every LFS file under
+    the given subdirectory of ONNX_REPO at the given revision. Non-LFS
+    files (config.json, tokenizer.json) are omitted — their integrity is
+    covered by _classify_model_state's file-presence check plus the clear
+    parse errors they produce at load time.
+
+    `revision` defaults to "main" for backwards compatibility with models
+    that predate the revision-pinning scheme, but download_model always
+    passes the commit SHA captured at download time.
+
+    Raises VerifyError on any network or HTTP failure.
+    """
+    url = _TREE_API.format(
+        repo=ONNX_REPO, revision=revision, subdir=hf_subdir
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
+            payload = json.loads(resp.read())
+    except Exception as e:
+        raise VerifyError(
+            f"failed to fetch expected hashes for {hf_subdir}@{revision}: {e}"
         ) from e
 
     result: dict[str, str] = {}
@@ -99,14 +136,47 @@ def fetch_expected_hashes(hf_subdir: str) -> dict[str, str]:
     return result
 
 
+def _read_pinned_revision(model_dir: str) -> str:
+    """Return the pinned HF commit SHA for a model, or 'main' if none.
+
+    Models downloaded before revision-pinning was added have no
+    .hf_revision file; for those we fall back to 'main' so verification
+    still runs against the current upstream bytes (same behavior as the
+    initial implementation).
+    """
+    path = os.path.join(model_dir, REVISION_FILE)
+    if not os.path.isfile(path):
+        return "main"
+    try:
+        with open(path) as f:
+            sha = f.read().strip()
+        return sha or "main"
+    except OSError:
+        return "main"
+
+
+def write_pinned_revision(model_dir: str, revision: str) -> None:
+    """Persist the HF commit SHA this model was downloaded from so that
+    future verifications use the immutable revision instead of main.
+    Called by download_model after a successful download+verify."""
+    with contextlib.suppress(OSError), open(os.path.join(model_dir, REVISION_FILE), "w") as f:
+        f.write(revision)
+
+
 def verify_model(model_dir: str, hf_subdir: str) -> VerifyResult:
     """Verify that LFS files in model_dir match the hashes HF reports.
+
+    Uses the commit SHA pinned in .hf_revision (written at download time)
+    so that upstream updates to main don't reclassify previously-good
+    local files as corrupt. Falls back to 'main' for models downloaded
+    before revision pinning existed.
 
     Non-LFS files (config.json, tokenizer.json) are not checked here —
     that's _classify_model_state's job (file presence) and the model
     loader's job (parse-time validation).
     """
-    expected = fetch_expected_hashes(hf_subdir)
+    revision = _read_pinned_revision(model_dir)
+    expected = fetch_expected_hashes(hf_subdir, revision=revision)
     mismatches: list[str] = []
     missing: list[str] = []
     for basename, expected_sha in expected.items():

@@ -338,7 +338,8 @@ def register_model(model_id, name, model_str, weights_path, description=""):
 
 
 def _hf_download_with_retry(repo_id, filename, local_dir,
-                            subfolder=None, progress_callback=None):
+                            subfolder=None, progress_callback=None,
+                            revision=None):
     """Download a file from HuggingFace with retry on connection failures.
 
     Uses hf_hub_download for reliable resume. Keeps retrying as long as
@@ -351,6 +352,7 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
         local_dir: destination directory for the file
         subfolder: optional subfolder within the repo
         progress_callback: optional callable(message)
+        revision: optional HF commit SHA to pin the download to.
     """
     import time as _time
 
@@ -385,6 +387,8 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             }
             if subfolder:
                 kwargs["subfolder"] = subfolder
+            if revision:
+                kwargs["revision"] = revision
 
             cached_path = hf_hub_download(**kwargs)
 
@@ -443,23 +447,38 @@ def download_model(model_id, progress_callback=None):
     hf_subdir = km.get("hf_subdir", model_id)
     total_files = len(files)
 
-    # Fetch expected hashes once up front so we can verify each LFS file
-    # against HF's reported SHA256 as we go. A fetch failure here means
-    # we'll proceed without verification, but we must also NOT clear any
-    # preexisting .verify_failed sentinel — otherwise a Repair attempt
-    # during a transient HF outage could silently reclassify a genuinely
-    # corrupt model as healthy.
+    # Pin the download to a specific HF commit SHA. Fetching that revision
+    # up front means (a) every file in this download comes from the same
+    # immutable snapshot, (b) verification uses those hashes forever
+    # regardless of later main updates, and (c) fetch_expected_hashes
+    # hits the same revision as hf_hub_download. A failure here means
+    # we'll proceed without pinning and without verification — the same
+    # degraded mode as before — and we must NOT clear a preexisting
+    # .verify_failed sentinel, since no integrity check actually ran.
+    pinned_revision: str | None = None
     verification_ran = False
+    expected_hashes: dict[str, str] = {}
     try:
-        expected_hashes = model_verify.fetch_expected_hashes(hf_subdir)
-        verification_ran = True
+        pinned_revision = model_verify.fetch_latest_revision(ONNX_REPO)
     except model_verify.VerifyError as e:
         log.warning(
-            "Could not fetch expected hashes for %s: %s. Proceeding without "
-            "post-download verification.",
-            hf_subdir, e,
+            "Could not fetch latest revision for %s: %s. Proceeding "
+            "without revision pinning or post-download verification.",
+            ONNX_REPO, e,
         )
-        expected_hashes = {}
+
+    if pinned_revision is not None:
+        try:
+            expected_hashes = model_verify.fetch_expected_hashes(
+                hf_subdir, revision=pinned_revision
+            )
+            verification_ran = True
+        except model_verify.VerifyError as e:
+            log.warning(
+                "Could not fetch expected hashes for %s@%s: %s. "
+                "Proceeding without post-download verification.",
+                hf_subdir, pinned_revision, e,
+            )
 
     for fi, filename in enumerate(files):
         if progress_callback:
@@ -477,13 +496,15 @@ def download_model(model_id, progress_callback=None):
             model_dir=model_dir,
             hf_subdir=hf_subdir,
             expected_hashes=expected_hashes,
+            revision=pinned_revision,
             progress_callback=progress_callback,
         )
 
-    # Clear the verify-failed sentinel only if we actually ran SHA256
-    # verification and every file matched its expected hash (a hash
-    # mismatch would have raised VerifyError out of the loop above, so
-    # reaching here with verification_ran=True means everything passed).
+    # Clear the verify-failed sentinel and persist the revision pin only
+    # if we actually ran SHA256 verification and every file matched its
+    # expected hash (a hash mismatch would have raised VerifyError out of
+    # the loop above, so reaching here with verification_ran=True means
+    # everything passed).
     if verification_ran:
         sentinel_path = os.path.join(
             model_dir, model_verify.VERIFY_FAILED_SENTINEL
@@ -491,6 +512,8 @@ def download_model(model_id, progress_callback=None):
         if os.path.isfile(sentinel_path):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel_path)
+        if pinned_revision is not None:
+            model_verify.write_pinned_revision(model_dir, pinned_revision)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":
@@ -521,14 +544,17 @@ _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
 
 
 def _download_and_verify_file(
-    filename, model_dir, hf_subdir, expected_hashes, progress_callback
+    filename, model_dir, hf_subdir, expected_hashes, progress_callback,
+    revision=None,
 ):
     """Download one file and verify its SHA256 against expected_hashes.
 
-    On mismatch, deletes the file from both the local model dir and the
-    HuggingFace cache (otherwise hf_hub_download would happily hand back
-    the same corrupt blob on retry) and retries up to _MAX_HASH_RETRIES.
-    On final mismatch, raises VerifyError.
+    When `revision` is not None, hf_hub_download is pinned to that commit
+    SHA so the cache is keyed on an immutable snapshot. On mismatch,
+    deletes the file from both the local model dir and the HuggingFace
+    cache (otherwise hf_hub_download would happily hand back the same
+    corrupt blob on retry) and retries up to _MAX_HASH_RETRIES. On final
+    mismatch, raises VerifyError.
     """
     attempts = 0
     while True:
@@ -538,6 +564,7 @@ def _download_and_verify_file(
             model_dir,
             subfolder=hf_subdir,
             progress_callback=progress_callback,
+            revision=revision,
         )
 
         expected_sha = expected_hashes.get(filename)
@@ -577,17 +604,23 @@ def _purge_hf_cache_file(filename, hf_subdir):
     hf_hub_download call fetches fresh bytes instead of returning the
     corrupt blob it previously cached.
 
-    Uses huggingface_hub.try_to_load_from_cache to resolve the blob path;
-    silently no-ops if the library call is unavailable or the file isn't
-    cached.
+    The HF cache layout is:
+        blobs/<oid>                       <- actual file bytes
+        snapshots/<revision>/{path}       -> ../../blobs/<oid> symlink
+
+    `try_to_load_from_cache` returns the snapshot path, which is
+    typically a symlink into blobs/. Unlinking only the symlink would
+    leave the blob intact and hf_hub_download would happily relink to
+    the same corrupt bytes on retry. So we resolve the symlink to its
+    target and delete both.
     """
     try:
-        from huggingface_hub import try_to_load_from_cache
+        import huggingface_hub
     except ImportError:
         return
 
     try:
-        cached = try_to_load_from_cache(
+        cached = huggingface_hub.try_to_load_from_cache(
             repo_id=ONNX_REPO,
             filename=f"{hf_subdir}/{filename}" if hf_subdir else filename,
         )
@@ -595,12 +628,27 @@ def _purge_hf_cache_file(filename, hf_subdir):
         log.debug("HF cache lookup failed for %s: %s", filename, e)
         return
 
-    if isinstance(cached, str) and os.path.isfile(cached):
-        try:
+    if not isinstance(cached, str):
+        return
+
+    # Resolve the symlink (if any) to the actual blob target before we
+    # unlink the symlink itself — otherwise os.path.realpath on a broken
+    # symlink is meaningless.
+    blob_target = None
+    if os.path.islink(cached):
+        blob_target = os.path.realpath(cached)
+    elif os.path.isfile(cached):
+        blob_target = cached
+
+    with contextlib.suppress(OSError):
+        if os.path.islink(cached) or os.path.isfile(cached):
             os.unlink(cached)
-            log.info("Purged corrupt blob from HF cache: %s", cached)
-        except OSError as e:
-            log.warning("Could not purge HF cache entry %s: %s", cached, e)
+            log.info("Purged HF cache snapshot entry: %s", cached)
+
+    if blob_target and blob_target != cached and os.path.isfile(blob_target):
+        with contextlib.suppress(OSError):
+            os.unlink(blob_target)
+            log.info("Purged HF cache blob target: %s", blob_target)
 
 
 def download_hf_model(repo_id, progress_callback=None):

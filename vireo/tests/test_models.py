@@ -535,10 +535,18 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
 
 
 def _patch_download_model_env(tmp_path, monkeypatch):
-    """Shared setup: isolate config/models dir and return the model dir path."""
+    """Shared setup: isolate config/models dir and return the model dir path.
+    Also stubs fetch_latest_revision to a fixed SHA so tests don't hit the
+    real HuggingFace model-info API."""
+    import model_verify
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_latest_revision",
+        lambda repo: "testsha1234567890abcdef1234567890abcdef12",
+    )
     return models, tmp_path / "models" / "bioclip-vit-b-16"
 
 
@@ -562,7 +570,7 @@ def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
         for name, data in lfs_contents.items()
     }
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
         if filename in lfs_contents:
@@ -576,7 +584,7 @@ def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
 
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     result = models.download_model("bioclip-vit-b-16")
@@ -609,7 +617,7 @@ def test_download_model_retries_on_hash_mismatch_then_succeeds(
 
     attempts = {"image_encoder.onnx.data": 0}
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
         if filename == "image_encoder.onnx.data":
@@ -636,7 +644,7 @@ def test_download_model_retries_on_hash_mismatch_then_succeeds(
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     result = models.download_model("bioclip-vit-b-16")
@@ -662,7 +670,7 @@ def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
 
     attempts = {"image_encoder.onnx": 0}
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
         if filename == "image_encoder.onnx":
@@ -676,7 +684,7 @@ def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     import pytest as _pytest
@@ -706,7 +714,7 @@ def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
         "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
     }
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
         with open(dest, "wb") as f:
@@ -718,12 +726,143 @@ def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
-        model_verify, "fetch_expected_hashes", lambda subdir: expected
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
     )
 
     model_verify._verified_this_process.add("bioclip-vit-b-16")
     models.download_model("bioclip-vit-b-16")
     assert "bioclip-vit-b-16" not in model_verify._verified_this_process
+
+
+def test_download_model_writes_pinned_revision(tmp_path, monkeypatch):
+    """After a successful download, download_model records the current HF
+    commit SHA in .hf_revision so subsequent verifications use that
+    immutable revision instead of main — protecting against upstream
+    model updates invalidating valid local files."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    pinned_sha = "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed"
+    contents = b"realbytes" * 200
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    captured_fetch = {}
+
+    def fake_fetch(subdir, revision="main"):
+        captured_fetch["revision"] = revision
+        return expected
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: pinned_sha
+    )
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # The pinned revision file is written on disk
+    rev_file = model_dir / model_verify.REVISION_FILE
+    assert rev_file.is_file()
+    assert rev_file.read_text().strip() == pinned_sha
+
+    # fetch_expected_hashes was called with the pinned revision, not main
+    assert captured_fetch["revision"] == pinned_sha
+
+
+def test_download_model_proceeds_without_pin_on_revision_fetch_failure(
+    tmp_path, monkeypatch
+):
+    """If fetch_latest_revision fails (HF outage), download_model still
+    runs — just without pinning and without SHA verification (same
+    fallback path as fetch_expected_hashes failing). No .hf_revision is
+    written, because we don't have a revision to pin to."""
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    def fetch_revision_raises(repo):
+        raise model_verify.VerifyError("model-info api offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", fetch_revision_raises
+    )
+    # Also stub fetch_expected_hashes in case it's still called.
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": (_ for _ in ()).throw(
+            AssertionError("should not fetch hashes if revision fetch failed")
+        ),
+    )
+
+    models.download_model("bioclip-vit-b-16")
+
+    assert not (model_dir / model_verify.REVISION_FILE).exists()
+
+
+def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):
+    """_purge_hf_cache_file follows the snapshot symlink to the actual blob
+    in blobs/ and deletes that, not just the snapshot symlink. Otherwise
+    hf_hub_download on retry would relink to the same corrupt bytes.
+    """
+    import models
+
+    # Build a fake HF cache layout:
+    #   blobs/<oid>         <- actual file bytes
+    #   snapshots/<rev>/path/to/file.data  -> ../../blobs/<oid>
+    blobs = tmp_path / "blobs"
+    snapshots = tmp_path / "snapshots" / "rev123" / "bioclip-vit-b-16"
+    blobs.mkdir(parents=True)
+    snapshots.mkdir(parents=True)
+    blob_path = blobs / "corruptblob"
+    blob_path.write_bytes(b"corrupt")
+    symlink_path = snapshots / "image_encoder.onnx.data"
+    os.symlink(blob_path, symlink_path)
+
+    def fake_try_to_load_from_cache(repo_id, filename):
+        return str(symlink_path)
+
+    import huggingface_hub
+    monkeypatch.setattr(
+        huggingface_hub, "try_to_load_from_cache", fake_try_to_load_from_cache
+    )
+
+    models._purge_hf_cache_file(
+        "image_encoder.onnx.data", "bioclip-vit-b-16"
+    )
+
+    # Both the snapshot symlink and the blob target must be gone, so that
+    # the next hf_hub_download actually fetches fresh bytes instead of
+    # relinking to the same corrupt blob.
+    assert not symlink_path.exists()
+    assert not blob_path.exists()
 
 
 def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
@@ -743,14 +882,14 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
     sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
     sentinel.write_text("earlier mismatch")
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
         with open(dest, "wb") as f:
             f.write(b"stub")
         return dest
 
-    def fetch_raises(subdir):
+    def fetch_raises(subdir, revision="main"):
         raise model_verify.VerifyError("tree API offline")
 
     monkeypatch.setattr(

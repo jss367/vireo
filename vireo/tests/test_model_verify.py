@@ -129,6 +129,62 @@ def test_fetch_expected_hashes_raises_verify_error_on_network_failure(monkeypatc
     assert "connection refused" in str(excinfo.value)
 
 
+def test_fetch_expected_hashes_uses_pinned_revision(monkeypatch):
+    """When a revision (commit SHA) is passed, the URL must target that
+    revision — not 'main'. Otherwise a post-download upstream change would
+    silently flip healthy models to 'incomplete'."""
+    import model_verify
+
+    captured_url = {}
+
+    def fake_urlopen(url, timeout=None):
+        captured_url["url"] = url
+        return _FakeResponse(_CANNED_TREE)
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+
+    model_verify.fetch_expected_hashes(
+        "bioclip-vit-b-16",
+        revision="deadbeef1234567890abcdef1234567890abcdef",
+    )
+    assert "deadbeef1234567890abcdef1234567890abcdef" in captured_url["url"]
+    assert "/tree/main/" not in captured_url["url"]
+
+
+def test_fetch_latest_revision_returns_sha(monkeypatch):
+    """fetch_latest_revision returns the current commit SHA on main from
+    the HF model-info API. Used by download_model to pin new downloads."""
+    import model_verify
+
+    def fake_urlopen(url, timeout=None):
+        # HF /api/models/{repo} returns a dict with a `sha` field that is
+        # the latest commit on main.
+        return _FakeResponse(
+            {
+                "sha": "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed",
+                "id": model_verify.ONNX_REPO,
+            }
+        )
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+
+    sha = model_verify.fetch_latest_revision(model_verify.ONNX_REPO)
+    assert sha == "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed"
+
+
+def test_fetch_latest_revision_network_error_raises_verify_error(monkeypatch):
+    """Same error wrapping contract as fetch_expected_hashes."""
+    import model_verify
+
+    def fake_urlopen(url, timeout=None):
+        raise OSError("dns failure")
+
+    monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(model_verify.VerifyError):
+        model_verify.fetch_latest_revision(model_verify.ONNX_REPO)
+
+
 # ---------------------------------------------------------------------------
 # verify_model
 # ---------------------------------------------------------------------------
@@ -153,7 +209,7 @@ def test_verify_model_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": h2,
         },
@@ -178,7 +234,7 @@ def test_verify_model_detects_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": bad_expected,
         },
@@ -200,7 +256,7 @@ def test_verify_model_detects_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {
+        lambda subdir, revision="main": {
             "image_encoder.onnx": h1,
             "image_encoder.onnx.data": "a" * 64,
         },
@@ -210,6 +266,46 @@ def test_verify_model_detects_missing(tmp_path, monkeypatch):
     assert result.ok is False
     assert result.missing == ["image_encoder.onnx.data"]
     assert result.mismatches == []
+
+
+def test_verify_model_reads_pinned_revision(tmp_path, monkeypatch):
+    """verify_model reads .hf_revision from the model dir and passes the
+    pinned revision to fetch_expected_hashes. No .hf_revision → defaults
+    to 'main' for backwards compatibility with pre-pinning downloads."""
+    import model_verify
+
+    h = _write_with_hash(tmp_path, "image_encoder.onnx", b"ok" * 100)
+    (tmp_path / model_verify.REVISION_FILE).write_text(
+        "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed"
+    )
+
+    captured = {}
+
+    def spy(subdir, revision="main"):
+        captured["revision"] = revision
+        return {"image_encoder.onnx": h}
+
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", spy)
+    model_verify.verify_model(str(tmp_path), "bioclip-vit-b-16")
+    assert captured["revision"] == "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed"
+
+
+def test_verify_model_without_revision_file_uses_main(tmp_path, monkeypatch):
+    """Backwards compat: models from before revision pinning have no
+    .hf_revision file and fall back to verifying against main."""
+    import model_verify
+
+    h = _write_with_hash(tmp_path, "image_encoder.onnx", b"ok" * 100)
+
+    captured = {}
+
+    def spy(subdir, revision="main"):
+        captured["revision"] = revision
+        return {"image_encoder.onnx": h}
+
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", spy)
+    model_verify.verify_model(str(tmp_path), "bioclip-vit-b-16")
+    assert captured["revision"] == "main"
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +333,7 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx": h},
+        lambda subdir, revision="main": {"image_encoder.onnx": h},
     )
 
     call_count = {"n": 0}
@@ -268,7 +364,7 @@ def test_verify_if_needed_raises_and_writes_sentinel_on_mismatch(
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx.data": "0" * 64},
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
     )
 
     with pytest.raises(model_verify.ModelCorruptError) as excinfo:
@@ -291,7 +387,7 @@ def test_verify_if_needed_mismatch_does_not_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx.data": "0" * 64},
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
     )
 
     with pytest.raises(model_verify.ModelCorruptError):
@@ -314,7 +410,7 @@ def test_clear_verified_cache_forces_re_verification(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "fetch_expected_hashes",
-        lambda subdir: {"image_encoder.onnx": h},
+        lambda subdir, revision="main": {"image_encoder.onnx": h},
     )
 
     model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
