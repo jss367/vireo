@@ -12,14 +12,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _make_fake_data_file(path, size_bytes=None):
-    """Create a sparse file of the given size for .onnx.data stubs in tests.
-
-    Defaults to a size that clears the _ONNX_DATA_MIN_BYTES floor in models.py.
-    """
-    import models as _models
-    if size_bytes is None:
-        size_bytes = _models._ONNX_DATA_MIN_BYTES + 1024
+def _make_fake_data_file(path, size_bytes=2048):
+    """Create a sparse .onnx.data stub for tests. Size is now arbitrary —
+    the 10 MB floor in models.py has been replaced by SHA256 verification
+    in model_verify.py, so test stubs only need to exist on disk."""
     with open(path, "wb") as f:
         f.truncate(size_bytes)
 
@@ -465,21 +461,39 @@ def test_classify_state_partial_files(tmp_path):
     ) == "incomplete"
 
 
-def test_classify_state_truncated_data_file(tmp_path):
-    """An .onnx.data file below the size floor reports 'incomplete'."""
+def test_classify_state_sub_10mb_data_file_is_ok_without_sentinel(tmp_path):
+    """A small .onnx.data file is no longer flagged as incomplete on size
+    alone — the 10 MB floor has been replaced by SHA256 verification, which
+    runs separately. _classify_model_state only looks at file presence and
+    the .verify_failed sentinel."""
     import models
     d = tmp_path / "m"
     d.mkdir()
     (d / "image_encoder.onnx").write_bytes(b"stub")
-    # Sub-threshold data file — the exact failure mode from the incident.
-    _make_fake_data_file(d / "image_encoder.onnx.data", size_bytes=1024)
+    (d / "image_encoder.onnx.data").write_bytes(b"tiny")  # 4 bytes
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "ok"
+
+
+def test_classify_state_verify_failed_sentinel_marks_incomplete(tmp_path):
+    """If model_verify has written .verify_failed into a model dir,
+    _classify_model_state reports 'incomplete' so the Settings UI
+    surfaces the Repair button — reusing the existing Repair flow
+    from PR #488."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    (d / ".verify_failed").write_text("hash mismatch on retry")
     assert models._classify_model_state(
         str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
     ) == "incomplete"
 
 
 def test_classify_state_ok(tmp_path):
-    """All files present and data file meets floor reports 'ok'."""
+    """All files present and no sentinel reports 'ok'."""
     import models
     d = tmp_path / "m"
     d.mkdir()
@@ -492,11 +506,9 @@ def test_classify_state_ok(tmp_path):
 
 def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
     """get_models reports state='incomplete' and downloaded=False when a known
-    model directory exists but the .onnx.data sidecar is under the size floor.
-
-    This is the exact disk state that caused the incident: graph stubs were
-    downloaded before the manifest learned about external-data files.
-    """
+    model directory contains a .verify_failed sentinel (written by
+    model_verify after a hash mismatch). The Settings UI uses this to show
+    the Repair button."""
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
@@ -504,11 +516,12 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"stub")
-    _make_fake_data_file(model_dir / "image_encoder.onnx.data", size_bytes=2048)
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
     (model_dir / "text_encoder.onnx").write_bytes(b"stub")
-    _make_fake_data_file(model_dir / "text_encoder.onnx.data", size_bytes=2048)
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
+    (model_dir / ".verify_failed").write_text("sha256 mismatch")
 
     result = models.get_models()
     entry = next(m for m in result if m["id"] == "bioclip-vit-b-16")
@@ -517,67 +530,197 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# download_model post-download validation
+# download_model — SHA256 verification with retry
 # ---------------------------------------------------------------------------
 
 
-def test_download_model_rejects_truncated_result(tmp_path, monkeypatch):
-    """download_model raises if the downloaded files fail validation.
-
-    Simulates the regression window where the downloader would fetch ONNX
-    graph stubs but the .onnx.data file was missing/truncated. The fix: fail
-    the job instead of registering a broken model.
-    """
+def _patch_download_model_env(tmp_path, monkeypatch):
+    """Shared setup: isolate config/models dir and return the model dir path."""
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
-
-    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
-
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
-        os.makedirs(local_dir, exist_ok=True)
-        dest = os.path.join(local_dir, filename)
-        if filename.endswith(".onnx.data"):
-            # Truncated sidecar — below the size floor.
-            with open(dest, "wb") as f:
-                f.truncate(1024)
-        else:
-            with open(dest, "wb") as f:
-                f.write(b"stub")
-        return dest
-
-    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
-
-    import pytest
-    with pytest.raises(RuntimeError, match="failed validation"):
-        models.download_model("bioclip-vit-b-16")
-
-    # The broken model must not have been registered.
-    cfg = models._load_config()
-    assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+    return models, tmp_path / "models" / "bioclip-vit-b-16"
 
 
 def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
-    """download_model registers the model when validation passes."""
-    import models
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    """download_model registers the model when every LFS file's SHA256 matches
+    the hashes fetched from HF."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # Contents for the four LFS files; compute their expected hashes.
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in lfs_contents.items()
+    }
 
     def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
-        if filename.endswith(".onnx.data"):
+        if filename in lfs_contents:
             with open(dest, "wb") as f:
-                f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+                f.write(lfs_contents[filename])
         else:
+            # Non-LFS files (tokenizer.json, config.json) — just need to exist.
             with open(dest, "wb") as f:
-                f.write(b"stub")
+                f.write(b"{}")
         return dest
 
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir: expected
+    )
 
     result = models.download_model("bioclip-vit-b-16")
     assert result.endswith("bioclip-vit-b-16")
 
     cfg = models._load_config()
     assert any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_retries_on_hash_mismatch_then_succeeds(
+    tmp_path, monkeypatch
+):
+    """First two download attempts produce corrupt bytes, third attempt
+    produces correct bytes. download_model should retry transparently and
+    ultimately succeed, registering the model."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    good_content = b"weights-real" * 1000
+    good_hash = hashlib.sha256(good_content).hexdigest()
+    # Expected hashes for every LFS file in bioclip-vit-b-16.
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(b"graph-i").hexdigest(),
+        "image_encoder.onnx.data": good_hash,
+        "text_encoder.onnx": hashlib.sha256(b"graph-t").hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(b"graph-td").hexdigest(),
+    }
+
+    attempts = {"image_encoder.onnx.data": 0}
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename == "image_encoder.onnx.data":
+            attempts[filename] += 1
+            content = b"corrupt" if attempts[filename] < 3 else good_content
+        elif filename == "image_encoder.onnx":
+            content = b"graph-i"
+        elif filename == "text_encoder.onnx":
+            content = b"graph-t"
+        elif filename == "text_encoder.onnx.data":
+            content = b"graph-td"
+        else:
+            content = b"{}"
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    # Track cache purges so we can assert the HF cache is cleared between retries.
+    purged: list[str] = []
+    monkeypatch.setattr(
+        models,
+        "_purge_hf_cache_file",
+        lambda filename, subdir: purged.append(filename),
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir: expected
+    )
+
+    result = models.download_model("bioclip-vit-b-16")
+    assert result.endswith("bioclip-vit-b-16")
+    # 1 initial attempt + 2 retries on image_encoder.onnx.data
+    assert attempts["image_encoder.onnx.data"] == 3
+    # HF cache must be purged before each retry (2 purges = 2 retries).
+    assert purged.count("image_encoder.onnx.data") == 2
+
+
+def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
+    """Bytes on disk never match expected — download_model raises after
+    3 total attempts (1 initial + 2 retries) per file."""
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    expected = {
+        "image_encoder.onnx": "a" * 64,
+        "image_encoder.onnx.data": "b" * 64,
+        "text_encoder.onnx": "c" * 64,
+        "text_encoder.onnx.data": "d" * 64,
+    }
+
+    attempts = {"image_encoder.onnx": 0}
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename == "image_encoder.onnx":
+            attempts[filename] += 1
+        with open(dest, "wb") as f:
+            f.write(b"wrong")
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir: expected
+    )
+
+    import pytest as _pytest
+    with _pytest.raises(model_verify.VerifyError, match="image_encoder.onnx"):
+        models.download_model("bioclip-vit-b-16")
+
+    assert attempts["image_encoder.onnx"] == 3
+
+    # Broken model must not have been registered.
+    cfg = models._load_config()
+    assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
+    """After a successful download, the per-process verify cache for that
+    model_id is cleared so the next pipeline run re-verifies from disk."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"realbytes" * 100
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir: expected
+    )
+
+    model_verify._verified_this_process.add("bioclip-vit-b-16")
+    models.download_model("bioclip-vit-b-16")
+    assert "bioclip-vit-b-16" not in model_verify._verified_this_process

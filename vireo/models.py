@@ -4,10 +4,13 @@ All models are ONNX format, downloaded from the jss367/vireo-onnx-models
 HuggingFace repository into ~/.vireo/models/{model-id}/.
 """
 
+import contextlib
 import json
 import logging
 import os
 import shutil
+
+import model_verify
 
 log = logging.getLogger(__name__)
 
@@ -16,13 +19,6 @@ CONFIG_PATH = os.path.expanduser("~/.vireo/models.json")
 
 # HuggingFace repo containing all ONNX models
 ONNX_REPO = "jss367/vireo-onnx-models"
-
-# Minimum size for an ONNX external-data sidecar file (.onnx.data). Real weights
-# are always hundreds of MB; anything smaller means the download was truncated
-# or the .data file was never fetched. 10 MB is a generous floor that catches
-# the observed failure mode (graph stub with no weights) without risking any
-# legitimate file.
-_ONNX_DATA_MIN_BYTES = 10 * 1024 * 1024
 
 # Known models that can be downloaded.
 # Each entry specifies which ONNX files are needed and the subdirectory
@@ -131,13 +127,7 @@ def _save_config(config):
 def _check_onnx_downloaded(model_dir, files):
     """Check if all required model files exist and look usable.
 
-    Requires each listed file to exist, and requires any ONNX external-data
-    sidecar (*.onnx.data) to be at least _ONNX_DATA_MIN_BYTES so that graph
-    stubs without weights are detected as incomplete.
-
-    Returns:
-        True only if the directory exists, every file in `files` is present,
-        and every *.onnx.data file meets the size floor.
+    Returns True only when _classify_model_state returns 'ok'.
     """
     return _classify_model_state(model_dir, files) == "ok"
 
@@ -147,12 +137,18 @@ def _classify_model_state(model_dir, files):
 
     - 'missing':    directory doesn't exist, or no required file is present.
     - 'incomplete': directory exists with some but not all required files,
-                    OR an .onnx.data sidecar exists but is below the size
-                    floor (indicating a truncated / stubs-only download).
-    - 'ok':         all files present and sidecars meet the size floor.
+                    OR model_verify has written a .verify_failed sentinel
+                    into the directory (hash mismatch detected at load
+                    time or by manual Verify-all).
+    - 'ok':         all files present and no verify-failed sentinel.
     """
     if not os.path.isdir(model_dir):
         return "missing"
+
+    if os.path.isfile(
+        os.path.join(model_dir, model_verify.VERIFY_FAILED_SENTINEL)
+    ):
+        return "incomplete"
 
     present = [
         f for f in files if os.path.isfile(os.path.join(model_dir, f))
@@ -161,12 +157,6 @@ def _classify_model_state(model_dir, files):
         return "missing"
     if len(present) < len(files):
         return "incomplete"
-
-    for f in files:
-        if f.endswith(".onnx.data"):
-            size = os.path.getsize(os.path.join(model_dir, f))
-            if size < _ONNX_DATA_MIN_BYTES:
-                return "incomplete"
 
     return "ok"
 
@@ -453,6 +443,18 @@ def download_model(model_id, progress_callback=None):
     hf_subdir = km.get("hf_subdir", model_id)
     total_files = len(files)
 
+    # Fetch expected hashes once up front so we can verify each LFS file
+    # against HF's reported SHA256 as we go.
+    try:
+        expected_hashes = model_verify.fetch_expected_hashes(hf_subdir)
+    except model_verify.VerifyError as e:
+        log.warning(
+            "Could not fetch expected hashes for %s: %s. Proceeding without "
+            "post-download verification.",
+            hf_subdir, e,
+        )
+        expected_hashes = {}
+
     for fi, filename in enumerate(files):
         if progress_callback:
             size_hint = ""
@@ -464,24 +466,26 @@ def download_model(model_id, progress_callback=None):
                 total=total_files,
             )
 
-        _hf_download_with_retry(
-            ONNX_REPO,
-            filename,
-            model_dir,
-            subfolder=hf_subdir,
+        _download_and_verify_file(
+            filename=filename,
+            model_dir=model_dir,
+            hf_subdir=hf_subdir,
+            expected_hashes=expected_hashes,
             progress_callback=progress_callback,
         )
 
-    # Validate that what landed on disk is actually usable before we register
-    # the model. This catches truncated downloads (e.g. ONNX graph stubs with
-    # no external data sidecar) so the download-model job surfaces the
-    # failure instead of silently registering a broken model.
+    # Clear any stale verify-failed sentinel left over from a previous
+    # failed verification so the model is no longer reported as incomplete.
+    sentinel_path = os.path.join(model_dir, model_verify.VERIFY_FAILED_SENTINEL)
+    if os.path.isfile(sentinel_path):
+        with contextlib.suppress(OSError):
+            os.unlink(sentinel_path)
+
     state = _classify_model_state(model_dir, files)
     if state != "ok":
         raise RuntimeError(
-            f"Downloaded {km['name']} failed validation ({state}). "
-            f"Some files may be missing or truncated in {model_dir}. "
-            f"Try the download again — it will resume from the cache."
+            f"Downloaded {km['name']} failed post-download validation "
+            f"({state}). Some files may be missing in {model_dir}."
         )
 
     if progress_callback:
@@ -496,7 +500,96 @@ def download_model(model_id, progress_callback=None):
         model_id, km["name"], km.get("model_str", model_id),
         model_dir, km["description"],
     )
+    # The on-disk bytes just changed, so drop any cached "verified" marker
+    # for this model_id — the next pipeline run will re-verify.
+    model_verify.clear_verified_cache(model_id)
     return model_dir
+
+
+_MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
+
+
+def _download_and_verify_file(
+    filename, model_dir, hf_subdir, expected_hashes, progress_callback
+):
+    """Download one file and verify its SHA256 against expected_hashes.
+
+    On mismatch, deletes the file from both the local model dir and the
+    HuggingFace cache (otherwise hf_hub_download would happily hand back
+    the same corrupt blob on retry) and retries up to _MAX_HASH_RETRIES.
+    On final mismatch, raises VerifyError.
+    """
+    attempts = 0
+    while True:
+        _hf_download_with_retry(
+            ONNX_REPO,
+            filename,
+            model_dir,
+            subfolder=hf_subdir,
+            progress_callback=progress_callback,
+        )
+
+        expected_sha = expected_hashes.get(filename)
+        if expected_sha is None:
+            # Not an LFS file — HF didn't give us a hash, so we can't verify.
+            return
+
+        local_path = os.path.join(model_dir, filename)
+        actual_sha = model_verify.sha256_file(local_path)
+        if actual_sha == expected_sha:
+            return
+
+        attempts += 1
+        log.warning(
+            "hash mismatch for %s (attempt %d): expected %s..., got %s...",
+            filename, attempts, expected_sha[:8], actual_sha[:8],
+        )
+        if attempts > _MAX_HASH_RETRIES:
+            raise model_verify.VerifyError(
+                f"{filename} failed SHA256 verification after "
+                f"{_MAX_HASH_RETRIES + 1} attempts "
+                f"(expected {expected_sha[:8]}..., got {actual_sha[:8]}...)"
+            )
+
+        if progress_callback:
+            progress_callback(
+                f"Re-downloading corrupted {filename} "
+                f"(retry {attempts}/{_MAX_HASH_RETRIES})..."
+            )
+        with contextlib.suppress(OSError):
+            os.unlink(local_path)
+        _purge_hf_cache_file(filename, hf_subdir)
+
+
+def _purge_hf_cache_file(filename, hf_subdir):
+    """Delete a cached file from the HuggingFace cache so the next
+    hf_hub_download call fetches fresh bytes instead of returning the
+    corrupt blob it previously cached.
+
+    Uses huggingface_hub.try_to_load_from_cache to resolve the blob path;
+    silently no-ops if the library call is unavailable or the file isn't
+    cached.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return
+
+    try:
+        cached = try_to_load_from_cache(
+            repo_id=ONNX_REPO,
+            filename=f"{hf_subdir}/{filename}" if hf_subdir else filename,
+        )
+    except Exception as e:
+        log.debug("HF cache lookup failed for %s: %s", filename, e)
+        return
+
+    if isinstance(cached, str) and os.path.isfile(cached):
+        try:
+            os.unlink(cached)
+            log.info("Purged corrupt blob from HF cache: %s", cached)
+        except OSError as e:
+            log.warning("Could not purge HF cache entry %s: %s", cached, e)
 
 
 def download_hf_model(repo_id, progress_callback=None):

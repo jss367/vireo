@@ -686,6 +686,37 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 if state != "ok":
                     raise RuntimeError(_incomplete_model_message(model_name, model_is_custom))
 
+            # Lazy SHA256 verification: for known models (those with an
+            # hf_subdir), hash every LFS file on first load in this process
+            # and compare against HuggingFace's reported SHA256. Catches
+            # silent corruption and truncated downloads that slipped past
+            # hf_hub_download. Result is cached in-process so subsequent
+            # pipeline runs pay zero cost.
+            hf_subdir = active_model.get("hf_subdir")
+            if hf_subdir and not model_is_custom and weights_path:
+                import model_verify
+                try:
+                    model_verify.verify_if_needed(
+                        active_model["id"], weights_path, hf_subdir
+                    )
+                except model_verify.ModelCorruptError as verify_err:
+                    log.warning(
+                        "Lazy verification failed for %s: %s",
+                        active_model["id"], verify_err,
+                    )
+                    raise RuntimeError(
+                        _incomplete_model_message(model_name, model_is_custom)
+                    ) from verify_err
+                except model_verify.VerifyError as verify_err:
+                    # Can't reach HF to fetch expected hashes — log and
+                    # proceed. This keeps offline pipeline runs working
+                    # when the model is already on disk.
+                    log.warning(
+                        "Skipping verification for %s (could not fetch "
+                        "expected hashes): %s",
+                        active_model["id"], verify_err,
+                    )
+
             try:
                 if model_type == "timm":
                     from timm_classifier import TimmClassifier
