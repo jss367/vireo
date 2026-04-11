@@ -305,7 +305,7 @@ body { padding-bottom: 36px; }
   padding: 12px 20px; border-top: 1px solid var(--border-color);
 }
 .folder-browser-path {
-  font-size: 11px; color: var(--text-muted); flex: 1;
+  font-size: 11px; color: var(--text-muted); flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   margin-right: 12px;
 }
@@ -2971,11 +2971,11 @@ var _fbHomePath = '';
     </div>
     <div class="folder-browser-list" id="fbList"></div>
     <div class="folder-browser-footer">
-      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;">New Folder</button>
-      <div style="display:flex;align-items:center;">
+      <button class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
+      <div style="display:flex;align-items:center;flex:1;min-width:0;margin-left:12px;">
         <span class="folder-browser-path" id="fbSelectedPath"></span>
-        <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;">Cancel</button>
-        <button class="btn btn-primary" id="fbSelectBtn" onclick="selectFolder()" style="font-size:12px;">Select</button>
+        <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;flex-shrink:0;">Cancel</button>
+        <button class="btn btn-primary" id="fbSelectBtn" onclick="selectFolder()" style="font-size:12px;flex-shrink:0;">Select</button>
       </div>
     </div>
   </div>
