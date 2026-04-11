@@ -161,7 +161,8 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
 
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
-                   det_conf_threshold=None, already_detected_ids=None):
+                   det_conf_threshold=None, already_detected_ids=None,
+                   cached_detections=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -174,6 +175,12 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             loaded from config (fallback for callers that don't pre-load).
         already_detected_ids: Set of photo IDs that already have detections
             in the database. Used for skip-if-already-detected logic.
+        cached_detections: Optional dict {photo_id: [detection_dicts]}
+            produced by a prior model in the same pipeline run. When
+            provided and a photo is in already_detected_ids, the cached
+            entries are used instead of db.get_detections() so that
+            model 2+ binds to the exact detection rows from this run,
+            not stale rows from a previous pipeline pass.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -184,6 +191,8 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
     detection_map = {}
     if already_detected_ids is None:
         already_detected_ids = set()
+    if cached_detections is None:
+        cached_detections = {}
 
     try:
         if detect_animals is None or get_primary_detection is None:
@@ -199,6 +208,17 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             # Skip if already detected (unless reclassifying)
             if not reclassify and photo["id"] in already_detected_ids:
+                # Prefer cached detections from an earlier model in this
+                # same pipeline run so that model 2+ is bound to the
+                # detection rows just produced, not stale rows from a
+                # prior pipeline pass that db.get_detections() would
+                # return when old rows haven't been cleared.
+                if photo["id"] in cached_detections:
+                    det_list = cached_detections[photo["id"]]
+                    if det_list:
+                        detection_map[photo["id"]] = det_list
+                        detected += 1
+                    continue
                 existing_dets = db.get_detections(photo["id"])
                 if existing_dets:
                     det_list = []

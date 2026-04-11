@@ -1635,7 +1635,8 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     detect_call_ids = []
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
-                          det_conf_threshold=None, already_detected_ids=None):
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
         detect_call_ids.append(frozenset(already_detected_ids or set()))
         # Model 1 "detects" nothing in this run — empty det_map.
         return {}, 0
@@ -1683,16 +1684,22 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
         )
 
 
-def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
-    """On reclassify, prior-run detection rows must be DELETED from the DB
-    before any model runs. Just clearing the in-memory already_detected set
-    isn't sufficient: model 2+ hit _detect_batch's cached path, which calls
-    db.get_detections(photo_id) and returns the union of old + newly-inserted
-    rows when old rows are still present — so model 2's predictions bind to
-    stale detection_ids from a prior pipeline pass.
+def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeypatch):
+    """On reclassify, predictions from models NOT in this run must be preserved.
 
-    Regression for Codex review on #506: the earlier fix only wiped the
-    in-memory set; this test pins the stronger "DB rows are gone" invariant.
+    Previously, clear_detections() was called up-front for all collection
+    photos before the model loop. Because predictions.detection_id has
+    ON DELETE CASCADE, this deleted ALL prediction rows for those photos —
+    including rows from models that were not part of the current reclassify
+    run. In a common subset-reclassify (e.g. one selected model), other
+    models' predictions were permanently lost.
+
+    The fix: do not clear detection rows up-front. Instead pass
+    this_run_detections to model 2+ via cached_detections so they bind to
+    the exact detection rows produced in this run. Per-model clear_predictions
+    calls already handle removing stale predictions for the models being run.
+
+    Regression for Codex P1 comment on #506 (line 848).
     """
     import json
 
@@ -1713,14 +1720,12 @@ def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
 
-    # Prior-run detection rows we expect to be wiped by reclassify.
+    # Prior-run detection rows referenced by another model's predictions.
     prior_det_ids = db.save_detections(
         photo_id,
         [
             {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
              "confidence": 0.9, "category": "animal"},
-            {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
-             "confidence": 0.8, "category": "animal"},
         ],
         detector_model="MegaDetector",
     )
@@ -1731,13 +1736,27 @@ def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
+    # Use a single model for the reclassify run (subset reclassify).
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+    run_model_id = model_ids[:1]   # reclassify only the first model
+    other_model_id = model_ids[1]  # this model's predictions should survive
 
-    # _detect_batch stub that writes NOTHING — mimics a reclassify pass that
-    # produces no new detections. If the fix is working, the DB should end
-    # up with zero rows for this photo; if not, prior rows will linger.
+    # Seed a prediction from the "other" model referencing the prior detection.
+    detection_id = prior_det_ids[0]
+    db.add_prediction(
+        detection_id=detection_id,
+        species="other_species",
+        confidence=0.95,
+        model=other_model_id,
+    )
+    assert db.get_prediction_for_photo(photo_id, other_model_id) is not None, (
+        "setup sanity: other-model prediction must exist before reclassify"
+    )
+
+    # _detect_batch stub that produces nothing (reclassify finds no animals).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
-                          det_conf_threshold=None, already_detected_ids=None):
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
         return {}, 0
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -1754,7 +1773,7 @@ def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
 
     params = PipelineParams(
         collection_id=col_id,
-        model_ids=model_ids,
+        model_ids=run_model_id,
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
@@ -1765,14 +1784,13 @@ def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # Reopen the DB to see the committed state from the pipeline's thread-db.
+    # The other model's prediction must still exist after the reclassify.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
-    remaining = verify_db.get_detections(photo_id)
-    assert remaining == [], (
-        f"Prior-run detection rows must be cleared on reclassify but "
-        f"db.get_detections({photo_id}) still returned {remaining!r}. "
-        "This is exactly the cross-model stale-id leak Codex flagged on #506: "
-        "model 2+ would see these rows via _detect_batch's cached path and "
-        "bind predictions to outdated detection_ids."
+    surviving_pred = verify_db.get_prediction_for_photo(photo_id, other_model_id)
+    assert surviving_pred is not None, (
+        f"Prediction from '{other_model_id}' was deleted by a reclassify run "
+        f"that only included '{run_model_id}'. Clearing detections up-front "
+        "cascades to delete ALL predictions including from models not in this "
+        "run — a data-loss regression flagged in Codex P1 on #506 line 848."
     )
