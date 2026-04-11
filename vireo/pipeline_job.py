@@ -837,6 +837,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 getattr(thread_db, "get_existing_detection_photo_ids", lambda: set())()
             )
 
+            # Accumulates the detection rows produced by model 1 in *this*
+            # run so that model 2+ can use them directly instead of calling
+            # db.get_detections(), which would return ALL historical detection
+            # rows (including stale ones from prior pipeline passes).
+            this_run_detections: dict = {}
+
             from datetime import datetime as dt
 
             for spec_idx, active_spec in enumerate(resolved_specs):
@@ -933,13 +939,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # first model iteration re-runs detection (spec_idx == 0);
                     # subsequent models share those detections rather than
                     # inserting duplicate rows for the same photos.
+                    #
+                    # Pass this_run_detections to model 2+ so _detect_batch
+                    # returns the detection rows that model 1 produced in this
+                    # run rather than fetching all historical rows via
+                    # db.get_detections() (which would include stale rows from
+                    # prior pipeline passes and corrupt cross-model consistency).
                     det_map, det_count = _detect_batch(
                         batch, folders, runner, job,
                         params.reclassify and spec_idx == 0, thread_db,
                         already_detected_ids=already_detected,
+                        cached_detections=this_run_detections if spec_idx > 0 else None,
                     )
                     detected += det_count
                     already_detected.update(det_map.keys())
+                    # Keep this_run_detections current for model 2+.
+                    if spec_idx == 0 and len(resolved_specs) > 1:
+                        this_run_detections.update(det_map)
 
                     # Classify this batch
                     for photo in batch:
