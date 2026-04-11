@@ -444,9 +444,15 @@ def download_model(model_id, progress_callback=None):
     total_files = len(files)
 
     # Fetch expected hashes once up front so we can verify each LFS file
-    # against HF's reported SHA256 as we go.
+    # against HF's reported SHA256 as we go. A fetch failure here means
+    # we'll proceed without verification, but we must also NOT clear any
+    # preexisting .verify_failed sentinel — otherwise a Repair attempt
+    # during a transient HF outage could silently reclassify a genuinely
+    # corrupt model as healthy.
+    verification_ran = False
     try:
         expected_hashes = model_verify.fetch_expected_hashes(hf_subdir)
+        verification_ran = True
     except model_verify.VerifyError as e:
         log.warning(
             "Could not fetch expected hashes for %s: %s. Proceeding without "
@@ -474,12 +480,17 @@ def download_model(model_id, progress_callback=None):
             progress_callback=progress_callback,
         )
 
-    # Clear any stale verify-failed sentinel left over from a previous
-    # failed verification so the model is no longer reported as incomplete.
-    sentinel_path = os.path.join(model_dir, model_verify.VERIFY_FAILED_SENTINEL)
-    if os.path.isfile(sentinel_path):
-        with contextlib.suppress(OSError):
-            os.unlink(sentinel_path)
+    # Clear the verify-failed sentinel only if we actually ran SHA256
+    # verification and every file matched its expected hash (a hash
+    # mismatch would have raised VerifyError out of the loop above, so
+    # reaching here with verification_ran=True means everything passed).
+    if verification_ran:
+        sentinel_path = os.path.join(
+            model_dir, model_verify.VERIFY_FAILED_SENTINEL
+        )
+        if os.path.isfile(sentinel_path):
+            with contextlib.suppress(OSError):
+                os.unlink(sentinel_path)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":

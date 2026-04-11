@@ -724,3 +724,47 @@ def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
     model_verify._verified_this_process.add("bioclip-vit-b-16")
     models.download_model("bioclip-vit-b-16")
     assert "bioclip-vit-b-16" not in model_verify._verified_this_process
+
+
+def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
+    tmp_path, monkeypatch
+):
+    """If fetch_expected_hashes fails (HF tree API outage), download_model
+    proceeds without verification — but in that case we must NOT delete
+    a preexisting .verify_failed sentinel. Otherwise a Repair attempt
+    during a transient HF outage would flip a genuinely corrupt model
+    back to 'ok' without any integrity check actually running, letting
+    pipelines run against bad weights."""
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preexisting sentinel from an earlier verification failure.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    sentinel.write_text("earlier mismatch")
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    def fetch_raises(subdir):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+
+    # download_model should raise because _classify_model_state will still
+    # see the sentinel and return 'incomplete'.
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="incomplete"):
+        models.download_model("bioclip-vit-b-16")
+
+    # Sentinel must still be on disk so a future pipeline run (or a retry
+    # after HF is back up) keeps the model flagged as corrupt.
+    assert sentinel.is_file()
