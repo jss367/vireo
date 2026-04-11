@@ -1122,6 +1122,7 @@ function showPreviewPlaceholder() {
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
   _previewData = null;
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function showPreviewLoading() {
@@ -1131,6 +1132,7 @@ function showPreviewLoading() {
   document.getElementById('previewError').style.display = 'none';
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function showPreviewError(msg) {
@@ -1140,6 +1142,7 @@ function showPreviewError(msg) {
   var errEl = document.getElementById('previewError');
   errEl.style.display = '';
   errEl.textContent = msg;
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function renderPreview() {
