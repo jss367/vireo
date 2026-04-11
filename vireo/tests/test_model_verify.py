@@ -397,6 +397,40 @@ def test_verify_all_models_reports_per_model_results(tmp_path, monkeypatch):
     assert any("bad-model" in m for m in progress_messages)
 
 
+def test_verify_all_models_skips_sentinel_on_verify_error(tmp_path, monkeypatch):
+    """A VerifyError (network/HTTP failure) must NOT write .verify_failed.
+    A transient connectivity issue should not permanently reclassify a
+    healthy model as 'incomplete' and break pipelines."""
+    import model_verify
+
+    good_dir = tmp_path / "good-model"
+    good_dir.mkdir()
+    fake_models = [{
+        "id": "good-model",
+        "state": "ok",
+        "downloaded": True,
+        "weights_path": str(good_dir),
+        "hf_subdir": "good-model",
+        "source": "hf-hub:test",
+    }]
+
+    def raise_verify_error(d, s):
+        raise model_verify.VerifyError("connection refused")
+
+    monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
+    import models
+    monkeypatch.setattr(models, "get_models", lambda: fake_models)
+
+    results = model_verify.verify_all_models()
+
+    # Result is reported to caller (ok=False with synthetic entry).
+    assert "good-model" in results
+    assert results["good-model"].ok is False
+    assert any("hash fetch failed" in m for m in results["good-model"].missing)
+    # No sentinel written — model stays in its current 'ok' state on disk.
+    assert not (good_dir / model_verify.VERIFY_FAILED_SENTINEL).exists()
+
+
 def test_verify_all_models_writes_sentinel_on_mismatch(tmp_path, monkeypatch):
     """A bad model gets a .verify_failed sentinel written so the Settings UI
     surfaces the Repair state after the sweep completes."""

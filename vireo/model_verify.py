@@ -189,12 +189,14 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
         try:
             result = verify_model(weights_path, m["hf_subdir"])
         except VerifyError as e:
-            # Network or HTTP failure — can't verify, but don't mark
-            # the model as corrupt either. Surface to caller via a
-            # VerifyResult with ok=False and a synthetic "missing" entry.
-            result = VerifyResult(
+            # Network or HTTP failure — can't verify, but don't mark the
+            # model as corrupt. Record the result for the caller and skip
+            # sentinel writing so a transient outage doesn't flip healthy
+            # models to 'incomplete' and break pipelines.
+            results[model_id] = VerifyResult(
                 ok=False, missing=[f"<hash fetch failed: {e}>"]
             )
+            continue
         results[model_id] = result
         if not result.ok:
             sentinel = os.path.join(weights_path, VERIFY_FAILED_SENTINEL)
