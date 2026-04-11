@@ -1581,3 +1581,102 @@ def test_pipeline_model_ids_back_compat_with_model_id(tmp_path, monkeypatch):
         f"Legacy model_id should load exactly one classifier, "
         f"got {len(construction_calls)}"
     )
+
+
+def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
+    tmp_path, monkeypatch
+):
+    """On reclassify with multiple models, already_detected must be cleared
+    before model 1's batch loop so model 2+ only reuse detections produced in
+    this run, not stale rows from a prior pipeline pass.
+
+    Regression: before the fix, already_detected was pre-seeded from
+    get_existing_detection_photo_ids() before the model loop.  When model 1
+    ran with reclassify=True but did NOT produce a detection for a photo that
+    already had a prior-run detection row, model 2 (reclassify=False) still
+    found that photo in already_detected and called db.get_detections(),
+    binding its predictions to outdated detection_ids.
+    """
+    import json
+    import classify_job
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Create a folder + photo and insert a prior-run detection row so that
+    # get_existing_detection_photo_ids() returns this photo's id.
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    # Static collection containing exactly that one photo.
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Capture the already_detected_ids set passed to each _detect_batch call.
+    detect_call_ids = []
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None):
+        detect_call_ids.append(frozenset(already_detected_ids or set()))
+        # Model 1 "detects" nothing in this run — empty det_map.
+        return {}, 0
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # _detect_batch should have been called at least once (one batch per model).
+    assert len(detect_call_ids) >= 1, (
+        "Expected _detect_batch to be called at least once but it was not."
+    )
+
+    # The stale prior-run photo_id must NOT appear in already_detected_ids for
+    # any _detect_batch invocation.  With the fix, already_detected is wiped
+    # before model 1's loop; model 1 finds nothing → already_detected stays
+    # empty → model 2 receives an empty set, not the pre-seeded stale ID.
+    for call_ids in detect_call_ids:
+        assert photo_id not in call_ids, (
+            f"Prior-run photo_id {photo_id} leaked into already_detected_ids "
+            f"{call_ids!r}. already_detected must be cleared before the first "
+            "model's batch loop so later models do not use stale detection rows "
+            "from prior pipeline passes."
+        )
