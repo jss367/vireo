@@ -843,3 +843,56 @@ def test_download_model_writes_revision_file(tmp_path, monkeypatch):
     rev_file = model_dir / model_verify.REVISION_FILE
     assert rev_file.is_file()
     assert rev_file.read_text().strip() == "pinned_sha_abc123"
+
+
+def test_download_model_still_verifies_when_revision_lookup_fails(tmp_path, monkeypatch):
+    """When fetch_repo_revision fails (repo-info API down) but fetch_expected_hashes
+    succeeds against 'main', SHA256 verification must still run — the two API
+    endpoints are independent and a revision-lookup failure must not silently
+    disable integrity checking.
+
+    Regression test for the Codex P1 comment on #504 ('Preserve hash
+    verification when revision lookup fails').
+    """
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"verifyok" * 100
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+    fetch_hashes_call_count = {"n": 0}
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    def fetch_raises_verify_error(repo):
+        raise model_verify.VerifyError("repo-info API offline")
+
+    def fake_fetch_hashes(subdir, revision="main"):
+        fetch_hashes_call_count["n"] += 1
+        # Verify that we fall back to "main" when revision is unknown
+        assert revision == "main", f"Expected 'main' fallback, got {revision!r}"
+        return expected
+
+    monkeypatch.setattr(models, "_purge_hf_cache_file", lambda filename, subdir: None)
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_repo_revision", fetch_raises_verify_error)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch_hashes)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # Verification must have run even though revision lookup failed.
+    assert fetch_hashes_call_count["n"] == 1, (
+        "fetch_expected_hashes should have been called once (against 'main') "
+        "even when fetch_repo_revision raises VerifyError"
+    )
