@@ -786,15 +786,78 @@ def test_download_model_writes_pinned_revision(tmp_path, monkeypatch):
     assert captured_fetch["revision"] == pinned_sha
 
 
-def test_download_model_proceeds_without_pin_on_revision_fetch_failure(
+def test_download_model_falls_back_to_main_when_revision_lookup_fails(
     tmp_path, monkeypatch
 ):
-    """If fetch_latest_revision fails (HF outage), download_model still
-    runs — just without pinning and without SHA verification (same
-    fallback path as fetch_expected_hashes failing). No .hf_revision is
-    written, because we don't have a revision to pin to."""
+    """If fetch_latest_revision fails (model-info API offline) but the tree
+    API is still healthy, download_model should NOT skip verification —
+    it should fall back to verifying against 'main'. The two HF APIs are
+    independent and a stale blob should still be caught.
+
+    No .hf_revision is written because we don't have an immutable SHA to
+    pin to, but SHA256 verification still happens end-to-end."""
+    import hashlib
+
     import model_verify
     models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"weights" * 1000
+    good = hashlib.sha256(contents).hexdigest()
+    expected = {
+        "image_encoder.onnx": good,
+        "image_encoder.onnx.data": good,
+        "text_encoder.onnx": good,
+        "text_encoder.onnx.data": good,
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    def fetch_revision_raises(repo):
+        raise model_verify.VerifyError("model-info api offline")
+
+    captured = {}
+
+    def fake_fetch_hashes(subdir, revision="main"):
+        captured["revision"] = revision
+        return expected
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", fetch_revision_raises
+    )
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch_hashes)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # Verification still ran, using 'main' as the revision.
+    assert captured["revision"] == "main"
+    # No pin file written because we don't have an immutable SHA.
+    assert not (model_dir / model_verify.REVISION_FILE).exists()
+    # Model was registered as successfully downloaded.
+    cfg = models._load_config()
+    assert any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_skips_verification_only_when_tree_api_also_fails(
+    tmp_path, monkeypatch
+):
+    """Verification is only skipped entirely when BOTH the model-info API
+    and the tree API are unreachable. In that terminal case .hf_revision
+    is not written and any preexisting .verify_failed sentinel stays in
+    place so the model remains flagged as incomplete."""
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    sentinel.write_text("earlier mismatch")
 
     def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
@@ -806,6 +869,9 @@ def test_download_model_proceeds_without_pin_on_revision_fetch_failure(
     def fetch_revision_raises(repo):
         raise model_verify.VerifyError("model-info api offline")
 
+    def fetch_hashes_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree api offline")
+
     monkeypatch.setattr(
         models, "_purge_hf_cache_file", lambda filename, subdir: None
     )
@@ -813,17 +879,17 @@ def test_download_model_proceeds_without_pin_on_revision_fetch_failure(
     monkeypatch.setattr(
         model_verify, "fetch_latest_revision", fetch_revision_raises
     )
-    # Also stub fetch_expected_hashes in case it's still called.
     monkeypatch.setattr(
-        model_verify,
-        "fetch_expected_hashes",
-        lambda subdir, revision="main": (_ for _ in ()).throw(
-            AssertionError("should not fetch hashes if revision fetch failed")
-        ),
+        model_verify, "fetch_expected_hashes", fetch_hashes_raises
     )
 
-    models.download_model("bioclip-vit-b-16")
+    # download_model raises because sentinel + post-download state check
+    # flips the state to 'incomplete'.
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="incomplete"):
+        models.download_model("bioclip-vit-b-16")
 
+    assert sentinel.is_file()
     assert not (model_dir / model_verify.REVISION_FILE).exists()
 
 

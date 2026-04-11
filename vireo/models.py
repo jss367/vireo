@@ -451,34 +451,41 @@ def download_model(model_id, progress_callback=None):
     # up front means (a) every file in this download comes from the same
     # immutable snapshot, (b) verification uses those hashes forever
     # regardless of later main updates, and (c) fetch_expected_hashes
-    # hits the same revision as hf_hub_download. A failure here means
-    # we'll proceed without pinning and without verification — the same
-    # degraded mode as before — and we must NOT clear a preexisting
-    # .verify_failed sentinel, since no integrity check actually ran.
+    # hits the same revision as hf_hub_download.
+    #
+    # The revision lookup (model-info API) and the hash fetch (tree API)
+    # are independent endpoints. Split them into two try blocks so that a
+    # transient outage of the model-info endpoint doesn't silently
+    # disable SHA256 verification — we can still verify against 'main'
+    # even if we can't pin to a specific SHA.
     pinned_revision: str | None = None
     verification_ran = False
     expected_hashes: dict[str, str] = {}
+
     try:
         pinned_revision = model_verify.fetch_latest_revision(ONNX_REPO)
     except model_verify.VerifyError as e:
         log.warning(
-            "Could not fetch latest revision for %s: %s. Proceeding "
-            "without revision pinning or post-download verification.",
+            "Could not fetch latest revision for %s: %s. "
+            "Will verify hashes against 'main' instead of an immutable pin.",
             ONNX_REPO, e,
         )
 
-    if pinned_revision is not None:
-        try:
-            expected_hashes = model_verify.fetch_expected_hashes(
-                hf_subdir, revision=pinned_revision
-            )
-            verification_ran = True
-        except model_verify.VerifyError as e:
-            log.warning(
-                "Could not fetch expected hashes for %s@%s: %s. "
-                "Proceeding without post-download verification.",
-                hf_subdir, pinned_revision, e,
-            )
+    # Fall back to "main" if the revision lookup failed. That way the tree
+    # API still gets a usable revision and verification can proceed, even
+    # though the downloaded files won't be pinned in .hf_revision.
+    revision_for_hashes = pinned_revision or "main"
+    try:
+        expected_hashes = model_verify.fetch_expected_hashes(
+            hf_subdir, revision=revision_for_hashes
+        )
+        verification_ran = True
+    except model_verify.VerifyError as e:
+        log.warning(
+            "Could not fetch expected hashes for %s@%s: %s. "
+            "Proceeding without post-download verification.",
+            hf_subdir, revision_for_hashes, e,
+        )
 
     for fi, filename in enumerate(files):
         if progress_callback:
