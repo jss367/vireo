@@ -861,6 +861,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     for k in ("clf", "model_type", "model_name", "model_str",
                               "labels", "use_tol", "active_model"):
                         loaded_models.pop(k, None)
+                    # Drop the local clf reference so the previous ONNX graph
+                    # is eligible for GC before the next model is loaded.
+                    # Without this, two large model graphs can be resident
+                    # simultaneously during the handoff.
+                    clf = None
                     bundle = _load_model_bundle(active_spec, tax, thread_db)
                     loaded_models.update(bundle)
                     clf = bundle["clf"]
@@ -912,10 +917,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                        progress={"current": batch_idx, "total": total})
 
                     # Detect this batch. Pass already_detected so subsequent
-                    # models (and re-runs) skip MegaDetector on photos that
-                    # already have detections in the DB.
+                    # models skip MegaDetector on photos that already have
+                    # detections in the DB.  On reclassify runs, only the
+                    # first model iteration re-runs detection (spec_idx == 0);
+                    # subsequent models share those detections rather than
+                    # inserting duplicate rows for the same photos.
                     det_map, det_count = _detect_batch(
-                        batch, folders, runner, job, params.reclassify, thread_db,
+                        batch, folders, runner, job,
+                        params.reclassify and spec_idx == 0, thread_db,
                         already_detected_ids=already_detected,
                     )
                     detected += det_count
