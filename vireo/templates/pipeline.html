@@ -1041,6 +1041,7 @@ var _previewSelected = {};     // { filePath: true/false }
 var _previewAbort = null;      // AbortController for in-flight request
 var _duplicateResults = {};    // path -> true for duplicates (cache)
 var _duplicateCheckAbort = null;  // AbortController for in-flight check
+var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
@@ -1121,6 +1122,7 @@ function showPreviewPlaceholder() {
   document.getElementById('previewLoading').style.display = 'none';
   document.getElementById('previewError').style.display = 'none';
   _previewData = null;
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function showPreviewLoading() {
@@ -1130,6 +1132,7 @@ function showPreviewLoading() {
   document.getElementById('previewError').style.display = 'none';
   // Cancel any in-flight duplicate check when preview context changes
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function showPreviewError(msg) {
@@ -1139,6 +1142,7 @@ function showPreviewError(msg) {
   var errEl = document.getElementById('previewError');
   errEl.style.display = '';
   errEl.textContent = msg;
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
 function renderPreview() {
@@ -1367,23 +1371,68 @@ function onSkipDuplicatesToggle() {
 }
 
 function setupThumbnailObserver() {
+  // Cancel any previous scheduler so its done-callbacks don't keep pumping
+  // on elements that were removed from the DOM by a re-render.
+  if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+
   var grid = document.getElementById('previewGrid');
-  var thumbs = grid.querySelectorAll('.preview-thumb.skeleton');
+  var pendingQueue = Array.from(grid.querySelectorAll('.preview-thumb.skeleton'));
+  var visibleSet = new Set();
+  var inFlight = 0;
+  var CONCURRENCY = 4;
+  var cancelled = false;
+
+  // Register a cancel function so the next call to setupThumbnailObserver can
+  // stop this scheduler before it finishes draining its queue.
+  _thumbSchedulerCancel = function() {
+    cancelled = true;
+    pendingQueue.length = 0;
+    observer.disconnect();
+  };
+
+  function dispatch(el) {
+    var path = el.dataset.path;
+    var img = el.querySelector('img');
+    inFlight++;
+    var done = function() {
+      el.classList.remove('skeleton');
+      inFlight--;
+      if (!cancelled) pump();
+    };
+    img.onload = done;
+    img.onerror = done;
+    img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
+  }
+
+  function pump() {
+    while (inFlight < CONCURRENCY && pendingQueue.length > 0) {
+      // Prefer a visible thumb; fall back to the top of the queue.
+      var idx = 0;
+      for (var i = 0; i < pendingQueue.length; i++) {
+        if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
+      }
+      dispatch(pendingQueue.splice(idx, 1)[0]);
+    }
+  }
 
   var observer = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
-      if (!entry.isIntersecting) return;
-      var el = entry.target;
-      var path = el.dataset.path;
-      var img = el.querySelector('img');
-      img.onload = function() { el.classList.remove('skeleton'); };
-      img.onerror = function() { el.classList.remove('skeleton'); };
-      img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
-      observer.unobserve(el);
+      if (entry.isIntersecting) {
+        visibleSet.add(entry.target);
+      } else {
+        visibleSet.delete(entry.target);
+      }
     });
+    if (!cancelled) pump();
   }, { root: grid, rootMargin: '200px' });
 
-  thumbs.forEach(function(t) { observer.observe(t); });
+  pendingQueue.forEach(function(t) { observer.observe(t); });
+  // Defer the initial pump so IntersectionObserver has time to fire its initial
+  // callbacks and populate visibleSet before we start dispatching. If pump() is
+  // called synchronously here, visibleSet is always empty on the first pass and
+  // the first CONCURRENCY requests go to top-of-list offscreen thumbs instead of
+  // the currently-visible ones, defeating the visible-first scheduling.
+  setTimeout(function() { if (!cancelled) pump(); }, 0);
 }
 
 function updatePreviewCounts() {
