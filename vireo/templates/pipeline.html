@@ -1427,7 +1427,12 @@ function setupThumbnailObserver() {
   }, { root: grid, rootMargin: '200px' });
 
   pendingQueue.forEach(function(t) { observer.observe(t); });
-  pump();
+  // Defer the initial pump so IntersectionObserver has time to fire its initial
+  // callbacks and populate visibleSet before we start dispatching. If pump() is
+  // called synchronously here, visibleSet is always empty on the first pass and
+  // the first CONCURRENCY requests go to top-of-list offscreen thumbs instead of
+  // the currently-visible ones, defeating the visible-first scheduling.
+  setTimeout(function() { if (!cancelled) pump(); }, 0);
 }
 
 function updatePreviewCounts() {
