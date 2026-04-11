@@ -319,8 +319,10 @@ def _clear_verify_cache():
     tests so cache state from one test doesn't leak into another."""
     import model_verify
     model_verify._verified_this_process.clear()
+    model_verify._verify_failure_timestamps.clear()
     yield
     model_verify._verified_this_process.clear()
+    model_verify._verify_failure_timestamps.clear()
 
 
 def test_verify_if_needed_calls_verify_model_once_per_process(
@@ -418,6 +420,89 @@ def test_clear_verified_cache_forces_re_verification(tmp_path, monkeypatch):
 
     model_verify.clear_verified_cache("bioclip-vit-b-16")
     assert "bioclip-vit-b-16" not in model_verify._verified_this_process
+
+
+def test_verify_if_needed_records_failure_timestamp_on_verify_error(
+    tmp_path, monkeypatch
+):
+    """When verify_model raises VerifyError (network/API failure), the
+    timestamp is recorded in _verify_failure_timestamps so subsequent calls
+    within the TTL can skip the expensive 30-second hash-fetch."""
+    import model_verify
+
+    def raise_verify_error(d, s):
+        raise model_verify.VerifyError("API offline")
+
+    monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
+
+    with pytest.raises(model_verify.VerifyError):
+        model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+
+    assert "bioclip-vit-b-16" in model_verify._verify_failure_timestamps
+
+
+def test_verify_if_needed_skips_rehash_within_failure_ttl(tmp_path, monkeypatch):
+    """A VerifyError within the TTL window causes verify_if_needed to return
+    immediately (fail-open) without attempting another expensive hash-fetch."""
+    import time
+    import model_verify
+
+    call_count = {"n": 0}
+
+    def raise_verify_error(d, s):
+        call_count["n"] += 1
+        raise model_verify.VerifyError("API offline")
+
+    monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
+
+    # First call: raises VerifyError and records failure timestamp.
+    with pytest.raises(model_verify.VerifyError):
+        model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+
+    assert call_count["n"] == 1
+
+    # Second call within TTL: returns immediately without calling verify_model.
+    model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+    assert call_count["n"] == 1  # verify_model not called again
+
+
+def test_verify_if_needed_retries_after_failure_ttl_expires(tmp_path, monkeypatch):
+    """Once the failure TTL expires, verify_if_needed retries verification."""
+    import time
+    import model_verify
+
+    call_count = {"n": 0}
+
+    def raise_verify_error(d, s):
+        call_count["n"] += 1
+        raise model_verify.VerifyError("API offline")
+
+    monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
+
+    # Seed an expired failure timestamp (well past the TTL).
+    model_verify._verify_failure_timestamps["bioclip-vit-b-16"] = (
+        time.monotonic() - model_verify._VERIFY_FAILURE_TTL - 1
+    )
+
+    # Should retry and re-raise (not skip).
+    with pytest.raises(model_verify.VerifyError):
+        model_verify.verify_if_needed("bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16")
+
+    assert call_count["n"] == 1
+
+
+def test_clear_verified_cache_also_clears_failure_timestamp(tmp_path, monkeypatch):
+    """clear_verified_cache resets the failure-backoff entry so a fresh
+    download (which just called clear_verified_cache) triggers re-verification
+    immediately on next pipeline start instead of waiting out the TTL."""
+    import time
+    import model_verify
+
+    model_verify._verify_failure_timestamps["bioclip-vit-b-16"] = time.monotonic()
+
+    model_verify.clear_verified_cache("bioclip-vit-b-16")
+
+    assert "bioclip-vit-b-16" not in model_verify._verify_failure_timestamps
 
 
 # ---------------------------------------------------------------------------

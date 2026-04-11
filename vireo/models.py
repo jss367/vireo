@@ -500,11 +500,20 @@ def download_model(model_id, progress_callback=None):
             progress_callback=progress_callback,
         )
 
-    # Clear the verify-failed sentinel and persist the revision pin only
-    # if we actually ran SHA256 verification and every file matched its
-    # expected hash (a hash mismatch would have raised VerifyError out of
-    # the loop above, so reaching here with verification_ran=True means
-    # everything passed).
+    # Persist the revision pin whenever we know which HF commit the files
+    # came from (pinned_revision is not None), regardless of whether hash
+    # verification ran. If fetch_latest_revision succeeded but
+    # fetch_expected_hashes failed, the files were still downloaded from
+    # pinned_revision; leaving an older .hf_revision in place would cause
+    # verify_model to compare against the wrong commit and report false
+    # mismatches on the next pipeline start.
+    if pinned_revision is not None:
+        model_verify.write_pinned_revision(model_dir, pinned_revision)
+
+    # Clear the verify-failed sentinel only if we actually ran SHA256
+    # verification and every file matched its expected hash (a hash mismatch
+    # would have raised VerifyError out of the loop above, so reaching here
+    # with verification_ran=True means everything passed).
     if verification_ran:
         sentinel_path = os.path.join(
             model_dir, model_verify.VERIFY_FAILED_SENTINEL
@@ -512,8 +521,6 @@ def download_model(model_id, progress_callback=None):
         if os.path.isfile(sentinel_path):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel_path)
-        if pinned_revision is not None:
-            model_verify.write_pinned_revision(model_dir, pinned_revision)
 
     state = _classify_model_state(model_dir, files)
     if state != "ok":

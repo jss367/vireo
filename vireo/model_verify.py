@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import os
+import time
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -60,6 +61,14 @@ class VerifyResult:
 # Per-process cache of model ids that have already passed verification.
 # Cleared by clear_verified_cache after a successful re-download.
 _verified_this_process: set[str] = set()
+
+# Short-lived failure cache: model_id -> timestamp of last VerifyError from
+# verify_if_needed. Entries expire after _VERIFY_FAILURE_TTL seconds so that
+# a transient network outage doesn't permanently suppress re-verification
+# within the same process (e.g. after network is restored), but does prevent
+# repeated 30-second hash-fetch stalls on every pipeline start.
+_verify_failure_timestamps: dict[str, float] = {}
+_VERIFY_FAILURE_TTL = 300  # 5 minutes
 
 
 def sha256_file(path: str) -> str:
@@ -201,10 +210,23 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     raises ModelCorruptError without populating the cache (so a Repair
     flow will see the failure state again if verification is retried
     without a fresh download).
+
+    If hash-fetching raises VerifyError (network/API failure), the error
+    is re-raised so callers can fail-open, and the failure timestamp is
+    recorded. Subsequent calls within _VERIFY_FAILURE_TTL seconds skip the
+    expensive hash-fetch entirely and return immediately, avoiding repeated
+    30-second stalls on every pipeline start while the network is down.
     """
     if model_id in _verified_this_process:
         return
-    result = verify_model(model_dir, hf_subdir)
+    last_failure = _verify_failure_timestamps.get(model_id)
+    if last_failure is not None and (time.monotonic() - last_failure) < _VERIFY_FAILURE_TTL:
+        return
+    try:
+        result = verify_model(model_dir, hf_subdir)
+    except VerifyError:
+        _verify_failure_timestamps[model_id] = time.monotonic()
+        raise
     if not result.ok:
         try:
             with open(os.path.join(model_dir, VERIFY_FAILED_SENTINEL), "w") as f:
@@ -213,6 +235,7 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
             pass
         raise ModelCorruptError(model_id, result)
     _verified_this_process.add(model_id)
+    _verify_failure_timestamps.pop(model_id, None)
     sentinel = os.path.join(model_dir, VERIFY_FAILED_SENTINEL)
     if os.path.isfile(sentinel):
         with contextlib.suppress(OSError):
@@ -224,6 +247,7 @@ def clear_verified_cache(model_id: str) -> None:
     next call to verify_if_needed will re-hash. Called by download_model
     after a successful re-download."""
     _verified_this_process.discard(model_id)
+    _verify_failure_timestamps.pop(model_id, None)
 
 
 def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
