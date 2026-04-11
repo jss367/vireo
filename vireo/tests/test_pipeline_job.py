@@ -1684,22 +1684,17 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
         )
 
 
-def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeypatch):
-    """On reclassify, predictions from models NOT in this run must be preserved.
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
+    """On reclassify, prior-run detection rows must be deleted after model 1
+    re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
+    stale bounding boxes via get_existing_detection_photo_ids + get_detections.
 
-    Previously, clear_detections() was called up-front for all collection
-    photos before the model loop. Because predictions.detection_id has
-    ON DELETE CASCADE, this deleted ALL prediction rows for those photos —
-    including rows from models that were not part of the current reclassify
-    run. In a common subset-reclassify (e.g. one selected model), other
-    models' predictions were permanently lost.
+    Scenario: a photo had a prior detection (potential false positive). The
+    reclassify run finds NO animals this time (fake_detect_batch returns {}).
+    After reclassify the old detection row must be gone so future runs
+    actually call MegaDetector rather than short-circuiting to the stale box.
 
-    The fix: do not clear detection rows up-front. Instead pass
-    this_run_detections to model 2+ via cached_detections so they bind to
-    the exact detection rows produced in this run. Per-model clear_predictions
-    calls already handle removing stale predictions for the models being run.
-
-    Regression for Codex P1 comment on #506 (line 848).
+    Regression for Codex P1 review on #511 line 848.
     """
     import json
 
@@ -1720,7 +1715,7 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
 
-    # Prior-run detection rows referenced by another model's predictions.
+    # Prior-run detection row (e.g. a prior false positive).
     prior_det_ids = db.save_detections(
         photo_id,
         [
@@ -1729,31 +1724,16 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
         ],
         detector_model="MegaDetector",
     )
-    assert prior_det_ids, "setup sanity: prior detections were inserted"
+    assert prior_det_ids, "setup sanity: prior detection was inserted"
 
     col_id = db.add_collection(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
-    # Use a single model for the reclassify run (subset reclassify).
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
-    run_model_id = model_ids[:1]   # reclassify only the first model
-    other_model_id = model_ids[1]  # this model's predictions should survive
 
-    # Seed a prediction from the "other" model referencing the prior detection.
-    detection_id = prior_det_ids[0]
-    db.add_prediction(
-        detection_id=detection_id,
-        species="other_species",
-        confidence=0.95,
-        model=other_model_id,
-    )
-    assert db.get_prediction_for_photo(photo_id, other_model_id) is not None, (
-        "setup sanity: other-model prediction must exist before reclassify"
-    )
-
-    # _detect_batch stub that produces nothing (reclassify finds no animals).
+    # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
@@ -1773,7 +1753,7 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
 
     params = PipelineParams(
         collection_id=col_id,
-        model_ids=run_model_id,
+        model_ids=model_ids[:1],
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
@@ -1784,13 +1764,16 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # The other model's prediction must still exist after the reclassify.
+    # The stale prior-run detection must be gone after reclassify so that
+    # future non-reclassify runs don't reuse it via the already-detected path.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
-    surviving_pred = verify_db.get_prediction_for_photo(photo_id, other_model_id)
-    assert surviving_pred is not None, (
-        f"Prediction from '{other_model_id}' was deleted by a reclassify run "
-        f"that only included '{run_model_id}'. Clearing detections up-front "
-        "cascades to delete ALL predictions including from models not in this "
-        "run — a data-loss regression flagged in Codex P1 on #506 line 848."
+    remaining = verify_db.get_detections(photo_id)
+    assert remaining == [], (
+        f"Stale prior-run detection rows must be purged during reclassify but "
+        f"db.get_detections({photo_id}) returned {remaining!r}. "
+        "Without this cleanup, future non-reclassify runs short-circuit to "
+        "stale boxes via get_existing_detection_photo_ids + get_detections, "
+        "causing false-positive detections to persist indefinitely. "
+        "Regression for Codex P1 review on #511 line 848."
     )
