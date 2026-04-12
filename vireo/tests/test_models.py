@@ -680,7 +680,7 @@ def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
         return dest
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -722,7 +722,7 @@ def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
         return dest
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -767,7 +767,7 @@ def test_download_model_writes_pinned_revision(tmp_path, monkeypatch):
         return expected
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -827,7 +827,7 @@ def test_download_model_falls_back_to_main_when_revision_lookup_fails(
         return expected
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -873,7 +873,7 @@ def test_download_model_skips_verification_only_when_tree_api_also_fails(
         raise model_verify.VerifyError("tree api offline")
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -912,7 +912,7 @@ def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):
     symlink_path = snapshots / "image_encoder.onnx.data"
     os.symlink(blob_path, symlink_path)
 
-    def fake_try_to_load_from_cache(repo_id, filename):
+    def fake_try_to_load_from_cache(repo_id, filename, revision=None):
         return str(symlink_path)
 
     import huggingface_hub
@@ -959,7 +959,7 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
         raise model_verify.VerifyError("tree API offline")
 
     monkeypatch.setattr(
-        models, "_purge_hf_cache_file", lambda filename, subdir: None
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
@@ -973,3 +973,142 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
     # Sentinel must still be on disk so a future pipeline run (or a retry
     # after HF is back up) keeps the model flagged as corrupt.
     assert sentinel.is_file()
+
+
+def test_purge_hf_cache_file_passes_revision_to_cache_lookup(tmp_path, monkeypatch):
+    """_purge_hf_cache_file must pass the revision parameter to
+    try_to_load_from_cache so the lookup resolves the pinned snapshot entry
+    rather than the default-branch entry.
+
+    Without revision= the HF cache lookup targets 'main', leaving the
+    corrupt blob for the pinned commit untouched; every retry then
+    relinks to the same bad bytes and hash-mismatch retries are exhausted
+    without ever fetching fresh bytes.
+
+    Regression for Codex P1 review on #501, models.py line 653.
+    """
+    import sys
+    import types
+
+    import models
+
+    captured: dict = {}
+
+    blobs = tmp_path / "blobs"
+    snapshots = tmp_path / "snapshots" / "abc123" / "bioclip-vit-b-16"
+    blobs.mkdir(parents=True)
+    snapshots.mkdir(parents=True)
+    blob_path = blobs / "corruptblob"
+    blob_path.write_bytes(b"corrupt")
+    symlink_path = snapshots / "image_encoder.onnx.data"
+    os.symlink(blob_path, symlink_path)
+
+    def fake_try_to_load_from_cache(repo_id, filename, revision=None):
+        captured["revision"] = revision
+        return str(symlink_path)
+
+    # Stub huggingface_hub in sys.modules so the test passes in environments
+    # where the library is not installed.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.try_to_load_from_cache = fake_try_to_load_from_cache
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
+    models._purge_hf_cache_file(
+        "image_encoder.onnx.data", "bioclip-vit-b-16", revision="abc123"
+    )
+
+    assert captured.get("revision") == "abc123", (
+        "try_to_load_from_cache must receive the pinned revision so the "
+        "correct snapshot entry is purged — regression for Codex P1 on "
+        "#501 models.py line 653"
+    )
+    # Both the symlink and blob should be deleted
+    assert not symlink_path.exists()
+    assert not blob_path.exists()
+
+
+def test_download_model_clears_stale_revision_when_verification_runs_against_main(
+    tmp_path, monkeypatch
+):
+    """When verification runs against 'main' (because fetch_latest_revision
+    failed so pinned_revision is None), any pre-existing .hf_revision must
+    be deleted.
+
+    If a stale .hf_revision remains from a previous install, the next
+    verify_model call reads that old SHA and fetches expected hashes for
+    the wrong revision, causing false mismatches and unnecessary Repair
+    prompts even though the downloaded files are correct.
+
+    Regression for Codex P2 review on #501, models.py line 523.
+    """
+    import hashlib
+    import sys
+    import types
+
+    import model_verify
+
+    # Stub out huggingface_hub so the import guard in download_model passes
+    # even when the library is not installed in this environment.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = lambda *a, **kw: None
+    hf_stub.try_to_load_from_cache = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Simulate a stale revision pin left by a previous install.
+    stale_rev_path = model_dir / model_verify.REVISION_FILE
+    stale_rev_path.write_text("old_sha_from_previous_install\n")
+
+    # fetch_latest_revision will raise (model-info API offline), so
+    # pinned_revision will be None but the tree API still works (returns
+    # expected hashes against "main").
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_latest_revision",
+        lambda repo: (_ for _ in ()).throw(
+            model_verify.VerifyError("model-info offline")
+        ),
+    )
+
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        fn: hashlib.sha256(data).hexdigest()
+        for fn, data in lfs_contents.items()
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        base = os.path.basename(filename)
+        dest = os.path.join(local_dir, base)
+        with open(dest, "wb") as f:
+            f.write(lfs_contents.get(base, b"stub"))
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": expected,
+    )
+
+    models.download_model("bioclip-vit-b-16")
+
+    # The stale .hf_revision must have been deleted so that verify_model
+    # uses "main" (matching the revision used for hash verification) rather
+    # than the old SHA, which would produce false mismatches.
+    assert not stale_rev_path.exists(), (
+        ".hf_revision must be deleted when verification runs against 'main' "
+        "(pinned_revision=None) to prevent false mismatch errors on the "
+        "next verify_model call — regression for Codex P2 on #501 line 523"
+    )

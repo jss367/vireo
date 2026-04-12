@@ -521,6 +521,16 @@ def download_model(model_id, progress_callback=None):
                 os.unlink(sentinel_path)
         if pinned_revision is not None:
             model_verify.write_pinned_revision(model_dir, pinned_revision)
+        else:
+            # Verification ran against "main" (model-info API was unavailable
+            # so pinned_revision is None).  Clear any existing .hf_revision so
+            # that future verify_model calls also use "main" instead of reading
+            # a stale SHA from a previous install and fetching expected hashes
+            # for the wrong revision — which would cause false mismatches and
+            # unnecessary Repair prompts.
+            rev_path = os.path.join(model_dir, model_verify.REVISION_FILE)
+            with contextlib.suppress(OSError):
+                os.unlink(rev_path)
     else:
         # Hash fetch was unavailable so verification was skipped. We still
         # need to update (or clear) the revision pin so that a subsequent
@@ -623,10 +633,10 @@ def _download_and_verify_file(
             )
         with contextlib.suppress(OSError):
             os.unlink(local_path)
-        _purge_hf_cache_file(filename, hf_subdir)
+        _purge_hf_cache_file(filename, hf_subdir, revision=revision)
 
 
-def _purge_hf_cache_file(filename, hf_subdir):
+def _purge_hf_cache_file(filename, hf_subdir, revision=None):
     """Delete a cached file from the HuggingFace cache so the next
     hf_hub_download call fetches fresh bytes instead of returning the
     corrupt blob it previously cached.
@@ -640,17 +650,27 @@ def _purge_hf_cache_file(filename, hf_subdir):
     leave the blob intact and hf_hub_download would happily relink to
     the same corrupt bytes on retry. So we resolve the symlink to its
     target and delete both.
+
+    `revision` must match the revision used in the hf_hub_download call
+    that produced the cached file; without it try_to_load_from_cache
+    resolves the entry for the default branch (main) instead of the
+    pinned snapshot, leaving the corrupt blob for the pinned commit
+    untouched and causing repeated hash-mismatch retries.
     """
     try:
         import huggingface_hub
     except ImportError:
         return
 
+    lookup_kwargs: dict = dict(
+        repo_id=ONNX_REPO,
+        filename=f"{hf_subdir}/{filename}" if hf_subdir else filename,
+    )
+    if revision is not None:
+        lookup_kwargs["revision"] = revision
+
     try:
-        cached = huggingface_hub.try_to_load_from_cache(
-            repo_id=ONNX_REPO,
-            filename=f"{hf_subdir}/{filename}" if hf_subdir else filename,
-        )
+        cached = huggingface_hub.try_to_load_from_cache(**lookup_kwargs)
     except Exception as e:
         log.debug("HF cache lookup failed for %s: %s", filename, e)
         return
