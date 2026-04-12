@@ -1598,8 +1598,9 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     binding its predictions to outdated detection_ids.
     """
     import json
-    import classify_job
+
     import classifier as classifier_mod
+    import classify_job
     import config as cfg
     from db import Database
 
@@ -1692,7 +1693,8 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     Regression test for the second Codex P1 comment on #506 ('Restrict model
     2+ reuse to detections created in this run').
     """
-    import sys, os
+    import os
+    import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     import classify_job
 
@@ -1728,3 +1730,99 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
         "detection_map must contain the cached detection list, not a DB result."
     )
     assert count == 1
+
+
+def test_pipeline_reclassify_clears_prior_detection_rows(tmp_path, monkeypatch):
+    """On reclassify, prior-run detection rows must be DELETED from the DB
+    before any model runs. Just clearing the in-memory already_detected set
+    isn't sufficient: model 2+ hit _detect_batch's cached path, which calls
+    db.get_detections(photo_id) and returns the union of old + newly-inserted
+    rows when old rows are still present — so model 2's predictions bind to
+    stale detection_ids from a prior pipeline pass.
+
+    Regression for Codex review on #506: the earlier fix only wiped the
+    in-memory set; this test pins the stronger "DB rows are gone" invariant.
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+
+    # Prior-run detection rows we expect to be wiped by reclassify.
+    prior_det_ids = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.9, "category": "animal"},
+            {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
+             "confidence": 0.8, "category": "animal"},
+        ],
+        detector_model="MegaDetector",
+    )
+    assert prior_det_ids, "setup sanity: prior detections were inserted"
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # _detect_batch stub that writes NOTHING — mimics a reclassify pass that
+    # produces no new detections. If the fix is working, the DB should end
+    # up with zero rows for this photo; if not, prior rows will linger.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Reopen the DB to see the committed state from the pipeline's thread-db.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+    remaining = verify_db.get_detections(photo_id)
+    assert remaining == [], (
+        f"Prior-run detection rows must be cleared on reclassify but "
+        f"db.get_detections({photo_id}) still returned {remaining!r}. "
+        "This is exactly the cross-model stale-id leak Codex flagged on #506: "
+        "model 2+ would see these rows via _detect_batch's cached path and "
+        "bind predictions to outdated detection_ids."
+    )

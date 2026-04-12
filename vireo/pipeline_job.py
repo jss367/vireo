@@ -829,13 +829,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total_failed = 0
             total_skipped_existing = 0
 
-            # Seed with detections that already exist in the DB so the first
-            # model iteration doesn't re-run MegaDetector on photos that were
-            # detected in a prior pipeline pass. Also lets model #2..N reuse
-            # detections that model #1 just produced.
-            already_detected = set(
-                getattr(thread_db, "get_existing_detection_photo_ids", lambda: set())()
-            )
+            # On reclassify, actually drop the prior-run detection rows from
+            # the DB for the photos we're about to re-process. Just wiping the
+            # in-memory already_detected set isn't enough: model 2+ hit the
+            # cached path inside _detect_batch which calls
+            # db.get_detections(photo_id), and that returns the union of old
+            # and newly-inserted rows when old rows are still present — so
+            # model 2's predictions end up bound to stale detection_ids from
+            # a prior pipeline pass. Clearing the rows up-front keeps the DB
+            # state consistent with "everything you see was produced in this
+            # run." The standalone classify_job uses the same pattern.
+            #
+            # Non-reclassify runs keep existing detections so the cached path
+            # in _detect_batch can reuse them (that's the whole point of the
+            # pre-seed).
+            if params.reclassify:
+                for photo in photos:
+                    thread_db.clear_detections(photo["id"])
+                already_detected = set()
+            else:
+                already_detected = set(
+                    getattr(thread_db, "get_existing_detection_photo_ids", lambda: set())()
+                )
 
             # Accumulates the detection rows produced by model 1 in *this*
             # run so that model 2+ can use them directly instead of calling
@@ -894,17 +909,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 detected = 0
                 skipped_existing = 0
                 start_time = time.time()
-
-                # On the first model of a reclassify run, drop any pre-seeded
-                # already_detected IDs so that later models only reuse
-                # detections that model 1 produced in *this* run.  Without
-                # this, already_detected still contains IDs from
-                # get_existing_detection_photo_ids() that reflect prior
-                # pipeline passes; when model 2 encounters those photo IDs it
-                # calls db.get_detections() and picks up stale rows instead of
-                # the fresh detections model 1 just inserted.
-                if params.reclassify and spec_idx == 0 and len(resolved_specs) > 1:
-                    already_detected = set()
 
                 for batch_start in range(0, total, _BATCH_SIZE):
                     if _should_abort(abort):
