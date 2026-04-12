@@ -984,16 +984,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # MegaDetector for them instead of re-running detection on
                     # empty-frame photos each iteration.
                     already_detected.update(det_processed_ids)
+                    if _multi_model:
+                        # Cache detections from every model iteration so
+                        # later models use this-run rows rather than stale
+                        # rows from db.get_detections().  Only add photos
+                        # not already cached — model 1's results take
+                        # precedence for photos it successfully processed.
+                        for pid, dets in det_map.items():
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = dets
+                        for pid in det_processed_ids:
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = []
                     if spec_idx == 0:
-                        if _multi_model:
-                            this_run_detections.update(det_map)
-                            # Also cache zero-detection photos so model 2+
-                            # finds them in cached_detections and skips
-                            # MegaDetector rather than falling through to
-                            # db.get_detections().
-                            for pid in det_processed_ids:
-                                if pid not in this_run_detections:
-                                    this_run_detections[pid] = []
                         # Key purge eligibility on photos whose per-photo
                         # iteration in _detect_batch actually completed —
                         # not the whole submitted batch.  If _detect_batch
