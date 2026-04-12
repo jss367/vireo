@@ -684,7 +684,7 @@ def test_download_model_writes_revision_when_hash_fetch_fails(tmp_path, monkeypa
             f.write(b"stub")
         return dest
 
-    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s: None)
+    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s, revision=None: None)
     monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
 
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
@@ -734,7 +734,7 @@ def test_download_model_clears_stale_revision_when_both_apis_fail(tmp_path, monk
             f.write(b"stub")
         return dest
 
-    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s: None)
+    monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s, revision=None: None)
     monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
 
     # download_model raises because state check sees no sentinel but files
