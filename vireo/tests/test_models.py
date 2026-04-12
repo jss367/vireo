@@ -1172,3 +1172,11 @@ def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="truncated"):
         models.download_model("bioclip-vit-b-16")
+
+    # The verify-failed sentinel must be written so _classify_model_state
+    # reports 'incomplete' and get_models() shows the Repair button.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), (
+        "Size-floor failure must write .verify_failed sentinel so the model "
+        "is not treated as healthy by _classify_model_state."
+    )
