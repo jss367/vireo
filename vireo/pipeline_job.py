@@ -1313,27 +1313,51 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             start_time = time.time()
 
             # If the input collection has photos but none carry detections,
-            # fail loudly instead of silently completing with masked=0. The
-            # pipeline would otherwise reject every photo with no_subject_mask
-            # without explaining why the masks were never produced.
+            # surface a clear status instead of silently completing with
+            # masked=0 — otherwise the pipeline rejects every photo with
+            # no_subject_mask without explaining why masks were never made.
+            # Distinguish two cases:
+            #   (a) weights missing → actionable remediation
+            #   (b) weights present → legitimate outcome (empty scenes,
+            #       strict confidence threshold, non-wildlife photos)
             if photos_with_detections == 0 and len(photos) > 0:
-                reason = (
-                    f"No detections found for {len(photos)} photo(s). The classify stage did not "
-                    "produce any detections (most commonly because MegaDetector weights were not "
-                    "downloaded). Without detections the mask extraction stage has nothing to "
-                    "process, and the pipeline will reject every photo with `no_subject_mask`. "
-                    "Download MegaDetector V6 from the pipeline models page and rerun classify."
-                )
+                weights_present = False
+                try:
+                    from detector import MEGADETECTOR_ONNX_PATH
+                    weights_present = os.path.isfile(MEGADETECTOR_ONNX_PATH)
+                except ImportError:
+                    weights_present = False
+
+                if weights_present:
+                    reason = (
+                        f"No detections produced for {len(photos)} photo(s). MegaDetector ran but "
+                        "found no animals meeting the confidence threshold. The pipeline will "
+                        "reject every photo with `no_subject_mask`. Lower `detector_confidence` "
+                        "in settings or rerun classify with a different threshold if detections "
+                        "were expected."
+                    )
+                    summary = "Skipped — MegaDetector produced no detections"
+                else:
+                    reason = (
+                        f"No detections available for {len(photos)} photo(s). MegaDetector "
+                        "weights are not downloaded, so the classify stage ran on full images "
+                        "and stored no detections. Without detections the mask extraction stage "
+                        "has nothing to process, and the pipeline will reject every photo with "
+                        "`no_subject_mask`. Download MegaDetector V6 from the pipeline models "
+                        "page and rerun the pipeline."
+                    )
+                    summary = "Skipped — MegaDetector weights not downloaded"
+
                 log.warning("Pipeline extract-masks: %s", reason)
                 errors.append(f"[extract_masks] {reason}")
                 stages["extract_masks"]["status"] = "skipped"
                 runner.update_step(
                     job["id"], "extract_masks", status="completed",
-                    summary="Skipped — no detections available",
+                    summary=summary,
                 )
                 result["stages"]["extract_masks"] = {
                     "masked": 0, "skipped": 0, "failed": 0, "total": 0,
-                    "reason": "no_detections",
+                    "reason": "weights_missing" if not weights_present else "no_detections",
                 }
                 _update_stages(runner, job["id"], stages)
                 return
