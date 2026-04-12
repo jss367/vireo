@@ -792,12 +792,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 "stages": {k: dict(v) for k, v in stages.items()},
             })
 
-            bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
-            loaded_models.update(bundle)
+            try:
+                bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
+                loaded_models.update(bundle)
+            except Exception as preload_err:
+                if len(resolved_specs) > 1:
+                    # Other models remain — don't abort the whole pipeline.
+                    log.warning(
+                        "First model %s failed to load, %d remaining: %s",
+                        first_name, len(resolved_specs) - 1, preload_err,
+                    )
+                    loaded_models["preload_error"] = str(preload_err)
+                else:
+                    # Single model — fatal, let the outer handler abort.
+                    raise
+
             loaded_models["pending_specs"] = resolved_specs[1:]
 
             stages["model_loader"]["status"] = "completed"
             summary = ", ".join(s["name"] for s in resolved_specs)
+            if "preload_error" in loaded_models:
+                summary += f" ({first_name} failed to preload)"
             runner.update_step(job["id"], "model_loader", status="completed",
                                summary=summary)
         except Exception as e:
@@ -815,7 +830,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         collection_ready.wait()
         models_ready.wait()
 
-        if params.skip_classify or abort.is_set() or not collection_id or "clf" not in loaded_models:
+        # Skip classify only when there is truly nothing to run.  When the
+        # first model's preload failed but resolved_specs still contains
+        # other models, we must NOT skip — classify_stage will try each
+        # remaining spec in turn.
+        has_models_to_try = (
+            "clf" in loaded_models
+            or loaded_models.get("resolved_specs")
+        )
+        if params.skip_classify or abort.is_set() or not collection_id or not has_models_to_try:
             stages["classify"]["status"] = "skipped"
             runner.update_step(job["id"], "classify", status="completed",
                                summary="Skipped")
@@ -915,27 +938,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # reclassify does not cause data loss.
             _model1_processed_photo_ids: set = set()
 
+            # Track models that failed to load so we can report them.
+            skipped_model_names: list = []
+            models_succeeded = 0
+
             from datetime import datetime as dt
 
             for spec_idx, active_spec in enumerate(resolved_specs):
                 if _should_abort(abort):
                     break
 
-                if spec_idx == 0:
+                if spec_idx == 0 and "clf" in loaded_models:
                     # First model was preloaded by model_loader_stage.
                     clf = loaded_models["clf"]
                     model_type = loaded_models["model_type"]
                     model_name = loaded_models["model_name"]
                 else:
-                    # Load the next classifier. Release the previous bundle
-                    # first so we don't hold two large ONNX graphs in memory
-                    # at once.
+                    # Either a secondary model (spec_idx > 0), or the first
+                    # model whose preload failed in model_loader_stage.
+                    # Load it now with try/except so one bad model doesn't
+                    # kill the entire multi-model run.
                     runner.push_event(job["id"], "progress", {
                         "phase": f"Loading {active_spec['name']}...",
                         "stage_id": "classify",
                         "current": 0, "total": total,
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
+                    # Release previous model from memory.
                     for k in ("clf", "model_type", "model_name", "model_str",
                               "labels", "use_tol", "active_model"):
                         loaded_models.pop(k, None)
@@ -948,7 +977,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # embeddings/image metadata for all photos don't stay
                     # alive during the model-load handoff.
                     raw_results = None
-                    bundle = _load_model_bundle(active_spec, tax, thread_db)
+                    try:
+                        bundle = _load_model_bundle(active_spec, tax, thread_db)
+                    except Exception as model_err:
+                        log.warning(
+                            "Skipping model %s: %s",
+                            active_spec["name"], model_err,
+                        )
+                        runner.push_event(job["id"], "progress", {
+                            "phase": f"Skipping {active_spec['name']}: {model_err}",
+                            "stage_id": "classify",
+                            "current": 0, "total": total,
+                            "stages": {k: dict(v) for k, v in stages.items()},
+                        })
+                        skipped_model_names.append(active_spec["name"])
+                        continue
                     loaded_models.update(bundle)
                     clf = bundle["clf"]
                     model_type = bundle["model_type"]
@@ -1092,6 +1135,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 total_detected += detected
                 total_failed += failed
                 total_skipped_existing += skipped_existing
+                models_succeeded += 1
 
                 # After model 1 has inserted all fresh detection rows, delete
                 # the pre-run stale rows we snapshotted before the loop.
@@ -1129,9 +1173,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             len(_pre_run_det_ids) - len(processed_with_priors),
                         )
 
+            # If every model failed to load, mark classify as failed.
+            if models_succeeded == 0 and skipped_model_names:
+                fail_msg = (
+                    f"All {len(skipped_model_names)} model(s) failed to load: "
+                    + ", ".join(skipped_model_names)
+                )
+                raise RuntimeError(fail_msg)
+
+            summary_parts = [f"{total_predictions_stored} predictions"]
+            if skipped_model_names:
+                skipped_str = ", ".join(skipped_model_names)
+                summary_parts.append(
+                    f"{len(skipped_model_names)} model(s) skipped: {skipped_str}"
+                )
+
             stages["classify"]["status"] = "completed"
             runner.update_step(job["id"], "classify", status="completed",
-                               summary=f"{total_predictions_stored} predictions")
+                               summary="; ".join(summary_parts))
             result["stages"]["classify"] = {
                 "total": total,
                 "predictions_stored": total_predictions_stored,
@@ -1139,6 +1198,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 "failed": total_failed,
                 "already_classified": total_skipped_existing,
                 "model_count": len(resolved_specs),
+                "models_succeeded": models_succeeded,
+                "models_skipped": len(skipped_model_names),
+                "skipped_model_names": skipped_model_names,
             }
 
         except Exception as e:

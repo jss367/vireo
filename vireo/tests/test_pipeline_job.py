@@ -2168,3 +2168,220 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
         "photo that was never re-detected.  "
         "Regression for Codex P1 review on #513 line 981."
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-model pipeline resilience to individual model failures
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_continues_when_first_model_fails(tmp_path, monkeypatch):
+    """When the first model in a multi-model run fails to load, the pipeline
+    must NOT abort.  The second model should still classify photos and the
+    pipeline should complete successfully.
+
+    This is the fix for the multi-model pipeline abort bug: previously
+    model_loader_stage set abort on ANY preload failure, which killed the
+    entire pipeline even when other models were available.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # The first model ("bioclip-vit-b-16") always fails; the second
+    # ("bioclip-2") always succeeds. Use the pretrained_str kwarg to
+    # distinguish which model is being loaded.
+    construction_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pretrained = kwargs.get("pretrained_str", "") or ""
+            if "bioclip-vit-b-16" in pretrained:
+                raise RuntimeError("simulated first model failure")
+            construction_calls.append(kwargs)
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Should NOT raise — second model should succeed.
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The second model must have been constructed successfully.
+    assert len(construction_calls) >= 1, (
+        "Expected at least one successful Classifier construction (second model), "
+        f"got {len(construction_calls)}"
+    )
+
+    # model_loader summary should note the preload failure.
+    model_loader_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and kwargs.get("status") == "completed"
+    ]
+    assert model_loader_summaries, "model_loader should complete (not fail)"
+    assert "failed to preload" in " ".join(model_loader_summaries)
+
+    # classify summary should mention the skipped model.
+    classify_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "classify" and kwargs.get("status") == "completed"
+    ]
+    assert classify_summaries, "classify stage should complete"
+    joined_classify = " ".join(classify_summaries)
+    assert "skipped" in joined_classify.lower(), (
+        f"classify summary should mention skipped model, got: {classify_summaries}"
+    )
+
+    # The returned result must record the skipped model info.
+    assert isinstance(result, dict)
+    classify_result = result.get("stages", {}).get("classify", {})
+    assert classify_result.get("models_skipped", 0) >= 1
+    assert classify_result.get("models_succeeded", 0) >= 1
+
+
+def test_pipeline_continues_when_secondary_model_fails(tmp_path, monkeypatch):
+    """When the second model in a multi-model run fails to load, the first
+    model's results are kept and the pipeline completes with a partial success.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # The second model ("bioclip-2") always fails; the first succeeds.
+    construction_calls = []
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pretrained = kwargs.get("pretrained_str", "") or ""
+            if "bioclip-2" in pretrained:
+                raise RuntimeError("simulated second model failure")
+            construction_calls.append(kwargs)
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    # Should NOT raise — first model succeeded.
+    result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The first model must have been constructed.
+    assert len(construction_calls) >= 1, (
+        f"Expected at least 1 construction call, got {len(construction_calls)}"
+    )
+
+    # classify summary should mention the skipped model.
+    classify_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "classify" and kwargs.get("status") == "completed"
+    ]
+    assert classify_summaries, "classify stage should complete"
+    joined_classify = " ".join(classify_summaries)
+    assert "skipped" in joined_classify.lower(), (
+        f"classify summary should mention skipped model, got: {classify_summaries}"
+    )
+
+    assert isinstance(result, dict)
+    classify_result = result.get("stages", {}).get("classify", {})
+    assert classify_result.get("models_skipped", 0) >= 1
+    assert classify_result.get("models_succeeded", 0) >= 1
+
+
+def test_pipeline_single_model_still_aborts_on_failure(tmp_path, monkeypatch):
+    """When there is only one model and it fails to load, the pipeline must
+    still abort — the resilience logic should NOT swallow single-model errors.
+    This preserves the existing behavior tested by
+    test_pipeline_raises_when_stage_fails.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated single model failure")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=["bioclip-vit-b-16"],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # model_loader should be marked as failed.
+    model_loader_failures = [
+        kwargs
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and kwargs.get("status") == "failed"
+    ]
+    assert model_loader_failures, (
+        "Single-model pipeline must mark model_loader as failed"
+    )
+    assert isinstance(job["result"], dict)
+    assert any(
+        "model_loader" in e for e in job["result"]["errors"]
+    ), f"Expected a model_loader error, got: {job['result']['errors']}"
