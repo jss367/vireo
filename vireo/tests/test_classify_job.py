@@ -279,6 +279,70 @@ def test_detect_subjects_graceful_on_import_error():
 # ── Task 4: Multi-detection pipeline tests ───────────────────────────────────
 
 
+def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
+    """_detect_batch must add photo_id to processed_ids as soon as detection
+    rows are committed to the DB, before quality-scoring calls.
+
+    If compute_sharpness or update_photo_quality raises after save_detections,
+    the outer except catches the exception and processed_ids.add at the end of
+    the per-photo loop body is never reached.  The photo would be missing from
+    processed_ids, causing the reclassify purge in pipeline_job to skip
+    deleting its stale pre-run detection rows — future non-reclassify runs
+    would then reuse those stale rows indefinitely.
+
+    Regression for Codex P2 review on #513, classify_job.py line 315.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_batch
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [{"id": 7, "filename": "bird.jpg", "folder_id": 10}]
+    folders = {10: str(tmp_path)}
+
+    img = Image.new("RGB", (100, 100), color="red")
+    img.save(str(tmp_path / "bird.jpg"))
+
+    fake_detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ]
+
+    mock_db = MagicMock()
+    mock_db.save_detections.return_value = [42]
+
+    # quality scoring raises — simulates compute_sharpness or
+    # update_photo_quality failing after the detection row is already saved.
+    def raising_sharpness(*args, **kwargs):
+        raise RuntimeError("simulated sharpness failure")
+
+    with patch("classify_job.detect_animals", return_value=fake_detections), \
+         patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
+         patch("classify_job.compute_sharpness", side_effect=raising_sharpness):
+        detection_map, detected, processed_ids = _detect_batch(
+            photos=photos,
+            folders=folders,
+            runner=runner,
+            job=job,
+            reclassify=True,
+            db=mock_db,
+            already_detected_ids=set(),
+        )
+
+    # The detection was saved to the DB before quality scoring raised.
+    mock_db.save_detections.assert_called_once()
+    # photo 7 must be in processed_ids even though quality scoring raised, so
+    # the reclassify purge correctly removes its stale pre-run detection rows.
+    assert 7 in processed_ids, (
+        "photo_id must be in processed_ids after save_detections even when "
+        "quality-scoring raises — regression for Codex P2 on #513 line 315"
+    )
+    # detection_map should still contain the result from this run
+    assert 7 in detection_map
+
+
 def test_detect_batch_stores_all_detections(tmp_path):
     """_detect_batch should store all detections, not just the primary."""
     from db import Database
@@ -328,7 +392,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     with patch("classify_job.detect_animals", return_value=fake_detections), \
          patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
          patch("classify_job.compute_sharpness", return_value=50.0):
-        detection_map, detected = _detect_batch(
+        detection_map, detected, _processed = _detect_batch(
             photos=photos,
             folders=folders,
             runner=runner,

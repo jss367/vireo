@@ -5622,6 +5622,7 @@ def create_app(db_path, thumb_cache_dir=None):
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
             model_id=body.get("model_id"),
+            model_ids=body.get("model_ids"),
             reclassify=body.get("reclassify", False),
             skip_classify=body.get("skip_classify", False),
             download_taxonomy=body.get("download_taxonomy", True),
@@ -5638,13 +5639,27 @@ def create_app(db_path, thumb_cache_dir=None):
         if not params.skip_classify:
             from models import get_active_model, get_models
 
-            _model = None
-            if params.model_id:
-                _all = get_models()
-                _model = next((m for m in _all if m["id"] == params.model_id and m["downloaded"]), None)
-            if not _model:
-                _model = get_active_model()
-            if not _model:
+            # Resolve the set of requested models. Prefer the explicit list,
+            # fall back to the legacy single id, and finally to whatever is
+            # marked active. Any requested id that isn't downloaded fails the
+            # check, so the user sees the "no model available" warning instead
+            # of a mid-run model_loader crash.
+            requested_ids = list(params.model_ids or [])
+            if not requested_ids and params.model_id:
+                requested_ids = [params.model_id]
+
+            all_models = None
+            resolved_any = False
+            if requested_ids:
+                all_models = get_models()
+                by_id = {m["id"]: m for m in all_models}
+                resolved_any = all(
+                    by_id.get(mid, {}).get("downloaded") for mid in requested_ids
+                )
+            else:
+                resolved_any = get_active_model() is not None
+
+            if not resolved_any:
                 params.skip_classify = True
                 params.skip_extract_masks = True
                 params.skip_regroup = True

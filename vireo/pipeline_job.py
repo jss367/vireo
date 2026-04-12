@@ -38,6 +38,7 @@ class PipelineParams:
     labels_file: str | None = None
     labels_files: list | None = None
     model_id: str | None = None
+    model_ids: list | None = None
     reclassify: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
@@ -165,6 +166,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     collection_ready = threading.Event()
     models_ready = threading.Event()
     loaded_models = {}  # populated by model_loader thread
+
+    # Normalize model_ids: prefer the explicit list, fall back to the legacy
+    # single `model_id`, and finally to `[]` which means "use the active model
+    # from config." This is the knob the multi-model fix hangs off of.
+    if params.model_ids:
+        effective_model_ids = list(params.model_ids)
+    elif params.model_id:
+        effective_model_ids = [params.model_id]
+    else:
+        effective_model_ids = []
 
     skip_scan = collection_id is not None
 
@@ -593,6 +604,95 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         _update_stages(runner, job["id"], stages)
 
+    def _resolve_model_spec(model_id_arg):
+        """Look up a model by id and require it to be fully downloaded."""
+        from models import get_active_model, get_models
+
+        if model_id_arg:
+            all_models = get_models()
+            spec = next(
+                (m for m in all_models if m["id"] == model_id_arg and m["downloaded"]),
+                None,
+            )
+            if not spec:
+                raise RuntimeError(
+                    f"Model '{model_id_arg}' not found or not downloaded."
+                )
+            return spec
+        spec = get_active_model()
+        if not spec:
+            raise RuntimeError("No model available. Download one in Settings.")
+        return spec
+
+    def _load_model_bundle(active_model, tax, thread_db):
+        """Turn a resolved model spec into a ready-to-use classifier bundle.
+
+        Loads labels for the model and constructs the Classifier/TimmClassifier,
+        translating ONNXRuntime's cryptic missing-weights errors into an
+        actionable "Repair" hint. Called by both the model_loader stage (for
+        the first model) and the classify stage (for each subsequent model in
+        a multi-model run).
+        """
+        from classify_job import _load_labels
+        from models import _classify_model_state
+
+        model_str = active_model["model_str"]
+        weights_path = active_model["weights_path"]
+        model_type = active_model.get("model_type", "bioclip")
+        model_name = active_model["name"]
+        model_is_custom = active_model.get("source") == "custom"
+
+        labels, use_tol = _load_labels(
+            model_type=model_type,
+            model_str=model_str,
+            labels_file=params.labels_file,
+            labels_files=params.labels_files,
+            db=thread_db,
+        )
+
+        # Preflight: validate the on-disk model before handing it to
+        # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
+        # the user deleted a .onnx.data file, or the download manifest
+        # changed) would otherwise surface as an opaque ONNXRuntime crash.
+        files = active_model.get("files", [])
+        if files and weights_path:
+            state = _classify_model_state(weights_path, files)
+            if state != "ok":
+                raise RuntimeError(
+                    _incomplete_model_message(model_name, model_is_custom)
+                )
+
+        try:
+            if model_type == "timm":
+                from timm_classifier import TimmClassifier
+                clf = TimmClassifier(model_str, taxonomy=tax)
+            else:
+                from classifier import Classifier
+                clf = Classifier(
+                    labels=None if use_tol else labels,
+                    model_str=model_str,
+                    pretrained_str=weights_path,
+                )
+        except Exception as load_err:
+            # ONNXRuntime signals missing external-data with a
+            # "model_path must not be empty" / "Initializer" error. Treat
+            # any load failure as an incomplete-model hint for the user.
+            if _looks_like_missing_external_data(load_err):
+                raise RuntimeError(
+                    _incomplete_model_message(model_name, model_is_custom)
+                ) from load_err
+            raise
+
+        return {
+            "clf": clf,
+            "model_type": model_type,
+            "model_name": model_name,
+            "model_str": model_str,
+            "labels": labels,
+            "use_tol": use_tol,
+            "active_model": active_model,
+        }
+
     def model_loader_stage():
         if params.skip_classify:
             stages["model_loader"]["status"] = "skipped"
@@ -606,32 +706,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                            current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
-            from classify_job import _load_labels, _load_taxonomy
-            from models import get_active_model, get_models
+            from classify_job import _load_taxonomy
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
 
-            # Resolve model
-            if params.model_id:
-                all_models = get_models()
-                active_model = next(
-                    (m for m in all_models if m["id"] == params.model_id and m["downloaded"]),
-                    None,
-                )
-                if not active_model:
-                    raise RuntimeError(f"Model '{params.model_id}' not found or not downloaded.")
+            # Resolve every requested model upfront so a bad id fails fast
+            # BEFORE taxonomy download, rather than mid-run after the user
+            # has already watched one classifier finish.
+            if effective_model_ids:
+                resolved_specs = [
+                    _resolve_model_spec(mid) for mid in effective_model_ids
+                ]
             else:
-                active_model = get_active_model()
-            if not active_model:
-                raise RuntimeError("No model available. Download one in Settings.")
+                resolved_specs = [_resolve_model_spec(None)]
 
-            model_str = active_model["model_str"]
-            weights_path = active_model["weights_path"]
-            model_type = active_model.get("model_type", "bioclip")
-            model_name = active_model["name"]
-            model_is_custom = active_model.get("source") == "custom"
-            runner.update_step(job["id"], "model_loader", current_file=model_name)
+            first_name = resolved_specs[0]["name"]
+            runner.update_step(job["id"], "model_loader", current_file=first_name)
 
             # Download taxonomy if missing and requested
             taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
@@ -655,70 +746,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 except Exception as e:
                     log.warning("Taxonomy download failed, continuing without: %s", e)
 
-            # Load taxonomy
+            # Taxonomy is shared across every classifier in the run.
             tax = _load_taxonomy(taxonomy_path)
+            loaded_models["tax"] = tax
+            loaded_models["resolved_specs"] = resolved_specs
 
-            # Load labels
-            labels, use_tol = _load_labels(
-                model_type=model_type,
-                model_str=model_str,
-                labels_file=params.labels_file,
-                labels_files=params.labels_files,
-                db=thread_db,
-            )
-
-            # Load classifier
+            # Load the first classifier so classify_stage can start as soon
+            # as scan completes; any remaining specs are loaded inside
+            # classify_stage so we never hold more than one model in memory.
             runner.push_event(job["id"], "progress", {
-                "phase": f"Loading {model_name}...",
+                "phase": f"Loading {first_name}...",
                 "stage_id": "model_loader",
                 "current": 0, "total": 0,
                 "stages": {k: dict(v) for k, v in stages.items()},
             })
 
-            # Preflight: validate the on-disk model before handing it to
-            # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
-            # the user deleted a .onnx.data file, or the download manifest
-            # changed) would otherwise surface as an opaque ONNXRuntime crash.
-            from models import _classify_model_state
-            files = active_model.get("files", [])
-            if files and weights_path:
-                state = _classify_model_state(weights_path, files)
-                if state != "ok":
-                    raise RuntimeError(_incomplete_model_message(model_name, model_is_custom))
-
-            try:
-                if model_type == "timm":
-                    from timm_classifier import TimmClassifier
-                    clf = TimmClassifier(model_str, taxonomy=tax)
-                else:
-                    from classifier import Classifier
-                    clf = Classifier(
-                        labels=None if use_tol else labels,
-                        model_str=model_str,
-                        pretrained_str=weights_path,
-                    )
-            except Exception as load_err:
-                # ONNXRuntime signals missing external-data with a
-                # "model_path must not be empty" / "Initializer" error. Treat
-                # any load failure as an incomplete-model hint for the user.
-                if _looks_like_missing_external_data(load_err):
-                    raise RuntimeError(
-                        _incomplete_model_message(model_name, model_is_custom)
-                    ) from load_err
-                raise
-
-            loaded_models["clf"] = clf
-            loaded_models["model_type"] = model_type
-            loaded_models["model_name"] = model_name
-            loaded_models["model_str"] = model_str
-            loaded_models["tax"] = tax
-            loaded_models["labels"] = labels
-            loaded_models["use_tol"] = use_tol
-            loaded_models["active_model"] = active_model
+            bundle = _load_model_bundle(resolved_specs[0], tax, thread_db)
+            loaded_models.update(bundle)
+            loaded_models["pending_specs"] = resolved_specs[1:]
 
             stages["model_loader"]["status"] = "completed"
+            summary = ", ".join(s["name"] for s in resolved_specs)
             runner.update_step(job["id"], "model_loader", status="completed",
-                               summary=model_name)
+                               summary=summary)
         except Exception as e:
             errors.append(f"[model_loader] Fatal: {e}")
             log.exception("Pipeline model loader stage failed")
@@ -759,118 +809,305 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             thread_db.set_active_workspace(workspace_id)
 
             user_cfg = thread_db.get_effective_config(cfg.load())
+            grouping_window = user_cfg.get("grouping_window_seconds", 5)
+            similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
 
-            clf = loaded_models["clf"]
-            model_type = loaded_models["model_type"]
-            model_name = loaded_models["model_name"]
             tax = loaded_models["tax"]
+            resolved_specs = loaded_models.get("resolved_specs") or [
+                loaded_models["active_model"]
+            ]
 
             photos = _filter_excluded(thread_db.get_collection_photos(collection_id, per_page=999999))
             folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
             total = len(photos)
 
+            # Aggregate counters across every model run. The UI reads a single
+            # stages.classify dict, so we sum across models rather than emit
+            # per-model rows.
+            total_predictions_stored = 0
+            total_detected = 0
+            total_failed = 0
+            total_skipped_existing = 0
+
+            # For reclassify: start with an empty already_detected so model 1
+            # re-runs MegaDetector on every photo. We intentionally do NOT
+            # clear detection rows from the DB up-front: doing so would
+            # cascade-delete prediction rows from OTHER models (not in this
+            # run's model_ids) via the predictions.detection_id FK, causing
+            # permanent data loss for any model not included in the subset
+            # reclassify. Instead, model 2+ receives the this_run_detections
+            # cache (filled by model 1's detect pass) via _detect_batch's
+            # cached_detections parameter, so later models bind predictions
+            # to the detection rows just produced — not to stale rows from a
+            # prior pass that db.get_detections() would otherwise return.
+            #
+            # After model 1's full detection pass we DELETE the pre-run
+            # detection rows (snapshotted below) for all collection photos.
+            # This prevents stale prior-run boxes from being reused by
+            # subsequent non-reclassify runs via get_existing_detection_photo_ids
+            # + db.get_detections() (the false-positive reuse regression flagged
+            # in the Codex review on #511).  The cascade to predictions is
+            # intentional: any predictions that referenced the OLD detection rows
+            # are now stale (MegaDetector re-ran and produced fresh rows).
+            #
+            # Non-reclassify runs keep existing detections so the cached path
+            # in _detect_batch can reuse them (that's the whole point of the
+            # pre-seed).
             if params.reclassify:
-                photo_ids = [p["id"] for p in photos]
-                thread_db.clear_predictions(model=model_name, collection_photo_ids=photo_ids)
+                already_detected = set()
+                # Snapshot detection IDs that exist BEFORE this run so we can
+                # delete them after model 1 inserts fresh rows.
+                photo_ids_list = [p["id"] for p in photos]
+                _pre_run_det_ids: dict = getattr(
+                    thread_db, "get_detection_ids_for_photos", lambda _: {}
+                )(photo_ids_list)
+            else:
+                already_detected = set(
+                    getattr(thread_db, "get_existing_detection_photo_ids", lambda: set())()
+                )
+                _pre_run_det_ids = {}
 
-            existing_preds = set()
-            if not params.reclassify:
-                existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
+            # Accumulates the detection rows produced by model 1 (spec_idx==0)
+            # so model 2+ can reference exactly those rows rather than calling
+            # db.get_detections() which would include stale rows from prior runs.
+            # Only allocated for multi-model runs; single-model runs never read
+            # the cache, so populating it would just waste memory.
+            _multi_model = len(resolved_specs) > 1
+            this_run_detections: dict = {}
 
-            # Interleaved detect + classify in batches
-            raw_results = []
-            failed = 0
-            detected = 0
-            skipped_existing = 0
-            start_time = time.time()
+            # Tracks photo IDs whose per-photo iteration in _detect_batch ran
+            # to completion during model 1's pass.  Used to gate the stale
+            # detection purge: only photos that were actually re-processed in
+            # this run should lose their prior-run rows.  Photos whose batch
+            # was never reached (abort) or whose iteration was cut short by a
+            # mid-batch exception keep their old detection rows so a partial
+            # reclassify does not cause data loss.
+            _model1_processed_photo_ids: set = set()
 
             from datetime import datetime as dt
 
-            for batch_start in range(0, total, _BATCH_SIZE):
+            for spec_idx, active_spec in enumerate(resolved_specs):
                 if _should_abort(abort):
                     break
 
-                batch = photos[batch_start:batch_start + _BATCH_SIZE]
-                batch_idx = batch_start + len(batch)
+                if spec_idx == 0:
+                    # First model was preloaded by model_loader_stage.
+                    clf = loaded_models["clf"]
+                    model_type = loaded_models["model_type"]
+                    model_name = loaded_models["model_name"]
+                else:
+                    # Load the next classifier. Release the previous bundle
+                    # first so we don't hold two large ONNX graphs in memory
+                    # at once.
+                    runner.push_event(job["id"], "progress", {
+                        "phase": f"Loading {active_spec['name']}...",
+                        "stage_id": "classify",
+                        "current": 0, "total": total,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+                    for k in ("clf", "model_type", "model_name", "model_str",
+                              "labels", "use_tol", "active_model"):
+                        loaded_models.pop(k, None)
+                    # Drop the local clf reference so the previous ONNX graph
+                    # is eligible for GC before the next model is loaded.
+                    # Without this, two large model graphs can be resident
+                    # simultaneously during the handoff.
+                    clf = None
+                    # Also release the previous iteration's output list so
+                    # embeddings/image metadata for all photos don't stay
+                    # alive during the model-load handoff.
+                    raw_results = None
+                    bundle = _load_model_bundle(active_spec, tax, thread_db)
+                    loaded_models.update(bundle)
+                    clf = bundle["clf"]
+                    model_type = bundle["model_type"]
+                    model_name = bundle["model_name"]
 
-                runner.push_event(job["id"], "progress", {
-                    "phase": "Classifying species",
-                    "stage_id": "classify",
-                    "current": batch_idx,
-                    "total": total,
-                    "rate": round(batch_idx / max(time.time() - start_time, 0.01) * 60, 1),
-                    "stages": {k: dict(v) for k, v in stages.items()},
-                })
-                stages["classify"]["count"] = batch_idx
-                runner.update_step(job["id"], "classify",
-                                   progress={"current": batch_idx, "total": total})
+                if params.reclassify:
+                    photo_ids = [p["id"] for p in photos]
+                    thread_db.clear_predictions(
+                        model=model_name, collection_photo_ids=photo_ids
+                    )
 
-                # Detect this batch
-                det_map, det_count = _detect_batch(
-                    batch, folders, runner, job, params.reclassify, thread_db,
+                existing_preds = set()
+                if not params.reclassify:
+                    existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
+
+                # Interleaved detect + classify in batches
+                raw_results = []
+                failed = 0
+                detected = 0
+                skipped_existing = 0
+                start_time = time.time()
+
+                for batch_start in range(0, total, _BATCH_SIZE):
+                    if _should_abort(abort):
+                        break
+
+                    batch = photos[batch_start:batch_start + _BATCH_SIZE]
+                    batch_idx = batch_start + len(batch)
+
+                    if len(resolved_specs) > 1:
+                        phase_label = (
+                            f"Classifying species ({model_name}, "
+                            f"{spec_idx + 1}/{len(resolved_specs)})"
+                        )
+                    else:
+                        phase_label = "Classifying species"
+
+                    runner.push_event(job["id"], "progress", {
+                        "phase": phase_label,
+                        "stage_id": "classify",
+                        "current": batch_idx,
+                        "total": total,
+                        "rate": round(batch_idx / max(time.time() - start_time, 0.01) * 60, 1),
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+                    stages["classify"]["count"] = batch_idx
+                    runner.update_step(job["id"], "classify",
+                                       progress={"current": batch_idx, "total": total})
+
+                    # Detect this batch. Pass already_detected so subsequent
+                    # models skip MegaDetector on photos that already have
+                    # detections in the DB.  On reclassify runs, only the
+                    # first model iteration re-runs detection (spec_idx == 0);
+                    # subsequent models share those detections rather than
+                    # inserting duplicate rows for the same photos.
+                    # cached_detections gives model 2+ the exact detection
+                    # rows from this run rather than querying the DB (which
+                    # could return stale rows from a prior pipeline pass).
+                    det_map, det_count, det_processed_ids = _detect_batch(
+                        batch, folders, runner, job,
+                        params.reclassify and spec_idx == 0, thread_db,
+                        already_detected_ids=already_detected,
+                        cached_detections=this_run_detections if _multi_model else None,
+                    )
+                    detected += det_count
+                    # Track ALL processed photos — including those where
+                    # MegaDetector found zero detections — so model 2+ skips
+                    # MegaDetector for them instead of re-running detection on
+                    # empty-frame photos each iteration.
+                    already_detected.update(det_processed_ids)
+                    if _multi_model:
+                        # Cache detections from every model iteration so
+                        # later models use this-run rows rather than stale
+                        # rows from db.get_detections().  Only add photos
+                        # not already cached — model 1's results take
+                        # precedence for photos it successfully processed.
+                        for pid, dets in det_map.items():
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = dets
+                        for pid in det_processed_ids:
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = []
+                    if spec_idx == 0:
+                        # Key purge eligibility on photos whose per-photo
+                        # iteration in _detect_batch actually completed —
+                        # not the whole submitted batch.  If _detect_batch
+                        # caught an exception mid-loop and returned early,
+                        # unprocessed photos will be absent from this set
+                        # and their stale rows will be preserved.
+                        _model1_processed_photo_ids.update(det_processed_ids)
+
+                    # Classify this batch
+                    for photo in batch:
+                        if photo["id"] in existing_preds:
+                            skipped_existing += 1
+                            pred_row = thread_db.get_prediction_for_photo(photo["id"], model_name)
+                            if pred_row:
+                                folder_path = folders.get(photo["folder_id"], "")
+                                image_path = os.path.join(folder_path, photo["filename"])
+                                timestamp = None
+                                if photo["timestamp"]:
+                                    with contextlib.suppress(ValueError, TypeError):
+                                        timestamp = dt.fromisoformat(photo["timestamp"])
+                                embedding = None
+                                if model_type != "timm":
+                                    emb_blob = thread_db.get_photo_embedding(photo["id"])
+                                    if emb_blob:
+                                        import numpy as np
+                                        embedding = np.frombuffer(emb_blob, dtype=np.float32)
+                                raw_results.append({
+                                    "photo": photo,
+                                    "folder_path": folder_path,
+                                    "image_path": image_path,
+                                    "prediction": pred_row["species"],
+                                    "confidence": pred_row["confidence"],
+                                    "timestamp": timestamp,
+                                    "filename": photo["filename"],
+                                    "embedding": embedding,
+                                    "taxonomy": None,
+                                    "_existing": True,
+                                })
+                            continue
+
+                        img, folder_path, image_path = _prepare_image(photo, folders, det_map)
+                        if img is None:
+                            failed += 1
+                            continue
+
+                        img_batch = [{"photo": photo, "folder_path": folder_path,
+                                      "image_path": image_path, "img": img}]
+                        failed += _flush_batch(img_batch, clf, model_type, model_name,
+                                               thread_db, raw_results)
+
+                # Group and store predictions for this model
+                group_result = _store_grouped_predictions(
+                    raw_results, job["id"], model_name,
+                    grouping_window, similarity_threshold, tax, thread_db,
                 )
-                detected += det_count
 
-                # Classify this batch
-                for photo in batch:
-                    if photo["id"] in existing_preds:
-                        skipped_existing += 1
-                        pred_row = thread_db.get_prediction_for_photo(photo["id"], model_name)
-                        if pred_row:
-                            folder_path = folders.get(photo["folder_id"], "")
-                            image_path = os.path.join(folder_path, photo["filename"])
-                            timestamp = None
-                            if photo["timestamp"]:
-                                with contextlib.suppress(ValueError, TypeError):
-                                    timestamp = dt.fromisoformat(photo["timestamp"])
-                            embedding = None
-                            if model_type != "timm":
-                                emb_blob = thread_db.get_photo_embedding(photo["id"])
-                                if emb_blob:
-                                    import numpy as np
-                                    embedding = np.frombuffer(emb_blob, dtype=np.float32)
-                            raw_results.append({
-                                "photo": photo,
-                                "folder_path": folder_path,
-                                "image_path": image_path,
-                                "prediction": pred_row["species"],
-                                "confidence": pred_row["confidence"],
-                                "timestamp": timestamp,
-                                "filename": photo["filename"],
-                                "embedding": embedding,
-                                "taxonomy": None,
-                                "_existing": True,
-                            })
-                        continue
+                total_predictions_stored += group_result["predictions_stored"]
+                total_detected += detected
+                total_failed += failed
+                total_skipped_existing += skipped_existing
 
-                    img, folder_path, image_path = _prepare_image(photo, folders, det_map)
-                    if img is None:
-                        failed += 1
-                        continue
-
-                    img_batch = [{"photo": photo, "folder_path": folder_path,
-                                  "image_path": image_path, "img": img}]
-                    failed += _flush_batch(img_batch, clf, model_type, model_name,
-                                           thread_db, raw_results)
-
-            # Group and store predictions
-            grouping_window = user_cfg.get("grouping_window_seconds", 5)
-            similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
-
-            group_result = _store_grouped_predictions(
-                raw_results, job["id"], model_name,
-                grouping_window, similarity_threshold, tax, thread_db,
-            )
+                # After model 1 has inserted all fresh detection rows, delete
+                # the pre-run stale rows we snapshotted before the loop.
+                # This prevents stale prior-run boxes from polluting future
+                # non-reclassify runs (the false-positive reuse regression
+                # flagged by Codex on #511 line 848).  We do this AFTER model
+                # 1's full pass — not batch-by-batch — so that all new rows
+                # are committed before the old ones are removed.
+                # model 2+ already has the new IDs via this_run_detections.
+                if params.reclassify and spec_idx == 0 and _pre_run_det_ids:
+                    # Only purge stale rows for photos whose per-photo
+                    # iteration in _detect_batch actually ran to completion.
+                    # If the run was aborted before a batch was submitted,
+                    # or _detect_batch caught an exception and returned
+                    # mid-batch, unprocessed photos are absent from
+                    # _model1_processed_photo_ids and their old rows stay.
+                    stale_ids = [
+                        det_id
+                        for photo_id, id_set in _pre_run_det_ids.items()
+                        for det_id in id_set
+                        if photo_id in _model1_processed_photo_ids
+                    ]
+                    if stale_ids:
+                        getattr(
+                            thread_db, "delete_detections_by_ids", lambda _: None
+                        )(stale_ids)
+                        processed_with_priors = (
+                            _model1_processed_photo_ids & _pre_run_det_ids.keys()
+                        )
+                        log.debug(
+                            "reclassify: purged %d stale detection rows for %d "
+                            "photos (%d photos not processed, rows preserved)",
+                            len(stale_ids),
+                            len(processed_with_priors),
+                            len(_pre_run_det_ids) - len(processed_with_priors),
+                        )
 
             stages["classify"]["status"] = "completed"
             runner.update_step(job["id"], "classify", status="completed",
-                               summary=f"{group_result['predictions_stored']} predictions")
+                               summary=f"{total_predictions_stored} predictions")
             result["stages"]["classify"] = {
                 "total": total,
-                "predictions_stored": group_result["predictions_stored"],
-                "detected": detected,
-                "failed": failed,
-                "already_classified": skipped_existing,
+                "predictions_stored": total_predictions_stored,
+                "detected": total_detected,
+                "failed": total_failed,
+                "already_classified": total_skipped_existing,
+                "model_count": len(resolved_specs),
             }
 
         except Exception as e:
