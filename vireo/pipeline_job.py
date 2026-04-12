@@ -913,6 +913,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # Without this, two large model graphs can be resident
                     # simultaneously during the handoff.
                     clf = None
+                    # Also release the previous iteration's output list so
+                    # embeddings/image metadata for all photos don't stay
+                    # alive during the model-load handoff.
+                    raw_results = None
                     bundle = _load_model_bundle(active_spec, tax, thread_db)
                     loaded_models.update(bundle)
                     clf = bundle["clf"]
