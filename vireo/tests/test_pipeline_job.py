@@ -2171,6 +2171,80 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
 
 
 # ---------------------------------------------------------------------------
+# Sentinel written on ONNX load failure
+# ---------------------------------------------------------------------------
+
+
+def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
+    """When ONNXRuntime fails with a missing-external-data error, the
+    .verify_failed sentinel must be written so that _classify_model_state
+    reports 'incomplete' and the Settings UI shows a Repair button.
+
+    This is the fix for the bug where the pipeline tells the user
+    "Open Settings -> Models and click Repair" but Settings shows the
+    model as healthy because no sentinel was written.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import model_verify
+    import models
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / model_id
+
+    # Simulate ONNXRuntime raising a missing-external-data error.
+    def boom(*args, **kwargs):
+        raise RuntimeError(
+            "[ONNXRuntimeError] model_path must not be empty. Ensure that "
+            "a path is provided when the model is created or loaded."
+        )
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # 1. The .verify_failed sentinel must have been written.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), (
+        ".verify_failed sentinel must be written when ONNXRuntime fails "
+        "with a missing-external-data error, otherwise Settings shows the "
+        "model as healthy and no Repair button appears."
+    )
+    assert "onnx-load-failure" in sentinel.read_text()
+
+    # 2. After the sentinel is written, _classify_model_state must return
+    #    'incomplete' so the Settings UI surfaces the Repair button.
+    known = [m for m in models.KNOWN_MODELS if m["id"] == model_id]
+    assert known, f"Expected to find {model_id} in KNOWN_MODELS"
+    files = known[0].get("files", [])
+    state = models._classify_model_state(str(model_dir), files)
+    assert state == "incomplete", (
+        f"_classify_model_state should return 'incomplete' after the "
+        f"sentinel is written, but got '{state}'"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Multi-model pipeline resilience to individual model failures
 # ---------------------------------------------------------------------------
 

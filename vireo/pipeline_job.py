@@ -709,6 +709,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # "model_path must not be empty" / "Initializer" error. Treat
             # any load failure as an incomplete-model hint for the user.
             if _looks_like_missing_external_data(load_err):
+                # Write the .verify_failed sentinel so that
+                # _classify_model_state (used by get_models() / Settings
+                # UI) also reports 'incomplete' and shows the Repair
+                # button.  Without this the pipeline tells the user to
+                # "click Repair" but Settings sees all files present and
+                # no sentinel, so no Repair button appears.
+                if weights_path:
+                    import model_verify
+                    try:
+                        with open(
+                            os.path.join(
+                                weights_path,
+                                model_verify.VERIFY_FAILED_SENTINEL,
+                            ),
+                            "w",
+                        ) as f:
+                            f.write(f"onnx-load-failure: {load_err}\n")
+                    except OSError:
+                        pass
                 raise RuntimeError(
                     _incomplete_model_message(model_name, model_is_custom)
                 ) from load_err
