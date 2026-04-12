@@ -66,3 +66,52 @@ def test_nms_basic():
     assert 0 in keep  # highest score kept
     assert 2 in keep  # non-overlapping kept
     assert 1 not in keep  # suppressed
+
+
+def test_create_session_excludes_coreml_for_external_data(tmp_path):
+    """CoreML should be excluded when a .onnx.data sidecar exists."""
+    from unittest.mock import MagicMock, patch
+
+    model_file = tmp_path / "model.onnx"
+    sidecar = tmp_path / "model.onnx.data"
+    model_file.write_bytes(b"fake")
+    sidecar.write_bytes(b"fake")
+
+    mock_session = MagicMock()
+    mock_session.get_providers.return_value = ["CPUExecutionProvider"]
+
+    with patch("vireo.onnx_runtime.get_providers", return_value=[
+        "CoreMLExecutionProvider", "CPUExecutionProvider",
+    ]), patch("onnxruntime.InferenceSession", return_value=mock_session) as mock_cls:
+        from vireo.onnx_runtime import create_session
+        create_session(str(model_file))
+
+    # CoreML must have been stripped from the providers list
+    _args, kwargs = mock_cls.call_args
+    assert "CoreMLExecutionProvider" not in kwargs.get("providers", _args[1] if len(_args) > 1 else [])
+
+
+def test_create_session_keeps_coreml_without_sidecar(tmp_path):
+    """CoreML should be kept when there is no .onnx.data sidecar."""
+    from unittest.mock import MagicMock, patch
+
+    model_file = tmp_path / "model.onnx"
+    model_file.write_bytes(b"fake")
+    # No sidecar created
+
+    mock_session = MagicMock()
+    mock_session.get_providers.return_value = [
+        "CoreMLExecutionProvider", "CPUExecutionProvider",
+    ]
+
+    with patch("vireo.onnx_runtime.get_providers", return_value=[
+        "CoreMLExecutionProvider", "CPUExecutionProvider",
+    ]), patch("onnxruntime.InferenceSession", return_value=mock_session) as mock_cls:
+        from vireo.onnx_runtime import create_session
+        create_session(str(model_file))
+
+    # CoreML must still be present
+    _args, kwargs = mock_cls.call_args
+    providers_used = kwargs.get("providers", _args[1] if len(_args) > 1 else [])
+    assert "CoreMLExecutionProvider" in providers_used
+    assert "CPUExecutionProvider" in providers_used
