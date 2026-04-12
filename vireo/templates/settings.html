@@ -43,6 +43,13 @@
   <div class="section">
     <div class="section-title">Models</div>
     <div id="modelsContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+    <div style="margin-top:10px;display:flex;align-items:center;gap:8px;">
+      <button onclick="verifyAllModels()" id="verifyAllBtn"
+              style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">
+        Verify all models
+      </button>
+      <span id="verifyAllStatus" style="font-size:12px;color:var(--text-dim);"></span>
+    </div>
     <div style="margin-top:12px; border-top:1px solid var(--border-primary); padding-top:12px;">
       <div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">Add from HuggingFace:</div>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
@@ -1684,6 +1691,53 @@ async function downloadModel(modelId) {
       }
     });
   } catch(e) {}
+}
+
+async function verifyAllModels() {
+  var btn = document.getElementById('verifyAllBtn');
+  var status = document.getElementById('verifyAllStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting...';
+  status.style.color = 'var(--text-dim)';
+  try {
+    var data = await safeFetch('/api/jobs/verify-all-models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    }, { toast: false });
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(p) {
+        if (p.current_file) status.textContent = p.current_file;
+      },
+      onComplete: function(result) {
+        btn.disabled = false;
+        if (result.status === 'completed' && result.result) {
+          var ok = (result.result.ok || []).length;
+          var failed = (result.result.failed || []);
+          if (failed.length > 0) {
+            status.textContent = ok + ' ok, ' + failed.length + ' failed: ' + failed.join(', ');
+            status.style.color = 'var(--danger)';
+          } else {
+            status.textContent = 'All ' + ok + ' models verified';
+            status.style.color = 'var(--accent)';
+          }
+        } else {
+          status.textContent = 'Verification failed';
+          status.style.color = 'var(--danger)';
+        }
+        loadModels();
+      },
+      onError: function() {
+        btn.disabled = false;
+        status.textContent = 'Connection lost';
+        status.style.color = 'var(--danger)';
+      }
+    });
+  } catch(e) {
+    btn.disabled = false;
+    status.textContent = 'Error: ' + e.message;
+    status.style.color = 'var(--danger)';
+  }
 }
 
 async function removeModel(modelId) {

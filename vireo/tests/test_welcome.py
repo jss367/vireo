@@ -134,6 +134,17 @@ def test_pipeline_download_endpoint_exists(app_and_db):
     assert resp.status_code == 400
 
 
+def test_verify_all_models_endpoint_returns_job_id(app_and_db):
+    """POST /api/jobs/verify-all-models starts a background job and returns
+    its job_id so the UI can track progress via the existing SSE stream."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/verify-all-models", json={})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "job_id" in data
+
+
 def test_welcome_page_contains_download_button(app_and_db, monkeypatch):
     """Welcome page contains the download button."""
     import models

@@ -1281,10 +1281,10 @@ def _write_fake_model_files(model_dir, extra_files=()):
     model_dir.mkdir(parents=True, exist_ok=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"stub")
     with open(model_dir / "image_encoder.onnx.data", "wb") as f:
-        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+        f.truncate(models._MIN_BINARY_MODEL_BYTES + 1024)
     (model_dir / "text_encoder.onnx").write_bytes(b"stub")
     with open(model_dir / "text_encoder.onnx.data", "wb") as f:
-        f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+        f.truncate(models._MIN_BINARY_MODEL_BYTES + 1024)
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
     for extra in extra_files:
@@ -1297,6 +1297,7 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     Returns the model id that was set active.
     """
     import classify_job
+    import model_verify
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
@@ -1307,6 +1308,14 @@ def _setup_fake_downloaded_model(tmp_path, monkeypatch):
     monkeypatch.setattr(classify_job, "_load_taxonomy", lambda *a, **k: {})
     monkeypatch.setattr(
         classify_job, "_load_labels", lambda *a, **k: (["test-label"], False)
+    )
+    # Short-circuit hash verification — these tests use stub files that
+    # would never match any real HF hash, and the verification path has
+    # its own dedicated unit tests.
+    monkeypatch.setattr(
+        model_verify,
+        "verify_if_needed",
+        lambda model_id, model_dir, hf_subdir: None,
     )
     return "bioclip-vit-b-16"
 
@@ -1382,6 +1391,70 @@ def test_pipeline_raises_when_stage_fails(tmp_path, monkeypatch):
     ), f"Expected a [model_loader]-prefixed error, got: {job['result']['errors']}"
     assert "duration" in job["result"]
     assert "stages" in job["result"]
+
+
+def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypatch):
+    """When model_verify.verify_if_needed raises ModelCorruptError during the
+    model_loader preflight, the pipeline should fail with the same Repair
+    message used for other incomplete-model errors.
+
+    This is the lazy-verification path: a silent bit-rot or unfinished
+    download is surfaced right before the model is handed to ONNXRuntime,
+    with an actionable recovery hint for the user.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import model_verify
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    def raise_corrupt(model_id, model_dir, hf_subdir):
+        raise model_verify.ModelCorruptError(
+            model_id,
+            model_verify.VerifyResult(
+                ok=False, mismatches=["image_encoder.onnx.data"]
+            ),
+        )
+
+    monkeypatch.setattr(model_verify, "verify_if_needed", raise_corrupt)
+
+    # Classifier should never be reached because verify_if_needed fails first.
+    def classifier_should_not_be_called(*args, **kwargs):
+        raise AssertionError(
+            "Classifier was constructed despite verify_if_needed raising"
+        )
+
+    monkeypatch.setattr(classifier_mod, "Classifier", classifier_should_not_be_called)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    model_loader_errors = [
+        kwargs.get("error", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and "error" in kwargs
+    ]
+    assert any("Repair" in e for e in model_loader_errors), \
+        f"Expected a Repair hint in model_loader errors, saw: {model_loader_errors}"
 
 
 def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
