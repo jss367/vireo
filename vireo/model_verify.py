@@ -9,10 +9,13 @@ heuristic in models.py that only caught the narrowest truncation case.
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import time
 import urllib.request
 from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
 
 ONNX_REPO = "jss367/vireo-onnx-models"
 _TREE_API = "https://huggingface.co/api/models/{repo}/tree/{revision}/{subdir}"
@@ -173,7 +176,9 @@ def write_pinned_revision(model_dir: str, revision: str) -> None:
         f.write(revision)
 
 
-def verify_model(model_dir: str, hf_subdir: str) -> VerifyResult:
+def verify_model(
+    model_dir: str, hf_subdir: str, revision: str | None = None
+) -> VerifyResult:
     """Verify that LFS files in model_dir match the hashes HF reports.
 
     Uses the commit SHA pinned in .hf_revision (written at download time)
@@ -181,11 +186,16 @@ def verify_model(model_dir: str, hf_subdir: str) -> VerifyResult:
     local files as corrupt. Falls back to 'main' for models downloaded
     before revision pinning existed.
 
+    If ``revision`` is provided it overrides the on-disk pin — used by
+    verify_if_needed when it resolves the current main SHA for unpinned
+    legacy installs.
+
     Non-LFS files (config.json, tokenizer.json) are not checked here —
     that's _classify_model_state's job (file presence) and the model
     loader's job (parse-time validation).
     """
-    revision = _read_pinned_revision(model_dir)
+    if revision is None:
+        revision = _read_pinned_revision(model_dir)
     expected = fetch_expected_hashes(hf_subdir, revision=revision)
     mismatches: list[str] = []
     missing: list[str] = []
@@ -203,17 +213,28 @@ def verify_model(model_dir: str, hf_subdir: str) -> VerifyResult:
     )
 
 
+def _has_pinned_revision(model_dir: str) -> bool:
+    """Return True if the model directory has a .hf_revision file."""
+    return os.path.isfile(os.path.join(model_dir, REVISION_FILE))
+
+
 def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     """Verify the model unless already verified in this process.
 
-    On success, adds model_id to the per-process cache and deletes any
-    stale .verify_failed sentinel. On hash-fetch failure (VerifyError —
-    network outage, transient HF API error), records the failure time in
-    _verify_error_cache and returns without writing .verify_failed; the
-    pipeline continues fail-open and will retry on the next process start
-    or after _VERIFY_ERROR_TTL seconds to avoid repeated 30-second stalls
-    within the same process. On corruption (result.ok=False), writes the
-    sentinel and raises ModelCorruptError.
+    **Pinned installs** (have .hf_revision): hard-fail on mismatch — the
+    pinned revision is the exact commit that was downloaded, so a mismatch
+    is unambiguous corruption.  Writes .verify_failed and raises
+    ModelCorruptError.
+
+    **Unpinned legacy installs** (no .hf_revision): soft-fail on mismatch.
+    These predate revision pinning and must be compared against current
+    main, but a mismatch could be upstream version drift rather than
+    corruption.  On success the install is auto-pinned for future checks;
+    on mismatch a warning is logged but the pipeline is not blocked.
+
+    On hash-fetch failure (VerifyError — network outage, transient HF API
+    error), records the failure time in _verify_error_cache and returns
+    without writing .verify_failed so the pipeline continues fail-open.
     """
     if model_id in _verified_this_process:
         return
@@ -224,12 +245,16 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     if error_ts is not None and (time.monotonic() - error_ts) < _VERIFY_ERROR_TTL:
         return
 
+    pinned = _has_pinned_revision(model_dir)
+
+    if not pinned:
+        _verify_unpinned(model_id, model_dir, hf_subdir)
+        return
+
+    # --- Pinned install: hard-fail on mismatch ---
     try:
         result = verify_model(model_dir, hf_subdir)
     except VerifyError:
-        # Network/HTTP failure — can't fetch expected hashes. Fail open:
-        # record the failure so we skip the retry window, but don't write
-        # .verify_failed (that would mark a healthy model as corrupt).
         _verify_error_cache[model_id] = time.monotonic()
         return
 
@@ -246,6 +271,45 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     if os.path.isfile(sentinel):
         with contextlib.suppress(OSError):
             os.unlink(sentinel)
+
+
+def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
+    """Verify a legacy install that has no .hf_revision pin.
+
+    Fetches the current main SHA, verifies against it, and auto-pins on
+    success.  On mismatch, logs a warning but does NOT write .verify_failed
+    or raise — the mismatch is ambiguous (version drift vs corruption) and
+    blocking the pipeline would be a migration regression.
+    """
+    try:
+        latest_rev = fetch_latest_revision(ONNX_REPO)
+    except VerifyError:
+        _verify_error_cache[model_id] = time.monotonic()
+        return
+
+    try:
+        result = verify_model(model_dir, hf_subdir, revision=latest_rev)
+    except VerifyError:
+        _verify_error_cache[model_id] = time.monotonic()
+        return
+
+    if result.ok:
+        write_pinned_revision(model_dir, latest_rev)
+        _verified_this_process.add(model_id)
+        _verify_error_cache.pop(model_id, None)
+        sentinel = os.path.join(model_dir, VERIFY_FAILED_SENTINEL)
+        if os.path.isfile(sentinel):
+            with contextlib.suppress(OSError):
+                os.unlink(sentinel)
+    else:
+        log.warning(
+            "Model %s (no revision pin) does not match current main: "
+            "mismatches=%s, missing=%s. Use 'Verify all models' in "
+            "Settings or click Repair to re-download.",
+            model_id, result.mismatches, result.missing,
+        )
+        # Cache as checked so we don't re-warn on every pipeline start.
+        _verified_this_process.add(model_id)
 
 
 def clear_verified_cache(model_id: str) -> None:
@@ -310,4 +374,12 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             _verified_this_process.discard(model_id)
         else:
             _verified_this_process.add(model_id)
+            # Auto-pin legacy installs on first successful verification
+            # so future checks use an immutable revision.
+            if not _has_pinned_revision(weights_path):
+                try:
+                    rev = fetch_latest_revision(ONNX_REPO)
+                    write_pinned_revision(weights_path, rev)
+                except VerifyError:
+                    pass
     return results

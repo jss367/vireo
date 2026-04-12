@@ -332,6 +332,9 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
     """Second call for the same model_id is a no-op — no re-hashing."""
     import model_verify
 
+    # Pin so we exercise the standard (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
+
     h = _write_with_hash(tmp_path, "image_encoder.onnx", b"ok" * 100)
     monkeypatch.setattr(
         model_verify,
@@ -342,9 +345,9 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
     call_count = {"n": 0}
     real_verify = model_verify.verify_model
 
-    def counting(model_dir, hf_subdir):
+    def counting(model_dir, hf_subdir, revision=None):
         call_count["n"] += 1
-        return real_verify(model_dir, hf_subdir)
+        return real_verify(model_dir, hf_subdir, revision=revision)
 
     monkeypatch.setattr(model_verify, "verify_model", counting)
 
@@ -356,10 +359,12 @@ def test_verify_if_needed_calls_verify_model_once_per_process(
 def test_verify_if_needed_raises_and_writes_sentinel_on_mismatch(
     tmp_path, monkeypatch
 ):
-    """On hash mismatch, verify_if_needed raises ModelCorruptError and
-    writes a .verify_failed sentinel in the model directory so that
-    _classify_model_state can surface the Repair state."""
+    """On hash mismatch for a pinned install, verify_if_needed raises
+    ModelCorruptError and writes a .verify_failed sentinel."""
     import model_verify
+
+    # Pin so we exercise the hard-fail (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
 
     data_path = tmp_path / "image_encoder.onnx.data"
     data_path.write_bytes(b"actual content")
@@ -380,9 +385,13 @@ def test_verify_if_needed_raises_and_writes_sentinel_on_mismatch(
 
 
 def test_verify_if_needed_mismatch_does_not_cache(tmp_path, monkeypatch):
-    """A failed verification must not populate the cache — subsequent calls
-    should re-run verification so that a Repair flow can clear the state."""
+    """A failed verification on a pinned install must not populate the
+    cache — subsequent calls should re-run verification so that a Repair
+    flow can clear the state."""
     import model_verify
+
+    # Pin so we exercise the hard-fail (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
 
     p = tmp_path / "image_encoder.onnx.data"
     p.write_bytes(b"wrong")
@@ -409,6 +418,9 @@ def test_clear_verified_cache_forces_re_verification(tmp_path, monkeypatch):
     clear_verified_cache(model_id) so the next model load re-verifies."""
     import model_verify
 
+    # Pin so we exercise the standard (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
+
     h = _write_with_hash(tmp_path, "image_encoder.onnx", b"ok" * 100)
     monkeypatch.setattr(
         model_verify,
@@ -421,6 +433,92 @@ def test_clear_verified_cache_forces_re_verification(tmp_path, monkeypatch):
 
     model_verify.clear_verified_cache("bioclip-vit-b-16")
     assert "bioclip-vit-b-16" not in model_verify._verified_this_process
+
+
+# ---------------------------------------------------------------------------
+# verify_if_needed — unpinned legacy installs (no .hf_revision)
+# ---------------------------------------------------------------------------
+
+
+def test_unpinned_install_auto_pins_on_success(tmp_path, monkeypatch):
+    """Legacy installs (no .hf_revision) are auto-pinned on first
+    successful verification so future checks use an immutable revision."""
+    import model_verify
+
+    # No .hf_revision — this is a legacy install.
+    h = _write_with_hash(tmp_path, "image_encoder.onnx", b"ok" * 100)
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {"image_encoder.onnx": h},
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "newsha456"
+    )
+
+    model_verify.verify_if_needed(
+        "bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16"
+    )
+
+    # Model is cached as verified.
+    assert "bioclip-vit-b-16" in model_verify._verified_this_process
+    # .hf_revision was written — future checks will use the pinned path.
+    rev_file = tmp_path / model_verify.REVISION_FILE
+    assert rev_file.is_file()
+    assert rev_file.read_text() == "newsha456"
+
+
+def test_unpinned_install_soft_fails_on_mismatch(tmp_path, monkeypatch):
+    """Legacy installs that don't match current main get a warning, NOT a
+    hard-fail.  This prevents migration regressions where a HuggingFace
+    model update would block pipelines for pre-existing installs."""
+    import model_verify
+
+    # No .hf_revision — legacy install.
+    p = tmp_path / "image_encoder.onnx.data"
+    p.write_bytes(b"old version bytes")
+
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "newsha789"
+    )
+
+    # Must NOT raise — soft-fail for unpinned installs.
+    model_verify.verify_if_needed(
+        "bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16"
+    )
+
+    # No sentinel written (ambiguous mismatch, not proven corruption).
+    assert not (tmp_path / model_verify.VERIFY_FAILED_SENTINEL).is_file()
+    # No .hf_revision written (mismatch — don't pin to wrong revision).
+    assert not (tmp_path / model_verify.REVISION_FILE).is_file()
+    # Cached so we don't re-warn on every pipeline start.
+    assert "bioclip-vit-b-16" in model_verify._verified_this_process
+
+
+def test_unpinned_install_fails_open_on_network_error(tmp_path, monkeypatch):
+    """If fetch_latest_revision fails for an unpinned install, fail open
+    just like the pinned path does for verify_model errors."""
+    import model_verify
+
+    # No .hf_revision — legacy install.
+    (tmp_path / "image_encoder.onnx").write_bytes(b"data")
+
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_latest_revision",
+        lambda repo: (_ for _ in ()).throw(model_verify.VerifyError("offline")),
+    )
+
+    # Should not raise.
+    model_verify.verify_if_needed(
+        "bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16"
+    )
+    assert "bioclip-vit-b-16" in model_verify._verify_error_cache
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +571,7 @@ def test_verify_all_models_reports_per_model_results(tmp_path, monkeypatch):
     for m in fake_models:
         os.makedirs(m["weights_path"], exist_ok=True)
 
-    def fake_verify_model(model_dir, hf_subdir):
+    def fake_verify_model(model_dir, hf_subdir, revision=None):
         if "good" in hf_subdir:
             return model_verify.VerifyResult(ok=True)
         return model_verify.VerifyResult(ok=False, mismatches=["weights"])
@@ -481,6 +579,10 @@ def test_verify_all_models_reports_per_model_results(tmp_path, monkeypatch):
     import models
     monkeypatch.setattr(models, "get_models", lambda: fake_models)
     monkeypatch.setattr(model_verify, "verify_model", fake_verify_model)
+    # Stub fetch_latest_revision — called for auto-pin on success.
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "autopin123"
+    )
 
     progress_messages: list[str] = []
     result = model_verify.verify_all_models(
@@ -513,7 +615,7 @@ def test_verify_all_models_skips_sentinel_on_verify_error(tmp_path, monkeypatch)
         "source": "hf-hub:test",
     }]
 
-    def raise_verify_error(d, s):
+    def raise_verify_error(d, s, revision=None):
         raise model_verify.VerifyError("connection refused")
 
     monkeypatch.setattr(model_verify, "verify_model", raise_verify_error)
@@ -549,7 +651,7 @@ def test_verify_all_models_writes_sentinel_on_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model_verify,
         "verify_model",
-        lambda d, s: model_verify.VerifyResult(
+        lambda d, s, revision=None: model_verify.VerifyResult(
             ok=False, mismatches=["weights"]
         ),
     )
@@ -570,7 +672,10 @@ def test_verify_if_needed_catches_verify_error_and_fails_open(tmp_path, monkeypa
     let the pipeline proceed, logging the failure for later retry."""
     import model_verify
 
-    def always_raises(model_dir, hf_subdir):
+    # Pin so we exercise the standard (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
+
+    def always_raises(model_dir, hf_subdir, revision=None):
         raise model_verify.VerifyError("network timeout")
 
     monkeypatch.setattr(model_verify, "verify_model", always_raises)
@@ -590,9 +695,12 @@ def test_verify_if_needed_skips_network_within_ttl_after_verify_error(tmp_path, 
     repeated 30-second stalls on every pipeline start when HF is unreachable."""
     import model_verify
 
+    # Pin so we exercise the standard (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
+
     call_count = {"n": 0}
 
-    def counting_verify(model_dir, hf_subdir):
+    def counting_verify(model_dir, hf_subdir, revision=None):
         call_count["n"] += 1
         raise model_verify.VerifyError("still down")
 
@@ -615,9 +723,12 @@ def test_verify_if_needed_retries_after_error_ttl_expires(tmp_path, monkeypatch)
     call retries the network check (so we don't suppress errors forever)."""
     import model_verify
 
+    # Pin so we exercise the standard (pinned) path.
+    (tmp_path / model_verify.REVISION_FILE).write_text("abc123")
+
     call_count = {"n": 0}
 
-    def counting_verify(model_dir, hf_subdir):
+    def counting_verify(model_dir, hf_subdir, revision=None):
         call_count["n"] += 1
         raise model_verify.VerifyError("timeout")
 
