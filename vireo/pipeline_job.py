@@ -1320,7 +1320,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             #   (a) weights missing → actionable remediation
             #   (b) weights present → legitimate outcome (empty scenes,
             #       strict confidence threshold, non-wildlife photos)
-            if photos_with_detections == 0 and len(photos) > 0:
+            # Only fire this diagnostic when classify actually ran in this
+            # invocation.  If classify was skipped (skip_classify=True, no
+            # models available, abort, etc.) zero detections is expected and
+            # appending an extract_masks error would be factually incorrect.
+            classify_ran = stages["classify"]["status"] not in ("skipped", "pending")
+            if photos_with_detections == 0 and len(photos) > 0 and classify_ran:
                 weights_present = False
                 try:
                     from detector import MEGADETECTOR_ONNX_PATH
