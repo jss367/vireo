@@ -3225,19 +3225,27 @@ class Database:
         pre-run detection IDs so that a reclassify pass can delete only
         the *stale* rows after fresh ones have been inserted, avoiding the
         cascade-delete that would destroy other-model predictions.
+
+        Photo IDs are queried in chunks of at most 900 to stay safely
+        under SQLite's default bound-parameter limit
+        (SQLITE_LIMIT_VARIABLE_NUMBER, typically 999 in production builds).
         """
         if not photo_ids:
             return {}
         ws_id = self._ws_id()
-        placeholders = ",".join("?" * len(photo_ids))
-        rows = self.conn.execute(
-            f"SELECT id, photo_id FROM detections "
-            f"WHERE photo_id IN ({placeholders}) AND workspace_id = ?",
-            (*photo_ids, ws_id),
-        ).fetchall()
         result: dict = {}
-        for row in rows:
-            result.setdefault(row["photo_id"], set()).add(row["id"])
+        ids = list(photo_ids)
+        _CHUNK = 900
+        for i in range(0, len(ids), _CHUNK):
+            chunk = ids[i : i + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT id, photo_id FROM detections "
+                f"WHERE photo_id IN ({placeholders}) AND workspace_id = ?",
+                (*chunk, ws_id),
+            ).fetchall()
+            for row in rows:
+                result.setdefault(row["photo_id"], set()).add(row["id"])
         return result
 
     def delete_detections_by_ids(self, detection_ids):
