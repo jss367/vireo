@@ -161,7 +161,8 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
 
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
-                   det_conf_threshold=None, already_detected_ids=None):
+                   det_conf_threshold=None, already_detected_ids=None,
+                   cached_detections=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -174,6 +175,11 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             loaded from config (fallback for callers that don't pre-load).
         already_detected_ids: Set of photo IDs that already have detections
             in the database. Used for skip-if-already-detected logic.
+        cached_detections: Optional dict of photo_id → detection_list
+            produced in the current run (e.g. by model 1 in a multi-model
+            pipeline).  When provided, preferred over db.get_detections() so
+            that model 2+ bind predictions to the detection rows from *this*
+            run rather than stale rows from a prior pipeline pass.
 
     Returns:
         (detection_map, detected_count) where detection_map is
@@ -199,6 +205,15 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             # Skip if already detected (unless reclassifying)
             if not reclassify and photo["id"] in already_detected_ids:
+                # Prefer cached detections from the current run so that
+                # model 2+ bind to the rows model 1 just inserted rather
+                # than stale rows from a prior pipeline pass.
+                if cached_detections is not None and photo["id"] in cached_detections:
+                    cached_list = cached_detections[photo["id"]]
+                    if cached_list:
+                        detection_map[photo["id"]] = cached_list
+                        detected += 1
+                        continue
                 existing_dets = db.get_detections(photo["id"])
                 if existing_dets:
                     det_list = []
