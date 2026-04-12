@@ -39,9 +39,25 @@ def create_session(model_path):
     Returns:
         ort.InferenceSession
     """
+    import os
+
     import onnxruntime as ort
 
     providers = get_providers()
+
+    # onnxruntime 1.24+ CoreMLExecutionProvider crashes when loading models
+    # that use external data (.onnx.data sidecar files).  Fall back to the
+    # remaining providers for these models.
+    if str(model_path).endswith(".onnx") and os.path.exists(str(model_path) + ".data"):
+        before = list(providers)
+        providers = [p for p in providers if p != "CoreMLExecutionProvider"]
+        if providers != before:
+            log.info(
+                "Model %s uses external data (.onnx.data); "
+                "excluding CoreMLExecutionProvider to avoid crash",
+                model_path,
+            )
+
     log.info("Loading ONNX model: %s (providers: %s)", model_path, providers)
     session = ort.InferenceSession(model_path, providers=providers)
     actual = session.get_providers()
