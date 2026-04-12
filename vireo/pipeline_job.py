@@ -870,6 +870,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # Accumulates the detection rows produced by model 1 (spec_idx==0)
             # so model 2+ can reference exactly those rows rather than calling
             # db.get_detections() which would include stale rows from prior runs.
+            # Only allocated for multi-model runs; single-model runs never read
+            # the cache, so populating it would just waste memory.
+            _multi_model = len(resolved_specs) > 1
             this_run_detections: dict = {}
 
             # Tracks photo IDs whose per-photo iteration in _detect_batch ran
@@ -973,7 +976,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         batch, folders, runner, job,
                         params.reclassify and spec_idx == 0, thread_db,
                         already_detected_ids=already_detected,
-                        cached_detections=this_run_detections,
+                        cached_detections=this_run_detections if _multi_model else None,
                     )
                     detected += det_count
                     # Track ALL processed photos — including those where
@@ -982,13 +985,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # empty-frame photos each iteration.
                     already_detected.update(det_processed_ids)
                     if spec_idx == 0:
-                        this_run_detections.update(det_map)
-                        # Also cache zero-detection photos so model 2+ finds
-                        # them in cached_detections and skips MegaDetector
-                        # rather than falling through to db.get_detections().
-                        for pid in det_processed_ids:
-                            if pid not in this_run_detections:
-                                this_run_detections[pid] = []
+                        if _multi_model:
+                            this_run_detections.update(det_map)
+                            # Also cache zero-detection photos so model 2+
+                            # finds them in cached_detections and skips
+                            # MegaDetector rather than falling through to
+                            # db.get_detections().
+                            for pid in det_processed_ids:
+                                if pid not in this_run_detections:
+                                    this_run_detections[pid] = []
                         # Key purge eligibility on photos whose per-photo
                         # iteration in _detect_batch actually completed —
                         # not the whole submitted batch.  If _detect_batch
