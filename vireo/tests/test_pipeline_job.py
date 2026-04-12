@@ -1638,8 +1638,9 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
         detect_call_ids.append(frozenset(already_detected_ids or set()))
-        # Model 1 "detects" nothing in this run — empty det_map.
-        return {}, 0
+        # Model 1 "detects" nothing in this run — empty det_map, but every
+        # photo in the batch completed its iteration.
+        return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
@@ -1684,22 +1685,17 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
         )
 
 
-def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeypatch):
-    """On reclassify, predictions from models NOT in this run must be preserved.
+def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
+    """On reclassify, prior-run detection rows must be deleted after model 1
+    re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
+    stale bounding boxes via get_existing_detection_photo_ids + get_detections.
 
-    Previously, clear_detections() was called up-front for all collection
-    photos before the model loop. Because predictions.detection_id has
-    ON DELETE CASCADE, this deleted ALL prediction rows for those photos —
-    including rows from models that were not part of the current reclassify
-    run. In a common subset-reclassify (e.g. one selected model), other
-    models' predictions were permanently lost.
+    Scenario: a photo had a prior detection (potential false positive). The
+    reclassify run finds NO animals this time (fake_detect_batch returns {}).
+    After reclassify the old detection row must be gone so future runs
+    actually call MegaDetector rather than short-circuiting to the stale box.
 
-    The fix: do not clear detection rows up-front. Instead pass
-    this_run_detections to model 2+ via cached_detections so they bind to
-    the exact detection rows produced in this run. Per-model clear_predictions
-    calls already handle removing stale predictions for the models being run.
-
-    Regression for Codex P1 comment on #506 (line 848).
+    Regression for Codex P1 review on #511 line 848.
     """
     import json
 
@@ -1720,7 +1716,7 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
 
-    # Prior-run detection rows referenced by another model's predictions.
+    # Prior-run detection row (e.g. a prior false positive).
     prior_det_ids = db.save_detections(
         photo_id,
         [
@@ -1729,35 +1725,20 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
         ],
         detector_model="MegaDetector",
     )
-    assert prior_det_ids, "setup sanity: prior detections were inserted"
+    assert prior_det_ids, "setup sanity: prior detection was inserted"
 
     col_id = db.add_collection(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
-    # Use a single model for the reclassify run (subset reclassify).
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
-    run_model_id = model_ids[:1]   # reclassify only the first model
-    other_model_id = model_ids[1]  # this model's predictions should survive
 
-    # Seed a prediction from the "other" model referencing the prior detection.
-    detection_id = prior_det_ids[0]
-    db.add_prediction(
-        detection_id=detection_id,
-        species="other_species",
-        confidence=0.95,
-        model=other_model_id,
-    )
-    assert db.get_prediction_for_photo(photo_id, other_model_id) is not None, (
-        "setup sanity: other-model prediction must exist before reclassify"
-    )
-
-    # _detect_batch stub that produces nothing (reclassify finds no animals).
+    # _detect_batch stub: reclassify finds no animals this time (false pos fixed).
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
-        return {}, 0
+        return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
@@ -1773,7 +1754,7 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
 
     params = PipelineParams(
         collection_id=col_id,
-        model_ids=run_model_id,
+        model_ids=model_ids[:1],
         reclassify=True,
         skip_extract_masks=True,
         skip_regroup=True,
@@ -1784,13 +1765,261 @@ def test_pipeline_reclassify_preserves_other_model_predictions(tmp_path, monkeyp
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # The other model's prediction must still exist after the reclassify.
+    # The stale prior-run detection must be gone after reclassify so that
+    # future non-reclassify runs don't reuse it via the already-detected path.
     verify_db = Database(db_path)
     verify_db.set_active_workspace(ws_id)
-    surviving_pred = verify_db.get_prediction_for_photo(photo_id, other_model_id)
-    assert surviving_pred is not None, (
-        f"Prediction from '{other_model_id}' was deleted by a reclassify run "
-        f"that only included '{run_model_id}'. Clearing detections up-front "
-        "cascades to delete ALL predictions including from models not in this "
-        "run — a data-loss regression flagged in Codex P1 on #506 line 848."
+    remaining = verify_db.get_detections(photo_id)
+    assert remaining == [], (
+        f"Stale prior-run detection rows must be purged during reclassify but "
+        f"db.get_detections({photo_id}) returned {remaining!r}. "
+        "Without this cleanup, future non-reclassify runs short-circuit to "
+        "stale boxes via get_existing_detection_photo_ids + get_detections, "
+        "causing false-positive detections to persist indefinitely. "
+        "Regression for Codex P1 review on #511 line 848."
+    )
+
+
+def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
+    tmp_path, monkeypatch
+):
+    """A partial/aborted reclassify must NOT delete detection rows for photos
+    whose batches were never submitted to _detect_batch.
+
+    Scenario: 2 photos each have a prior detection row. Batch size is patched
+    to 1 so each photo is its own batch. After the first batch completes,
+    _should_abort returns True so the second batch is never processed.
+
+    Expected outcome:
+    - photo1's stale detection row is purged (its batch was processed).
+    - photo2's detection row is preserved (its batch was never reached).
+
+    Regression guard for Codex P1 review on #513 line 1040.
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    import pipeline_job as pj
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
+    photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+
+    # Give each photo a prior-run detection row.
+    prior_det1 = db.save_detections(
+        photo1_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    prior_det2 = db.save_detections(
+        photo2_id,
+        [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
+          "confidence": 0.8, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Process one photo per batch so we can abort between them.
+    monkeypatch.setattr(classify_job, "_BATCH_SIZE", 1)
+
+    # After the first _detect_batch call, all subsequent _should_abort checks
+    # return True, preventing the second batch from being processed.
+    detect_call_count = [0]
+    original_should_abort = pj._should_abort
+
+    def patched_should_abort(event):
+        if detect_call_count[0] >= 1:
+            return True
+        return original_should_abort(event)
+
+    monkeypatch.setattr(pj, "_should_abort", patched_should_abort)
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        detect_call_count[0] += 1
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids[:1],
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert detect_call_count[0] == 1, (
+        "Expected exactly one _detect_batch call before abort; "
+        f"got {detect_call_count[0]}"
+    )
+
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+
+    remaining1 = verify_db.get_detections(photo1_id)
+    remaining2 = verify_db.get_detections(photo2_id)
+
+    assert remaining1 == [], (
+        f"photo1 was processed in model 1's batch loop; its stale prior-run "
+        f"detection must be purged, but get_detections returned {remaining1!r}. "
+        "Regression for Codex P1 review on #513 line 1040."
+    )
+    assert remaining2 != [], (
+        "photo2's batch was never reached (run was aborted before it). "
+        "Its prior-run detection row must be preserved to avoid data loss "
+        "in partial reclassify runs. "
+        "Regression for Codex P1 review on #513 line 1040."
+    )
+
+
+def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
+    tmp_path, monkeypatch
+):
+    """A reclassify where _detect_batch exits mid-batch on an exception must
+    NOT delete detection rows for the photos that were never actually
+    reached inside that batch.
+
+    Scenario: two photos share a single batch.  _detect_batch only
+    completes the per-photo iteration for the first photo and returns early
+    (simulating detect_animals raising while processing photo2 — the real
+    _detect_batch catches the exception at function level and returns the
+    accumulated detection_map with only the already-processed photos).
+
+    Expected outcome:
+    - photo1 (whose iteration completed) has its stale prior-run row purged.
+    - photo2 (whose iteration never ran) keeps its stale prior-run row.
+
+    Regression for Codex P1 review on #513 line 981 — the purge must be
+    keyed to per-photo processing completion, not the full submitted batch.
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
+    photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+
+    prior_det1 = db.save_detections(
+        photo1_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    prior_det2 = db.save_detections(
+        photo2_id,
+        [{"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.3},
+          "confidence": 0.8, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    assert prior_det1 and prior_det2, "setup sanity: prior detections inserted"
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo1_id, photo2_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Both photos land in a single batch.  The stub returns a processed_ids
+    # set containing ONLY photo1, mirroring what _detect_batch does when
+    # detect_animals raises while processing photo2: the try/except at the
+    # function level returns the accumulated results and photo2 never makes
+    # it into processed_ids.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {photo1_id}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids[:1],
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+
+    remaining1 = verify_db.get_detections(photo1_id)
+    remaining2 = verify_db.get_detections(photo2_id)
+
+    assert remaining1 == [], (
+        f"photo1's per-photo iteration completed in _detect_batch; its stale "
+        f"prior-run row must be purged, but get_detections returned "
+        f"{remaining1!r}. Regression for Codex P1 review on #513 line 981."
+    )
+    assert remaining2 != [], (
+        "photo2's iteration never ran (simulated mid-batch exception in "
+        "_detect_batch).  Its stale prior-run detection row must be "
+        "preserved — purging it would cascade-delete predictions for a "
+        "photo that was never re-detected.  "
+        "Regression for Codex P1 review on #513 line 981."
     )

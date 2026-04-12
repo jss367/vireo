@@ -3218,6 +3218,45 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
+    def get_detection_ids_for_photos(self, photo_ids):
+        """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
+
+        Only returns rows from the active workspace.  Used to snapshot
+        pre-run detection IDs so that a reclassify pass can delete only
+        the *stale* rows after fresh ones have been inserted, avoiding the
+        cascade-delete that would destroy other-model predictions.
+        """
+        if not photo_ids:
+            return {}
+        ws_id = self._ws_id()
+        placeholders = ",".join("?" * len(photo_ids))
+        rows = self.conn.execute(
+            f"SELECT id, photo_id FROM detections "
+            f"WHERE photo_id IN ({placeholders}) AND workspace_id = ?",
+            (*photo_ids, ws_id),
+        ).fetchall()
+        result: dict = {}
+        for row in rows:
+            result.setdefault(row["photo_id"], set()).add(row["id"])
+        return result
+
+    def delete_detections_by_ids(self, detection_ids):
+        """Delete specific detection rows by primary key.
+
+        Cascades to predictions via the FK constraint.  Does nothing if
+        the list is empty.  Used by reclassify to purge only the stale
+        rows for photos that have just been re-detected, without touching
+        detection rows that belong to models not included in the current run.
+        """
+        if not detection_ids:
+            return
+        placeholders = ",".join("?" * len(detection_ids))
+        self.conn.execute(
+            f"DELETE FROM detections WHERE id IN ({placeholders})",
+            tuple(detection_ids),
+        )
+        self.conn.commit()
+
     # -- Pending Changes --
 
     def queue_change(self, photo_id, change_type, value, workspace_id=None, _commit=True):
