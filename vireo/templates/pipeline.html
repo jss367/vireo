@@ -1924,6 +1924,9 @@ async function startPipeline() {
       selectedModels.push({id: cb.value, name: cb.dataset.name});
     });
     if (selectedModels.length > 0) {
+      // Send every checked model. The backend loops over model_ids in the
+      // classify stage; model_id stays for back-compat with older callers.
+      body.model_ids = selectedModels.map(function(m) { return m.id; });
       body.model_id = selectedModels[0].id;
     }
 

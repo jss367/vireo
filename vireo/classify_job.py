@@ -161,7 +161,8 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
 
 
 def _detect_batch(photos, folders, runner, job, reclassify, db,
-                   det_conf_threshold=None, already_detected_ids=None):
+                   det_conf_threshold=None, already_detected_ids=None,
+                   cached_detections=None):
     """Run MegaDetector on a batch of photos.
 
     Same interface as _detect_subjects but designed to be called with
@@ -174,20 +175,32 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             loaded from config (fallback for callers that don't pre-load).
         already_detected_ids: Set of photo IDs that already have detections
             in the database. Used for skip-if-already-detected logic.
+        cached_detections: Optional dict {photo_id: [detection_dicts]}
+            produced by a prior model in the same pipeline run. When
+            provided and a photo is in already_detected_ids, the cached
+            entries are used instead of db.get_detections() so that
+            model 2+ binds to the exact detection rows from this run,
+            not stale rows from a previous pipeline pass.
 
     Returns:
-        (detection_map, detected_count) where detection_map is
-        {photo_id: [list_of_detection_dicts]} and detected_count is total
-        photos with at least one detection.
+        (detection_map, detected_count, processed_ids) where detection_map
+        is {photo_id: [list_of_detection_dicts]}, detected_count is total
+        photos with at least one detection, and processed_ids is the set
+        of photo IDs whose per-photo iteration completed without raising
+        (callers use this to distinguish "ran and found nothing" from
+        "never reached because an earlier photo raised mid-loop").
     """
     detected = 0
     detection_map = {}
+    processed_ids: set[int] = set()
     if already_detected_ids is None:
         already_detected_ids = set()
+    if cached_detections is None:
+        cached_detections = {}
 
     try:
         if detect_animals is None or get_primary_detection is None:
-            return detection_map, detected
+            return detection_map, detected, processed_ids
 
         if det_conf_threshold is None:
             import config as cfg
@@ -199,6 +212,18 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             # Skip if already detected (unless reclassifying)
             if not reclassify and photo["id"] in already_detected_ids:
+                # Prefer cached detections from an earlier model in this
+                # same pipeline run so that model 2+ is bound to the
+                # detection rows just produced, not stale rows from a
+                # prior pipeline pass that db.get_detections() would
+                # return when old rows haven't been cleared.
+                if cached_detections is not None and photo["id"] in cached_detections:
+                    det_list = cached_detections[photo["id"]]
+                    if det_list:
+                        detection_map[photo["id"]] = det_list
+                        detected += 1
+                    processed_ids.add(photo["id"])
+                    continue
                 existing_dets = db.get_detections(photo["id"])
                 if existing_dets:
                     det_list = []
@@ -214,6 +239,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         })
                     detection_map[photo["id"]] = det_list
                     detected += 1
+                    processed_ids.add(photo["id"])
                     continue
 
             detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
@@ -239,6 +265,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         "category": det.get("category", "animal"),
                     })
                 detection_map[photo["id"]] = det_list
+
+                # Mark as processed immediately after detection rows are committed
+                # so that even if the quality-scoring calls below raise, the
+                # reclassify purge in pipeline_job correctly removes the now-stale
+                # pre-run detection rows for this photo rather than leaving them in
+                # place and allowing future non-reclassify runs to reuse them.
+                processed_ids.add(photo["id"])
 
                 # Use highest-confidence detection as primary for quality scoring
                 primary = get_primary_detection(detections)
@@ -286,12 +319,14 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                             photo["id"],
                         )
 
+            processed_ids.add(photo["id"])
+
     except (ImportError, RuntimeError):
         pass
     except Exception:
         log.warning("Detection failed for batch (non-fatal)", exc_info=True)
 
-    return detection_map, detected
+    return detection_map, detected, processed_ids
 
 
 def _detect_subjects(photos, folders, runner, job, reclassify, db):
@@ -361,7 +396,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                 and photo["id"] in already_detected_ids
             )
 
-            batch_map, batch_detected = _detect_batch(
+            batch_map, batch_detected, _batch_processed = _detect_batch(
                 [photo], folders, runner, job, reclassify, db,
                 det_conf_threshold=det_conf_threshold,
                 already_detected_ids=already_detected_ids,
