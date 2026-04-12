@@ -1256,7 +1256,11 @@ async function loadSystemInfo() {
       mdStatus.textContent = 'Installed';
       mdStatus.style.color = 'var(--accent)';
       mdDetail.textContent = d.megadetector_detail;
-    } else if (d.megadetector === 'not installed') {
+    } else if (d.megadetector === 'weights_missing') {
+      mdStatus.textContent = 'Not ready';
+      mdStatus.style.color = 'var(--warning)';
+      mdDetail.textContent = d.megadetector_detail;
+    } else if (d.megadetector === 'unavailable' || d.megadetector === 'not installed') {
       mdStatus.textContent = 'Not installed';
       mdStatus.style.color = 'var(--warning)';
       mdDetail.textContent = 'Subject detection disabled — ' + d.megadetector_detail;

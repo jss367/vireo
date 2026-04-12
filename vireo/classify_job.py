@@ -416,8 +416,16 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     except (ImportError, RuntimeError) as e:
         msg = str(e)
         if "ONNX model not available" in msg or "not found" in msg:
-            log.info(
-                "MegaDetector not available — skipping detection (classifying full images)"
+            log.warning(
+                "MegaDetector weights not available — detection skipped; classifying full images. "
+                "Download the MegaDetector V6 ONNX model from the pipeline models page to enable "
+                "subject detection, cropped classification, and mask extraction."
+            )
+            job["errors"].append(
+                "MegaDetector weights not downloaded — detection skipped. Classification ran on full "
+                "images (less accurate) and no detections were stored, which also prevents the mask "
+                "extraction stage from producing subject masks. Download MegaDetector V6 from the "
+                "pipeline models page to fix."
             )
             runner.push_event(
                 job["id"],
@@ -426,7 +434,7 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
                     "current": 0,
                     "total": total,
                     "current_file": "",
-                    "phase": "Step 4/5: Detection skipped (MegaDetector not available)",
+                    "phase": "Step 4/5: Detection skipped — MegaDetector weights not downloaded",
                 },
             )
         else:

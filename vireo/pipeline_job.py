@@ -1281,9 +1281,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # from the detections table. Only photos with detections and without
             # masks need processing.
             photo_det_map = {}
+            photos_with_detections = 0
             for p in photos:
                 dets = thread_db.get_detections(p["id"])
                 if dets:
+                    photos_with_detections += 1
                     primary = dets[0]  # already ordered by confidence DESC
                     has_mask = thread_db.conn.execute(
                         "SELECT mask_path FROM photos WHERE id=?", (p["id"],)
@@ -1309,6 +1311,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             skipped = 0
             em_failed = 0
             start_time = time.time()
+
+            # If the input collection has photos but none carry detections,
+            # fail loudly instead of silently completing with masked=0. The
+            # pipeline would otherwise reject every photo with no_subject_mask
+            # without explaining why the masks were never produced.
+            if photos_with_detections == 0 and len(photos) > 0:
+                reason = (
+                    f"No detections found for {len(photos)} photo(s). The classify stage did not "
+                    "produce any detections (most commonly because MegaDetector weights were not "
+                    "downloaded). Without detections the mask extraction stage has nothing to "
+                    "process, and the pipeline will reject every photo with `no_subject_mask`. "
+                    "Download MegaDetector V6 from the pipeline models page and rerun classify."
+                )
+                log.warning("Pipeline extract-masks: %s", reason)
+                errors.append(f"[extract_masks] {reason}")
+                stages["extract_masks"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "extract_masks", status="completed",
+                    summary="Skipped — no detections available",
+                )
+                result["stages"]["extract_masks"] = {
+                    "masked": 0, "skipped": 0, "failed": 0, "total": 0,
+                    "reason": "no_detections",
+                }
+                _update_stages(runner, job["id"], stages)
+                return
 
             for i, entry in enumerate(photos_to_process):
                 if _should_abort(abort):
