@@ -3247,14 +3247,22 @@ class Database:
         the list is empty.  Used by reclassify to purge only the stale
         rows for photos that have just been re-detected, without touching
         detection rows that belong to models not included in the current run.
+
+        IDs are deleted in chunks of at most 900 to stay safely under
+        SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
+        typically 999 in production builds).
         """
         if not detection_ids:
             return
-        placeholders = ",".join("?" * len(detection_ids))
-        self.conn.execute(
-            f"DELETE FROM detections WHERE id IN ({placeholders})",
-            tuple(detection_ids),
-        )
+        ids = list(detection_ids)
+        _CHUNK = 900
+        for i in range(0, len(ids), _CHUNK):
+            chunk = ids[i : i + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"DELETE FROM detections WHERE id IN ({placeholders})",
+                chunk,
+            )
         self.conn.commit()
 
     # -- Pending Changes --
