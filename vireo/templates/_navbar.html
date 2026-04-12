@@ -193,6 +193,65 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   font-size: 13px;
 }
 
+/* ---------- Report Issue Modal ---------- */
+.report-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.5);
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 10vh;
+}
+.report-overlay.active { display: flex; }
+.report-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  width: 480px;
+  padding: 24px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+.report-modal h3 { margin: 0 0 12px; color: var(--text-primary); }
+.report-modal textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  resize: vertical;
+  box-sizing: border-box;
+}
+.report-modal textarea:focus { border-color: var(--accent); outline: none; }
+.report-modal .report-hint {
+  font-size: 12px;
+  color: var(--text-ghost);
+  margin: 8px 0 16px;
+}
+.report-modal .report-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.report-modal .report-status {
+  font-size: 13px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  display: none;
+}
+.report-modal .report-status.success {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  display: block;
+}
+.report-modal .report-status.error {
+  background: rgba(244, 67, 54, 0.15);
+  color: #f44336;
+  display: block;
+}
+
 /* ---------- Bottom Panel ---------- */
 .bottom-toggle {
   background: var(--bg-panel);
@@ -931,6 +990,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/shortcuts" data-nav-id="shortcuts">Shortcuts</a>
   <a href="/settings" data-nav-id="settings">Settings</a>
   <span class="nav-spacer"></span>
+  <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
   <span class="nav-icon" onclick="toggleDevMode()" title="Toggle developer mode" id="devModeToggle" style="opacity:0.4;">&#9881;</span>
   <span class="nav-icon" onclick="toggleTheme()" title="Toggle light/dark mode" id="themeToggle">&#9788;</span>
@@ -950,6 +1010,82 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     <div class="help-results" id="helpResults"></div>
   </div>
 </div>
+
+<!-- Report Issue Modal -->
+<div class="report-overlay" id="reportModal" onclick="if(event.target===this)closeReportModal()">
+  <div class="report-modal">
+    <h3>Report Issue</h3>
+    <textarea id="reportDescription" placeholder="What happened? What did you expect?"></textarea>
+    <div class="report-hint">This report includes recent logs and system info to help diagnose the issue.</div>
+    <div class="report-actions">
+      <button class="modal-btn modal-btn-cancel" onclick="closeReportModal()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="reportSendBtn" onclick="sendReport()">Send Report</button>
+    </div>
+    <div class="report-status" id="reportStatus"></div>
+  </div>
+</div>
+<script>
+function openReportModal() {
+  document.getElementById('reportModal').classList.add('active');
+  document.getElementById('reportDescription').value = '';
+  document.getElementById('reportStatus').className = 'report-status';
+  document.getElementById('reportStatus').textContent = '';
+  document.getElementById('reportSendBtn').disabled = false;
+  document.getElementById('reportDescription').focus();
+}
+function closeReportModal() {
+  document.getElementById('reportModal').classList.remove('active');
+}
+function sendReport() {
+  var desc = document.getElementById('reportDescription').value.trim();
+  if (!desc) {
+    document.getElementById('reportDescription').style.borderColor = 'var(--danger)';
+    document.getElementById('reportDescription').focus();
+    return;
+  }
+  var btn = document.getElementById('reportSendBtn');
+  var status = document.getElementById('reportStatus');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+  status.className = 'report-status';
+  status.textContent = '';
+
+  fetch('/api/report-issue', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({description: desc})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.status === 'sent') {
+      status.className = 'report-status success';
+      status.textContent = 'Report sent — thanks!';
+      setTimeout(closeReportModal, 2000);
+    } else if (data.status === 'download') {
+      var blob = new Blob([JSON.stringify(data.diagnostics, null, 2)], {type: 'application/json'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'vireo-issue-report.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      status.className = 'report-status error';
+      status.textContent = 'Could not send automatically. Please email the downloaded file.';
+    } else if (data.error) {
+      status.className = 'report-status error';
+      status.textContent = data.error;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Send Report';
+  })
+  .catch(function(err) {
+    status.className = 'report-status error';
+    status.textContent = 'Failed to send report: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = 'Send Report';
+  });
+}
+</script>
 
 <!-- Missing Folders Banner -->
 <div class="missing-folders-banner" id="missingFoldersBanner" style="display:none;">
@@ -1235,7 +1371,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
       // Skip if any overlay or modal is open
-      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active')) return;
+      if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;
 
       for (var shortcutStr in keyToHref) {
         if (matchesShortcut(e, shortcutStr)) {
@@ -2061,7 +2197,7 @@ async function inatDoSubmit() {
 // If adding JS-based navigation shortcuts, guard with:
 //   if (window.__TAURI_INTERNALS__) return;
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); }
+  if (e.key === 'Escape') { closeLightbox(); closePipeline(); closeSimilar(); closeInatModal(); if (typeof closeHelpModal === 'function') closeHelpModal(); if (typeof closeReportModal === 'function') closeReportModal(); }
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
