@@ -606,6 +606,8 @@ def test_verify_all_models_skips_sentinel_on_verify_error(tmp_path, monkeypatch)
 
     good_dir = tmp_path / "good-model"
     good_dir.mkdir()
+    # Pin so the test exercises the pinned VerifyError path.
+    (good_dir / model_verify.REVISION_FILE).write_text("abc123")
     fake_models = [{
         "id": "good-model",
         "state": "ok",
@@ -632,13 +634,15 @@ def test_verify_all_models_skips_sentinel_on_verify_error(tmp_path, monkeypatch)
     assert not (good_dir / model_verify.VERIFY_FAILED_SENTINEL).exists()
 
 
-def test_verify_all_models_writes_sentinel_on_mismatch(tmp_path, monkeypatch):
-    """A bad model gets a .verify_failed sentinel written so the Settings UI
-    surfaces the Repair state after the sweep completes."""
+def test_verify_all_models_writes_sentinel_on_pinned_mismatch(tmp_path, monkeypatch):
+    """A pinned model with a mismatch gets a .verify_failed sentinel so the
+    Settings UI surfaces Repair."""
     import model_verify
 
     bad_dir = tmp_path / "bad-model"
     bad_dir.mkdir()
+    # Pin so we exercise the hard-fail path.
+    (bad_dir / model_verify.REVISION_FILE).write_text("abc123")
     fake_models = [{
         "id": "bad-model",
         "state": "ok",
@@ -660,6 +664,45 @@ def test_verify_all_models_writes_sentinel_on_mismatch(tmp_path, monkeypatch):
 
     model_verify.verify_all_models()
     assert (bad_dir / model_verify.VERIFY_FAILED_SENTINEL).is_file()
+
+
+def test_verify_all_models_no_sentinel_on_unpinned_mismatch(tmp_path, monkeypatch):
+    """An unpinned legacy install with a mismatch must NOT get a .verify_failed
+    sentinel — the mismatch could be version drift, not corruption."""
+    import model_verify
+
+    bad_dir = tmp_path / "bad-model"
+    bad_dir.mkdir()
+    # No .hf_revision — legacy install.
+    fake_models = [{
+        "id": "bad-model",
+        "state": "ok",
+        "downloaded": True,
+        "weights_path": str(bad_dir),
+        "hf_subdir": "bad-model",
+        "source": "hf-hub:test",
+    }]
+
+    monkeypatch.setattr(
+        model_verify,
+        "verify_model",
+        lambda d, s, revision=None: model_verify.VerifyResult(
+            ok=False, mismatches=["weights"]
+        ),
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "rev999"
+    )
+    import models
+    monkeypatch.setattr(models, "get_models", lambda: fake_models)
+
+    results = model_verify.verify_all_models()
+    # Result is reported to caller (mismatch).
+    assert results["bad-model"].ok is False
+    # No sentinel written — ambiguous mismatch for unpinned install.
+    assert not (bad_dir / model_verify.VERIFY_FAILED_SENTINEL).exists()
+    # No .hf_revision written — don't pin on mismatch.
+    assert not (bad_dir / model_verify.REVISION_FILE).exists()
 
 
 # ---------------------------------------------------------------------------

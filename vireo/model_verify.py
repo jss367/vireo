@@ -328,8 +328,14 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
       - Models in 'incomplete' or 'missing' state (nothing to verify if files
         aren't all present yet — the Settings UI already shows Repair).
 
-    On mismatch, writes the .verify_failed sentinel so _classify_model_state
-    will report 'incomplete' and the Settings UI surfaces the Repair button.
+    **Pinned installs**: on mismatch writes .verify_failed so the Settings
+    UI surfaces the Repair button (unambiguous corruption).
+
+    **Unpinned legacy installs**: resolves the current main SHA, verifies
+    against it, auto-pins on success.  On mismatch the result is reported
+    to the caller but no sentinel is written — the mismatch is ambiguous
+    (version drift vs corruption) and writing the sentinel would block
+    pipelines until a forced re-download.
 
     Returns a dict mapping model_id -> VerifyResult for every model that
     was actually verified.
@@ -350,13 +356,42 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             continue
         if progress_callback:
             progress_callback(f"Verifying {model_id}...")
+
+        pinned = _has_pinned_revision(weights_path)
+
+        if not pinned:
+            # Legacy install — resolve current main SHA so we verify
+            # against an explicit revision, not the moving "main" ref.
+            try:
+                latest_rev = fetch_latest_revision(ONNX_REPO)
+            except VerifyError as e:
+                results[model_id] = VerifyResult(
+                    ok=False, missing=[f"<hash fetch failed: {e}>"]
+                )
+                continue
+            try:
+                result = verify_model(
+                    weights_path, m["hf_subdir"], revision=latest_rev
+                )
+            except VerifyError as e:
+                results[model_id] = VerifyResult(
+                    ok=False, missing=[f"<hash fetch failed: {e}>"]
+                )
+                continue
+            results[model_id] = result
+            if result.ok:
+                write_pinned_revision(weights_path, latest_rev)
+                _verified_this_process.add(model_id)
+            else:
+                # Mismatch is ambiguous for unpinned installs — don't
+                # write sentinel, just report to the caller.
+                _verified_this_process.discard(model_id)
+            continue
+
+        # --- Pinned install: hard-fail on mismatch ---
         try:
             result = verify_model(weights_path, m["hf_subdir"])
         except VerifyError as e:
-            # Network or HTTP failure — can't verify, but don't mark the
-            # model as corrupt. Record the result for the caller and skip
-            # sentinel writing so a transient outage doesn't flip healthy
-            # models to 'incomplete' and break pipelines.
             results[model_id] = VerifyResult(
                 ok=False, missing=[f"<hash fetch failed: {e}>"]
             )
@@ -374,12 +409,4 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             _verified_this_process.discard(model_id)
         else:
             _verified_this_process.add(model_id)
-            # Auto-pin legacy installs on first successful verification
-            # so future checks use an immutable revision.
-            if not _has_pinned_revision(weights_path):
-                try:
-                    rev = fetch_latest_revision(ONNX_REPO)
-                    write_pinned_revision(weights_path, rev)
-                except VerifyError:
-                    pass
     return results
