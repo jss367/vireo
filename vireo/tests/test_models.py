@@ -1140,9 +1140,12 @@ def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
     tmp_path, monkeypatch
 ):
     """When hash verification is unavailable (HF tree API offline) and a
-    downloaded binary model file is below the 10 MB floor, download_model must
-    raise immediately rather than silently registering a truncated/stub file
-    as a healthy model.
+    downloaded .onnx.data weight sidecar is below the 10 MB floor,
+    download_model must raise immediately rather than silently registering a
+    truncated/stub file as a healthy model.
+
+    Only .onnx.data files are checked — graph .onnx files can legitimately
+    be much smaller in external-data ONNX layouts.
 
     Regression for Codex P2 review on #501 (vireo/models.py line 487).
     """
