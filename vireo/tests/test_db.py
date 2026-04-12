@@ -1924,6 +1924,31 @@ def test_get_missing_folders(tmp_path):
     assert missing[0]["photo_count"] == 1
 
 
+def test_get_missing_folders_scoped_to_active_workspace(tmp_path):
+    """Missing folders from other workspaces must not leak into the active one."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fid_a = db.add_folder("/gone/in_a", name="in_a")
+
+    db.set_active_workspace(ws_b)
+    fid_b = db.add_folder("/gone/in_b", name="in_b")
+
+    db.conn.execute("UPDATE folders SET status = 'missing'")
+    db.conn.commit()
+
+    db.set_active_workspace(ws_a)
+    missing = db.get_missing_folders()
+    assert [row["path"] for row in missing] == ["/gone/in_a"]
+
+    db.set_active_workspace(ws_b)
+    missing = db.get_missing_folders()
+    assert [row["path"] for row in missing] == ["/gone/in_b"]
+
+
 def test_relocate_folder(tmp_path):
     """relocate_folder updates path and sets status to 'ok'."""
     from db import Database

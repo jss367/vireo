@@ -976,15 +976,17 @@ class Database:
         return changed
 
     def get_missing_folders(self):
-        """Return all folders with status='missing' and their photo counts."""
+        """Return missing folders in the active workspace with photo counts."""
         return self.conn.execute(
             """SELECT f.id, f.path, f.name, f.parent_id,
                       COUNT(p.id) as photo_count
                FROM folders f
+               JOIN workspace_folders wf ON wf.folder_id = f.id
                LEFT JOIN photos p ON p.folder_id = f.id
-               WHERE f.status = 'missing'
+               WHERE wf.workspace_id = ? AND f.status = 'missing'
                GROUP BY f.id
-               ORDER BY f.path"""
+               ORDER BY f.path""",
+            (self._ws_id(),),
         ).fetchall()
 
     def relocate_folder(self, folder_id, new_path):
