@@ -881,12 +881,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # reclassify does not cause data loss.
             _model1_processed_photo_ids: set = set()
 
-            # Accumulates the detection rows produced by model 1 in *this*
-            # run so that model 2+ can use them directly instead of calling
-            # db.get_detections(), which would return ALL historical detection
-            # rows (including stale ones from prior pipeline passes).
-            this_run_detections: dict = {}
-
             from datetime import datetime as dt
 
             for spec_idx, active_spec in enumerate(resolved_specs):
