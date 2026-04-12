@@ -12,14 +12,10 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _make_fake_data_file(path, size_bytes=None):
-    """Create a sparse file of the given size for .onnx.data stubs in tests.
-
-    Defaults to a size that clears the _ONNX_DATA_MIN_BYTES floor in models.py.
-    """
-    import models as _models
-    if size_bytes is None:
-        size_bytes = _models._ONNX_DATA_MIN_BYTES + 1024
+def _make_fake_data_file(path, size_bytes=2048):
+    """Create a sparse .onnx.data stub for tests. Size is now arbitrary —
+    the 10 MB floor in models.py has been replaced by SHA256 verification
+    in model_verify.py, so test stubs only need to exist on disk."""
     with open(path, "wb") as f:
         f.truncate(size_bytes)
 
@@ -465,21 +461,39 @@ def test_classify_state_partial_files(tmp_path):
     ) == "incomplete"
 
 
-def test_classify_state_truncated_data_file(tmp_path):
-    """An .onnx.data file below the size floor reports 'incomplete'."""
+def test_classify_state_sub_10mb_data_file_is_ok_without_sentinel(tmp_path):
+    """A small .onnx.data file is no longer flagged as incomplete on size
+    alone — the 10 MB floor has been replaced by SHA256 verification, which
+    runs separately. _classify_model_state only looks at file presence and
+    the .verify_failed sentinel."""
     import models
     d = tmp_path / "m"
     d.mkdir()
     (d / "image_encoder.onnx").write_bytes(b"stub")
-    # Sub-threshold data file — the exact failure mode from the incident.
-    _make_fake_data_file(d / "image_encoder.onnx.data", size_bytes=1024)
+    (d / "image_encoder.onnx.data").write_bytes(b"tiny")  # 4 bytes
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "ok"
+
+
+def test_classify_state_verify_failed_sentinel_marks_incomplete(tmp_path):
+    """If model_verify has written .verify_failed into a model dir,
+    _classify_model_state reports 'incomplete' so the Settings UI
+    surfaces the Repair button — reusing the existing Repair flow
+    from PR #488."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    (d / ".verify_failed").write_text("hash mismatch on retry")
     assert models._classify_model_state(
         str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
     ) == "incomplete"
 
 
 def test_classify_state_ok(tmp_path):
-    """All files present and data file meets floor reports 'ok'."""
+    """All files present and no sentinel reports 'ok'."""
     import models
     d = tmp_path / "m"
     d.mkdir()
@@ -492,11 +506,9 @@ def test_classify_state_ok(tmp_path):
 
 def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
     """get_models reports state='incomplete' and downloaded=False when a known
-    model directory exists but the .onnx.data sidecar is under the size floor.
-
-    This is the exact disk state that caused the incident: graph stubs were
-    downloaded before the manifest learned about external-data files.
-    """
+    model directory contains a .verify_failed sentinel (written by
+    model_verify after a hash mismatch). The Settings UI uses this to show
+    the Repair button."""
     import models
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
@@ -504,11 +516,12 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
     (model_dir / "image_encoder.onnx").write_bytes(b"stub")
-    _make_fake_data_file(model_dir / "image_encoder.onnx.data", size_bytes=2048)
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
     (model_dir / "text_encoder.onnx").write_bytes(b"stub")
-    _make_fake_data_file(model_dir / "text_encoder.onnx.data", size_bytes=2048)
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
     (model_dir / "tokenizer.json").write_text("{}")
     (model_dir / "config.json").write_text("{}")
+    (model_dir / ".verify_failed").write_text("sha256 mismatch")
 
     result = models.get_models()
     entry = next(m for m in result if m["id"] == "bioclip-vit-b-16")
@@ -517,67 +530,705 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# download_model post-download validation
+# download_model — SHA256 verification with retry
 # ---------------------------------------------------------------------------
 
 
-def test_download_model_rejects_truncated_result(tmp_path, monkeypatch):
-    """download_model raises if the downloaded files fail validation.
+def _patch_download_model_env(tmp_path, monkeypatch):
+    """Shared setup: isolate config/models dir and return the model dir path.
+    Also stubs fetch_latest_revision to a fixed SHA so tests don't hit the
+    real HuggingFace model-info API.  Injects a minimal huggingface_hub stub
+    so the ImportError guard in download_model is satisfied without actually
+    having the library installed."""
+    import types
 
-    Simulates the regression window where the downloader would fetch ONNX
-    graph stubs but the .onnx.data file was missing/truncated. The fix: fail
-    the job instead of registering a broken model.
-    """
+    import model_verify
     import models
+
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_latest_revision",
+        lambda repo: "testsha1234567890abcdef1234567890abcdef12",
+    )
 
-    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    # Stub huggingface_hub so the `from huggingface_hub import hf_hub_download`
+    # guard in download_model passes in environments without the library.
+    # Actual downloads go through _hf_download_with_retry which each test
+    # patches with its own fake.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = None  # not called; _hf_download_with_retry is patched
+    hf_stub.try_to_load_from_cache = None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
-        os.makedirs(local_dir, exist_ok=True)
-        dest = os.path.join(local_dir, filename)
-        if filename.endswith(".onnx.data"):
-            # Truncated sidecar — below the size floor.
-            with open(dest, "wb") as f:
-                f.truncate(1024)
-        else:
-            with open(dest, "wb") as f:
-                f.write(b"stub")
-        return dest
-
-    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
-
-    import pytest
-    with pytest.raises(RuntimeError, match="failed validation"):
-        models.download_model("bioclip-vit-b-16")
-
-    # The broken model must not have been registered.
-    cfg = models._load_config()
-    assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+    return models, tmp_path / "models" / "bioclip-vit-b-16"
 
 
 def test_download_model_accepts_valid_result(tmp_path, monkeypatch):
-    """download_model registers the model when validation passes."""
-    import models
-    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    """download_model registers the model when every LFS file's SHA256 matches
+    the hashes fetched from HF."""
+    import hashlib
 
-    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None):
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # Contents for the four LFS files; compute their expected hashes.
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in lfs_contents.items()
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
         os.makedirs(local_dir, exist_ok=True)
         dest = os.path.join(local_dir, filename)
-        if filename.endswith(".onnx.data"):
+        if filename in lfs_contents:
             with open(dest, "wb") as f:
-                f.truncate(models._ONNX_DATA_MIN_BYTES + 1024)
+                f.write(lfs_contents[filename])
         else:
+            # Non-LFS files (tokenizer.json, config.json) — just need to exist.
             with open(dest, "wb") as f:
-                f.write(b"stub")
+                f.write(b"{}")
         return dest
 
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
 
     result = models.download_model("bioclip-vit-b-16")
     assert result.endswith("bioclip-vit-b-16")
 
     cfg = models._load_config()
     assert any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_retries_on_hash_mismatch_then_succeeds(
+    tmp_path, monkeypatch
+):
+    """First two download attempts produce corrupt bytes, third attempt
+    produces correct bytes. download_model should retry transparently and
+    ultimately succeed, registering the model."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    good_content = b"weights-real" * 1000
+    good_hash = hashlib.sha256(good_content).hexdigest()
+    # Expected hashes for every LFS file in bioclip-vit-b-16.
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(b"graph-i").hexdigest(),
+        "image_encoder.onnx.data": good_hash,
+        "text_encoder.onnx": hashlib.sha256(b"graph-t").hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(b"graph-td").hexdigest(),
+    }
+
+    attempts = {"image_encoder.onnx.data": 0}
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename == "image_encoder.onnx.data":
+            attempts[filename] += 1
+            content = b"corrupt" if attempts[filename] < 3 else good_content
+        elif filename == "image_encoder.onnx":
+            content = b"graph-i"
+        elif filename == "text_encoder.onnx":
+            content = b"graph-t"
+        elif filename == "text_encoder.onnx.data":
+            content = b"graph-td"
+        else:
+            content = b"{}"
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    # Track cache purges so we can assert the HF cache is cleared between retries.
+    purged: list[str] = []
+    monkeypatch.setattr(
+        models,
+        "_purge_hf_cache_file",
+        lambda filename, subdir, revision=None: purged.append(filename),
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
+
+    result = models.download_model("bioclip-vit-b-16")
+    assert result.endswith("bioclip-vit-b-16")
+    # 1 initial attempt + 2 retries on image_encoder.onnx.data
+    assert attempts["image_encoder.onnx.data"] == 3
+    # HF cache must be purged before each retry (2 purges = 2 retries).
+    assert purged.count("image_encoder.onnx.data") == 2
+
+
+def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
+    """Bytes on disk never match expected — download_model raises after
+    3 total attempts (1 initial + 2 retries) per file."""
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    expected = {
+        "image_encoder.onnx": "a" * 64,
+        "image_encoder.onnx.data": "b" * 64,
+        "text_encoder.onnx": "c" * 64,
+        "text_encoder.onnx.data": "d" * 64,
+    }
+
+    attempts = {"image_encoder.onnx": 0}
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        if filename == "image_encoder.onnx":
+            attempts[filename] += 1
+        with open(dest, "wb") as f:
+            f.write(b"wrong")
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
+
+    import pytest as _pytest
+    with _pytest.raises(model_verify.VerifyError, match="image_encoder.onnx"):
+        models.download_model("bioclip-vit-b-16")
+
+    assert attempts["image_encoder.onnx"] == 3
+
+    # .verify_failed sentinel must exist so _classify_model_state reports
+    # 'incomplete' even though all files are physically present on disk.
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), ".verify_failed sentinel must be written before raising"
+    assert "hash-mismatch" in sentinel.read_text()
+
+    # Broken model must not have been registered.
+    cfg = models._load_config()
+    assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_clears_verify_cache_on_success(tmp_path, monkeypatch):
+    """After a successful download, the per-process verify cache for that
+    model_id is cleared so the next pipeline run re-verifies from disk."""
+    import hashlib
+
+    import model_verify
+    models, _ = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"realbytes" * 100
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
+
+    model_verify._verified_this_process.add("bioclip-vit-b-16")
+    models.download_model("bioclip-vit-b-16")
+    assert "bioclip-vit-b-16" not in model_verify._verified_this_process
+
+
+def test_download_model_writes_pinned_revision(tmp_path, monkeypatch):
+    """After a successful download, download_model records the current HF
+    commit SHA in .hf_revision so subsequent verifications use that
+    immutable revision instead of main — protecting against upstream
+    model updates invalidating valid local files."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    pinned_sha = "ea7d6fbf207d90de6f7b0df3c3d5aef2a971c0ed"
+    contents = b"realbytes" * 200
+    expected = {
+        "image_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "image_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx": hashlib.sha256(contents).hexdigest(),
+        "text_encoder.onnx.data": hashlib.sha256(contents).hexdigest(),
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    captured_fetch = {}
+
+    def fake_fetch(subdir, revision="main"):
+        captured_fetch["revision"] = revision
+        return expected
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: pinned_sha
+    )
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # The pinned revision file is written on disk
+    rev_file = model_dir / model_verify.REVISION_FILE
+    assert rev_file.is_file()
+    assert rev_file.read_text().strip() == pinned_sha
+
+    # fetch_expected_hashes was called with the pinned revision, not main
+    assert captured_fetch["revision"] == pinned_sha
+
+
+def test_download_model_falls_back_to_main_when_revision_lookup_fails(
+    tmp_path, monkeypatch
+):
+    """If fetch_latest_revision fails (model-info API offline) but the tree
+    API is still healthy, download_model should NOT skip verification —
+    it should fall back to verifying against 'main'. The two HF APIs are
+    independent and a stale blob should still be caught.
+
+    No .hf_revision is written because we don't have an immutable SHA to
+    pin to, but SHA256 verification still happens end-to-end."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    contents = b"weights" * 1000
+    good = hashlib.sha256(contents).hexdigest()
+    expected = {
+        "image_encoder.onnx": good,
+        "image_encoder.onnx.data": good,
+        "text_encoder.onnx": good,
+        "text_encoder.onnx.data": good,
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(contents if filename in expected else b"{}")
+        return dest
+
+    def fetch_revision_raises(repo):
+        raise model_verify.VerifyError("model-info api offline")
+
+    captured = {}
+
+    def fake_fetch_hashes(subdir, revision="main"):
+        captured["revision"] = revision
+        return expected
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", fetch_revision_raises
+    )
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fake_fetch_hashes)
+
+    models.download_model("bioclip-vit-b-16")
+
+    # Verification still ran, using 'main' as the revision.
+    assert captured["revision"] == "main"
+    # No pin file written because we don't have an immutable SHA.
+    assert not (model_dir / model_verify.REVISION_FILE).exists()
+    # Model was registered as successfully downloaded.
+    cfg = models._load_config()
+    assert any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
+
+
+def test_download_model_skips_verification_only_when_tree_api_also_fails(
+    tmp_path, monkeypatch
+):
+    """Verification is only skipped entirely when BOTH the model-info API
+    and the tree API are unreachable. In that terminal case .hf_revision
+    is not written and any preexisting .verify_failed sentinel stays in
+    place so the model remains flagged as incomplete."""
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    sentinel.write_text("earlier mismatch")
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    def fetch_revision_raises(repo):
+        raise model_verify.VerifyError("model-info api offline")
+
+    def fetch_hashes_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree api offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", fetch_revision_raises
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", fetch_hashes_raises
+    )
+    # Disable the size-floor check so this test stays focused on sentinel
+    # preservation and revision-pin semantics, not on stub-file detection.
+    monkeypatch.setattr(models, "_MIN_BINARY_MODEL_BYTES", 0)
+
+    # download_model raises because sentinel + post-download state check
+    # flips the state to 'incomplete'.
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="incomplete"):
+        models.download_model("bioclip-vit-b-16")
+
+    assert sentinel.is_file()
+    assert not (model_dir / model_verify.REVISION_FILE).exists()
+
+
+def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):
+    """_purge_hf_cache_file follows the snapshot symlink to the actual blob
+    in blobs/ and deletes that, not just the snapshot symlink. Otherwise
+    hf_hub_download on retry would relink to the same corrupt bytes.
+    """
+    import types
+
+    import models
+
+    # Build a fake HF cache layout:
+    #   blobs/<oid>         <- actual file bytes
+    #   snapshots/<rev>/path/to/file.data  -> ../../blobs/<oid>
+    blobs = tmp_path / "blobs"
+    snapshots = tmp_path / "snapshots" / "rev123" / "bioclip-vit-b-16"
+    blobs.mkdir(parents=True)
+    snapshots.mkdir(parents=True)
+    blob_path = blobs / "corruptblob"
+    blob_path.write_bytes(b"corrupt")
+    symlink_path = snapshots / "image_encoder.onnx.data"
+    os.symlink(blob_path, symlink_path)
+
+    def fake_try_to_load_from_cache(repo_id, filename, revision=None):
+        return str(symlink_path)
+
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.try_to_load_from_cache = fake_try_to_load_from_cache
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
+    models._purge_hf_cache_file(
+        "image_encoder.onnx.data", "bioclip-vit-b-16"
+    )
+
+    # Both the snapshot symlink and the blob target must be gone, so that
+    # the next hf_hub_download actually fetches fresh bytes instead of
+    # relinking to the same corrupt blob.
+    assert not symlink_path.exists()
+    assert not blob_path.exists()
+
+
+def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
+    tmp_path, monkeypatch
+):
+    """If fetch_expected_hashes fails (HF tree API outage), download_model
+    proceeds without verification — but in that case we must NOT delete
+    a preexisting .verify_failed sentinel. Otherwise a Repair attempt
+    during a transient HF outage would flip a genuinely corrupt model
+    back to 'ok' without any integrity check actually running, letting
+    pipelines run against bad weights."""
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preexisting sentinel from an earlier verification failure.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    sentinel.write_text("earlier mismatch")
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub")
+        return dest
+
+    def fetch_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+    # Disable the size-floor check so this test stays focused on sentinel
+    # preservation semantics, not on stub-file detection.
+    monkeypatch.setattr(models, "_MIN_BINARY_MODEL_BYTES", 0)
+
+    # download_model should raise because _classify_model_state will still
+    # see the sentinel and return 'incomplete'.
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="incomplete"):
+        models.download_model("bioclip-vit-b-16")
+
+    # Sentinel must still be on disk so a future pipeline run (or a retry
+    # after HF is back up) keeps the model flagged as corrupt.
+    assert sentinel.is_file()
+
+
+def test_purge_hf_cache_file_passes_revision_to_cache_lookup(tmp_path, monkeypatch):
+    """_purge_hf_cache_file must pass the revision parameter to
+    try_to_load_from_cache so the lookup resolves the pinned snapshot entry
+    rather than the default-branch entry.
+
+    Without revision= the HF cache lookup targets 'main', leaving the
+    corrupt blob for the pinned commit untouched; every retry then
+    relinks to the same bad bytes and hash-mismatch retries are exhausted
+    without ever fetching fresh bytes.
+
+    Regression for Codex P1 review on #501, models.py line 653.
+    """
+    import sys
+    import types
+
+    import models
+
+    captured: dict = {}
+
+    blobs = tmp_path / "blobs"
+    snapshots = tmp_path / "snapshots" / "abc123" / "bioclip-vit-b-16"
+    blobs.mkdir(parents=True)
+    snapshots.mkdir(parents=True)
+    blob_path = blobs / "corruptblob"
+    blob_path.write_bytes(b"corrupt")
+    symlink_path = snapshots / "image_encoder.onnx.data"
+    os.symlink(blob_path, symlink_path)
+
+    def fake_try_to_load_from_cache(repo_id, filename, revision=None):
+        captured["revision"] = revision
+        return str(symlink_path)
+
+    # Stub huggingface_hub in sys.modules so the test passes in environments
+    # where the library is not installed.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.try_to_load_from_cache = fake_try_to_load_from_cache
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
+    models._purge_hf_cache_file(
+        "image_encoder.onnx.data", "bioclip-vit-b-16", revision="abc123"
+    )
+
+    assert captured.get("revision") == "abc123", (
+        "try_to_load_from_cache must receive the pinned revision so the "
+        "correct snapshot entry is purged — regression for Codex P1 on "
+        "#501 models.py line 653"
+    )
+    # Both the symlink and blob should be deleted
+    assert not symlink_path.exists()
+    assert not blob_path.exists()
+
+
+def test_download_model_clears_stale_revision_when_verification_runs_against_main(
+    tmp_path, monkeypatch
+):
+    """When verification runs against 'main' (because fetch_latest_revision
+    failed so pinned_revision is None), any pre-existing .hf_revision must
+    be deleted.
+
+    If a stale .hf_revision remains from a previous install, the next
+    verify_model call reads that old SHA and fetches expected hashes for
+    the wrong revision, causing false mismatches and unnecessary Repair
+    prompts even though the downloaded files are correct.
+
+    Regression for Codex P2 review on #501, models.py line 523.
+    """
+    import hashlib
+    import sys
+    import types
+
+    import model_verify
+
+    # Stub out huggingface_hub so the import guard in download_model passes
+    # even when the library is not installed in this environment.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = lambda *a, **kw: None
+    hf_stub.try_to_load_from_cache = lambda *a, **kw: None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Simulate a stale revision pin left by a previous install.
+    stale_rev_path = model_dir / model_verify.REVISION_FILE
+    stale_rev_path.write_text("old_sha_from_previous_install\n")
+
+    # fetch_latest_revision will raise (model-info API offline), so
+    # pinned_revision will be None but the tree API still works (returns
+    # expected hashes against "main").
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_latest_revision",
+        lambda repo: (_ for _ in ()).throw(
+            model_verify.VerifyError("model-info offline")
+        ),
+    )
+
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        fn: hashlib.sha256(data).hexdigest()
+        for fn, data in lfs_contents.items()
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        base = os.path.basename(filename)
+        dest = os.path.join(local_dir, base)
+        with open(dest, "wb") as f:
+            f.write(lfs_contents.get(base, b"stub"))
+        return dest
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": expected,
+    )
+
+    models.download_model("bioclip-vit-b-16")
+
+    # The stale .hf_revision must have been deleted so that verify_model
+    # uses "main" (matching the revision used for hash verification) rather
+    # than the old SHA, which would produce false mismatches.
+    assert not stale_rev_path.exists(), (
+        ".hf_revision must be deleted when verification runs against 'main' "
+        "(pinned_revision=None) to prevent false mismatch errors on the "
+        "next verify_model call — regression for Codex P2 on #501 line 523"
+    )
+
+
+def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
+    tmp_path, monkeypatch
+):
+    """When hash verification is unavailable (HF tree API offline) and a
+    downloaded .onnx.data weight sidecar is below the 10 MB floor,
+    download_model must raise immediately rather than silently registering a
+    truncated/stub file as a healthy model.
+
+    Only .onnx.data files are checked — graph .onnx files can legitimately
+    be much smaller in external-data ONNX layouts.
+
+    Regression for Codex P2 review on #501 (vireo/models.py line 487).
+    Plain .onnx graph files are excluded from the floor check because they are
+    legitimately small in external-data ONNX layouts (Codex P1 on #520).
+    """
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub-too-small")
+        return dest
+
+    def fetch_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncated"):
+        models.download_model("bioclip-vit-b-16")
+
+    # The verify-failed sentinel must be written so _classify_model_state
+    # reports 'incomplete' and get_models() shows the Repair button.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), (
+        "Size-floor failure must write .verify_failed sentinel so the model "
+        "is not treated as healthy by _classify_model_state."
+    )
+
+
+def test_download_model_small_onnx_graph_does_not_trigger_size_floor(
+    tmp_path, monkeypatch
+):
+    """Plain .onnx graph files must NOT be rejected by the size-floor check
+    even when they are smaller than _MIN_BINARY_MODEL_BYTES.  In external-data
+    ONNX layouts the graph file is legitimately tiny; the weights live in the
+    .onnx.data sidecar.  Applying the floor to .onnx files would falsely reject
+    valid installs whenever the HF tree API is down.
+
+    Regression for Codex P1 review on #520 (vireo/models.py line 560).
+    """
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # _MIN_BINARY_MODEL_BYTES is 10 MB; write a large-enough .onnx.data sidecar
+    # but a tiny stub .onnx graph to confirm the floor only fires on .onnx.data.
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            if filename.endswith(".onnx.data"):
+                # large enough to pass the floor
+                f.write(b"\x00" * (models._MIN_BINARY_MODEL_BYTES + 1))
+            else:
+                f.write(b"stub-tiny-graph")
+        return dest
+
+    def fetch_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+
+    # Must NOT raise — the .onnx graph is tiny but that is allowed; only the
+    # .onnx.data sidecars are subject to the floor.  Any exception here
+    # (including a non-"truncated" RuntimeError) is a test failure.
+    models.download_model("bioclip-vit-b-16")

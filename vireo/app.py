@@ -3091,6 +3091,45 @@ def create_app(db_path, thumb_cache_dir=None):
         job_id = runner.start("download-model", work, config={"model_id": model_id}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/verify-all-models", methods=["POST"])
+    def api_job_verify_all_models():
+        """Run SHA256 verification on every installed known model.
+
+        Launches a background job that iterates get_models(), hashes each
+        model's LFS files, and writes a .verify_failed sentinel into any
+        directory whose files don't match HuggingFace's reported hashes.
+        The UI can then show Repair for the bad ones via the existing
+        state classifier path.
+        """
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            import model_verify
+
+            def progress_cb(msg):
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": 0,
+                        "total": 0,
+                        "current_file": msg,
+                        "rate": 0,
+                        "phase": "Verifying models",
+                    },
+                )
+
+            results = model_verify.verify_all_models(progress_callback=progress_cb)
+            return {
+                "verified": len(results),
+                "failed": [mid for mid, r in results.items() if not r.ok],
+                "ok": [mid for mid, r in results.items() if r.ok],
+            }
+
+        job_id = runner.start("verify-models", work, workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
     @app.route("/api/jobs/download-hf-model", methods=["POST"])
     def api_job_download_hf_model():
         body = request.get_json(silent=True) or {}
