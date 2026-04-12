@@ -5075,6 +5075,8 @@ def create_app(db_path, thumb_cache_dir=None):
                     else:
                         out[k] = _redact(v)
                 return out
+            if isinstance(obj, list):
+                return [_redact(item) for item in obj]
             return obj
 
         sanitized_config = _redact(cfg.load())
