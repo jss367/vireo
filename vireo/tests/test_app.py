@@ -1846,3 +1846,39 @@ def test_api_import_full_accepts_exclude_paths(app_and_db, tmp_path):
     assert resp.status_code == 200
     data = resp.get_json()
     assert "job_id" in data
+
+
+def test_system_info_megadetector_weights_missing(app_and_db, monkeypatch, tmp_path):
+    """/api/system/info reports weights_missing (not installed) when only the
+    detector module imports but the ONNX weights file is absent.
+    """
+    import detector
+    missing_path = str(tmp_path / "does_not_exist.onnx")
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", missing_path)
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/system/info")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["megadetector"] == "weights_missing"
+    assert data["megadetector_weights"] == "not downloaded"
+    assert "weights not downloaded" in data["megadetector_detail"].lower()
+
+
+def test_system_info_megadetector_installed_when_weights_present(app_and_db, monkeypatch, tmp_path):
+    """/api/system/info reports installed only when weights are on disk."""
+    import detector
+    weights = tmp_path / "model.onnx"
+    weights.write_bytes(b"\x00" * 1024)
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(weights))
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/system/info")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    assert data["megadetector"] == "installed"
+    assert data["megadetector_weights"] == "downloaded"

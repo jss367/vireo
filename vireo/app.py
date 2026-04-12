@@ -3635,19 +3635,21 @@ def create_app(db_path, thumb_cache_dir=None):
         except ImportError:
             info["device_detail"] = "onnxruntime not installed"
 
-        # MegaDetector status — just check for the ONNX file
+        # "installed" requires both module AND weights — module-only
+        # lets classify silently fall back to full-image classification.
         try:
             from detector import MEGADETECTOR_ONNX_PATH
 
-            info["megadetector"] = "installed"
-            info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
-
             if os.path.isfile(MEGADETECTOR_ONNX_PATH):
                 size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+                info["megadetector"] = "installed"
+                info["megadetector_detail"] = "MegaDetector V6 (YOLOv9-c) — subject detection for crop-based classification"
                 info["megadetector_weights"] = "downloaded"
                 info["megadetector_weights_path"] = MEGADETECTOR_ONNX_PATH
                 info["megadetector_weights_size"] = f"{size_mb} MB"
             else:
+                info["megadetector"] = "weights_missing"
+                info["megadetector_detail"] = "Weights not downloaded — subject detection disabled until the MegaDetector V6 ONNX model is downloaded from the pipeline models page."
                 info["megadetector_weights"] = "not downloaded"
                 info["megadetector_weights_path"] = None
                 info["megadetector_weights_size"] = None
