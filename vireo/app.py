@@ -5042,6 +5042,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 vireo_version = "unknown"
 
         # --- App state ---
+        db = None
         try:
             db = _get_db()
             ws = db.get_active_workspace()
