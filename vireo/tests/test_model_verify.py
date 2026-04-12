@@ -657,6 +657,8 @@ def test_download_model_writes_revision_when_hash_fetch_fails(tmp_path, monkeypa
     pinned SHA so that a later verify_model call fetches hashes against the
     correct (immutable) revision instead of 'main' or a stale pin."""
     import os
+    import sys
+    import types
 
     import model_verify
     import models as models_mod
@@ -664,6 +666,12 @@ def test_download_model_writes_revision_when_hash_fetch_fails(tmp_path, monkeypa
     # Reuse the helper from test_models.py's environment patch.
     monkeypatch.setattr(models_mod, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models_mod, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    # Stub huggingface_hub so the ImportError guard in download_model passes.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = None
+    hf_stub.try_to_load_from_cache = None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
 
     pinned_sha = "abc123" * 6 + "abcd"  # 40-char SHA-like
 
@@ -686,6 +694,9 @@ def test_download_model_writes_revision_when_hash_fetch_fails(tmp_path, monkeypa
 
     monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s, revision=None: None)
     monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
+    # Bypass the size-floor check so this test stays focused on revision-pin
+    # semantics, not stub-file detection.
+    monkeypatch.setattr(models_mod, "_MIN_BINARY_MODEL_BYTES", 0)
 
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
 
@@ -706,12 +717,20 @@ def test_download_model_clears_stale_revision_when_both_apis_fail(tmp_path, monk
     verify_model falls back to 'main' rather than reading a stale SHA that
     would cause false mismatch failures for files that are actually correct."""
     import os
+    import sys
+    import types
 
     import model_verify
     import models as models_mod
 
     monkeypatch.setattr(models_mod, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models_mod, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    # Stub huggingface_hub so the ImportError guard in download_model passes.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = None
+    hf_stub.try_to_load_from_cache = None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
 
     model_dir = tmp_path / "models" / "bioclip-vit-b-16"
     model_dir.mkdir(parents=True)
@@ -737,13 +756,13 @@ def test_download_model_clears_stale_revision_when_both_apis_fail(tmp_path, monk
     monkeypatch.setattr(models_mod, "_purge_hf_cache_file", lambda f, s, revision=None: None)
     monkeypatch.setattr(models_mod, "_hf_download_with_retry", fake_download)
 
-    # download_model raises because state check sees no sentinel but files
-    # are stub-sized — state = 'ok' with stubs so it won't raise.
-    # Just call it; we care about the revision file.
+    # download_model may raise (size-floor check fires on stub files, or
+    # state check sees missing files). Either way we only care that the
+    # stale .hf_revision was deleted before the exception.
     try:
         models_mod.download_model("bioclip-vit-b-16")
     except RuntimeError:
-        pass  # may raise on state check; that's acceptable
+        pass  # expected — stub files trigger the size-floor check
 
     assert not stale_rev.exists(), (
         "Stale .hf_revision must be deleted when both revision and hash APIs "

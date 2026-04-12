@@ -552,6 +552,22 @@ def download_model(model_id, progress_callback=None):
             with contextlib.suppress(OSError):
                 os.unlink(rev_path)
 
+        # SHA256 verification was unavailable (HF tree API unreachable).
+        # Apply a minimal size floor to binary model files so that a
+        # truncated or stub download is surfaced immediately rather than
+        # being registered as a healthy model that later fails at runtime.
+        for filename in files:
+            if not filename.endswith((".onnx", ".onnx.data")):
+                continue
+            local_path = os.path.join(model_dir, filename)
+            actual_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
+            if actual_size < _MIN_BINARY_MODEL_BYTES:
+                raise RuntimeError(
+                    f"Downloaded {km['name']} ({filename}) appears truncated "
+                    f"({actual_size:,} bytes, expected ≥ {_MIN_BINARY_MODEL_BYTES:,} bytes). "
+                    "Open Settings → Models and click Repair to retry the download."
+                )
+
     state = _classify_model_state(model_dir, files)
     if state != "ok":
         raise RuntimeError(
@@ -578,6 +594,11 @@ def download_model(model_id, progress_callback=None):
 
 
 _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
+
+# Minimum size for binary model files (.onnx, .onnx.data) when post-download
+# SHA256 verification is unavailable (HF tree API unreachable).  Guards against
+# truncated or stub downloads being silently registered as healthy models.
+_MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 def _download_and_verify_file(
