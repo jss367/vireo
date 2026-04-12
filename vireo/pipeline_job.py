@@ -872,13 +872,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # db.get_detections() which would include stale rows from prior runs.
             this_run_detections: dict = {}
 
-            # Tracks photo IDs whose batches were actually submitted to
-            # _detect_batch during model 1's pass.  Used to gate the stale
-            # detection purge: only photos that were re-processed in this run
-            # should lose their prior-run rows.  Photos in batches that were
-            # never reached (e.g. the run was aborted mid-way) keep their old
-            # detection rows so a partial reclassify does not cause data loss.
-            _model1_attempted_photo_ids: set = set()
+            # Tracks photo IDs whose per-photo iteration in _detect_batch ran
+            # to completion during model 1's pass.  Used to gate the stale
+            # detection purge: only photos that were actually re-processed in
+            # this run should lose their prior-run rows.  Photos whose batch
+            # was never reached (abort) or whose iteration was cut short by a
+            # mid-batch exception keep their old detection rows so a partial
+            # reclassify does not cause data loss.
+            _model1_processed_photo_ids: set = set()
 
             from datetime import datetime as dt
 
@@ -968,7 +969,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # cached_detections gives model 2+ the exact detection
                     # rows from this run rather than querying the DB (which
                     # could return stale rows from a prior pipeline pass).
-                    det_map, det_count = _detect_batch(
+                    det_map, det_count, det_processed_ids = _detect_batch(
                         batch, folders, runner, job,
                         params.reclassify and spec_idx == 0, thread_db,
                         already_detected_ids=already_detected,
@@ -978,7 +979,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     already_detected.update(det_map.keys())
                     if spec_idx == 0:
                         this_run_detections.update(det_map)
-                        _model1_attempted_photo_ids.update(p["id"] for p in batch)
+                        # Key purge eligibility on photos whose per-photo
+                        # iteration in _detect_batch actually completed —
+                        # not the whole submitted batch.  If _detect_batch
+                        # caught an exception mid-loop and returned early,
+                        # unprocessed photos will be absent from this set
+                        # and their stale rows will be preserved.
+                        _model1_processed_photo_ids.update(det_processed_ids)
 
                     # Classify this batch
                     for photo in batch:
@@ -1042,29 +1049,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # are committed before the old ones are removed.
                 # model 2+ already has the new IDs via this_run_detections.
                 if params.reclassify and spec_idx == 0 and _pre_run_det_ids:
-                    # Only purge stale rows for photos whose batches were
-                    # actually submitted to _detect_batch in this run.
-                    # If the run was aborted mid-way, photos in unprocessed
-                    # batches were never re-detected, so deleting their old
-                    # detection rows would be avoidable data loss.
+                    # Only purge stale rows for photos whose per-photo
+                    # iteration in _detect_batch actually ran to completion.
+                    # If the run was aborted before a batch was submitted,
+                    # or _detect_batch caught an exception and returned
+                    # mid-batch, unprocessed photos are absent from
+                    # _model1_processed_photo_ids and their old rows stay.
                     stale_ids = [
                         det_id
                         for photo_id, id_set in _pre_run_det_ids.items()
                         for det_id in id_set
-                        if photo_id in _model1_attempted_photo_ids
+                        if photo_id in _model1_processed_photo_ids
                     ]
                     if stale_ids:
                         getattr(
                             thread_db, "delete_detections_by_ids", lambda _: None
                         )(stale_ids)
+                        processed_with_priors = (
+                            _model1_processed_photo_ids & _pre_run_det_ids.keys()
+                        )
                         log.debug(
                             "reclassify: purged %d stale detection rows for %d "
-                            "photos (%d photos not yet processed, rows preserved)",
+                            "photos (%d photos not processed, rows preserved)",
                             len(stale_ids),
-                            len(_model1_attempted_photo_ids & _pre_run_det_ids.keys()),
-                            len(_pre_run_det_ids) - len(
-                                _model1_attempted_photo_ids & _pre_run_det_ids.keys()
-                            ),
+                            len(processed_with_priors),
+                            len(_pre_run_det_ids) - len(processed_with_priors),
                         )
 
             stages["classify"]["status"] = "completed"

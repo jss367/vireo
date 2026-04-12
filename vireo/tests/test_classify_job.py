@@ -328,7 +328,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     with patch("classify_job.detect_animals", return_value=fake_detections), \
          patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
          patch("classify_job.compute_sharpness", return_value=50.0):
-        detection_map, detected = _detect_batch(
+        detection_map, detected, _processed = _detect_batch(
             photos=photos,
             folders=folders,
             runner=runner,
