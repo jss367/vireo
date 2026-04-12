@@ -553,11 +553,15 @@ def download_model(model_id, progress_callback=None):
                 os.unlink(rev_path)
 
         # SHA256 verification was unavailable (HF tree API unreachable).
-        # Apply a minimal size floor to binary model files so that a
-        # truncated or stub download is surfaced immediately rather than
-        # being registered as a healthy model that later fails at runtime.
+        # Apply a minimal size floor to weight sidecar files (.onnx.data) so
+        # that a truncated download is surfaced immediately rather than being
+        # registered as a healthy model that later fails at runtime.
+        # Plain .onnx graph files are deliberately excluded: in external-data
+        # layouts the graph file is legitimately small (the weights live in the
+        # .onnx.data sidecar), so applying the floor there would falsely reject
+        # valid installs whenever the HF tree API is unavailable.
         for filename in files:
-            if not filename.endswith((".onnx", ".onnx.data")):
+            if not filename.endswith(".onnx.data"):
                 continue
             local_path = os.path.join(model_dir, filename)
             actual_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
@@ -595,9 +599,11 @@ def download_model(model_id, progress_callback=None):
 
 _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
 
-# Minimum size for binary model files (.onnx, .onnx.data) when post-download
+# Minimum size for weight sidecar files (.onnx.data) when post-download
 # SHA256 verification is unavailable (HF tree API unreachable).  Guards against
 # truncated or stub downloads being silently registered as healthy models.
+# Plain .onnx graph files are not checked — they are legitimately small in
+# external-data ONNX layouts.
 _MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
