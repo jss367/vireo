@@ -18,12 +18,13 @@ def test_detect_batch_returns_detection_map():
     mock_job = {"id": "test-1", "progress": {}, "errors": [], "_start_time": 1.0}
 
     with patch("classify_job.detect_animals", return_value=[]):
-        detection_map, detected = _detect_batch(
+        detection_map, detected, processed_ids = _detect_batch(
             photos, folders, mock_runner, mock_job, reclassify=False, db=mock_db,
         )
 
     assert isinstance(detection_map, dict)
     assert isinstance(detected, int)
+    assert isinstance(processed_ids, set)
 
 
 def test_detect_batch_uses_cached_detection():
@@ -42,7 +43,7 @@ def test_detect_batch_uses_cached_detection():
     mock_runner = MagicMock()
     mock_job = {"id": "test-1", "progress": {}, "errors": [], "_start_time": 1.0}
 
-    detection_map, detected = _detect_batch(
+    detection_map, detected, processed_ids = _detect_batch(
         photos, folders, mock_runner, mock_job, reclassify=False, db=mock_db,
         already_detected_ids={1},
     )
@@ -51,3 +52,4 @@ def test_detect_batch_uses_cached_detection():
     assert len(detection_map[1]) == 1
     assert detection_map[1][0]["box_x"] == 0.1
     assert detected == 1
+    assert 1 in processed_ids

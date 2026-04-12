@@ -829,28 +829,57 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total_failed = 0
             total_skipped_existing = 0
 
-            # On reclassify, actually drop the prior-run detection rows from
-            # the DB for the photos we're about to re-process. Just wiping the
-            # in-memory already_detected set isn't enough: model 2+ hit the
-            # cached path inside _detect_batch which calls
-            # db.get_detections(photo_id), and that returns the union of old
-            # and newly-inserted rows when old rows are still present — so
-            # model 2's predictions end up bound to stale detection_ids from
-            # a prior pipeline pass. Clearing the rows up-front keeps the DB
-            # state consistent with "everything you see was produced in this
-            # run." The standalone classify_job uses the same pattern.
+            # For reclassify: start with an empty already_detected so model 1
+            # re-runs MegaDetector on every photo. We intentionally do NOT
+            # clear detection rows from the DB up-front: doing so would
+            # cascade-delete prediction rows from OTHER models (not in this
+            # run's model_ids) via the predictions.detection_id FK, causing
+            # permanent data loss for any model not included in the subset
+            # reclassify. Instead, model 2+ receives the this_run_detections
+            # cache (filled by model 1's detect pass) via _detect_batch's
+            # cached_detections parameter, so later models bind predictions
+            # to the detection rows just produced — not to stale rows from a
+            # prior pass that db.get_detections() would otherwise return.
+            #
+            # After model 1's full detection pass we DELETE the pre-run
+            # detection rows (snapshotted below) for all collection photos.
+            # This prevents stale prior-run boxes from being reused by
+            # subsequent non-reclassify runs via get_existing_detection_photo_ids
+            # + db.get_detections() (the false-positive reuse regression flagged
+            # in the Codex review on #511).  The cascade to predictions is
+            # intentional: any predictions that referenced the OLD detection rows
+            # are now stale (MegaDetector re-ran and produced fresh rows).
             #
             # Non-reclassify runs keep existing detections so the cached path
             # in _detect_batch can reuse them (that's the whole point of the
             # pre-seed).
             if params.reclassify:
-                for photo in photos:
-                    thread_db.clear_detections(photo["id"])
                 already_detected = set()
+                # Snapshot detection IDs that exist BEFORE this run so we can
+                # delete them after model 1 inserts fresh rows.
+                photo_ids_list = [p["id"] for p in photos]
+                _pre_run_det_ids: dict = getattr(
+                    thread_db, "get_detection_ids_for_photos", lambda _: {}
+                )(photo_ids_list)
             else:
                 already_detected = set(
                     getattr(thread_db, "get_existing_detection_photo_ids", lambda: set())()
                 )
+                _pre_run_det_ids = {}
+
+            # Accumulates the detection rows produced by model 1 (spec_idx==0)
+            # so model 2+ can reference exactly those rows rather than calling
+            # db.get_detections() which would include stale rows from prior runs.
+            this_run_detections: dict = {}
+
+            # Tracks photo IDs whose per-photo iteration in _detect_batch ran
+            # to completion during model 1's pass.  Used to gate the stale
+            # detection purge: only photos that were actually re-processed in
+            # this run should lose their prior-run rows.  Photos whose batch
+            # was never reached (abort) or whose iteration was cut short by a
+            # mid-batch exception keep their old detection rows so a partial
+            # reclassify does not cause data loss.
+            _model1_processed_photo_ids: set = set()
 
             # Accumulates the detection rows produced by model 1 in *this*
             # run so that model 2+ can use them directly instead of calling
@@ -943,23 +972,36 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # first model iteration re-runs detection (spec_idx == 0);
                     # subsequent models share those detections rather than
                     # inserting duplicate rows for the same photos.
-                    #
-                    # Pass this_run_detections to model 2+ so _detect_batch
-                    # returns the detection rows that model 1 produced in this
-                    # run rather than fetching all historical rows via
-                    # db.get_detections() (which would include stale rows from
-                    # prior pipeline passes and corrupt cross-model consistency).
-                    det_map, det_count = _detect_batch(
+                    # cached_detections gives model 2+ the exact detection
+                    # rows from this run rather than querying the DB (which
+                    # could return stale rows from a prior pipeline pass).
+                    det_map, det_count, det_processed_ids = _detect_batch(
                         batch, folders, runner, job,
                         params.reclassify and spec_idx == 0, thread_db,
                         already_detected_ids=already_detected,
-                        cached_detections=this_run_detections if spec_idx > 0 else None,
+                        cached_detections=this_run_detections,
                     )
                     detected += det_count
-                    already_detected.update(det_map.keys())
-                    # Keep this_run_detections current for model 2+.
-                    if spec_idx == 0 and len(resolved_specs) > 1:
+                    # Track ALL processed photos — including those where
+                    # MegaDetector found zero detections — so model 2+ skips
+                    # MegaDetector for them instead of re-running detection on
+                    # empty-frame photos each iteration.
+                    already_detected.update(det_processed_ids)
+                    if spec_idx == 0:
                         this_run_detections.update(det_map)
+                        # Also cache zero-detection photos so model 2+ finds
+                        # them in cached_detections and skips MegaDetector
+                        # rather than falling through to db.get_detections().
+                        for pid in det_processed_ids:
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = []
+                        # Key purge eligibility on photos whose per-photo
+                        # iteration in _detect_batch actually completed —
+                        # not the whole submitted batch.  If _detect_batch
+                        # caught an exception mid-loop and returned early,
+                        # unprocessed photos will be absent from this set
+                        # and their stale rows will be preserved.
+                        _model1_processed_photo_ids.update(det_processed_ids)
 
                     # Classify this batch
                     for photo in batch:
@@ -1013,6 +1055,42 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 total_detected += detected
                 total_failed += failed
                 total_skipped_existing += skipped_existing
+
+                # After model 1 has inserted all fresh detection rows, delete
+                # the pre-run stale rows we snapshotted before the loop.
+                # This prevents stale prior-run boxes from polluting future
+                # non-reclassify runs (the false-positive reuse regression
+                # flagged by Codex on #511 line 848).  We do this AFTER model
+                # 1's full pass — not batch-by-batch — so that all new rows
+                # are committed before the old ones are removed.
+                # model 2+ already has the new IDs via this_run_detections.
+                if params.reclassify and spec_idx == 0 and _pre_run_det_ids:
+                    # Only purge stale rows for photos whose per-photo
+                    # iteration in _detect_batch actually ran to completion.
+                    # If the run was aborted before a batch was submitted,
+                    # or _detect_batch caught an exception and returned
+                    # mid-batch, unprocessed photos are absent from
+                    # _model1_processed_photo_ids and their old rows stay.
+                    stale_ids = [
+                        det_id
+                        for photo_id, id_set in _pre_run_det_ids.items()
+                        for det_id in id_set
+                        if photo_id in _model1_processed_photo_ids
+                    ]
+                    if stale_ids:
+                        getattr(
+                            thread_db, "delete_detections_by_ids", lambda _: None
+                        )(stale_ids)
+                        processed_with_priors = (
+                            _model1_processed_photo_ids & _pre_run_det_ids.keys()
+                        )
+                        log.debug(
+                            "reclassify: purged %d stale detection rows for %d "
+                            "photos (%d photos not processed, rows preserved)",
+                            len(stale_ids),
+                            len(processed_with_priors),
+                            len(_pre_run_det_ids) - len(processed_with_priors),
+                        )
 
             stages["classify"]["status"] = "completed"
             runner.update_step(job["id"], "classify", status="completed",
