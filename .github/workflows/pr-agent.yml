@@ -585,13 +585,13 @@ jobs:
             head=$(gh pr view "$pr" --repo "$REPO" --json headRefName -q .headRefName)
 
             if [[ "$base" != "main" ]]; then
-              gh pr comment "$pr" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+              echo "PR #${pr}: targets '${base}' not 'main' — skipping (no comment posted by scheduled poll)."
               continue
             fi
 
             children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
             if [[ "$children" -gt 0 ]]; then
-              gh pr comment "$pr" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-react with 👍."
+              echo "PR #${pr}: ${children} open child PR(s) target '${head}' — skipping (no comment posted by scheduled poll)."
               continue
             fi
 
