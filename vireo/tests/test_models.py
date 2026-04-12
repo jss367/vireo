@@ -537,9 +537,14 @@ def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
 def _patch_download_model_env(tmp_path, monkeypatch):
     """Shared setup: isolate config/models dir and return the model dir path.
     Also stubs fetch_latest_revision to a fixed SHA so tests don't hit the
-    real HuggingFace model-info API."""
+    real HuggingFace model-info API.  Injects a minimal huggingface_hub stub
+    so the ImportError guard in download_model is satisfied without actually
+    having the library installed."""
+    import types
+
     import model_verify
     import models
+
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
     monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     monkeypatch.setattr(
@@ -547,6 +552,16 @@ def _patch_download_model_env(tmp_path, monkeypatch):
         "fetch_latest_revision",
         lambda repo: "testsha1234567890abcdef1234567890abcdef12",
     )
+
+    # Stub huggingface_hub so the `from huggingface_hub import hf_hub_download`
+    # guard in download_model passes in environments without the library.
+    # Actual downloads go through _hf_download_with_retry which each test
+    # patches with its own fake.
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.hf_hub_download = None  # not called; _hf_download_with_retry is patched
+    hf_stub.try_to_load_from_cache = None
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
+
     return models, tmp_path / "models" / "bioclip-vit-b-16"
 
 
@@ -640,7 +655,7 @@ def test_download_model_retries_on_hash_mismatch_then_succeeds(
     monkeypatch.setattr(
         models,
         "_purge_hf_cache_file",
-        lambda filename, subdir: purged.append(filename),
+        lambda filename, subdir, revision=None: purged.append(filename),
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(
@@ -882,6 +897,9 @@ def test_download_model_skips_verification_only_when_tree_api_also_fails(
     monkeypatch.setattr(
         model_verify, "fetch_expected_hashes", fetch_hashes_raises
     )
+    # Disable the size-floor check so this test stays focused on sentinel
+    # preservation and revision-pin semantics, not on stub-file detection.
+    monkeypatch.setattr(models, "_MIN_BINARY_MODEL_BYTES", 0)
 
     # download_model raises because sentinel + post-download state check
     # flips the state to 'incomplete'.
@@ -898,6 +916,8 @@ def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):
     in blobs/ and deletes that, not just the snapshot symlink. Otherwise
     hf_hub_download on retry would relink to the same corrupt bytes.
     """
+    import types
+
     import models
 
     # Build a fake HF cache layout:
@@ -915,10 +935,9 @@ def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):
     def fake_try_to_load_from_cache(repo_id, filename, revision=None):
         return str(symlink_path)
 
-    import huggingface_hub
-    monkeypatch.setattr(
-        huggingface_hub, "try_to_load_from_cache", fake_try_to_load_from_cache
-    )
+    hf_stub = types.ModuleType("huggingface_hub")
+    hf_stub.try_to_load_from_cache = fake_try_to_load_from_cache
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hf_stub)
 
     models._purge_hf_cache_file(
         "image_encoder.onnx.data", "bioclip-vit-b-16"
@@ -963,6 +982,9 @@ def test_download_model_preserves_sentinel_when_fetch_hashes_fails(
     )
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+    # Disable the size-floor check so this test stays focused on sentinel
+    # preservation semantics, not on stub-file detection.
+    monkeypatch.setattr(models, "_MIN_BINARY_MODEL_BYTES", 0)
 
     # download_model should raise because _classify_model_state will still
     # see the sentinel and return 'incomplete'.
@@ -1112,3 +1134,94 @@ def test_download_model_clears_stale_revision_when_verification_runs_against_mai
         "(pinned_revision=None) to prevent false mismatch errors on the "
         "next verify_model call — regression for Codex P2 on #501 line 523"
     )
+
+
+def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
+    tmp_path, monkeypatch
+):
+    """When hash verification is unavailable (HF tree API offline) and a
+    downloaded .onnx.data weight sidecar is below the 10 MB floor,
+    download_model must raise immediately rather than silently registering a
+    truncated/stub file as a healthy model.
+
+    Only .onnx.data files are checked — graph .onnx files can legitimately
+    be much smaller in external-data ONNX layouts.
+
+    Regression for Codex P2 review on #501 (vireo/models.py line 487).
+    Plain .onnx graph files are excluded from the floor check because they are
+    legitimately small in external-data ONNX layouts (Codex P1 on #520).
+    """
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            f.write(b"stub-too-small")
+        return dest
+
+    def fetch_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="truncated"):
+        models.download_model("bioclip-vit-b-16")
+
+    # The verify-failed sentinel must be written so _classify_model_state
+    # reports 'incomplete' and get_models() shows the Repair button.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), (
+        "Size-floor failure must write .verify_failed sentinel so the model "
+        "is not treated as healthy by _classify_model_state."
+    )
+
+
+def test_download_model_small_onnx_graph_does_not_trigger_size_floor(
+    tmp_path, monkeypatch
+):
+    """Plain .onnx graph files must NOT be rejected by the size-floor check
+    even when they are smaller than _MIN_BINARY_MODEL_BYTES.  In external-data
+    ONNX layouts the graph file is legitimately tiny; the weights live in the
+    .onnx.data sidecar.  Applying the floor to .onnx files would falsely reject
+    valid installs whenever the HF tree API is down.
+
+    Regression for Codex P1 review on #520 (vireo/models.py line 560).
+    """
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # _MIN_BINARY_MODEL_BYTES is 10 MB; write a large-enough .onnx.data sidecar
+    # but a tiny stub .onnx graph to confirm the floor only fires on .onnx.data.
+    def fake_download(repo_id, filename, local_dir, subfolder=None,
+                      progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        with open(dest, "wb") as f:
+            if filename.endswith(".onnx.data"):
+                # large enough to pass the floor
+                f.write(b"\x00" * (models._MIN_BINARY_MODEL_BYTES + 1))
+            else:
+                f.write(b"stub-tiny-graph")
+        return dest
+
+    def fetch_raises(subdir, revision="main"):
+        raise model_verify.VerifyError("tree API offline")
+
+    monkeypatch.setattr(
+        models, "_purge_hf_cache_file", lambda filename, subdir, revision=None: None
+    )
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
+
+    # Must NOT raise — the .onnx graph is tiny but that is allowed; only the
+    # .onnx.data sidecars are subject to the floor.  Any exception here
+    # (including a non-"truncated" RuntimeError) is a test failure.
+    models.download_model("bioclip-vit-b-16")

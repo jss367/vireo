@@ -552,6 +552,34 @@ def download_model(model_id, progress_callback=None):
             with contextlib.suppress(OSError):
                 os.unlink(rev_path)
 
+        # SHA256 verification was unavailable (HF tree API unreachable).
+        # Apply a minimal size floor to weight sidecar files so that a
+        # truncated or stub download is surfaced immediately rather than
+        # being registered as a healthy model that later fails at runtime.
+        # Only .onnx.data files are checked — in external-data ONNX layouts
+        # the graph .onnx file can legitimately be much smaller than the
+        # floor while the real weights live in the .onnx.data sidecar.
+        for filename in files:
+            if not filename.endswith(".onnx.data"):
+                continue
+            local_path = os.path.join(model_dir, filename)
+            actual_size = os.path.getsize(local_path) if os.path.isfile(local_path) else 0
+            if actual_size < _MIN_BINARY_MODEL_BYTES:
+                # Write the verify-failed sentinel so _classify_model_state
+                # reports 'incomplete' and get_models() shows Repair.
+                # Without this, the truncated file stays on disk and the
+                # model is treated as healthy on next check.
+                sentinel = os.path.join(
+                    model_dir, model_verify.VERIFY_FAILED_SENTINEL
+                )
+                with open(sentinel, "w") as f:
+                    f.write(f"size-floor: {filename} {actual_size} < {_MIN_BINARY_MODEL_BYTES}\n")
+                raise RuntimeError(
+                    f"Downloaded {km['name']} ({filename}) appears truncated "
+                    f"({actual_size:,} bytes, expected ≥ {_MIN_BINARY_MODEL_BYTES:,} bytes). "
+                    "Open Settings → Models and click Repair to retry the download."
+                )
+
     state = _classify_model_state(model_dir, files)
     if state != "ok":
         raise RuntimeError(
@@ -578,6 +606,13 @@ def download_model(model_id, progress_callback=None):
 
 
 _MAX_HASH_RETRIES = 2  # 1 initial attempt + 2 retries = 3 total per file
+
+# Minimum size for .onnx.data weight sidecar files when post-download SHA256
+# verification is unavailable (HF tree API unreachable).  Guards against
+# truncated or stub downloads being silently registered as healthy models.
+# Only applied to .onnx.data files — graph .onnx files can legitimately be
+# smaller than this floor in external-data ONNX layouts.
+_MIN_BINARY_MODEL_BYTES = 10 * 1024 * 1024  # 10 MB
 
 
 def _download_and_verify_file(
