@@ -458,10 +458,25 @@ jobs:
       - name: Squash-merge approved PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          title=$(gh pr view "$PR" --repo "${{ github.repository }}" --json title -q .title)
-          gh pr merge "$PR" --repo "${{ github.repository }}" --squash --auto --delete-branch \
+          base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
+          head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
+
+          if [[ "$base" != "main" ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+            exit 0
+          fi
+
+          children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+          if [[ "$children" -gt 0 ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
+            exit 0
+          fi
+
+          title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title)
+          gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch \
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
@@ -479,10 +494,25 @@ jobs:
       - name: Squash-merge approved PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
         run: |
-          title=$(gh pr view "$PR" --repo "${{ github.repository }}" --json title -q .title)
-          gh pr merge "$PR" --repo "${{ github.repository }}" --squash --auto --delete-branch \
+          base=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q .baseRefName)
+          head=$(gh pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName)
+
+          if [[ "$base" != "main" ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+            exit 0
+          fi
+
+          children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+          if [[ "$children" -gt 0 ]]; then
+            gh pr comment "$PR" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-approve."
+            exit 0
+          fi
+
+          title=$(gh pr view "$PR" --repo "$REPO" --json title -q .title)
+          gh pr merge "$PR" --repo "$REPO" --squash --auto --delete-branch \
             --subject "${title} (#${PR})"
           echo "Auto-merge enabled on PR #${PR}. GitHub will merge when CI passes."
 
@@ -547,11 +577,26 @@ jobs:
         if: steps.approved.outputs.has_approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           for pr in ${{ steps.approved.outputs.pr_numbers }}; do
             echo "=== Processing PR #${pr} ==="
-            title=$(gh pr view "$pr" --repo "${{ github.repository }}" --json title -q .title)
-            gh pr merge "$pr" --repo "${{ github.repository }}" --squash --auto --delete-branch \
+            base=$(gh pr view "$pr" --repo "$REPO" --json baseRefName -q .baseRefName)
+            head=$(gh pr view "$pr" --repo "$REPO" --json headRefName -q .headRefName)
+
+            if [[ "$base" != "main" ]]; then
+              gh pr comment "$pr" --repo "$REPO" --body "🤖 Auto-merge skipped: PR targets \`$base\` instead of \`main\`. Legacy stacked PRs must be merged manually from leaf to root."
+              continue
+            fi
+
+            children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+            if [[ "$children" -gt 0 ]]; then
+              gh pr comment "$pr" --repo "$REPO" --body "🤖 Auto-merge skipped: open child PRs still target \`$head\`. Resolve or close children first, then re-react with 👍."
+              continue
+            fi
+
+            title=$(gh pr view "$pr" --repo "$REPO" --json title -q .title)
+            gh pr merge "$pr" --repo "$REPO" --squash --auto --delete-branch \
               --subject "${title} (#${pr})" \
               || echo "WARNING: Auto-merge failed for PR #${pr}"
           done
