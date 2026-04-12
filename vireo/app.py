@@ -5103,7 +5103,14 @@ def create_app(db_path, thumb_cache_dir=None):
         }
 
         # --- Send or download ---
-        effective = db.get_effective_config(cfg.load()) if db else cfg.load()
+        # Fall back to plain cfg.load() if the DB is degraded (e.g. schema or
+        # connection errors) so the download path still works when users are
+        # reporting DB problems.
+        try:
+            effective = db.get_effective_config(cfg.load()) if db else cfg.load()
+        except Exception:
+            log.exception("Failed to load effective config for issue report")
+            effective = cfg.load()
         report_url = effective.get("report_url", "")
 
         if report_url:

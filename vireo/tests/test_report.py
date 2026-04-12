@@ -107,3 +107,23 @@ class TestReportIssue:
         data = resp.get_json()
         assert data["status"] == "download"
         assert "diagnostics" in data
+
+    def test_report_when_effective_config_raises(self, app_and_db, monkeypatch):
+        """If the DB is degraded and get_effective_config raises, still return
+        a download bundle (don't 500) — this is the path users need when they
+        are reporting DB problems."""
+        app, _ = app_and_db
+
+        from db import Database
+
+        def boom(self, *a, **kw):
+            raise RuntimeError("schema broken")
+
+        monkeypatch.setattr(Database, "get_effective_config", boom)
+
+        with app.test_client() as c:
+            resp = c.post("/api/report-issue", json={"description": "db broken"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "download"
+        assert data["diagnostics"]["description"] == "db broken"
