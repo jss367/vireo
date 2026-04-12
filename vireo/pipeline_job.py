@@ -976,9 +976,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         cached_detections=this_run_detections,
                     )
                     detected += det_count
-                    already_detected.update(det_map.keys())
+                    # Track ALL processed photos — including those where
+                    # MegaDetector found zero detections — so model 2+ skips
+                    # MegaDetector for them instead of re-running detection on
+                    # empty-frame photos each iteration.
+                    already_detected.update(det_processed_ids)
                     if spec_idx == 0:
                         this_run_detections.update(det_map)
+                        # Also cache zero-detection photos so model 2+ finds
+                        # them in cached_detections and skips MegaDetector
+                        # rather than falling through to db.get_detections().
+                        for pid in det_processed_ids:
+                            if pid not in this_run_detections:
+                                this_run_detections[pid] = []
                         # Key purge eligibility on photos whose per-photo
                         # iteration in _detect_batch actually completed —
                         # not the whole submitted batch.  If _detect_batch

@@ -1631,13 +1631,19 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
 
-    # Capture the already_detected_ids set passed to each _detect_batch call.
-    detect_call_ids = []
+    # Capture the already_detected_ids and cached_detections passed to each
+    # _detect_batch call so we can verify model 2 gets fresh cache entries
+    # from model 1 rather than stale DB rows.
+    detect_calls = []
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
-        detect_call_ids.append(frozenset(already_detected_ids or set()))
+        detect_calls.append({
+            "already_detected_ids": frozenset(already_detected_ids or set()),
+            "cached_detections": dict(cached_detections) if cached_detections else {},
+            "reclassify": reclassify,
+        })
         # Model 1 "detects" nothing in this run — empty det_map, but every
         # photo in the batch completed its iteration.
         return {}, 0, {p["id"] for p in batch}
@@ -1667,22 +1673,39 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # _detect_batch should have been called at least once (one batch per model).
-    assert len(detect_call_ids) >= 1, (
-        "Expected _detect_batch to be called at least once but it was not."
+    # _detect_batch should have been called twice (one batch per model).
+    assert len(detect_calls) == 2, (
+        f"Expected 2 _detect_batch calls (one per model), got {len(detect_calls)}"
     )
 
-    # The stale prior-run photo_id must NOT appear in already_detected_ids for
-    # any _detect_batch invocation.  With the fix, already_detected is wiped
-    # before model 1's loop; model 1 finds nothing → already_detected stays
-    # empty → model 2 receives an empty set, not the pre-seeded stale ID.
-    for call_ids in detect_call_ids:
-        assert photo_id not in call_ids, (
-            f"Prior-run photo_id {photo_id} leaked into already_detected_ids "
-            f"{call_ids!r}. already_detected must be cleared before the first "
-            "model's batch loop so later models do not use stale detection rows "
-            "from prior pipeline passes."
-        )
+    # Model 1 (reclassify=True): already_detected must be empty because this
+    # is a fresh reclassify run — no stale prior-run IDs should be seeded.
+    assert photo_id not in detect_calls[0]["already_detected_ids"], (
+        f"Prior-run photo_id {photo_id} leaked into already_detected_ids for "
+        "model 1. already_detected must start empty on reclassify runs."
+    )
+
+    # Model 2: already_detected SHOULD contain photo_id because model 1
+    # processed it (even with zero detections).  This tells model 2 to skip
+    # MegaDetector and use cached_detections from this run instead of falling
+    # back to db.get_detections() which would return stale rows.
+    assert photo_id in detect_calls[1]["already_detected_ids"], (
+        f"photo_id {photo_id} missing from already_detected_ids for model 2. "
+        "Zero-detection photos from model 1 must be tracked so model 2 "
+        "does not redundantly re-run MegaDetector."
+    )
+
+    # Model 2 must receive cached_detections with an empty list for the
+    # zero-detection photo, preventing fallback to db.get_detections().
+    assert photo_id in detect_calls[1]["cached_detections"], (
+        f"photo_id {photo_id} missing from cached_detections for model 2. "
+        "Zero-detection photos must be cached so model 2 uses the fresh "
+        "(empty) result instead of stale DB rows."
+    )
+    assert detect_calls[1]["cached_detections"][photo_id] == [], (
+        "cached_detections entry for a zero-detection photo should be an "
+        "empty list."
+    )
 
 
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
