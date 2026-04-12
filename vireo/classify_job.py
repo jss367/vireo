@@ -217,7 +217,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # detection rows just produced, not stale rows from a
                 # prior pipeline pass that db.get_detections() would
                 # return when old rows haven't been cleared.
-                if photo["id"] in cached_detections:
+                if cached_detections is not None and photo["id"] in cached_detections:
                     det_list = cached_detections[photo["id"]]
                     if det_list:
                         detection_map[photo["id"]] = det_list

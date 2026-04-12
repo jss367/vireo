@@ -1708,6 +1708,55 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     )
 
 
+def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
+    """_detect_batch must use cached_detections when provided instead of
+    calling db.get_detections(), so model 2+ in a multi-model reclassify run
+    bind predictions to the detection rows model 1 produced in *this* run
+    rather than stale rows from a prior pipeline pass.
+
+    Regression test for the second Codex P1 comment on #506 ('Restrict model
+    2+ reuse to detections created in this run').
+    """
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    import classify_job
+
+    photo = {"id": 42, "folder_id": 1, "filename": "bird.jpg"}
+
+    cached_det = [{"id": 99, "box_x": 0.1, "box_y": 0.1,
+                   "box_w": 0.5, "box_h": 0.5,
+                   "confidence": 0.95, "category": "animal"}]
+
+    db_called = {"n": 0}
+
+    class FakeDB:
+        def get_detections(self, photo_id):
+            db_called["n"] += 1
+            return []
+
+    det_map, count, processed = classify_job._detect_batch(
+        photos=[photo],
+        folders={1: "/fake"},
+        runner=None,
+        job=None,
+        reclassify=False,
+        db=FakeDB(),
+        already_detected_ids={42},
+        cached_detections={42: cached_det},
+    )
+
+    assert db_called["n"] == 0, (
+        "db.get_detections() must NOT be called when cached_detections "
+        "already has an entry for the photo."
+    )
+    assert det_map.get(42) == cached_det, (
+        "detection_map must contain the cached detection list, not a DB result."
+    )
+    assert count == 1
+    assert 42 in processed
+
+
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     """On reclassify, prior-run detection rows must be deleted after model 1
     re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
