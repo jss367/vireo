@@ -266,6 +266,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                     })
                 detection_map[photo["id"]] = det_list
 
+                # Mark as processed immediately after detection rows are committed
+                # so that even if the quality-scoring calls below raise, the
+                # reclassify purge in pipeline_job correctly removes the now-stale
+                # pre-run detection rows for this photo rather than leaving them in
+                # place and allowing future non-reclassify runs to reuse them.
+                processed_ids.add(photo["id"])
+
                 # Use highest-confidence detection as primary for quality scoring
                 primary = get_primary_detection(detections)
                 if primary:
