@@ -655,6 +655,23 @@ def _download_and_verify_file(
             filename, attempts, expected_sha[:8], actual_sha[:8],
         )
         if attempts > _MAX_HASH_RETRIES:
+            # Write .verify_failed before raising so _classify_model_state
+            # reports 'incomplete' even though download_model's post-loop
+            # sentinel logic is skipped by the exception.  Without this,
+            # a repair on an already-installed model leaves all files
+            # present and the model appears 'ok' despite proven corruption.
+            sentinel = os.path.join(
+                model_dir, model_verify.VERIFY_FAILED_SENTINEL
+            )
+            try:
+                with open(sentinel, "w") as f:
+                    f.write(
+                        f"hash-mismatch: {filename} "
+                        f"expected {expected_sha[:8]}... "
+                        f"got {actual_sha[:8]}...\n"
+                    )
+            except OSError:
+                pass
             raise model_verify.VerifyError(
                 f"{filename} failed SHA256 verification after "
                 f"{_MAX_HASH_RETRIES + 1} attempts "

@@ -708,6 +708,13 @@ def test_download_model_raises_after_max_retries(tmp_path, monkeypatch):
 
     assert attempts["image_encoder.onnx"] == 3
 
+    # .verify_failed sentinel must exist so _classify_model_state reports
+    # 'incomplete' even though all files are physically present on disk.
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), ".verify_failed sentinel must be written before raising"
+    assert "hash-mismatch" in sentinel.read_text()
+
     # Broken model must not have been registered.
     cfg = models._load_config()
     assert not any(m["id"] == "bioclip-vit-b-16" for m in cfg.get("models", []))
