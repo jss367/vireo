@@ -4,6 +4,7 @@ Covers sha256_file, fetch_expected_hashes (HF tree API parsing),
 verify_model (on-disk vs expected), verify_if_needed (lazy + cached),
 and the .verify_failed sentinel file.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -587,8 +588,6 @@ def test_verify_if_needed_skips_network_within_ttl_after_verify_error(tmp_path, 
     """After a VerifyError, subsequent calls within _VERIFY_ERROR_TTL must skip
     the network check entirely — no call to verify_model at all.  This avoids
     repeated 30-second stalls on every pipeline start when HF is unreachable."""
-    import time as _time
-
     import model_verify
 
     call_count = {"n": 0}
@@ -759,10 +758,8 @@ def test_download_model_clears_stale_revision_when_both_apis_fail(tmp_path, monk
     # download_model may raise (size-floor check fires on stub files, or
     # state check sees missing files). Either way we only care that the
     # stale .hf_revision was deleted before the exception.
-    try:
+    with contextlib.suppress(RuntimeError):
         models_mod.download_model("bioclip-vit-b-16")
-    except RuntimeError:
-        pass  # expected — stub files trigger the size-floor check
 
     assert not stale_rev.exists(), (
         "Stale .hf_revision must be deleted when both revision and hash APIs "

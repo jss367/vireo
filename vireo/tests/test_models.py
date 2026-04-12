@@ -1144,6 +1144,9 @@ def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
     download_model must raise immediately rather than silently registering a
     truncated/stub file as a healthy model.
 
+    Only .onnx.data files are checked — graph .onnx files can legitimately
+    be much smaller in external-data ONNX layouts.
+
     Regression for Codex P2 review on #501 (vireo/models.py line 487).
     Plain .onnx graph files are excluded from the floor check because they are
     legitimately small in external-data ONNX layouts (Codex P1 on #520).
@@ -1171,6 +1174,14 @@ def test_download_model_raises_when_binary_file_too_small_and_hash_fetch_fails(
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="truncated"):
         models.download_model("bioclip-vit-b-16")
+
+    # The verify-failed sentinel must be written so _classify_model_state
+    # reports 'incomplete' and get_models() shows the Repair button.
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert sentinel.exists(), (
+        "Size-floor failure must write .verify_failed sentinel so the model "
+        "is not treated as healthy by _classify_model_state."
+    )
 
 
 def test_download_model_small_onnx_graph_does_not_trigger_size_floor(
@@ -1210,12 +1221,7 @@ def test_download_model_small_onnx_graph_does_not_trigger_size_floor(
     monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
     monkeypatch.setattr(model_verify, "fetch_expected_hashes", fetch_raises)
 
-    # Must NOT raise "truncated" — the .onnx graph is tiny but that is
-    # allowed; only the .onnx.data sidecars are subject to the floor.
-    try:
-        models.download_model("bioclip-vit-b-16")
-    except RuntimeError as exc:
-        assert "truncated" not in str(exc), (
-            "Size-floor check must not fire on plain .onnx graph files — "
-            "they are legitimately small in external-data ONNX layouts"
-        )
+    # Must NOT raise — the .onnx graph is tiny but that is allowed; only the
+    # .onnx.data sidecars are subject to the floor.  Any exception here
+    # (including a non-"truncated" RuntimeError) is a test failure.
+    models.download_model("bioclip-vit-b-16")
