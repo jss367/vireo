@@ -1063,7 +1063,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # Detect this batch. Pass already_detected so subsequent
                     # models skip MegaDetector on photos that already have
                     # detections in the DB.  On reclassify runs, only the
-                    # first model iteration re-runs detection (spec_idx == 0);
+                    # first *successfully processed* model re-runs detection
+                    # (models_succeeded == 0 before this iteration completes);
                     # subsequent models share those detections rather than
                     # inserting duplicate rows for the same photos.
                     # cached_detections gives model 2+ the exact detection
@@ -1071,7 +1072,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     # could return stale rows from a prior pipeline pass).
                     det_map, det_count, det_processed_ids = _detect_batch(
                         batch, folders, runner, job,
-                        params.reclassify and spec_idx == 0, thread_db,
+                        params.reclassify and models_succeeded == 0, thread_db,
                         already_detected_ids=already_detected,
                         cached_detections=this_run_detections if _multi_model else None,
                     )
@@ -1093,13 +1094,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         for pid in det_processed_ids:
                             if pid not in this_run_detections:
                                 this_run_detections[pid] = []
-                    if spec_idx == 0:
+                    if models_succeeded == 0:
                         # Key purge eligibility on photos whose per-photo
                         # iteration in _detect_batch actually completed —
                         # not the whole submitted batch.  If _detect_batch
                         # caught an exception mid-loop and returned early,
                         # unprocessed photos will be absent from this set
                         # and their stale rows will be preserved.
+                        # Use models_succeeded == 0 (not spec_idx == 0) so
+                        # this still fires when the first spec failed to load
+                        # and a later spec is the first to successfully run.
                         _model1_processed_photo_ids.update(det_processed_ids)
 
                     # Classify this batch
@@ -1156,15 +1160,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 total_skipped_existing += skipped_existing
                 models_succeeded += 1
 
-                # After model 1 has inserted all fresh detection rows, delete
-                # the pre-run stale rows we snapshotted before the loop.
-                # This prevents stale prior-run boxes from polluting future
-                # non-reclassify runs (the false-positive reuse regression
-                # flagged by Codex on #511 line 848).  We do this AFTER model
-                # 1's full pass — not batch-by-batch — so that all new rows
-                # are committed before the old ones are removed.
-                # model 2+ already has the new IDs via this_run_detections.
-                if params.reclassify and spec_idx == 0 and _pre_run_det_ids:
+                # After the first successfully processed model has inserted all
+                # fresh detection rows, delete the pre-run stale rows we
+                # snapshotted before the loop.  This prevents stale prior-run
+                # boxes from polluting future non-reclassify runs (the
+                # false-positive reuse regression flagged by Codex on #511
+                # line 848).  We do this AFTER the first model's full pass —
+                # not batch-by-batch — so that all new rows are committed
+                # before the old ones are removed.
+                # models_succeeded == 1 (just incremented) identifies the
+                # first successfully completed model regardless of spec index,
+                # so the purge still fires even when spec_idx == 0 was skipped
+                # due to a model load failure.
+                if params.reclassify and models_succeeded == 1 and _pre_run_det_ids:
                     # Only purge stale rows for photos whose per-photo
                     # iteration in _detect_batch actually ran to completion.
                     # If the run was aborted before a batch was submitted,
