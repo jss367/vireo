@@ -348,8 +348,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     )
 
     if detect_animals is not None and get_primary_detection is not None:
-        needs_fresh_detection = reclassify or any(
-            p["id"] not in already_detected_ids for p in photos
+        needs_fresh_detection = bool(photos) and (
+            reclassify or any(
+                p["id"] not in already_detected_ids for p in photos
+            )
         )
         if needs_fresh_detection:
             from detector import ensure_megadetector_weights

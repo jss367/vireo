@@ -967,8 +967,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # runs. Skip when every photo already has cached detections and we're
             # not reclassifying — _detect_batch will reuse DB rows and never call
             # MegaDetector, so an offline rerun should not abort on missing weights.
-            needs_fresh_detection = params.reclassify or any(
-                p["id"] not in already_detected for p in photos
+            # Also skip when photos is empty: a no-op reclassify on an empty
+            # collection should not trigger a weight download.
+            needs_fresh_detection = bool(photos) and (
+                params.reclassify or any(
+                    p["id"] not in already_detected for p in photos
+                )
             )
             if needs_fresh_detection:
                 from detector import ensure_megadetector_weights
