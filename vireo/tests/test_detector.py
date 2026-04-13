@@ -305,6 +305,70 @@ def test_ensure_weights_raises_on_download_failure(tmp_path, monkeypatch):
     assert not dest_path.exists()
 
 
+def test_ensure_weights_atomic_and_serialized(tmp_path, monkeypatch):
+    """Concurrent callers download once and never observe a partial file
+    at the final path. Guards against the copy/copy race Codex flagged."""
+    import threading
+
+    import detector
+
+    dest_dir = tmp_path / "megadetector-v6"
+    dest_path = dest_dir / "model.onnx"
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_DIR", str(dest_dir))
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(dest_path))
+
+    cache_path = tmp_path / "hf-cache" / "model.onnx"
+    cache_path.parent.mkdir()
+    cache_path.write_bytes(b"m" * 4096)
+
+    call_count = 0
+    observed_partial = False
+    download_started = threading.Event()
+
+    def fake_hf_hub_download(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Release the second thread so it can race the in-progress download.
+        download_started.set()
+        return str(cache_path)
+
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    def run():
+        detector.ensure_megadetector_weights()
+
+    def observer():
+        # Wait until thread-A is inside the download block, then repeatedly
+        # probe the final path. With atomic replace + lock it must either
+        # not exist, or be the full 4096 bytes — never anything in between.
+        nonlocal observed_partial
+        download_started.wait(timeout=2.0)
+        for _ in range(100):
+            if dest_path.is_file():
+                size = dest_path.stat().st_size
+                if 0 < size < 4096:
+                    observed_partial = True
+                    return
+
+    t1 = threading.Thread(target=run)
+    t2 = threading.Thread(target=observer)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Second caller enters after t1 finished, so exactly one real download occurred.
+    detector.ensure_megadetector_weights()
+    assert call_count == 1
+    assert dest_path.stat().st_size == 4096
+    assert not observed_partial
+
+
 def test_megadetector_onnx_model_file_valid():
     """Verify MegaDetector ONNX model file exists and is valid."""
     try:

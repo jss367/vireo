@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 _session = None
 _lock = threading.Lock()
+_download_lock = threading.Lock()
 
 # MegaDetector ONNX model path — downloaded to ~/.vireo/models/megadetector-v6/
 MEGADETECTOR_ONNX_DIR = os.path.expanduser("~/.vireo/models/megadetector-v6")
@@ -39,48 +40,64 @@ def ensure_megadetector_weights(progress_callback=None):
     if os.path.isfile(MEGADETECTOR_ONNX_PATH):
         return MEGADETECTOR_ONNX_PATH
 
-    os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
+    # Serialize concurrent first-run downloads. Without the lock, two parallel
+    # jobs would both start a ~300 MB download; without the atomic replace
+    # below, a second caller could also observe a half-copied file at the
+    # final path and try to load it as ONNX.
+    with _download_lock:
+        if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+            return MEGADETECTOR_ONNX_PATH
 
-    if progress_callback:
-        progress_callback(
-            "Downloading MegaDetector V6 (~300 MB, first run only)...", 0, 1
-        )
-    log.info("MegaDetector weights missing — downloading from Hugging Face")
+        os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
 
-    try:
-        import shutil
+        if progress_callback:
+            progress_callback(
+                "Downloading MegaDetector V6 (~300 MB, first run only)...", 0, 1
+            )
+        log.info("MegaDetector weights missing — downloading from Hugging Face")
 
-        from huggingface_hub import hf_hub_download
-        from models import ONNX_REPO
+        tmp_path = MEGADETECTOR_ONNX_PATH + ".download"
+        try:
+            import shutil
 
-        cached_path = hf_hub_download(
-            repo_id=ONNX_REPO,
-            filename="model.onnx",
-            subfolder="megadetector-v6",
-        )
-        if cached_path != MEGADETECTOR_ONNX_PATH:
-            shutil.copy2(cached_path, MEGADETECTOR_ONNX_PATH)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to download MegaDetector V6 weights: {e}. "
-            "Check your network connection and retry, or download manually "
-            "from the pipeline models page."
-        ) from e
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
 
-    if not os.path.isfile(MEGADETECTOR_ONNX_PATH):
-        raise RuntimeError(
-            "MegaDetector download completed but weights file is missing at "
-            f"{MEGADETECTOR_ONNX_PATH}."
-        )
+            cached_path = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx",
+                subfolder="megadetector-v6",
+            )
+            # Copy to a sibling temp path then atomically replace so other
+            # threads only ever observe either the old (missing) state or a
+            # fully written weights file — never a partial copy.
+            shutil.copy2(cached_path, tmp_path)
+            os.replace(tmp_path, MEGADETECTOR_ONNX_PATH)
+        except Exception as e:
+            import contextlib
 
-    size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
-    log.info("MegaDetector weights downloaded (%s MB)", size_mb)
-    if progress_callback:
-        progress_callback(
-            f"MegaDetector V6 ready ({size_mb} MB)", 1, 1
-        )
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise RuntimeError(
+                f"Failed to download MegaDetector V6 weights: {e}. "
+                "Check your network connection and retry, or download manually "
+                "from the pipeline models page."
+            ) from e
 
-    return MEGADETECTOR_ONNX_PATH
+        if not os.path.isfile(MEGADETECTOR_ONNX_PATH):
+            raise RuntimeError(
+                "MegaDetector download completed but weights file is missing at "
+                f"{MEGADETECTOR_ONNX_PATH}."
+            )
+
+        size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+        log.info("MegaDetector weights downloaded (%s MB)", size_mb)
+        if progress_callback:
+            progress_callback(
+                f"MegaDetector V6 ready ({size_mb} MB)", 1, 1
+            )
+
+        return MEGADETECTOR_ONNX_PATH
 
 
 def _get_session():
