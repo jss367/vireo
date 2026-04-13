@@ -1411,22 +1411,35 @@ class Database:
             photo_id = row["id"]
 
         # Auto-resolve duplicates when we have a file_hash and >1 non-rejected
-        # rows share it. Disabled via env var for tests that exercise
-        # apply_duplicate_resolution directly.
-        if file_hash and not os.environ.get("VIREO_DISABLE_AUTO_DUP_RESOLVE"):
-            try:
-                dup_rows = self.conn.execute(
-                    "SELECT id FROM photos WHERE file_hash = ? AND flag != 'rejected'",
-                    (file_hash,),
-                ).fetchall()
-                if len(dup_rows) > 1:
-                    self.apply_duplicate_resolution([r["id"] for r in dup_rows])
-            except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
-                )
+        # rows share it. Most scanner-path callers leave file_hash=None here
+        # and set it later via an UPDATE; those callers must invoke
+        # check_and_resolve_duplicates_for_hash themselves after the UPDATE.
+        if file_hash:
+            self.check_and_resolve_duplicates_for_hash(file_hash)
 
         return photo_id
+
+    def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
+        """Look up non-rejected photos sharing this hash; if >=2, resolve.
+
+        Returns the result dict from apply_duplicate_resolution when resolution
+        ran, or None when no resolution was needed. Failures are logged and
+        swallowed — this is a best-effort hook, not a correctness guarantee.
+        """
+        if not file_hash:
+            return None
+        try:
+            dup_rows = self.conn.execute(
+                "SELECT id FROM photos WHERE file_hash = ? AND flag != 'rejected'",
+                (file_hash,),
+            ).fetchall()
+            if len(dup_rows) > 1:
+                return self.apply_duplicate_resolution([r["id"] for r in dup_rows])
+        except sqlite3.Error as e:
+            logging.getLogger(__name__).warning(
+                "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
+            )
+        return None
 
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.

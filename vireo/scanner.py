@@ -590,6 +590,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 update_params,
             )
             db.conn.commit()
+            # Trigger duplicate auto-resolve now that file_hash is committed.
+            # add_photo was called without the hash, so the hook there was a
+            # no-op — we own firing it here.
+            if file_hash is not None:
+                db.check_and_resolve_duplicates_for_hash(file_hash)
 
         # Import XMP keywords if sidecar exists
         if xmp_path.exists():

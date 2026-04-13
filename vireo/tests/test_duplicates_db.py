@@ -23,18 +23,29 @@ def _add(db, folder_id, filename, file_hash=None, file_mtime=100.0, rating=0):
     return pid
 
 
+def _reset_flags(db, file_hash):
+    """Clear auto-rejection so tests can exercise apply_duplicate_resolution directly."""
+    db.conn.execute(
+        "UPDATE photos SET flag = 'none' WHERE file_hash = ?", (file_hash,)
+    )
+    db.conn.commit()
+
+
 # -----------------------------------------------------------------------------
 # Task 7: apply_duplicate_resolution
 # -----------------------------------------------------------------------------
 
-def test_apply_resolution_rejects_loser_and_merges_rating(tmp_path, monkeypatch):
+def test_apply_resolution_rejects_loser_and_merges_rating(tmp_path):
     """The resolver picks a winner, merges max rating, rejects losers."""
-    # Disable the auto-resolve hook so we can test apply_duplicate_resolution directly.
-    monkeypatch.setenv("VIREO_DISABLE_AUTO_DUP_RESOLVE", "1")
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HASH1", rating=0)
-    p2 = _add(db, fid, "owl (2).jpg", file_hash="HASH1", rating=5)
+    p2 = _add(db, fid, "owl (2).jpg", file_hash="HASH1")
+    # The add_photo hook auto-rejected one already; reset so we can test
+    # apply_duplicate_resolution directly. Also set p2's rating via raw SQL.
+    _reset_flags(db, "HASH1")
+    db.conn.execute("UPDATE photos SET rating = ? WHERE id = ?", (5, p2))
+    db.conn.commit()
 
     result = db.apply_duplicate_resolution([p1, p2])
     assert result["winner_id"] == p1
@@ -52,32 +63,50 @@ def test_apply_resolution_rejects_loser_and_merges_rating(tmp_path, monkeypatch)
     assert row["flag"] == "rejected"
 
 
-def test_apply_resolution_skips_already_rejected(tmp_path, monkeypatch):
-    """If fewer than 2 non-rejected candidates remain, resolver is a no-op."""
-    monkeypatch.setenv("VIREO_DISABLE_AUTO_DUP_RESOLVE", "1")
+def test_apply_resolution_skips_already_rejected(tmp_path):
+    """If fewer than 2 non-rejected candidates remain, resolver is a no-op.
+
+    After two add_photo calls with a shared hash, the hook has already
+    rejected one of them. Calling apply_duplicate_resolution on the same
+    pair should be a no-op.
+    """
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "a.jpg", file_hash="H")
     p2 = _add(db, fid, "b.jpg", file_hash="H")
-    db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (p2,))
-    db.conn.commit()
+
+    # Exactly one of p1/p2 is rejected by the hook; identify the survivor.
+    flags = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p1, p2)
+        ).fetchall()
+    }
+    rejected = [pid for pid, f in flags.items() if f == "rejected"]
+    assert len(rejected) == 1
 
     result = db.apply_duplicate_resolution([p1, p2])
     assert result["winner_id"] is None
     assert result["loser_ids"] == []
     assert result["rejected"] == 0
-    # p2 stays rejected, p1 stays unflagged
-    r1 = db.conn.execute("SELECT flag FROM photos WHERE id = ?", (p1,)).fetchone()
-    assert r1["flag"] != "rejected"
+    # Flags unchanged.
+    flags_after = {
+        r["id"]: r["flag"]
+        for r in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)", (p1, p2)
+        ).fetchall()
+    }
+    assert flags_after == flags
 
 
-def test_apply_resolution_merges_keywords(tmp_path, monkeypatch):
+def test_apply_resolution_merges_keywords(tmp_path):
     """Winner gains loser's keywords (union)."""
-    monkeypatch.setenv("VIREO_DISABLE_AUTO_DUP_RESOLVE", "1")
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="H")
     p2 = _add(db, fid, "owl (2).jpg", file_hash="H")
+    # Reset hook's auto-rejection so apply_duplicate_resolution sees both.
+    _reset_flags(db, "H")
     kw_id = db.add_keyword("bird")
     db.conn.execute(
         "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
@@ -92,9 +121,8 @@ def test_apply_resolution_merges_keywords(tmp_path, monkeypatch):
     assert any(r["keyword_id"] == kw_id for r in rows)
 
 
-def test_apply_resolution_single_candidate_noop(tmp_path, monkeypatch):
+def test_apply_resolution_single_candidate_noop(tmp_path):
     """With <2 candidates we return an empty result with no changes."""
-    monkeypatch.setenv("VIREO_DISABLE_AUTO_DUP_RESOLVE", "1")
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "a.jpg", file_hash="H")
@@ -132,17 +160,19 @@ def test_add_photo_no_hash_no_hook(tmp_path):
         assert row["flag"] == "none"
 
 
-def test_add_photo_hook_does_not_break_on_resolver_error(tmp_path, monkeypatch):
-    """If the resolver raises, the insert still succeeds and returns the id."""
+def test_add_photo_hook_swallows_sqlite_error(tmp_path, monkeypatch):
+    """sqlite3.Error raised inside the hook is logged and swallowed."""
+    import sqlite3
+
     db = Database(str(tmp_path / "t.db"))
     fid = db.add_folder(str(tmp_path))
     p1 = _add(db, fid, "owl.jpg", file_hash="HBOOM")
 
-    # Monkeypatch the resolver to raise — the hook should swallow and log.
-    import duplicates as dup_mod
-    def _boom(*a, **kw):
-        raise RuntimeError("synthetic resolver failure")
-    monkeypatch.setattr(dup_mod, "resolve_duplicates", _boom)
+    # Patch apply_duplicate_resolution on the instance so the hook's
+    # execute() succeeds but the resolver call raises sqlite3.Error.
+    def _boom(ids):
+        raise sqlite3.OperationalError("synthetic")
+    monkeypatch.setattr(db, "apply_duplicate_resolution", _boom)
 
     p2 = db.add_photo(
         folder_id=fid,
@@ -156,3 +186,41 @@ def test_add_photo_hook_does_not_break_on_resolver_error(tmp_path, monkeypatch):
     # Neither photo is rejected because the hook failed gracefully.
     r2 = db.conn.execute("SELECT flag FROM photos WHERE id = ?", (p2,)).fetchone()
     assert r2["flag"] != "rejected"
+
+
+# -----------------------------------------------------------------------------
+# Scanner-style flow: add_photo (no hash) + UPDATE hash + explicit hook call.
+# -----------------------------------------------------------------------------
+
+def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
+    """Mimic scanner.py: insert without file_hash, UPDATE it, then call the hook."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+
+    # Scanner path: add_photo with no hash, then UPDATE photos SET file_hash=?
+    p1 = db.add_photo(
+        folder_id=fid, filename="owl.jpg", extension=".jpg",
+        file_size=1000, file_mtime=100.0,
+    )
+    p2 = db.add_photo(
+        folder_id=fid, filename="owl (2).jpg", extension=".jpg",
+        file_size=1000, file_mtime=100.0,
+    )
+    db.conn.execute("UPDATE photos SET file_hash = ? WHERE id = ?", ("SCANHASH", p1))
+    db.conn.commit()
+    # First call: only one row has the hash — no-op.
+    result = db.check_and_resolve_duplicates_for_hash("SCANHASH")
+    assert result is None
+
+    db.conn.execute("UPDATE photos SET file_hash = ? WHERE id = ?", ("SCANHASH", p2))
+    db.conn.commit()
+    # Second call: two rows share the hash — resolve.
+    result = db.check_and_resolve_duplicates_for_hash("SCANHASH")
+    assert result is not None
+    assert result["winner_id"] == p1
+    assert result["loser_ids"] == [p2]
+
+    r1 = db.conn.execute("SELECT flag FROM photos WHERE id = ?", (p1,)).fetchone()
+    r2 = db.conn.execute("SELECT flag FROM photos WHERE id = ?", (p2,)).fetchone()
+    assert r1["flag"] != "rejected"
+    assert r2["flag"] == "rejected"
