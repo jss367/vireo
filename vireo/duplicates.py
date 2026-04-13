@@ -55,4 +55,12 @@ def resolve_duplicates(candidates):
         losers = [c for c in candidates if c.id != winner.id]
         return winner.id, [l.id for l in losers]
 
-    raise NotImplementedError("rules 3-4 not yet")
+    # Rule 3: older mtime wins
+    min_mtime = min(c.mtime for c in pool)
+    oldest = [c for c in pool if c.mtime == min_mtime]
+    if len(oldest) == 1:
+        winner = oldest[0]
+        losers = [c for c in candidates if c.id != winner.id]
+        return winner.id, [l.id for l in losers]
+
+    raise NotImplementedError("rule 4 not yet")

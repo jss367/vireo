@@ -32,3 +32,11 @@ def test_resolve_prefers_shorter_path():
     winner, losers = resolve_duplicates([deep, shallow])
     assert winner == 1
     assert losers == [2]
+
+
+def test_resolve_prefers_older_mtime():
+    older = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    newer = DupCandidate(id=2, path="/b/owl.jpg", mtime=200.0)  # same-length path
+    winner, losers = resolve_duplicates([newer, older])
+    assert winner == 1
+    assert losers == [2]
