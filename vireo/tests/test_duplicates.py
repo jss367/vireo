@@ -64,6 +64,24 @@ def test_resolve_three_way_middle_wins():
     assert sorted(losers) == [1, 3]
 
 
+def test_resolve_rule1_cascades_to_rule2_among_clean():
+    long_clean  = DupCandidate(id=1, path="/archive/deep/owl.jpg", mtime=100.0)
+    short_clean = DupCandidate(id=2, path="/a/owl.jpg",           mtime=100.0)
+    dirty       = DupCandidate(id=3, path="/a/owl (2).jpg",       mtime=100.0)
+    # Pass in an order that would tempt the old buggy code to pick id=1:
+    winner, losers = resolve_duplicates([long_clean, short_clean, dirty])
+    assert winner == 2                    # rule 2 (shorter path) decides among clean
+    assert sorted(losers) == [1, 3]        # both the long-clean and the dirty one lose
+
+
+def test_resolve_all_dirty_falls_through_to_rules_2_through_4():
+    a = DupCandidate(id=1, path="/a/archive/owl (2).jpg", mtime=100.0)
+    b = DupCandidate(id=2, path="/a/owl (3).jpg",         mtime=100.0)
+    winner, losers = resolve_duplicates([a, b])
+    assert winner == 2  # rule 2 — shorter path wins among all-dirty
+    assert losers == [1]
+
+
 def test_merge_rating_takes_max():
     winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)
     losers = [PhotoMetadata(id=2, rating=5, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)]

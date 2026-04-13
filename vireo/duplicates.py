@@ -31,42 +31,43 @@ def resolve_duplicates(candidates):
     """Return (winner_id, [loser_ids]) for a group sharing a file_hash.
 
     Tiebreakers applied in order until decisive:
-    1. Prefer filenames without dup-ish suffixes (case-insensitive).
-    2. (TODO) shorter path wins.
-    3. (TODO) older mtime wins.
-    4. (TODO) lower id wins.
+    1. If at least one candidate has a clean filename, all dirty candidates
+       lose and tiebreaking continues among the clean ones. If all candidates
+       are dirty (or all are clean), this rule is a no-op.
+    2. Shorter path wins.
+    3. Older mtime wins.
+    4. Lower id wins.
     """
     assert len(candidates) >= 2, "resolver called with <2 candidates"
 
     clean = [c for c in candidates if not _has_dup_suffix(c.path)]
     dirty = [c for c in candidates if _has_dup_suffix(c.path)]
     if clean and dirty:
-        # rule 1 decisive: all dirty are losers; among clean, arbitrary for now
-        winner = clean[0]
-        losers = [c for c in candidates if c.id != winner.id]
-        return winner.id, [l.id for l in losers]
+        # rule 1 eliminated dirty; now run rules 2-4 on clean only
+        pool = clean
+    else:
+        pool = candidates
 
-    # All same on rule 1 — try rule 2 (shorter path wins)
-    pool = candidates
+    # Rule 2: shorter path wins
     min_len = min(len(c.path) for c in pool)
     shortest = [c for c in pool if len(c.path) == min_len]
     if len(shortest) == 1:
         winner = shortest[0]
-        losers = [c for c in candidates if c.id != winner.id]
-        return winner.id, [l.id for l in losers]
+        losers = [c.id for c in candidates if c.id != winner.id]
+        return winner.id, losers
 
     # Rule 3: older mtime wins
     min_mtime = min(c.mtime for c in pool)
     oldest = [c for c in pool if c.mtime == min_mtime]
     if len(oldest) == 1:
         winner = oldest[0]
-        losers = [c for c in candidates if c.id != winner.id]
-        return winner.id, [l.id for l in losers]
+        losers = [c.id for c in candidates if c.id != winner.id]
+        return winner.id, losers
 
     # Rule 4: lower id wins (deterministic)
     winner = min(pool, key=lambda c: c.id)
-    losers = [c for c in candidates if c.id != winner.id]
-    return winner.id, [l.id for l in losers]
+    losers = [c.id for c in candidates if c.id != winner.id]
+    return winner.id, losers
 
 
 @dataclass
