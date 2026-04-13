@@ -1890,6 +1890,114 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
+def test_pipeline_classify_passes_primary_detection_to_prepare_image(
+    tmp_path, monkeypatch
+):
+    """classify_stage must pass the primary detection dict (with box_x/y/w/h
+    keys) to _prepare_image, not the raw {photo_id: [dets]} det_map.
+
+    Regression: classify_stage called
+        _prepare_image(photo, folders, det_map)
+    where det_map is {photo_id: [detection, ...]}.  Because det_map is truthy
+    once any photo in a batch has a detection, _prepare_image entered its
+    crop branch and evaluated det_map["box_w"] -> KeyError: 'box_w', aborting
+    classify the moment the first detection came back.  The fix is to look
+    up the highest-confidence detection for this specific photo and pass
+    that (or None) to _prepare_image.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 12345, 1_000_000.0)
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    primary_det = {
+        "id": 77,
+        "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
+        "confidence": 0.95, "category": "animal",
+    }
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {p["id"]: [primary_det] for p in batch}
+        return det_map, len(batch), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    captured = []
+
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+        captured.append(detection)
+        # Returning (None, ...) tells the caller this photo failed to load,
+        # which short-circuits _flush_batch.  We only care about the
+        # arguments passed in.
+        return None, "", ""
+
+    monkeypatch.setattr(classify_job, "_prepare_image", capturing_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert captured, (
+        "_prepare_image was never called — test setup no longer exercises "
+        "the classify crop path."
+    )
+    # Every call must receive either None (no detection) or a detection dict
+    # with a 'box_w' key — never the raw {photo_id: [dets]} map.
+    for det in captured:
+        assert det is None or (isinstance(det, dict) and "box_w" in det), (
+            f"_prepare_image received {det!r}; expected a detection dict "
+            "with 'box_w' (or None), not the {photo_id: [dets]} map."
+        )
+    # The fix should pass this photo's primary detection through.
+    assert any(
+        isinstance(d, dict) and d.get("box_w") == 0.5 for d in captured
+    ), (
+        f"Expected _prepare_image to receive the primary detection for "
+        f"photo {photo_id}, got {captured!r}."
+    )
+    # And the KeyError must not have leaked into job errors.
+    assert not any("'box_w'" in e for e in job["errors"]), (
+        f"KeyError 'box_w' leaked into job errors: {job['errors']}"
+    )
+
+
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     """On reclassify, prior-run detection rows must be deleted after model 1
     re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
