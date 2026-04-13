@@ -63,4 +63,7 @@ def resolve_duplicates(candidates):
         losers = [c for c in candidates if c.id != winner.id]
         return winner.id, [l.id for l in losers]
 
-    raise NotImplementedError("rule 4 not yet")
+    # Rule 4: lower id wins (deterministic)
+    winner = min(pool, key=lambda c: c.id)
+    losers = [c for c in candidates if c.id != winner.id]
+    return winner.id, [l.id for l in losers]
