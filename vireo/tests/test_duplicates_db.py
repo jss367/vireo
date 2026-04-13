@@ -224,3 +224,43 @@ def test_check_and_resolve_for_hash_covers_scanner_flow(tmp_path):
     r2 = db.conn.execute("SELECT flag FROM photos WHERE id = ?", (p2,)).fetchone()
     assert r1["flag"] != "rejected"
     assert r2["flag"] == "rejected"
+
+
+# -----------------------------------------------------------------------------
+# Task 9: find_duplicate_groups
+# -----------------------------------------------------------------------------
+
+def test_find_duplicate_groups_returns_only_multi_groups(tmp_path):
+    """Returns hashes with 2+ non-rejected rows; skips singletons."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # Group A: 2 dups — hook auto-rejects one, reset so scan sees both again.
+    a1 = _add(db, fid, "a.jpg", file_hash="HA")
+    a2 = _add(db, fid, "a copy.jpg", file_hash="HA")
+    _reset_flags(db, "HA")
+    # Group B: singleton
+    _add(db, fid, "b.jpg", file_hash="HB")
+    # Group C: two rows but one rejected -> should not appear
+    c1 = _add(db, fid, "c.jpg", file_hash="HC")
+    c2 = _add(db, fid, "c (2).jpg", file_hash="HC")
+    # Hook already rejected one of c1/c2; leave as-is so only 1 non-rejected row.
+    # Group D: NULL hash -> should not appear
+    _add(db, fid, "d.jpg")
+
+    groups = db.find_duplicate_groups()
+    hashes = [g["file_hash"] for g in groups]
+    assert "HA" in hashes
+    assert "HB" not in hashes
+    assert "HC" not in hashes  # only one non-rejected row
+    assert None not in hashes
+
+    ha = next(g for g in groups if g["file_hash"] == "HA")
+    assert sorted(ha["photo_ids"]) == sorted([a1, a2])
+
+
+def test_find_duplicate_groups_empty(tmp_path):
+    """No dup groups -> empty list."""
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    _add(db, fid, "solo.jpg", file_hash="SOLO")
+    assert db.find_duplicate_groups() == []

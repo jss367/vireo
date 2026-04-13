@@ -1441,6 +1441,28 @@ class Database:
             )
         return None
 
+    def find_duplicate_groups(self):
+        """Return [{file_hash, photo_ids: [...]}] for every hash with 2+ non-rejected rows.
+
+        Used by the duplicate-scan job to preview groups without applying.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT file_hash, GROUP_CONCAT(id) AS ids
+            FROM photos
+            WHERE file_hash IS NOT NULL AND flag != 'rejected'
+            GROUP BY file_hash
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        return [
+            {
+                "file_hash": r["file_hash"],
+                "photo_ids": [int(x) for x in r["ids"].split(",")],
+            }
+            for r in rows
+        ]
+
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
 
