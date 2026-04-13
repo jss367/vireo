@@ -963,6 +963,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             from datetime import datetime as dt
 
+            # Ensure MegaDetector weights are on disk before any fresh detection
+            # runs. Skip when every photo already has cached detections and we're
+            # not reclassifying — _detect_batch will reuse DB rows and never call
+            # MegaDetector, so an offline rerun should not abort on missing weights.
+            # Also skip for empty photo sets — a no-op reclassify over 0 photos
+            # should not trigger a ~300 MB download.
+            needs_fresh_detection = bool(photos) and (
+                params.reclassify or any(
+                    p["id"] not in already_detected for p in photos
+                )
+            )
+            if needs_fresh_detection:
+                from detector import ensure_megadetector_weights
+
+                def _dl_progress(phase, current, total_steps):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": phase,
+                        "stage_id": "classify",
+                        "current": current, "total": total_steps,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+
+                ensure_megadetector_weights(progress_callback=_dl_progress)
+
             for spec_idx, active_spec in enumerate(resolved_specs):
                 if _should_abort(abort):
                     break

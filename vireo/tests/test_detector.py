@@ -208,6 +208,167 @@ def test_get_primary_detection_no_animals():
     assert get_primary_detection([]) is None
 
 
+def test_ensure_weights_noop_when_present(tmp_path, monkeypatch):
+    """ensure_megadetector_weights() returns path without downloading when file exists."""
+    import detector
+
+    fake_path = tmp_path / "model.onnx"
+    fake_path.write_bytes(b"x" * 1024)
+
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_DIR", str(tmp_path))
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(fake_path))
+
+    download_calls = []
+
+    def fake_hf_hub_download(**kwargs):
+        download_calls.append(kwargs)
+        return str(fake_path)
+
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress_calls = []
+    result = detector.ensure_megadetector_weights(
+        progress_callback=lambda p, c, t: progress_calls.append((p, c, t)),
+    )
+
+    assert result == str(fake_path)
+    assert download_calls == []
+    assert progress_calls == []
+
+
+def test_ensure_weights_downloads_when_missing(tmp_path, monkeypatch):
+    """ensure_megadetector_weights() downloads and copies file when missing; invokes progress callback."""
+    import detector
+
+    dest_dir = tmp_path / "megadetector-v6"
+    dest_path = dest_dir / "model.onnx"
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_DIR", str(dest_dir))
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(dest_path))
+
+    # Simulate HF cache returning a file at a different path (which forces a copy).
+    cache_path = tmp_path / "hf-cache" / "model.onnx"
+    cache_path.parent.mkdir()
+    cache_path.write_bytes(b"m" * 2048)
+
+    def fake_hf_hub_download(**kwargs):
+        assert kwargs["filename"] == "model.onnx"
+        assert kwargs["subfolder"] == "megadetector-v6"
+        return str(cache_path)
+
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress_calls = []
+    result = detector.ensure_megadetector_weights(
+        progress_callback=lambda p, c, t: progress_calls.append((p, c, t)),
+    )
+
+    assert result == str(dest_path)
+    assert dest_path.is_file()
+    assert dest_path.read_bytes() == b"m" * 2048
+    assert len(progress_calls) >= 2
+    assert progress_calls[0][1] == 0 and progress_calls[0][2] == 1
+    assert progress_calls[-1][1] == 1 and progress_calls[-1][2] == 1
+
+
+def test_ensure_weights_raises_on_download_failure(tmp_path, monkeypatch):
+    """ensure_megadetector_weights() raises RuntimeError with remediation hint when download fails."""
+    import detector
+
+    dest_dir = tmp_path / "megadetector-v6"
+    dest_path = dest_dir / "model.onnx"
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_DIR", str(dest_dir))
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(dest_path))
+
+    def fake_hf_hub_download(**kwargs):
+        raise ConnectionError("network unreachable")
+
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    with pytest.raises(RuntimeError, match="Failed to download MegaDetector"):
+        detector.ensure_megadetector_weights()
+
+    assert not dest_path.exists()
+
+
+def test_ensure_weights_atomic_and_serialized(tmp_path, monkeypatch):
+    """Concurrent callers download once and never observe a partial file
+    at the final path. Guards against the copy/copy race Codex flagged."""
+    import threading
+
+    import detector
+
+    dest_dir = tmp_path / "megadetector-v6"
+    dest_path = dest_dir / "model.onnx"
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_DIR", str(dest_dir))
+    monkeypatch.setattr(detector, "MEGADETECTOR_ONNX_PATH", str(dest_path))
+
+    cache_path = tmp_path / "hf-cache" / "model.onnx"
+    cache_path.parent.mkdir()
+    cache_path.write_bytes(b"m" * 4096)
+
+    call_count = 0
+    observed_partial = False
+    download_started = threading.Event()
+
+    def fake_hf_hub_download(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        # Release the second thread so it can race the in-progress download.
+        download_started.set()
+        return str(cache_path)
+
+    import sys
+    import types
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    def run():
+        detector.ensure_megadetector_weights()
+
+    def observer():
+        # Wait until thread-A is inside the download block, then repeatedly
+        # probe the final path. With atomic replace + lock it must either
+        # not exist, or be the full 4096 bytes — never anything in between.
+        nonlocal observed_partial
+        download_started.wait(timeout=2.0)
+        for _ in range(100):
+            if dest_path.is_file():
+                size = dest_path.stat().st_size
+                if 0 < size < 4096:
+                    observed_partial = True
+                    return
+
+    t1 = threading.Thread(target=run)
+    t2 = threading.Thread(target=observer)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Second caller enters after t1 finished, so exactly one real download occurred.
+    detector.ensure_megadetector_weights()
+    assert call_count == 1
+    assert dest_path.stat().st_size == 4096
+    assert not observed_partial
+
+
 def test_megadetector_onnx_model_file_valid():
     """Verify MegaDetector ONNX model file exists and is valid."""
     try:
