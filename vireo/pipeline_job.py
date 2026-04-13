@@ -963,20 +963,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             from datetime import datetime as dt
 
-            # Ensure MegaDetector weights are on disk before any detection runs.
-            # Failure here aborts the stage rather than falling back to full-image
-            # classification, which produces unusable triage results downstream.
-            from detector import ensure_megadetector_weights
+            # Only download MegaDetector weights when at least one photo needs
+            # a fresh detection pass.  Unconditionally downloading would abort
+            # offline/air-gapped reruns where every photo already has detections
+            # in the DB and _detect_batch would reuse them without ever calling
+            # the model — a regression for non-reclassify runs introduced by
+            # the auto-download feature.
+            _needs_detection = params.reclassify or any(
+                p["id"] not in already_detected for p in photos
+            )
+            if _needs_detection:
+                from detector import ensure_megadetector_weights
 
-            def _dl_progress(phase, current, total_steps):
-                runner.push_event(job["id"], "progress", {
-                    "phase": phase,
-                    "stage_id": "classify",
-                    "current": current, "total": total_steps,
-                    "stages": {k: dict(v) for k, v in stages.items()},
-                })
+                def _dl_progress(phase, current, total_steps):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": phase,
+                        "stage_id": "classify",
+                        "current": current, "total": total_steps,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
 
-            ensure_megadetector_weights(progress_callback=_dl_progress)
+                ensure_megadetector_weights(progress_callback=_dl_progress)
 
             for spec_idx, active_spec in enumerate(resolved_specs):
                 if _should_abort(abort):
