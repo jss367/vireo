@@ -1167,7 +1167,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                 })
                             continue
 
-                        img, folder_path, image_path = _prepare_image(photo, folders, det_map)
+                        # det_map is {photo_id: [detection, ...]}. Pass the
+                        # highest-confidence detection for THIS photo (first
+                        # entry, already ordered by confidence DESC) to
+                        # _prepare_image, which expects a single detection
+                        # dict with box_x/y/w/h keys (or None for full-image
+                        # classification).  Passing the raw det_map caused
+                        # KeyError: 'box_w' the moment any photo in a batch
+                        # produced a detection, aborting classify mid-run.
+                        photo_dets = det_map.get(photo["id"], [])
+                        primary_det = photo_dets[0] if photo_dets else None
+                        img, folder_path, image_path = _prepare_image(
+                            photo, folders, primary_det
+                        )
                         if img is None:
                             failed += 1
                             continue
