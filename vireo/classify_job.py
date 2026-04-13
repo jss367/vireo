@@ -202,10 +202,6 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
         if detect_animals is None or get_primary_detection is None:
             return detection_map, detected, processed_ids
 
-        if det_conf_threshold is None:
-            import config as cfg
-            det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
-
         for photo in photos:
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
@@ -241,6 +237,18 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                     detected += 1
                     processed_ids.add(photo["id"])
                     continue
+
+            # Resolve threshold lazily on first actual detection call so a
+            # batch where every photo hits the cached/already-detected
+            # short-circuit doesn't need a working config/db at all (the
+            # cached-detections short-circuit test relies on this).
+            if det_conf_threshold is None:
+                import config as cfg
+                # Use workspace-effective config so per-workspace overrides
+                # (e.g. bird-photography workspaces lowering the threshold)
+                # are honored, not just the bare global default.
+                effective_cfg = db.get_effective_config(cfg.load())
+                det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
 
             detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
 
@@ -390,9 +398,11 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
             },
         )
 
-        # Load config once for the entire detection loop
+        # Load config once for the entire detection loop. Use the
+        # workspace-effective config so per-workspace overrides apply.
         import config as cfg
-        det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
+        effective_cfg = db.get_effective_config(cfg.load())
+        det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
 
         # Process one photo at a time so we can report per-photo progress
         detection_map = {}

@@ -399,6 +399,67 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     assert 7 in detection_map
 
 
+def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
+    """When det_conf_threshold is unset, _detect_batch must read the
+    workspace-effective config (so per-workspace overrides apply), not
+    the bare global config.
+
+    Regression: the old code called cfg.load() directly, which dropped
+    workspace overrides on the floor. A bird-photography workspace
+    setting detector_confidence=0.05 was silently ignored — every call
+    used the 0.2 global default.
+    """
+    from unittest.mock import patch
+
+    import config as cfg
+    from classify_job import _detect_batch
+    from db import Database
+
+    # Real DB with a workspace that overrides detector_confidence
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace(
+        "Birds", config_overrides={"detector_confidence": 0.05}
+    )
+    db.set_active_workspace(ws_id)
+
+    # Isolate global config so we don't read ~/.vireo/config.json
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    img = Image.new("RGB", (100, 100), color="red")
+    img_path = str(tmp_path / "bird.jpg")
+    img.save(img_path)
+
+    photos = [{"id": 1, "filename": "bird.jpg", "folder_id": 10}]
+    folders = {10: str(tmp_path)}
+
+    captured = {}
+
+    def fake_detect(image_path, confidence_threshold):
+        captured["threshold"] = confidence_threshold
+        return []
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with patch("classify_job.detect_animals", side_effect=fake_detect), \
+         patch("classify_job.get_primary_detection", return_value=None), \
+         patch("classify_job.compute_sharpness", return_value=50.0):
+        _detect_batch(
+            photos=photos,
+            folders=folders,
+            runner=runner,
+            job=job,
+            reclassify=True,
+            db=db,
+            already_detected_ids=set(),
+        )
+
+    assert captured["threshold"] == 0.05, (
+        "workspace override detector_confidence=0.05 was dropped; "
+        f"detect_animals was called with {captured.get('threshold')!r}"
+    )
+
+
 def test_detect_batch_stores_all_detections(tmp_path):
     """_detect_batch should store all detections, not just the primary."""
     from db import Database

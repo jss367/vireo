@@ -131,19 +131,23 @@ def test_postprocess_with_detections():
     assert all(k in det["box"] for k in ("x", "y", "w", "h"))
 
 
-def test_postprocess_cxcywh_format():
-    """_postprocess must handle cx/cy/w/h format (no objectness score)."""
+def test_postprocess_cxcywh_format_yolov9():
+    """7-column YOLOv9 output (no objectness) parses as cxcywh + 3 classes.
+
+    MegaDetector V6 (YOLOv9c) produces (1, 7, 8400) output with the
+    layout [cx, cy, w, h, animal_score, person_score, vehicle_score].
+    A previous version of the parser keyed on ``num_cols >= 7`` and
+    sent this through the with-objectness branch, multiplying the
+    animal score by max(person, vehicle) — yielding near-zero on bird
+    photos and corrupting category labels off-by-one.
+    """
     import detector
 
-    # Simulate (1, N, 7) format: [cx, cy, w, h, cls0, cls1, cls2]
-    # This is 7 columns which hits the num_cols >= 7 branch differently,
-    # but let's test the 5-6 column format with (1, N, 6)
-    # Actually, 7 columns hits the >= 7 branch. Let's test exactly the
-    # >= 5 branch by using 5 columns: [cx, cy, w, h, cls0]
+    # (1, N, 7) — single detection, animal class strong, person/vehicle ~0
     output = np.array(
         [
             [
-                [320, 320, 200, 200, 0.9],
+                [320, 320, 200, 200, 0.9, 0.02, 0.01],
             ]
         ],
         dtype=np.float32,
@@ -153,8 +157,39 @@ def test_postprocess_cxcywh_format():
 
     assert len(result) == 1
     det = result[0]
-    assert det["category"] == "animal"  # class 0
-    assert det["confidence"] > 0.5
+    assert det["category"] == "animal"
+    # Confidence must be the raw animal score (0.9), not animal × max(other)
+    assert det["confidence"] == pytest.approx(0.9, abs=1e-5)
+    # Box must be derived from cxcywh, not interpreted as xyxy
+    # cx=320, cy=320, w=200, h=200 → x1=220, y1=220, x2=420, y2=420
+    # Normalized to 640: x=220/640=0.34375, w=200/640=0.3125
+    assert det["box"]["x"] == pytest.approx(220 / 640, abs=1e-4)
+    assert det["box"]["y"] == pytest.approx(220 / 640, abs=1e-4)
+    assert det["box"]["w"] == pytest.approx(200 / 640, abs=1e-4)
+    assert det["box"]["h"] == pytest.approx(200 / 640, abs=1e-4)
+
+
+def test_postprocess_yolov9_category_labels_correct():
+    """7-column YOLOv9 output assigns categories from the class index in
+    cols 4-6, not via the off-by-one shifted lookup the old parser did."""
+    import detector
+
+    # Three detections, one strong in each class
+    output = np.array(
+        [
+            [
+                [100, 100, 50, 50, 0.9, 0.0, 0.0],   # animal
+                [200, 200, 50, 50, 0.0, 0.85, 0.0],  # person
+                [300, 300, 50, 50, 0.0, 0.0, 0.8],   # vehicle
+            ]
+        ],
+        dtype=np.float32,
+    )
+    preprocess_info = (1.0, 0, 0, 640, 640)
+    result = detector._postprocess([output], preprocess_info, 0.2)
+
+    cats = sorted(d["category"] for d in result)
+    assert cats == ["animal", "person", "vehicle"]
 
 
 def test_postprocess_transposed_format():
