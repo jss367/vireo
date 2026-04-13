@@ -59,8 +59,23 @@ jobs:
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
 
+      - name: Resolve PR head ref
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref=$(gh pr view ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --json headRefName -q .headRefName)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Address review comments
         uses: anthropics/claude-code-action@v1
+        env:
+          # Pin the action to the PR's head branch so it doesn't create a new
+          # branch + PR via its default branch_name_template. Undocumented
+          # escape hatch read in src/modes/agent/index.ts in claude-code-action.
+          CLAUDE_BRANCH: ${{ steps.head.outputs.ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "chatgpt-codex-connector[bot]"
@@ -124,8 +139,20 @@ jobs:
       - name: Install test dependencies
         run: pip install flask Pillow pytest imagehash
 
+      - name: Resolve PR head ref
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref=$(gh pr view ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --json headRefName -q .headRefName)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Address comment feedback
         uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_BRANCH: ${{ steps.head.outputs.ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "chatgpt-codex-connector[bot]"
@@ -192,6 +219,8 @@ jobs:
 
       - name: Address review comments
         uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_BRANCH: ${{ github.event.pull_request.head.ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "chatgpt-codex-connector[bot]"
@@ -290,6 +319,8 @@ jobs:
       - name: Address codex review
         if: steps.fork-check.outputs.is_fork == 'false'
         uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_BRANCH: ${{ github.event.pull_request.head.ref }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "chatgpt-codex-connector[bot]"
