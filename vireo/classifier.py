@@ -215,6 +215,38 @@ def _normalize(vec):
     return vec / norm
 
 
+def _make_text_runner(text_session, text_input_name):
+    """Return a callable that runs the text encoder on a (N, seq_len) token batch.
+
+    Some BioCLIP ONNX exports (notably bioclip-2.5-vith14) contain an internal
+    Reshape node with a hardcoded single-prompt shape, so inference fails for
+    any batch size > 1 even though the model's declared input is dynamic.
+    The returned runner tries the batched call first and, on failure, falls
+    back to per-row inference and remembers the choice for subsequent calls.
+    """
+    state = {"batched_ok": True}
+
+    def run(tokens):
+        if state["batched_ok"]:
+            try:
+                return text_session.run(None, {text_input_name: tokens})[0]
+            except Exception as e:
+                log.warning(
+                    "Text encoder rejected batched input (%s: %s); "
+                    "falling back to per-row inference",
+                    type(e).__name__,
+                    e,
+                )
+                state["batched_ok"] = False
+        rows = [
+            text_session.run(None, {text_input_name: tokens[i : i + 1]})[0]
+            for i in range(tokens.shape[0])
+        ]
+        return np.concatenate(rows, axis=0)
+
+    return run
+
+
 def _compute_embeddings_with_progress(
     text_session, text_input_name, tokenizer, labels, progress_callback=None
 ):
@@ -239,11 +271,13 @@ def _compute_embeddings_with_progress(
     if progress_callback:
         progress_callback(0, total)
 
+    run_text = _make_text_runner(text_session, text_input_name)
+
     all_features = []
     for i, classname in enumerate(labels):
         txts = [template(classname) for template in OPENAI_IMAGENET_TEMPLATE]
         tokens = _tokenize(tokenizer, txts)
-        txt_features = text_session.run(None, {text_input_name: tokens})[0]
+        txt_features = run_text(tokens)
         txt_features = txt_features.astype(np.float32)
         # Normalize each template's output, then average
         txt_features = _normalize(txt_features)
