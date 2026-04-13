@@ -9,6 +9,7 @@ Models are loaded as ONNX sessions from ~/.vireo/models/dinov2-{variant}/.
 
 import logging
 import os
+import threading
 
 import numpy as np
 import onnx_runtime
@@ -22,6 +23,13 @@ DINOV2_VARIANTS = {
     "vit-l14": 1024,
 }
 
+# Rough size estimate surfaced in the download progress message, per variant.
+_DINOV2_SIZE_HINT = {
+    "vit-s14": "~85 MB",
+    "vit-b14": "~350 MB",
+    "vit-l14": "~1.2 GB",
+}
+
 # DINOv2 native input size
 DINOV2_INPUT_SIZE = 518
 
@@ -31,6 +39,100 @@ _IMAGENET_STD = [0.229, 0.224, 0.225]
 
 _session = None
 _variant_loaded = None
+
+_dinov2_download_lock = threading.Lock()
+
+
+def _dinov2_model_path(variant):
+    model_dir = os.path.join(
+        os.path.expanduser("~"), ".vireo", "models", f"dinov2-{variant}"
+    )
+    return model_dir, os.path.join(model_dir, "model.onnx")
+
+
+def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
+    """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
+
+    Returns the weights path when already downloaded.  Otherwise fetches
+    ``dinov2-{variant}/model.onnx`` from Hugging Face and copies it into
+    ``~/.vireo/models/dinov2-{variant}/``.  Raises RuntimeError on failure
+    so callers can abort rather than silently run without embeddings.
+
+    Args:
+        variant: one of vit-s14, vit-b14, vit-l14
+        progress_callback: optional callable(phase: str, current: int,
+            total: int) invoked once before the download starts and once
+            after it completes.
+    """
+    if variant not in DINOV2_VARIANTS:
+        raise ValueError(
+            f"Unknown DINOv2 variant: {variant}. "
+            f"Choose from: {list(DINOV2_VARIANTS.keys())}"
+        )
+
+    model_dir, model_path = _dinov2_model_path(variant)
+    if os.path.isfile(model_path):
+        return model_path
+
+    with _dinov2_download_lock:
+        if os.path.isfile(model_path):
+            return model_path
+
+        os.makedirs(model_dir, exist_ok=True)
+
+        size_hint = _DINOV2_SIZE_HINT.get(variant, "")
+        if progress_callback:
+            progress_callback(
+                f"Downloading DINOv2 {variant} ({size_hint}, first run only)...",
+                0, 1,
+            )
+        log.info(
+            "DINOv2 weights missing for %s — downloading from Hugging Face",
+            variant,
+        )
+
+        tmp_path = model_path + ".download"
+        try:
+            import shutil
+
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
+
+            cached_path = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx",
+                subfolder=f"dinov2-{variant}",
+            )
+            # Copy to a sibling temp path then atomically replace so other
+            # threads only ever observe either the missing state or a
+            # fully written weights file — never a partial copy.
+            shutil.copy2(cached_path, tmp_path)
+            os.replace(tmp_path, model_path)
+        except Exception as e:
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise RuntimeError(
+                f"Failed to download DINOv2 weights ({variant}): {e}. "
+                "Check your network connection and retry, or download "
+                "manually from the pipeline models page."
+            ) from e
+
+        if not os.path.isfile(model_path):
+            raise RuntimeError(
+                "DINOv2 download completed but weights file is missing at "
+                f"{model_path}."
+            )
+
+        size_mb = round(os.path.getsize(model_path) / 1024 / 1024, 1)
+        log.info("DINOv2 weights downloaded (%s, %s MB)", variant, size_mb)
+        if progress_callback:
+            progress_callback(
+                f"DINOv2 {variant} ready ({size_mb} MB)", 1, 1,
+            )
+
+        return model_path
 
 
 def get_embedding_dim(variant="vit-b14"):

@@ -373,3 +373,120 @@ def test_input_size_constant():
     from dino_embed import DINOV2_INPUT_SIZE
 
     assert DINOV2_INPUT_SIZE == 518
+
+
+# -- ensure_dinov2_weights (auto-download on first pipeline run) --
+
+
+def test_ensure_dinov2_weights_noop_when_present(tmp_path, monkeypatch):
+    """ensure_dinov2_weights() returns path without downloading when file
+    is already on disk."""
+    import sys
+    import types
+
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_dir.mkdir()
+    model_path = model_dir / "model.onnx"
+    model_path.write_bytes(b"x" * 1024)
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    def fake_hf_hub_download(**kwargs):
+        raise AssertionError("must not download when file already exists")
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress = []
+    result = dino_embed.ensure_dinov2_weights(
+        "vit-b14", progress_callback=lambda p, c, t: progress.append((p, c, t))
+    )
+
+    assert result == str(model_path)
+    assert progress == []
+
+
+def test_ensure_dinov2_weights_downloads_when_missing(tmp_path, monkeypatch):
+    """ensure_dinov2_weights() fetches model.onnx and surfaces progress."""
+    import sys
+    import types
+
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_path = tmp_path / "hf-cache" / "model.onnx"
+    cache_path.parent.mkdir()
+    cache_path.write_bytes(b"m" * 4096)
+
+    seen_requests = []
+
+    def fake_hf_hub_download(**kwargs):
+        seen_requests.append((kwargs["filename"], kwargs["subfolder"]))
+        return str(cache_path)
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress = []
+    result = dino_embed.ensure_dinov2_weights(
+        "vit-b14",
+        progress_callback=lambda p, c, t: progress.append((p, c, t)),
+    )
+
+    assert result == str(model_path)
+    assert model_path.read_bytes() == b"m" * 4096
+    assert seen_requests == [("model.onnx", "dinov2-vit-b14")]
+    assert progress[0] == (progress[0][0], 0, 1)
+    assert progress[-1][1] == 1 and progress[-1][2] == 1
+
+
+def test_ensure_dinov2_weights_raises_on_download_failure(tmp_path, monkeypatch):
+    """A failed download must raise RuntimeError and leave no partial file
+    at the final path."""
+    import sys
+    import types
+
+    import dino_embed
+    import pytest
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    def fake_hf_hub_download(**kwargs):
+        raise ConnectionError("network unreachable")
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    with pytest.raises(RuntimeError, match="Failed to download DINOv2"):
+        dino_embed.ensure_dinov2_weights("vit-b14")
+
+    assert not model_path.exists()
+
+
+def test_ensure_dinov2_weights_rejects_unknown_variant():
+    """Guard against typos that would otherwise fetch from a wrong repo path."""
+    import dino_embed
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown DINOv2 variant"):
+        dino_embed.ensure_dinov2_weights("vit-xxl")

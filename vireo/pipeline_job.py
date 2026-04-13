@@ -1408,6 +1408,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 _update_stages(runner, job["id"], stages)
                 return
 
+            # Auto-download SAM2 + DINOv2 weights on first pipeline run.
+            # Mirrors the MegaDetector auto-download pattern (commit 90cd0f9):
+            # without this, first-time users hit 1 FileNotFoundError per
+            # photo (e.g. 124 identical tracebacks) instead of either
+            # getting the weights automatically or seeing one actionable
+            # message.  Only fire when there is actually work to do — a
+            # no-op rerun over 0 photos should not trigger a multi-hundred
+            # MB download.
+            if total > 0:
+                from dino_embed import ensure_dinov2_weights
+                from masking import ensure_sam2_weights
+
+                def _dl_progress(phase, current, total_steps):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": phase,
+                        "stage_id": "extract_masks",
+                        "current": current, "total": total_steps,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+
+                ensure_sam2_weights(
+                    variant=sam2_variant, progress_callback=_dl_progress,
+                )
+                ensure_dinov2_weights(
+                    variant=dinov2_variant, progress_callback=_dl_progress,
+                )
+
             for i, entry in enumerate(photos_to_process):
                 if _should_abort(abort):
                     break
