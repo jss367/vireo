@@ -284,6 +284,32 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     mock_ensure.assert_not_called()
 
 
+def test_detect_subjects_skips_weight_download_for_empty_reclassify(tmp_path):
+    """An empty photo list with reclassify=True should not trigger the
+    MegaDetector download. No photos = no detection pass, so the
+    ~300 MB fetch would be pure waste and would also make offline no-op
+    reclassifies fatally dependent on the network.
+
+    Regression for Codex P2 review on #535."""
+    from unittest.mock import MagicMock, patch
+
+    from classify_job import _detect_subjects
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    mock_db = MagicMock()
+    mock_db.get_existing_detection_photo_ids.return_value = set()
+
+    with patch("detector.ensure_megadetector_weights") as mock_ensure:
+        _detect_subjects(
+            photos=[], folders={}, runner=runner, job=job,
+            reclassify=True, db=mock_db,
+        )
+
+    mock_ensure.assert_not_called()
+
+
 def test_detect_subjects_graceful_on_import_error():
     """Phase 5: returns empty map if PytorchWildlife not installed."""
     from unittest.mock import MagicMock
