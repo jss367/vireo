@@ -375,7 +375,7 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
     """
     import time as _time
 
-    from huggingface_hub import hf_hub_download
+    from huggingface_hub import hf_hub_download, try_to_load_from_cache
 
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
@@ -386,20 +386,6 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
     while True:
         attempt += 1
         try:
-            if progress_callback:
-                if attempt == 1:
-                    progress_callback(f"Downloading {filename}...")
-                else:
-                    progress_callback(f"Resuming download (attempt {attempt})...")
-
-            log.info(
-                "Downloading %s/%s%s (attempt %d)",
-                repo_id,
-                f"{subfolder}/" if subfolder else "",
-                filename,
-                attempt,
-            )
-
             kwargs = {
                 "repo_id": repo_id,
                 "filename": filename,
@@ -409,15 +395,74 @@ def _hf_download_with_retry(repo_id, filename, local_dir,
             if revision:
                 kwargs["revision"] = revision
 
+            # Detect cache hit before triggering any network activity, so the
+            # log + UI can distinguish "1.2 GB came over the wire" from
+            # "the blob was already in the HF cache and we just cloned it
+            # into the model dir" (a few hundred ms on APFS even for huge
+            # files). Without this distinction a sub-second 'download' of
+            # a multi-GB model looks suspicious instead of correct.
+            from_cache = False
+            if attempt == 1:
+                try:
+                    pre_cached = try_to_load_from_cache(
+                        repo_id=repo_id,
+                        filename=(f"{subfolder}/{filename}"
+                                  if subfolder else filename),
+                        revision=revision,
+                    )
+                    from_cache = (
+                        isinstance(pre_cached, str)
+                        and os.path.isfile(pre_cached)
+                    )
+                except Exception as e:
+                    # Cache lookup is best-effort — if it fails, fall through
+                    # to the network path; hf_hub_download will sort it out.
+                    log.debug("Cache lookup failed for %s: %s", filename, e)
+
+            label_path = f"{subfolder}/{filename}" if subfolder else filename
+            if progress_callback:
+                if attempt == 1:
+                    if from_cache:
+                        progress_callback(
+                            f"Found {filename} in HF cache, copying..."
+                        )
+                    else:
+                        progress_callback(
+                            f"Downloading {filename} from Hugging Face..."
+                        )
+                else:
+                    progress_callback(f"Resuming download (attempt {attempt})...")
+
+            if from_cache:
+                log.info(
+                    "%s/%s already in HF cache — no network download needed",
+                    repo_id, label_path,
+                )
+            else:
+                log.info(
+                    "Downloading %s/%s (attempt %d)",
+                    repo_id, label_path, attempt,
+                )
+
             cached_path = hf_hub_download(**kwargs)
 
-            # Copy from cache to our models directory
+            # Copy from cache to our models directory.  On APFS shutil.copy2
+            # uses clonefile() (copy-on-write metadata-only), so cloning a
+            # 1+ GB blob takes milliseconds and shares disk pages with the
+            # cache until either side is modified.
             os.makedirs(local_dir, exist_ok=True)
             dest_path = os.path.join(local_dir, filename)
             if cached_path != dest_path:
                 shutil.copy2(cached_path, dest_path)
 
-            log.info("Download complete: %s", dest_path)
+            if from_cache:
+                size_mb = os.path.getsize(dest_path) / 1024 / 1024
+                log.info(
+                    "Linked from cache: %s (%.1f MB, no network transfer)",
+                    dest_path, size_mb,
+                )
+            else:
+                log.info("Download complete: %s", dest_path)
             return dest_path
 
         except Exception as e:
