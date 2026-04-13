@@ -358,6 +358,12 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
         )
         # Cache as checked so we don't re-warn on every pipeline start.
         _verified_this_process.add(model_id)
+        # Clear any stale .verify_skipped: the hash fetch succeeded this
+        # time, so the old "couldn't reach HF" reason no longer reflects
+        # reality. Without this, a previously-unverified model keeps
+        # showing the outdated network-error badge via get_models() even
+        # though lazy verification actually ran.
+        clear_verify_skipped(model_dir)
 
 
 def clear_verified_cache(model_id: str) -> None:
