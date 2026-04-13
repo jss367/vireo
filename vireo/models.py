@@ -133,14 +133,20 @@ def _check_onnx_downloaded(model_dir, files):
 
 
 def _classify_model_state(model_dir, files):
-    """Return 'ok', 'missing', or 'incomplete' for a model directory.
+    """Return 'ok', 'missing', 'incomplete', or 'unverified' for a model dir.
 
     - 'missing':    directory doesn't exist, or no required file is present.
     - 'incomplete': directory exists with some but not all required files,
                     OR model_verify has written a .verify_failed sentinel
                     into the directory (hash mismatch detected at load
                     time or by manual Verify-all).
-    - 'ok':         all files present and no verify-failed sentinel.
+    - 'unverified': all files present, but SHA256 verification could not be
+                    run (HuggingFace metadata API unreachable at download
+                    or verify time). Indicated by .verify_skipped sentinel.
+                    Files are probably fine — they just couldn't be
+                    cryptographically confirmed.
+    - 'ok':         all files present and verification passed (or has never
+                    been attempted because this is an unpinned legacy install).
     """
     if not os.path.isdir(model_dir):
         return "missing"
@@ -157,6 +163,11 @@ def _classify_model_state(model_dir, files):
         return "missing"
     if len(present) < len(files):
         return "incomplete"
+
+    if os.path.isfile(
+        os.path.join(model_dir, model_verify.VERIFY_SKIPPED_SENTINEL)
+    ):
+        return "unverified"
 
     return "ok"
 
@@ -187,11 +198,15 @@ def get_models():
             reg_path = registered[km["id"]].get("weights_path", "")
             if reg_path and reg_path != model_dir:
                 reg_state = _classify_model_state(reg_path, files)
-                if reg_state == "ok":
+                if reg_state in ("ok", "unverified"):
                     model_dir = reg_path
-                    state = "ok"
+                    state = reg_state
 
-        downloaded = state == "ok"
+        # "unverified" means all files are present — the model is usable,
+        # just not cryptographically confirmed. Treat as downloaded so the
+        # pipeline and "Use This" action still work, and surface the
+        # reason so Settings can render the caveat.
+        downloaded = state in ("ok", "unverified")
         entry = {
             **km,
             "downloaded": downloaded,
@@ -199,6 +214,10 @@ def get_models():
             "weights_path": model_dir if downloaded else None,
             "model_type": km.get("model_type", "bioclip"),
         }
+        if state == "unverified":
+            entry["verify_skipped_reason"] = (
+                model_verify.read_verify_skipped_reason(model_dir)
+            )
         result.append(entry)
 
     # Add custom models
@@ -461,6 +480,7 @@ def download_model(model_id, progress_callback=None):
     pinned_revision: str | None = None
     verification_ran = False
     expected_hashes: dict[str, str] = {}
+    skipped_reason: str | None = None
 
     try:
         pinned_revision = model_verify.fetch_latest_revision(ONNX_REPO)
@@ -486,6 +506,9 @@ def download_model(model_id, progress_callback=None):
             "Proceeding without post-download verification.",
             hf_subdir, revision_for_hashes, e,
         )
+        # Remember the reason so Settings → Models can surface "Unverified"
+        # with the underlying cause instead of the failure being invisible.
+        skipped_reason = str(e)
 
     for fi, filename in enumerate(files):
         if progress_callback:
@@ -519,6 +542,9 @@ def download_model(model_id, progress_callback=None):
         if os.path.isfile(sentinel_path):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel_path)
+        # Successful verification also clears any stale .verify_skipped from
+        # a prior download where the HF API was temporarily unreachable.
+        model_verify.clear_verify_skipped(model_dir)
         if pinned_revision is not None:
             model_verify.write_pinned_revision(model_dir, pinned_revision)
         else:
@@ -552,6 +578,12 @@ def download_model(model_id, progress_callback=None):
             with contextlib.suppress(OSError):
                 os.unlink(rev_path)
 
+        # Record the skipped-verification state so Settings → Models can
+        # show "Unverified — could not reach HuggingFace" with the cause,
+        # rather than pretending the download fully succeeded.
+        if skipped_reason:
+            model_verify.write_verify_skipped(model_dir, skipped_reason)
+
         # SHA256 verification was unavailable (HF tree API unreachable).
         # Apply a minimal size floor to weight sidecar files so that a
         # truncated or stub download is surfaced immediately rather than
@@ -581,7 +613,11 @@ def download_model(model_id, progress_callback=None):
                 )
 
     state = _classify_model_state(model_dir, files)
-    if state != "ok":
+    # "unverified" is an acceptable post-download state: every required file
+    # is present, only the cryptographic check was skipped because the HF
+    # metadata API wasn't reachable. The .verify_skipped sentinel makes
+    # that visible in Settings and doesn't block the user.
+    if state not in ("ok", "unverified"):
         raise RuntimeError(
             f"Downloaded {km['name']} failed post-download validation "
             f"({state}). Some files may be missing in {model_dir}."
