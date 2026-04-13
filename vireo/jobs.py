@@ -337,6 +337,18 @@ class JobRunner:
         with self._lock:
             if event_type == "progress":
                 job = self._jobs.get(job_id)
+                if job is not None:
+                    # Mirror latest progress fields onto job["progress"] so
+                    # clients polling /api/jobs or /api/jobs/history see the
+                    # current phase/current_file without needing SSE.
+                    prog = job.setdefault(
+                        "progress",
+                        {"current": 0, "total": 0, "current_file": ""},
+                    )
+                    for key, value in data.items():
+                        if key == "steps":
+                            continue
+                        prog[key] = value
                 if job and job.get("steps"):
                     data = dict(data)
                     data["steps"] = [dict(s) for s in job["steps"]]
