@@ -341,22 +341,32 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     """
     total = len(photos)
 
+    # Resolve cached-detection state before running MegaDetector so we can skip
+    # the weight download entirely when every photo already has a detection row.
+    already_detected_ids = (
+        db.get_existing_detection_photo_ids() if not reclassify else set()
+    )
+
     if detect_animals is not None and get_primary_detection is not None:
-        from detector import ensure_megadetector_weights
+        needs_fresh_detection = reclassify or any(
+            p["id"] not in already_detected_ids for p in photos
+        )
+        if needs_fresh_detection:
+            from detector import ensure_megadetector_weights
 
-        def _dl_progress(phase, current, total_steps):
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": current,
-                    "total": total_steps,
-                    "current_file": "",
-                    "phase": f"Step 4/5: {phase}",
-                },
-            )
+            def _dl_progress(phase, current, total_steps):
+                runner.push_event(
+                    job["id"],
+                    "progress",
+                    {
+                        "current": current,
+                        "total": total_steps,
+                        "current_file": "",
+                        "phase": f"Step 4/5: {phase}",
+                    },
+                )
 
-        ensure_megadetector_weights(progress_callback=_dl_progress)
+            ensure_megadetector_weights(progress_callback=_dl_progress)
 
     try:
         if detect_animals is None or get_primary_detection is None:
@@ -379,9 +389,6 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
         # Load config once for the entire detection loop
         import config as cfg
         det_conf_threshold = cfg.load().get("detector_confidence", 0.2)
-
-        # Get set of photo IDs that already have detections in the database
-        already_detected_ids = db.get_existing_detection_photo_ids() if not reclassify else set()
 
         # Process one photo at a time so we can report per-photo progress
         detection_map = {}
