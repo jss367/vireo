@@ -6,7 +6,7 @@ Read-only. Does not apply — the UI shows the preview and a user action (the
 import logging
 import os
 
-from duplicates import DupCandidate, _has_dup_suffix, resolve_duplicates
+from duplicates import DupCandidate, resolve_duplicates
 
 log = logging.getLogger(__name__)
 
@@ -21,25 +21,8 @@ def _row_to_info(row, folder_path):
         "path": full_path,
         "mtime": row["file_mtime"] or 0.0,
         "rating": row["rating"] if row["rating"] is not None else 0,
+        "file_size": row["file_size"] if row["file_size"] is not None else 0,
     }
-
-
-def _loser_reason(winner_info, loser_info):
-    """Return a short string describing why this loser was picked.
-
-    Matches the tiebreaker cascade in ``duplicates.resolve_duplicates``.
-    """
-    w_dirty = _has_dup_suffix(winner_info["path"])
-    l_dirty = _has_dup_suffix(loser_info["path"])
-    if l_dirty and not w_dirty:
-        return "filename has dup suffix"
-    w_len = len(winner_info["path"])
-    l_len = len(loser_info["path"])
-    if l_len > w_len:
-        return "longer path"
-    if loser_info["mtime"] > winner_info["mtime"]:
-        return "later mtime"
-    return "higher id"
 
 
 def run_duplicate_scan(job, db):
@@ -47,7 +30,9 @@ def run_duplicate_scan(job, db):
 
     Updates ``job['progress']`` as it walks groups. Returns a dict with a
     ``proposals`` list the UI can render; each proposal contains the
-    winner/losers with full paths, mtimes, ratings, and a per-loser reason.
+    winner/losers with full paths, mtimes, ratings, file sizes, and a
+    per-loser reason supplied by :func:`duplicates.resolve_duplicates` (the
+    single source of truth for tiebreaker reasons).
     """
     groups = db.find_duplicate_groups()
     total = len(groups)
@@ -58,7 +43,7 @@ def run_duplicate_scan(job, db):
         photo_ids = g["photo_ids"]
         placeholders = ",".join("?" * len(photo_ids))
         rows = db.conn.execute(
-            f"""SELECT p.id, p.filename, p.file_mtime, p.rating,
+            f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.file_size,
                        f.path AS folder_path
                 FROM photos p
                 LEFT JOIN folders f ON f.id = p.folder_id
@@ -76,12 +61,12 @@ def run_duplicate_scan(job, db):
             # Race: rows could have been rejected between the group query and
             # this lookup. Skip silently.
             continue
-        winner_id, loser_ids = resolve_duplicates(candidates)
+        winner_id, losers_with_reasons = resolve_duplicates(candidates)
         winner_info = info_by_id[winner_id]
         losers = []
-        for lid in loser_ids:
+        for lid, reason in losers_with_reasons:
             linfo = dict(info_by_id[lid])
-            linfo["reason"] = _loser_reason(winner_info, linfo)
+            linfo["reason"] = reason
             losers.append(linfo)
 
         proposals.append({
@@ -90,7 +75,8 @@ def run_duplicate_scan(job, db):
             "losers": losers,
         })
         job["progress"]["current"] = i + 1
-        job["progress"]["current_file"] = g["file_hash"]
+        # Show the winner's path (human-readable) rather than an opaque hash.
+        job["progress"]["current_file"] = winner_info["path"]
 
     return {
         "proposals": proposals,

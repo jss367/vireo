@@ -162,3 +162,15 @@ def test_apply_endpoint_no_json_body_returns_400(app_and_db):
     client = app.test_client()
     resp = client.post("/api/duplicates/apply")
     assert resp.status_code == 400
+
+
+def test_apply_endpoint_bad_entry_in_list_returns_400(app_and_db):
+    """Any non-string or empty-string entry in the list -> 400 (no silent skip)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/duplicates/apply",
+        json={"hashes": ["H1", 42, "", "H2"]},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()

@@ -14,6 +14,11 @@ def test_module_exports_exist():
     assert callable(resolve_duplicates)
 
 
+def _loser_ids(losers):
+    """resolve_duplicates now returns [(loser_id, reason), ...] — strip reasons."""
+    return [lid for lid, _ in losers]
+
+
 @pytest.mark.parametrize("clean_name, dup_name", [
     ("owl.jpg", "owl (2).jpg"),
     ("owl.jpg", "owl (10).jpg"),
@@ -28,7 +33,7 @@ def test_resolve_prefers_clean_filename(clean_name, dup_name):
     dup = DupCandidate(id=2, path=f"/a/{dup_name}", mtime=100.0)
     winner, losers = resolve_duplicates([dup, clean])  # order shouldn't matter
     assert winner == 1
-    assert losers == [2]
+    assert _loser_ids(losers) == [2]
 
 
 def test_resolve_prefers_shorter_path():
@@ -36,7 +41,7 @@ def test_resolve_prefers_shorter_path():
     deep = DupCandidate(id=2, path="/pics/archive/2024/owl.jpg", mtime=100.0)
     winner, losers = resolve_duplicates([deep, shallow])
     assert winner == 1
-    assert losers == [2]
+    assert _loser_ids(losers) == [2]
 
 
 def test_resolve_prefers_older_mtime():
@@ -44,7 +49,7 @@ def test_resolve_prefers_older_mtime():
     newer = DupCandidate(id=2, path="/b/owl.jpg", mtime=200.0)  # same-length path
     winner, losers = resolve_duplicates([newer, older])
     assert winner == 1
-    assert losers == [2]
+    assert _loser_ids(losers) == [2]
 
 
 def test_resolve_falls_back_to_lower_id():
@@ -52,7 +57,7 @@ def test_resolve_falls_back_to_lower_id():
     b = DupCandidate(id=3, path="/b/owl.jpg", mtime=100.0)  # same everything
     winner, losers = resolve_duplicates([a, b])
     assert winner == 3
-    assert losers == [5]
+    assert _loser_ids(losers) == [5]
 
 
 def test_resolve_three_way_middle_wins():
@@ -61,7 +66,7 @@ def test_resolve_three_way_middle_wins():
     c = DupCandidate(id=3, path="/archive/deep/owl.jpg", mtime=100.0)  # clean, long
     winner, losers = resolve_duplicates([a, b, c])
     assert winner == 2
-    assert sorted(losers) == [1, 3]
+    assert sorted(_loser_ids(losers)) == [1, 3]
 
 
 def test_resolve_rule1_cascades_to_rule2_among_clean():
@@ -71,7 +76,7 @@ def test_resolve_rule1_cascades_to_rule2_among_clean():
     # Pass in an order that would tempt the old buggy code to pick id=1:
     winner, losers = resolve_duplicates([long_clean, short_clean, dirty])
     assert winner == 2                    # rule 2 (shorter path) decides among clean
-    assert sorted(losers) == [1, 3]        # both the long-clean and the dirty one lose
+    assert sorted(_loser_ids(losers)) == [1, 3]  # long-clean and dirty both lose
 
 
 def test_resolve_all_dirty_falls_through_to_rules_2_through_4():
@@ -79,7 +84,66 @@ def test_resolve_all_dirty_falls_through_to_rules_2_through_4():
     b = DupCandidate(id=2, path="/a/owl (3).jpg",         mtime=100.0)
     winner, losers = resolve_duplicates([a, b])
     assert winner == 2  # rule 2 — shorter path wins among all-dirty
-    assert losers == [1]
+    assert _loser_ids(losers) == [1]
+
+
+# -----------------------------------------------------------------------------
+# Reason strings — resolver is the single source of truth for *why* each
+# loser was picked. Locked in so callers don't replay the rules.
+# -----------------------------------------------------------------------------
+
+def test_resolve_returns_reason_rule1():
+    """Rule 1: a dirty-suffix loser gets reason 'filename has dup suffix'."""
+    clean = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    dirty = DupCandidate(id=2, path="/a/owl (2).jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([clean, dirty])
+    assert winner == 1
+    assert losers == [(2, "filename has dup suffix")]
+
+
+def test_resolve_returns_reason_rule2():
+    """Rule 2: longer-path clean loser gets reason 'longer path'."""
+    short = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    long_ = DupCandidate(id=2, path="/archive/deep/owl.jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([short, long_])
+    assert winner == 1
+    assert losers == [(2, "longer path")]
+
+
+def test_resolve_returns_reason_rule3():
+    """Rule 3: same-length paths, later mtime loses with reason 'later mtime'."""
+    older = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    newer = DupCandidate(id=2, path="/b/owl.jpg", mtime=200.0)
+    winner, losers = resolve_duplicates([older, newer])
+    assert winner == 1
+    assert losers == [(2, "later mtime")]
+
+
+def test_resolve_returns_reason_rule4():
+    """Rule 4: everything tied, higher-id loses with reason 'higher id'."""
+    a = DupCandidate(id=3, path="/a/owl.jpg", mtime=100.0)
+    b = DupCandidate(id=5, path="/b/owl.jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([a, b])
+    assert winner == 3
+    assert losers == [(5, "higher id")]
+
+
+def test_resolve_mixed_reasons_in_three_way():
+    """3-way: one rule-1 loser (dirty), one rule-2 loser (long clean).
+
+    The dirty candidate is eliminated at rule 1 and keeps that reason; rule 2
+    only sees the two clean candidates and tags the longer one.
+    """
+    short_clean = DupCandidate(id=1, path="/a/owl.jpg", mtime=100.0)
+    long_clean  = DupCandidate(id=2, path="/archive/deep/owl.jpg", mtime=100.0)
+    dirty       = DupCandidate(id=3, path="/a/owl (2).jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([short_clean, long_clean, dirty])
+    assert winner == 1
+    reasons = dict(losers)
+    assert reasons == {
+        2: "longer path",
+        3: "filename has dup suffix",
+    }
 
 
 def test_merge_rating_takes_max():

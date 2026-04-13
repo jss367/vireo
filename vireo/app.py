@@ -4190,11 +4190,13 @@ def create_app(db_path, thumb_cache_dir=None):
         if not isinstance(hashes, list) or not hashes:
             return json_error("hashes required")
 
+        for h in hashes:
+            if not isinstance(h, str) or not h:
+                return json_error("hashes must be a list of non-empty strings")
+
         db = _get_db()
         total_rejected = 0
         for h in hashes:
-            if not isinstance(h, str) or not h:
-                continue
             rows = db.conn.execute(
                 "SELECT id FROM photos "
                 "WHERE file_hash = ? AND flag != 'rejected'",

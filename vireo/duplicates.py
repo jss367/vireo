@@ -28,22 +28,35 @@ def _has_dup_suffix(path: str) -> bool:
 
 
 def resolve_duplicates(candidates):
-    """Return (winner_id, [loser_ids]) for a group sharing a file_hash.
+    """Return ``(winner_id, [(loser_id, reason), ...])`` for a duplicate group.
 
-    Tiebreakers applied in order until decisive:
+    The resolver itself is the single source of truth for *why* each candidate
+    lost — callers (UI, DB) should never replay the rules to reconstruct a
+    reason.
+
+    Tiebreakers applied in order until decisive. Candidates eliminated at an
+    earlier rule keep the earlier-rule reason; later rules operate only on the
+    still-tied pool:
+
     1. If at least one candidate has a clean filename, all dirty candidates
-       lose and tiebreaking continues among the clean ones. If all candidates
-       are dirty (or all are clean), this rule is a no-op.
-    2. Shorter path wins.
-    3. Older mtime wins.
-    4. Lower id wins.
+       lose with reason ``"filename has dup suffix"`` and tiebreaking
+       continues among the clean ones. If all candidates are dirty (or all
+       are clean), this rule is a no-op.
+    2. Shorter path wins. Longer-path losers get reason ``"longer path"``.
+    3. Older mtime wins. Later-mtime losers get reason ``"later mtime"``.
+    4. Lower id wins. Higher-id losers get reason ``"higher id"``.
     """
     assert len(candidates) >= 2, "resolver called with <2 candidates"
 
+    losers_with_reasons = []
+
+    # Rule 1: clean filename beats dirty (dup-suffix) filename
     clean = [c for c in candidates if not _has_dup_suffix(c.path)]
     dirty = [c for c in candidates if _has_dup_suffix(c.path)]
     if clean and dirty:
-        # rule 1 eliminated dirty; now run rules 2-4 on clean only
+        losers_with_reasons.extend(
+            (c.id, "filename has dup suffix") for c in dirty
+        )
         pool = clean
     else:
         pool = candidates
@@ -53,21 +66,29 @@ def resolve_duplicates(candidates):
     shortest = [c for c in pool if len(c.path) == min_len]
     if len(shortest) == 1:
         winner = shortest[0]
-        losers = [c.id for c in candidates if c.id != winner.id]
-        return winner.id, losers
+        losers_with_reasons.extend(
+            (c.id, "longer path") for c in pool if c.id != winner.id
+        )
+        return winner.id, losers_with_reasons
 
-    # Rule 3: older mtime wins
+    # Rule 3: older mtime wins — operate on `shortest` (still tied at rule 2)
+    pool = shortest
     min_mtime = min(c.mtime for c in pool)
     oldest = [c for c in pool if c.mtime == min_mtime]
     if len(oldest) == 1:
         winner = oldest[0]
-        losers = [c.id for c in candidates if c.id != winner.id]
-        return winner.id, losers
+        losers_with_reasons.extend(
+            (c.id, "later mtime") for c in pool if c.id != winner.id
+        )
+        return winner.id, losers_with_reasons
 
-    # Rule 4: lower id wins (deterministic)
+    # Rule 4: lower id wins (deterministic) — operate on `oldest`
+    pool = oldest
     winner = min(pool, key=lambda c: c.id)
-    losers = [c.id for c in candidates if c.id != winner.id]
-    return winner.id, losers
+    losers_with_reasons.extend(
+        (c.id, "higher id") for c in pool if c.id != winner.id
+    )
+    return winner.id, losers_with_reasons
 
 
 @dataclass

@@ -1507,7 +1507,8 @@ class Database:
             )
             for r in rows
         ]
-        winner_id, loser_ids = resolve_duplicates(candidates)
+        winner_id, losers_with_reasons = resolve_duplicates(candidates)
+        loser_ids = [lid for lid, _reason in losers_with_reasons]
 
         def _meta(photo_id):
             r = self.conn.execute(
