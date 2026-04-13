@@ -146,6 +146,54 @@ def test_resolve_mixed_reasons_in_three_way():
     }
 
 
+def test_resolve_preserves_longer_path_losers_when_rule2_still_tied():
+    """Rule 2 (shorter-path wins) may leave multiple candidates tied on the
+    shortest length. The longer-path candidates being dropped from the pool
+    must still be recorded as 'longer path' losers — otherwise the DB layer
+    only rejects losers from the rule-3/4 sub-pool and leaves rows with the
+    same file_hash unflagged.
+    """
+    # Two short-path candidates tied, two longer-path candidates dropped.
+    # Rule 3 breaks the short-path tie (a < b by mtime).
+    a = DupCandidate(id=1, path="/x/owl.jpg", mtime=100.0)
+    b = DupCandidate(id=2, path="/x/owl.jpg", mtime=200.0)
+    c = DupCandidate(id=3, path="/archive/deep/owl.jpg", mtime=100.0)
+    d = DupCandidate(id=4, path="/archive/deep/owl.jpg", mtime=200.0)
+    winner, losers = resolve_duplicates([a, b, c, d])
+    assert winner == 1
+    reasons = dict(losers)
+    assert reasons == {
+        2: "later mtime",
+        3: "longer path",
+        4: "longer path",
+    }
+    # Sanity: every non-winner candidate must appear in losers.
+    assert {c.id for c in [a, b, c, d] if c.id != winner} == set(reasons)
+
+
+def test_resolve_preserves_later_mtime_losers_when_rule3_still_tied():
+    """Rule 3 (oldest-mtime wins) may leave multiple candidates tied on the
+    oldest mtime. Later-mtime candidates being dropped from the pool must
+    still be recorded as 'later mtime' losers so the DB layer rejects the
+    full duplicate set, not just the rule-4 sub-pool.
+    """
+    # All four share the shortest path (rule 2 no-op). Two share oldest mtime
+    # (rule 3 leaves pool=[a,b]); rule 4 picks lowest id among those.
+    a = DupCandidate(id=1, path="/x/owl.jpg", mtime=100.0)
+    b = DupCandidate(id=2, path="/x/owl.jpg", mtime=100.0)
+    c = DupCandidate(id=3, path="/x/owl.jpg", mtime=200.0)
+    d = DupCandidate(id=4, path="/x/owl.jpg", mtime=200.0)
+    winner, losers = resolve_duplicates([a, b, c, d])
+    assert winner == 1
+    reasons = dict(losers)
+    assert reasons == {
+        2: "higher id",
+        3: "later mtime",
+        4: "later mtime",
+    }
+    assert {c.id for c in [a, b, c, d] if c.id != winner} == set(reasons)
+
+
 def test_merge_rating_takes_max():
     winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)
     losers = [PhotoMetadata(id=2, rating=5, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)]

@@ -71,7 +71,13 @@ def resolve_duplicates(candidates):
         )
         return winner.id, losers_with_reasons
 
-    # Rule 3: older mtime wins — operate on `shortest` (still tied at rule 2)
+    # Rule 3: older mtime wins — operate on `shortest` (still tied at rule 2).
+    # Record the longer-path candidates being dropped from the pool as losers
+    # now; the later rules only see `shortest`, so without this the longer-path
+    # rows would never appear in losers_with_reasons and stay unrejected.
+    losers_with_reasons.extend(
+        (c.id, "longer path") for c in pool if len(c.path) != min_len
+    )
     pool = shortest
     min_mtime = min(c.mtime for c in pool)
     oldest = [c for c in pool if c.mtime == min_mtime]
@@ -82,7 +88,12 @@ def resolve_duplicates(candidates):
         )
         return winner.id, losers_with_reasons
 
-    # Rule 4: lower id wins (deterministic) — operate on `oldest`
+    # Rule 4: lower id wins (deterministic) — operate on `oldest`.
+    # Same as above: record the later-mtime candidates being dropped so the
+    # rule-4 sub-pool isn't the only source of losers.
+    losers_with_reasons.extend(
+        (c.id, "later mtime") for c in pool if c.mtime != min_mtime
+    )
     pool = oldest
     winner = min(pool, key=lambda c: c.id)
     losers_with_reasons.extend(
