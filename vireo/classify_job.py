@@ -341,6 +341,23 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     """
     total = len(photos)
 
+    if detect_animals is not None and get_primary_detection is not None:
+        from detector import ensure_megadetector_weights
+
+        def _dl_progress(phase, current, total_steps):
+            runner.push_event(
+                job["id"],
+                "progress",
+                {
+                    "current": current,
+                    "total": total_steps,
+                    "current_file": "",
+                    "phase": f"Step 4/5: {phase}",
+                },
+            )
+
+        ensure_megadetector_weights(progress_callback=_dl_progress)
+
     try:
         if detect_animals is None or get_primary_detection is None:
             raise ImportError(

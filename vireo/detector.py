@@ -25,6 +25,64 @@ INPUT_SIZE = 640
 CLASS_NAMES = {0: "animal", 1: "person", 2: "vehicle"}
 
 
+def ensure_megadetector_weights(progress_callback=None):
+    """Ensure MegaDetector V6 ONNX weights are present on disk.
+
+    Returns the weights path if already downloaded. Otherwise downloads from
+    Hugging Face and copies into MEGADETECTOR_ONNX_DIR. Raises RuntimeError
+    on failure so callers can abort rather than silently run without detection.
+
+    Args:
+        progress_callback: optional callable(phase: str, current: int, total: int)
+            invoked before the download starts and after it completes.
+    """
+    if os.path.isfile(MEGADETECTOR_ONNX_PATH):
+        return MEGADETECTOR_ONNX_PATH
+
+    os.makedirs(MEGADETECTOR_ONNX_DIR, exist_ok=True)
+
+    if progress_callback:
+        progress_callback(
+            "Downloading MegaDetector V6 (~300 MB, first run only)...", 0, 1
+        )
+    log.info("MegaDetector weights missing — downloading from Hugging Face")
+
+    try:
+        import shutil
+
+        from huggingface_hub import hf_hub_download
+        from models import ONNX_REPO
+
+        cached_path = hf_hub_download(
+            repo_id=ONNX_REPO,
+            filename="model.onnx",
+            subfolder="megadetector-v6",
+        )
+        if cached_path != MEGADETECTOR_ONNX_PATH:
+            shutil.copy2(cached_path, MEGADETECTOR_ONNX_PATH)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to download MegaDetector V6 weights: {e}. "
+            "Check your network connection and retry, or download manually "
+            "from the pipeline models page."
+        ) from e
+
+    if not os.path.isfile(MEGADETECTOR_ONNX_PATH):
+        raise RuntimeError(
+            "MegaDetector download completed but weights file is missing at "
+            f"{MEGADETECTOR_ONNX_PATH}."
+        )
+
+    size_mb = round(os.path.getsize(MEGADETECTOR_ONNX_PATH) / 1024 / 1024, 1)
+    log.info("MegaDetector weights downloaded (%s MB)", size_mb)
+    if progress_callback:
+        progress_callback(
+            f"MegaDetector V6 ready ({size_mb} MB)", 1, 1
+        )
+
+    return MEGADETECTOR_ONNX_PATH
+
+
 def _get_session():
     """Load MegaDetector ONNX session (cached singleton).
 
