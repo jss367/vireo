@@ -1388,3 +1388,136 @@ def test_download_model_small_onnx_graph_does_not_trigger_size_floor(
     # .onnx.data sidecars are subject to the floor.  Any exception here
     # (including a non-"truncated" RuntimeError) is a test failure.
     models.download_model("bioclip-vit-b-16")
+
+
+# ---------------------------------------------------------------------------
+# _hf_download_with_retry: cache-hit vs network-download messaging
+# ---------------------------------------------------------------------------
+
+def _stub_hf_module(monkeypatch, hf_hub_download_fn, try_to_load_from_cache_fn):
+    """Install a fake huggingface_hub module exposing the two functions
+    _hf_download_with_retry imports."""
+    import sys
+    import types
+
+    stub = types.ModuleType("huggingface_hub")
+    stub.hf_hub_download = hf_hub_download_fn
+    stub.try_to_load_from_cache = try_to_load_from_cache_fn
+    monkeypatch.setitem(sys.modules, "huggingface_hub", stub)
+
+
+def test_hf_download_with_retry_reports_cache_hit(tmp_path, monkeypatch, caplog):
+    """When the file is already in the HF cache, the user-visible message
+    and log say so — no '1.2 GB downloaded in 1 second' confusion."""
+    import logging
+
+    import models
+
+    # Pretend the blob is sitting at this path in the HF cache.
+    cached_blob = tmp_path / "fake-cache" / "blobs" / "abc123"
+    cached_blob.parent.mkdir(parents=True)
+    cached_blob.write_bytes(b"weights" * 100)
+
+    def fake_lookup(repo_id, filename, revision=None):
+        return str(cached_blob)
+
+    def fake_download(repo_id, filename, subfolder=None, revision=None):
+        # Simulate hf_hub_download returning the same cached path it would
+        # normally return when nothing needs to be fetched.
+        return str(cached_blob)
+
+    _stub_hf_module(monkeypatch, fake_download, fake_lookup)
+
+    messages = []
+    dest_dir = tmp_path / "model_dir"
+    with caplog.at_level(logging.INFO, logger="models"):
+        models._hf_download_with_retry(
+            repo_id="acme/foo",
+            filename="model.onnx",
+            local_dir=str(dest_dir),
+            subfolder="sub",
+            progress_callback=messages.append,
+        )
+
+    assert any("HF cache" in m for m in messages), (
+        f"expected a cache-hit message in progress callback, got {messages!r}"
+    )
+    log_text = caplog.text
+    assert "already in HF cache" in log_text
+    assert "Linked from cache" in log_text
+    assert "no network transfer" in log_text
+    # The dest must exist (copied from cache)
+    assert (dest_dir / "model.onnx").exists()
+
+
+def test_hf_download_with_retry_reports_network_download(tmp_path, monkeypatch, caplog):
+    """When the file is not cached, the message says 'Downloading from
+    Hugging Face' — the existing behaviour, kept distinct."""
+    import logging
+
+    import models
+
+    cached_blob = tmp_path / "fake-cache" / "blobs" / "abc123"
+
+    def fake_lookup(repo_id, filename, revision=None):
+        # Cache miss
+        return None
+
+    def fake_download(repo_id, filename, subfolder=None, revision=None):
+        # Pretend the network fetch landed here.
+        cached_blob.parent.mkdir(parents=True, exist_ok=True)
+        cached_blob.write_bytes(b"weights" * 100)
+        return str(cached_blob)
+
+    _stub_hf_module(monkeypatch, fake_download, fake_lookup)
+
+    messages = []
+    dest_dir = tmp_path / "model_dir"
+    with caplog.at_level(logging.INFO, logger="models"):
+        models._hf_download_with_retry(
+            repo_id="acme/foo",
+            filename="model.onnx",
+            local_dir=str(dest_dir),
+            progress_callback=messages.append,
+        )
+
+    assert any("Downloading" in m and "Hugging Face" in m for m in messages), (
+        f"expected a network-download message, got {messages!r}"
+    )
+    log_text = caplog.text
+    assert "already in HF cache" not in log_text
+    assert "Download complete" in log_text
+
+
+def test_hf_download_with_retry_cache_lookup_failure_falls_back(tmp_path, monkeypatch, caplog):
+    """If try_to_load_from_cache raises, we still call hf_hub_download —
+    cache detection is best-effort, not a hard dependency."""
+    import logging
+
+    import models
+
+    cached_blob = tmp_path / "fake-cache" / "blobs" / "abc123"
+
+    def fake_lookup(repo_id, filename, revision=None):
+        raise RuntimeError("HF cache lookup unavailable")
+
+    def fake_download(repo_id, filename, subfolder=None, revision=None):
+        cached_blob.parent.mkdir(parents=True, exist_ok=True)
+        cached_blob.write_bytes(b"weights" * 100)
+        return str(cached_blob)
+
+    _stub_hf_module(monkeypatch, fake_download, fake_lookup)
+
+    messages = []
+    dest_dir = tmp_path / "model_dir"
+    with caplog.at_level(logging.INFO, logger="models"):
+        result = models._hf_download_with_retry(
+            repo_id="acme/foo",
+            filename="model.onnx",
+            local_dir=str(dest_dir),
+            progress_callback=messages.append,
+        )
+
+    # Falls back to network-download messaging since cache state is unknown.
+    assert result == os.path.join(str(dest_dir), "model.onnx")
+    assert any("Downloading" in m and "Hugging Face" in m for m in messages)
