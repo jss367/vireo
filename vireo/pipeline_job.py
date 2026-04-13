@@ -654,10 +654,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
         # the user deleted a .onnx.data file, or the download manifest
         # changed) would otherwise surface as an opaque ONNXRuntime crash.
+        # "unverified" is accepted here: all files are present, only the
+        # SHA256 cross-check with HuggingFace was skipped (transient network
+        # issue). The lazy verify_if_needed call below will retry the hash
+        # check, and get_models() already treats these as downloaded, so
+        # rejecting them here turns a warning into a hard pipeline failure.
         files = active_model.get("files", [])
         if files and weights_path:
             state = _classify_model_state(weights_path, files)
-            if state != "ok":
+            if state not in ("ok", "unverified"):
                 raise RuntimeError(
                     _incomplete_model_message(model_name, model_is_custom)
                 )

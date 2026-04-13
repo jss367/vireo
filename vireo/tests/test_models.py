@@ -504,6 +504,67 @@ def test_classify_state_ok(tmp_path):
     ) == "ok"
 
 
+def test_classify_state_verify_skipped_sentinel_marks_unverified(tmp_path):
+    """All files present plus a .verify_skipped sentinel reports 'unverified'
+    so Settings can distinguish a working-but-unconfirmed download from a
+    fully-verified one."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    (d / ".verify_skipped").write_text("SSL: CERTIFICATE_VERIFY_FAILED")
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "unverified"
+
+
+def test_classify_state_verify_failed_takes_priority_over_skipped(tmp_path):
+    """If both sentinels exist, .verify_failed wins — a known bad hash is
+    more serious than 'could not check'."""
+    import models
+    d = tmp_path / "m"
+    d.mkdir()
+    (d / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(d / "image_encoder.onnx.data")
+    (d / ".verify_failed").write_text("hash mismatch")
+    (d / ".verify_skipped").write_text("hf api unreachable")
+    assert models._classify_model_state(
+        str(d), ["image_encoder.onnx", "image_encoder.onnx.data"]
+    ) == "incomplete"
+
+
+def test_get_models_surfaces_unverified_state_and_reason(tmp_path, monkeypatch):
+    """get_models reports state='unverified', downloaded=True, and surfaces the
+    underlying reason from the sentinel file so the Settings UI can display
+    the cause (e.g. the SSL error text) next to the warning badge."""
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    model_dir.mkdir(parents=True)
+    (model_dir / "image_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(model_dir / "image_encoder.onnx.data")
+    (model_dir / "text_encoder.onnx").write_bytes(b"stub")
+    _make_fake_data_file(model_dir / "text_encoder.onnx.data")
+    (model_dir / "tokenizer.json").write_text("{}")
+    (model_dir / "config.json").write_text("{}")
+    reason = (
+        "failed to fetch expected hashes for bioclip-vit-b-16@main: "
+        "<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]>"
+    )
+    (model_dir / ".verify_skipped").write_text(reason)
+
+    result = models.get_models()
+    entry = next(m for m in result if m["id"] == "bioclip-vit-b-16")
+    assert entry["state"] == "unverified"
+    # Unverified models are still usable — pipeline and "Use This" need to work.
+    assert entry["downloaded"] is True
+    assert entry["weights_path"] == str(model_dir)
+    assert entry["verify_skipped_reason"] == reason
+
+
 def test_get_models_surfaces_incomplete_state(tmp_path, monkeypatch):
     """get_models reports state='incomplete' and downloaded=False when a known
     model directory contains a .verify_failed sentinel (written by
@@ -916,6 +977,101 @@ def test_download_model_skips_verification_only_when_tree_api_also_fails(
 
     assert sentinel.is_file()
     assert not (model_dir / model_verify.REVISION_FILE).exists()
+
+
+def test_download_model_writes_verify_skipped_when_hash_fetch_fails(
+    tmp_path, monkeypatch
+):
+    """When the tree API is unreachable at download time, download_model
+    writes .verify_skipped with the underlying reason so the Settings UI
+    can surface why verification was skipped instead of the failure being
+    logged-only."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+
+    # Files land on disk with real bytes so the size-floor check passes;
+    # verification is blocked by the unreachable tree API, not by bad bytes.
+    large_bytes = b"x" * (20 * 1024 * 1024)  # 20 MB — above _MIN_BINARY_MODEL_BYTES
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        content = large_bytes if filename.endswith(".onnx.data") else b"stub"
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    def fetch_hashes_raises(subdir, revision="main"):
+        raise model_verify.VerifyError(
+            "<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED]>"
+        )
+
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", fetch_hashes_raises
+    )
+
+    models.download_model("bioclip-vit-b-16")
+
+    skipped = model_dir / model_verify.VERIFY_SKIPPED_SENTINEL
+    assert skipped.is_file(), (
+        ".verify_skipped must be written when fetch_expected_hashes fails "
+        "so Settings can show 'Unverified' with the cause"
+    )
+    # The recorded reason must be the actual exception text so the UI can
+    # show the user the real problem (SSL, proxy, etc).
+    assert "CERTIFICATE_VERIFY_FAILED" in skipped.read_text()
+
+    # Sanity: hash-computation just confirms files exist; not asserting a
+    # SHA (verification was skipped by design).
+    assert hashlib.sha256(large_bytes).hexdigest()  # smoke
+
+
+def test_download_model_clears_verify_skipped_on_successful_reverify(
+    tmp_path, monkeypatch
+):
+    """If a previous download left .verify_skipped and a retry now succeeds
+    with working hash fetch, the sentinel must be cleared so the model
+    returns to the 'ok' state."""
+    import hashlib
+
+    import model_verify
+    models, model_dir = _patch_download_model_env(tmp_path, monkeypatch)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    skipped = model_dir / model_verify.VERIFY_SKIPPED_SENTINEL
+    skipped.write_text("earlier SSL failure")
+
+    lfs_contents = {
+        "image_encoder.onnx": b"graph-i" * 100,
+        "image_encoder.onnx.data": b"weights-i" * 1000,
+        "text_encoder.onnx": b"graph-t" * 100,
+        "text_encoder.onnx.data": b"weights-t" * 1000,
+    }
+    expected = {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in lfs_contents.items()
+    }
+
+    def fake_download(repo_id, filename, local_dir, subfolder=None, progress_callback=None, revision=None):
+        os.makedirs(local_dir, exist_ok=True)
+        dest = os.path.join(local_dir, filename)
+        content = lfs_contents.get(filename, b"{}")
+        with open(dest, "wb") as f:
+            f.write(content)
+        return dest
+
+    monkeypatch.setattr(models, "_hf_download_with_retry", fake_download)
+    monkeypatch.setattr(
+        model_verify, "fetch_expected_hashes", lambda subdir, revision="main": expected
+    )
+
+    models.download_model("bioclip-vit-b-16")
+    assert not skipped.exists(), (
+        ".verify_skipped must be cleared once verification actually runs "
+        "and succeeds"
+    )
 
 
 def test_purge_hf_cache_file_deletes_blob_target(tmp_path, monkeypatch):

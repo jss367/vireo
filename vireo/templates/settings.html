@@ -1600,6 +1600,8 @@ async function loadModels() {
         statusColor = 'var(--accent)'; statusText = 'Downloaded';
       } else if (state === 'incomplete') {
         statusColor = 'var(--warning)'; statusText = 'Incomplete — repair available';
+      } else if (state === 'unverified') {
+        statusColor = 'var(--warning)'; statusText = 'Unverified — could not reach HuggingFace';
       } else {
         statusColor = 'var(--text-faint)'; statusText = 'Not downloaded';
       }
@@ -1616,21 +1618,26 @@ async function loadModels() {
       html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">' + escapeHtml(m.description || '') + '</div>';
       if (state === 'incomplete') {
         html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Model files are missing or truncated. Click Repair to finish the download — already-downloaded files will not be re-fetched.</div>';
+      } else if (state === 'unverified') {
+        var reason = m.verify_skipped_reason ? ' (' + escapeHtml(m.verify_skipped_reason) + ')' : '';
+        html += '<div style="font-size:11px;color:var(--warning);margin-bottom:6px;">Files are present but SHA256 could not be checked against HuggingFace' + reason + '. The model should work; click Retry verification once the network is reachable.</div>';
       }
       html += '<div style="display:flex;align-items:center;gap:8px;">';
       html += '<span style="font-size:11px;color:' + statusColor + ';">' + statusText + '</span>';
 
-      if (state === 'ok' && m.weights_path) {
+      if ((state === 'ok' || state === 'unverified') && m.weights_path) {
         html += '<span style="font-size:11px;color:var(--text-invisible);">' + escapeHtml(m.weights_path) + '</span>';
       }
 
       html += '<span style="margin-left:auto;display:flex;gap:6px;">';
       if (state === 'incomplete' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Repair</button>';
+      } else if (state === 'unverified' && m.source !== 'custom') {
+        html += '<button onclick="verifyAllModels()" style="background:var(--warning);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;font-weight:600;">Retry verification</button>';
       } else if (state === 'missing' && m.source !== 'custom') {
         html += '<button onclick="downloadModel(\'' + m.id + '\')" style="background:var(--accent);color:var(--accent-text);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Download</button>';
       }
-      if (!isActive && state === 'ok') {
+      if (!isActive && (state === 'ok' || state === 'unverified')) {
         html += '<button onclick="setActiveModel(\'' + m.id + '\')" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer;">Use This</button>';
       }
       if (state !== 'missing') {

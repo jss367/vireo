@@ -1457,6 +1457,66 @@ def test_pipeline_translates_verify_failure_to_repair_message(tmp_path, monkeypa
         f"Expected a Repair hint in model_loader errors, saw: {model_loader_errors}"
 
 
+def test_pipeline_preflight_accepts_unverified_model(tmp_path, monkeypatch):
+    """Models in 'unverified' state (files present, SHA256 check skipped
+    because HF was unreachable) must pass preflight. get_models() already
+    reports downloaded=True for them, so rejecting them at pipeline start
+    would turn a transient outage into a hard pipeline failure with no way
+    to clear it short of deleting and redownloading the model.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import model_verify
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Write the verify-skipped sentinel so _classify_model_state returns
+    # "unverified" rather than "ok".
+    model_dir = tmp_path / "models" / "bioclip-vit-b-16"
+    (model_dir / model_verify.VERIFY_SKIPPED_SENTINEL).write_text(
+        "Transient HF outage (test fixture)"
+    )
+
+    # Stub Classifier so the preflight check is the only thing that could
+    # fail on this path. If preflight rejects the unverified state, we'll
+    # see a "Repair" error in model_loader step updates before the stub
+    # is ever invoked.
+    class _StubClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(classifier_mod, "Classifier", _StubClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    model_loader_errors = [
+        kwargs.get("error", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "model_loader" and "error" in kwargs
+    ]
+    assert not any("Repair" in e for e in model_loader_errors), (
+        "Preflight must accept 'unverified' models, but saw Repair error: "
+        f"{model_loader_errors}"
+    )
+
+
 def test_pipeline_translates_incomplete_model_error(tmp_path, monkeypatch):
     """Model loader failures from missing external-data get a friendly message.
 

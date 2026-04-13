@@ -36,6 +36,49 @@ REVISION_FILE = ".hf_revision"
 
 VERIFY_FAILED_SENTINEL = ".verify_failed"
 
+# Written into a model directory when SHA256 verification could not be run
+# (HuggingFace metadata API unreachable, e.g. TLS / proxy / transient
+# outage). The file contents are the underlying reason string, surfaced in
+# the Settings → Models UI so the skipped-verification state is not silent.
+#
+# Distinct from VERIFY_FAILED_SENTINEL: that one means a file's hash did
+# not match (unambiguous corruption). VERIFY_SKIPPED means the hashes
+# could not be fetched at all — files on disk are probably fine, but
+# could not be cryptographically confirmed.
+VERIFY_SKIPPED_SENTINEL = ".verify_skipped"
+
+
+def write_verify_skipped(model_dir: str, reason: str) -> None:
+    """Write VERIFY_SKIPPED_SENTINEL with the given reason.
+
+    Silently ignores OSError so the outer flow (download/verify) is never
+    blocked by a filesystem hiccup — the worst case is that the Settings
+    UI doesn't show the skipped-verification banner.
+    """
+    try:
+        with open(os.path.join(model_dir, VERIFY_SKIPPED_SENTINEL), "w") as f:
+            f.write(reason)
+    except OSError:
+        pass
+
+
+def clear_verify_skipped(model_dir: str) -> None:
+    """Delete VERIFY_SKIPPED_SENTINEL if present."""
+    path = os.path.join(model_dir, VERIFY_SKIPPED_SENTINEL)
+    if os.path.isfile(path):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+def read_verify_skipped_reason(model_dir: str) -> str | None:
+    """Return the reason string from VERIFY_SKIPPED_SENTINEL, or None."""
+    path = os.path.join(model_dir, VERIFY_SKIPPED_SENTINEL)
+    try:
+        with open(path) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
 
 class VerifyError(Exception):
     """Raised when verification can't be performed (network / HTTP error)
@@ -264,8 +307,9 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     # --- Pinned install: hard-fail on mismatch ---
     try:
         result = verify_model(model_dir, hf_subdir)
-    except VerifyError:
+    except VerifyError as e:
         _verify_error_cache[model_id] = time.monotonic()
+        write_verify_skipped(model_dir, str(e))
         return
 
     if not result.ok:
@@ -281,6 +325,7 @@ def verify_if_needed(model_id: str, model_dir: str, hf_subdir: str) -> None:
     if os.path.isfile(sentinel):
         with contextlib.suppress(OSError):
             os.unlink(sentinel)
+    clear_verify_skipped(model_dir)
 
 
 def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
@@ -293,14 +338,16 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
     """
     try:
         latest_rev = fetch_latest_revision(ONNX_REPO)
-    except VerifyError:
+    except VerifyError as e:
         _verify_error_cache[model_id] = time.monotonic()
+        write_verify_skipped(model_dir, str(e))
         return
 
     try:
         result = verify_model(model_dir, hf_subdir, revision=latest_rev)
-    except VerifyError:
+    except VerifyError as e:
         _verify_error_cache[model_id] = time.monotonic()
+        write_verify_skipped(model_dir, str(e))
         return
 
     if result.ok:
@@ -311,6 +358,7 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
         if os.path.isfile(sentinel):
             with contextlib.suppress(OSError):
                 os.unlink(sentinel)
+        clear_verify_skipped(model_dir)
     else:
         log.warning(
             "Model %s (no revision pin) does not match current main: "
@@ -320,6 +368,12 @@ def _verify_unpinned(model_id: str, model_dir: str, hf_subdir: str) -> None:
         )
         # Cache as checked so we don't re-warn on every pipeline start.
         _verified_this_process.add(model_id)
+        # Clear any stale .verify_skipped: the hash fetch succeeded this
+        # time, so the old "couldn't reach HF" reason no longer reflects
+        # reality. Without this, a previously-unverified model keeps
+        # showing the outdated network-error badge via get_models() even
+        # though lazy verification actually ran.
+        clear_verify_skipped(model_dir)
 
 
 def clear_verified_cache(model_id: str) -> None:
@@ -358,7 +412,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             continue
         if not m.get("hf_subdir"):
             continue
-        if m.get("state") != "ok":
+        if m.get("state") not in ("ok", "unverified"):
             continue
         model_id = m["id"]
         weights_path = m.get("weights_path")
@@ -375,6 +429,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             try:
                 latest_rev = fetch_latest_revision(ONNX_REPO)
             except VerifyError as e:
+                write_verify_skipped(weights_path, str(e))
                 results[model_id] = VerifyResult(
                     ok=False, missing=[f"<hash fetch failed: {e}>"]
                 )
@@ -384,6 +439,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
                     weights_path, m["hf_subdir"], revision=latest_rev
                 )
             except VerifyError as e:
+                write_verify_skipped(weights_path, str(e))
                 results[model_id] = VerifyResult(
                     ok=False, missing=[f"<hash fetch failed: {e}>"]
                 )
@@ -392,16 +448,25 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             if result.ok:
                 write_pinned_revision(weights_path, latest_rev)
                 _verified_this_process.add(model_id)
+                clear_verify_skipped(weights_path)
             else:
                 # Mismatch is ambiguous for unpinned installs — don't
-                # write sentinel, just report to the caller.
+                # write .verify_failed, just report to the caller. But
+                # do clear any stale .verify_skipped: the hash fetch
+                # succeeded this round, so the old "couldn't reach HF"
+                # reason no longer reflects reality. Without this, a
+                # previously-unverified model stays stuck with an
+                # outdated network-error badge and makes Retry look
+                # ineffective even though verification actually ran.
                 _verified_this_process.discard(model_id)
+                clear_verify_skipped(weights_path)
             continue
 
         # --- Pinned install: hard-fail on mismatch ---
         try:
             result = verify_model(weights_path, m["hf_subdir"])
         except VerifyError as e:
+            write_verify_skipped(weights_path, str(e))
             results[model_id] = VerifyResult(
                 ok=False, missing=[f"<hash fetch failed: {e}>"]
             )
@@ -419,4 +484,5 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             _verified_this_process.discard(model_id)
         else:
             _verified_this_process.add(model_id)
+            clear_verify_skipped(weights_path)
     return results
