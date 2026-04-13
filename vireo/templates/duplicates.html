@@ -389,6 +389,7 @@
       showToast('Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's'), 'success');
       clearResults();
     } catch (e) {
+      showToast(e.message || 'Apply failed', 'error');
       status.textContent = '';
       btn.disabled = false;
       // safeFetch already shows a toast on failure.
