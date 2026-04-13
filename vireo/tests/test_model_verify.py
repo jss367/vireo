@@ -521,6 +521,51 @@ def test_unpinned_install_fails_open_on_network_error(tmp_path, monkeypatch):
     assert "bioclip-vit-b-16" in model_verify._verify_error_cache
 
 
+def test_verify_if_needed_unpinned_mismatch_clears_stale_verify_skipped(
+    tmp_path, monkeypatch
+):
+    """_verify_unpinned: if a previous transient outage wrote .verify_skipped
+    and a later verify_if_needed run actually reaches HF (but returns a
+    mismatch), the stale sentinel must be cleared. Without this, get_models()
+    keeps reporting state='unverified' with the outdated network-error reason
+    even though lazy verification has already run."""
+    import model_verify
+
+    # Legacy install — no .hf_revision.
+    p = tmp_path / "image_encoder.onnx.data"
+    p.write_bytes(b"old version bytes")
+
+    # Simulate a previous outage that left .verify_skipped on disk.
+    (tmp_path / model_verify.VERIFY_SKIPPED_SENTINEL).write_text(
+        "Could not reach HuggingFace (prior outage)"
+    )
+
+    # Now HF is reachable but the files don't match (hash mismatch).
+    monkeypatch.setattr(
+        model_verify,
+        "fetch_expected_hashes",
+        lambda subdir, revision="main": {"image_encoder.onnx.data": "0" * 64},
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "latestsha123"
+    )
+
+    # Must not raise — soft-fail semantics for unpinned installs.
+    model_verify.verify_if_needed(
+        "bioclip-vit-b-16", str(tmp_path), "bioclip-vit-b-16"
+    )
+
+    # .verify_skipped must be gone: the hash fetch succeeded, so the old
+    # "couldn't reach HF" reason is now stale and misleading.
+    assert not (tmp_path / model_verify.VERIFY_SKIPPED_SENTINEL).is_file(), (
+        "_verify_unpinned must clear .verify_skipped on mismatch path"
+    )
+    # .verify_failed must NOT have been written (ambiguous mismatch).
+    assert not (tmp_path / model_verify.VERIFY_FAILED_SENTINEL).is_file()
+    # Model is cached as checked (to avoid re-warning on every pipeline start).
+    assert "bioclip-vit-b-16" in model_verify._verified_this_process
+
+
 # ---------------------------------------------------------------------------
 # verify_all_models — iterate installed models for the "Verify all" button
 # ---------------------------------------------------------------------------
