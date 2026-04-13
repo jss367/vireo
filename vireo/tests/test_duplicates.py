@@ -24,3 +24,11 @@ def test_resolve_prefers_clean_filename(clean_name, dup_name):
     winner, losers = resolve_duplicates([dup, clean])  # order shouldn't matter
     assert winner == 1
     assert losers == [2]
+
+
+def test_resolve_prefers_shorter_path():
+    shallow = DupCandidate(id=1, path="/pics/owl.jpg", mtime=100.0)
+    deep = DupCandidate(id=2, path="/pics/archive/2024/owl.jpg", mtime=100.0)
+    winner, losers = resolve_duplicates([deep, shallow])
+    assert winner == 1
+    assert losers == [2]

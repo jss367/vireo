@@ -46,5 +46,13 @@ def resolve_duplicates(candidates):
         losers = [c for c in candidates if c.id != winner.id]
         return winner.id, [l.id for l in losers]
 
-    # No decisive split yet — fall through to later rules (raise for now)
-    raise NotImplementedError("later tiebreakers not yet implemented")
+    # All same on rule 1 — try rule 2 (shorter path wins)
+    pool = candidates
+    min_len = min(len(c.path) for c in pool)
+    shortest = [c for c in pool if len(c.path) == min_len]
+    if len(shortest) == 1:
+        winner = shortest[0]
+        losers = [c for c in candidates if c.id != winner.id]
+        return winner.id, [l.id for l in losers]
+
+    raise NotImplementedError("rules 3-4 not yet")
