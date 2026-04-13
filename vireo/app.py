@@ -384,6 +384,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def jobs_page():
         return render_template("jobs.html")
 
+    @app.route("/duplicates")
+    def duplicates_page():
+        return render_template("duplicates.html")
+
     @app.route("/move")
     def move_page():
         return render_template("move.html")
