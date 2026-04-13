@@ -128,6 +128,58 @@ def _validate_onnx(onnx_path, input_dict, pytorch_outputs, tolerance=0.01):
     return all_ok
 
 
+def _verify_text_encoder_batched(onnx_path, txt_wrapper, batch_size=8):
+    """Sanity-check that the exported text encoder accepts batches > 1.
+
+    Earlier exports baked batch=1 into a downstream Reshape (see
+    _TextEncoderWrapper docstring), so any batched call failed at runtime.
+    Run a batch_size inference and compare each row against per-row PyTorch
+    outputs to catch regressions at export time, not first-cold-start time.
+    """
+    import onnxruntime as ort
+
+    log.info("  Verifying text encoder accepts batch=%d...", batch_size)
+    rng = np.random.default_rng(0)
+    # Use realistic token IDs (49407 is CLIP's EOT token; surround with random
+    # in-vocab IDs). Vocab size for open_clip CLIP tokenizers is 49408.
+    tokens_np = rng.integers(low=1, high=49407, size=(batch_size, 77), dtype=np.int64)
+    tokens_np[:, 0] = 49406  # SOT
+    eot_positions = rng.integers(low=5, high=76, size=(batch_size,))
+    for i, pos in enumerate(eot_positions):
+        tokens_np[i, pos] = 49407
+        tokens_np[i, pos + 1 :] = 0
+
+    session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    try:
+        ort_batch = session.run(None, {input_name: tokens_np})[0]
+    except Exception as e:
+        raise RuntimeError(
+            "Text encoder ONNX rejected batched input — export still has a "
+            f"hardcoded batch dimension. Original error: {e!r}"
+        ) from e
+
+    # Compare against per-row PyTorch outputs
+    tokens_pt = torch.from_numpy(tokens_np)
+    with torch.no_grad():
+        pt_rows = [
+            txt_wrapper(tokens_pt[i : i + 1]).numpy() for i in range(batch_size)
+        ]
+    pt_batch = np.concatenate(pt_rows, axis=0)
+
+    abs_diff = np.abs(pt_batch.astype(np.float32) - ort_batch.astype(np.float32))
+    max_diff = float(abs_diff.max())
+    if max_diff > 0.05:
+        raise RuntimeError(
+            f"Batched ONNX output diverges from PyTorch per-row reference "
+            f"(max abs diff {max_diff:.4f})"
+        )
+    log.info(
+        "  Text encoder batched verification OK (max diff vs per-row PT: %.6f)",
+        max_diff,
+    )
+
+
 # ---------------------------------------------------------------------------
 # MegaDetector (YOLOv9)
 # ---------------------------------------------------------------------------
@@ -248,14 +300,64 @@ class _ImageEncoderWrapper(torch.nn.Module):
 
 
 class _TextEncoderWrapper(torch.nn.Module):
-    """Wrapper to export only the text encoder of an open_clip model."""
+    """Wrapper to export only the text encoder of an open_clip model.
+
+    open_clip's CLIP.encode_text uses text_global_pool, which contains:
+
+        x[torch.arange(x.shape[0], device=x.device), text.argmax(dim=-1)]
+
+    When traced by torch.onnx.export with a dummy batch of 1, ``x.shape[0]``
+    is captured as the constant ``1`` and propagates downstream as a
+    hardcoded Reshape target, so the resulting graph rejects any batch != 1
+    at runtime. We re-implement encode_text here, replacing that gather
+    with ``torch.gather`` (which exports cleanly with dynamic batch) and
+    keeping pool-type semantics consistent with open_clip.
+    """
 
     def __init__(self, clip_model):
         super().__init__()
         self.clip_model = clip_model
+        # Resolve pool config once so forward() avoids attribute lookups
+        # that the tracer might fold into constants.
+        self._pool_type = getattr(clip_model, "text_pool_type", "argmax")
+        self._eos_token_id = getattr(clip_model, "text_eos_id", None)
 
     def forward(self, text):
-        return self.clip_model.encode_text(text)
+        m = self.clip_model
+        cast_dtype = m.transformer.get_cast_dtype()
+
+        x = m.token_embedding(text).to(cast_dtype)         # (B, L, D)
+        x = x + m.positional_embedding.to(cast_dtype)
+        x = m.transformer(x, attn_mask=m.attn_mask)
+        x = m.ln_final(x)                                   # (B, L, D)
+
+        # Trace-friendly EOS pooling. Avoids torch.arange(x.shape[0]).
+        pool = self._pool_type
+        if pool == "first":
+            x = x[:, 0]
+        elif pool == "last":
+            x = x[:, -1]
+        elif pool in ("argmax", "eos"):
+            if pool == "argmax":
+                idx = text.argmax(dim=-1)                   # (B,)
+            else:
+                if self._eos_token_id is None:
+                    raise ValueError(
+                        "text_pool_type='eos' requires clip_model.text_eos_id"
+                    )
+                idx = (text == self._eos_token_id).int().argmax(dim=-1)  # (B,)
+            # gather along seq dim: index shape (B, 1, D) → output (B, 1, D)
+            idx = idx.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, x.size(-1))
+            x = x.gather(1, idx).squeeze(1)                 # (B, D)
+        # else: pool == 'none' or unknown — leave x as (B, L, D)
+
+        if m.text_projection is not None:
+            if isinstance(m.text_projection, torch.nn.Linear):
+                x = m.text_projection(x)
+            else:
+                x = x @ m.text_projection
+
+        return x
 
 
 def _export_bioclip_variant(model_id, output_dir, opset, validate=False):
@@ -315,7 +417,11 @@ def _export_bioclip_variant(model_id, output_dir, opset, validate=False):
 
     txt_wrapper = _TextEncoderWrapper(model)
     txt_wrapper.eval()
-    dummy_tokens = torch.zeros(1, 77, dtype=torch.long)
+    # Use a multi-row dummy so the tracer cannot fold batch into a constant.
+    # If anything in the model still bakes in a fixed batch size, the export
+    # itself will produce a graph that fails at runtime for other batch sizes
+    # — caught by the batched validation below.
+    dummy_tokens = torch.zeros(2, 77, dtype=torch.long)
 
     with torch.no_grad():
         pt_txt_out = txt_wrapper(dummy_tokens).numpy()
@@ -333,6 +439,11 @@ def _export_bioclip_variant(model_id, output_dir, opset, validate=False):
         },
     )
     log.info("  Text encoder: %s (output shape: %s)", text_encoder_path, pt_txt_out.shape)
+
+    # Verify the exported text encoder accepts batches != the dummy size.
+    # Catches any remaining hardcoded-batch reshape regressions before users
+    # hit them at inference time.
+    _verify_text_encoder_batched(text_encoder_path, txt_wrapper)
 
     # --- Save tokenizer ---
     tokenizer_path = os.path.join(out_dir, "tokenizer.json")
