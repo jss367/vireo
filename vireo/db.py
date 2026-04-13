@@ -1372,13 +1372,21 @@ class Database:
         width=None,
         height=None,
         xmp_mtime=None,
+        file_hash=None,
     ):
-        """Insert a photo. Returns the photo id."""
+        """Insert a photo. Returns the photo id.
+
+        If ``file_hash`` is provided and the insert creates a new row that
+        collides with an existing non-rejected photo sharing the same hash,
+        the duplicate auto-resolver runs and flags the loser(s) as rejected.
+        The hook is wrapped in try/except so resolver bugs never break
+        inserts.
+        """
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO photos
                (folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
-                timestamp, width, height)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                timestamp, width, height, file_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 folder_id,
                 filename,
@@ -1389,16 +1397,178 @@ class Database:
                 timestamp,
                 width,
                 height,
+                file_hash,
             ),
         )
         self.conn.commit()
         if cur.rowcount > 0:
-            return cur.lastrowid
-        row = self.conn.execute(
-            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-            (folder_id, filename),
-        ).fetchone()
-        return row["id"]
+            photo_id = cur.lastrowid
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (folder_id, filename),
+            ).fetchone()
+            photo_id = row["id"]
+
+        # Auto-resolve duplicates when we have a file_hash and >1 non-rejected
+        # rows share it. Most scanner-path callers leave file_hash=None here
+        # and set it later via an UPDATE; those callers must invoke
+        # check_and_resolve_duplicates_for_hash themselves after the UPDATE.
+        if file_hash:
+            self.check_and_resolve_duplicates_for_hash(file_hash)
+
+        return photo_id
+
+    def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:
+        """Look up non-rejected photos sharing this hash; if >=2, resolve.
+
+        Returns the result dict from apply_duplicate_resolution when resolution
+        ran, or None when no resolution was needed. Failures are logged and
+        swallowed — this is a best-effort hook, not a correctness guarantee.
+        """
+        if not file_hash:
+            return None
+        try:
+            dup_rows = self.conn.execute(
+                "SELECT id FROM photos WHERE file_hash = ? AND flag != 'rejected'",
+                (file_hash,),
+            ).fetchall()
+            if len(dup_rows) > 1:
+                return self.apply_duplicate_resolution([r["id"] for r in dup_rows])
+        except sqlite3.Error as e:
+            logging.getLogger(__name__).warning(
+                "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
+            )
+        return None
+
+    def find_duplicate_groups(self):
+        """Return [{file_hash, photo_ids: [...]}] for every hash with 2+ non-rejected rows.
+
+        Used by the duplicate-scan job to preview groups without applying.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT file_hash, GROUP_CONCAT(id) AS ids
+            FROM photos
+            WHERE file_hash IS NOT NULL AND flag != 'rejected'
+            GROUP BY file_hash
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        return [
+            {
+                "file_hash": r["file_hash"],
+                "photo_ids": [int(x) for x in r["ids"].split(",")],
+            }
+            for r in rows
+        ]
+
+    def apply_duplicate_resolution(self, photo_ids):
+        """Resolve a group of photos sharing a file_hash.
+
+        Picks a winner using :func:`vireo.duplicates.resolve_duplicates`,
+        merges metadata (rating/keywords) from losers onto the winner, and
+        flags the losers as rejected. Runs in a single transaction.
+
+        Photos whose ``flag`` is already ``'rejected'`` are filtered out
+        before resolving — we never un-reject previously handled losers.
+
+        Returns ``{"winner_id": int|None, "loser_ids": [int], "rejected": int}``.
+        If fewer than 2 non-rejected candidates remain, returns the no-op
+        shape with ``winner_id=None``.
+        """
+        from duplicates import (
+            DupCandidate,
+            PhotoMetadata,
+            merge_metadata,
+            resolve_duplicates,
+        )
+
+        if not photo_ids or len(photo_ids) < 2:
+            return {"winner_id": None, "loser_ids": [], "rejected": 0}
+
+        placeholders = ",".join("?" * len(photo_ids))
+        rows = self.conn.execute(
+            f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
+                       f.path AS folder_path
+                FROM photos p
+                LEFT JOIN folders f ON f.id = p.folder_id
+                WHERE p.id IN ({placeholders}) AND p.flag != 'rejected'""",
+            list(photo_ids),
+        ).fetchall()
+        if len(rows) < 2:
+            return {"winner_id": None, "loser_ids": [], "rejected": 0}
+
+        candidates = [
+            DupCandidate(
+                id=r["id"],
+                path=os.path.join(r["folder_path"] or "", r["filename"] or ""),
+                mtime=r["file_mtime"] or 0.0,
+            )
+            for r in rows
+        ]
+        winner_id, losers_with_reasons = resolve_duplicates(candidates)
+        loser_ids = [lid for lid, _reason in losers_with_reasons]
+
+        def _meta(photo_id):
+            r = self.conn.execute(
+                "SELECT rating FROM photos WHERE id = ?", (photo_id,)
+            ).fetchone()
+            kw_rows = self.conn.execute(
+                "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+                (photo_id,),
+            ).fetchall()
+            pend = self.conn.execute(
+                "SELECT 1 FROM pending_changes WHERE photo_id = ? LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+            return PhotoMetadata(
+                id=photo_id,
+                rating=(r["rating"] if r and r["rating"] is not None else 0),
+                keyword_ids={kr["keyword_id"] for kr in kw_rows},
+                # Collections in Vireo are rule-based (no junction table); skip.
+                collection_ids=set(),
+                has_pending_edit=pend is not None,
+            )
+
+        winner_meta = _meta(winner_id)
+        loser_metas = [_meta(lid) for lid in loser_ids]
+        merge = merge_metadata(winner_meta, loser_metas)
+
+        with self.conn:  # transaction
+            if merge.new_rating != winner_meta.rating:
+                self.conn.execute(
+                    "UPDATE photos SET rating = ? WHERE id = ?",
+                    (merge.new_rating, winner_id),
+                )
+            for kw_id in merge.keyword_ids_to_add:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
+                    "VALUES (?, ?)",
+                    (winner_id, kw_id),
+                )
+            # TODO: pending-edit copy for duplicate merge — see plan Task 7.
+            # Skipped because pending_changes is workspace-scoped and its
+            # value/change_token columns are non-trivial to copy safely in
+            # this transaction. Rare edge case; revisit if product needs it.
+            # Collections are rule-based (no junction table) so
+            # merge.collection_ids_to_add has nothing to write either.
+            loser_placeholders = ",".join("?" * len(loser_ids))
+            self.conn.execute(
+                f"UPDATE photos SET flag = 'rejected' WHERE id IN ({loser_placeholders})",
+                loser_ids,
+            )
+
+        logging.getLogger(__name__).info(
+            "Duplicate resolved: kept id=%s, rejected id(s)=%s",
+            winner_id,
+            loser_ids,
+        )
+        return {
+            "winner_id": winner_id,
+            "loser_ids": list(loser_ids),
+            "rejected": len(loser_ids),
+        }
 
     # Columns to return in photo list queries (excludes large fields)
     PHOTO_COLS = """id, folder_id, filename, extension, file_size, file_mtime, xmp_mtime,

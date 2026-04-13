@@ -591,9 +591,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             )
             db.conn.commit()
 
-        # Import XMP keywords if sidecar exists
+        # Import XMP keywords if sidecar exists — must land BEFORE the
+        # duplicate auto-resolve hook below, so if this row turns out to be
+        # the loser its keywords are visible to apply_duplicate_resolution's
+        # metadata query and get merged onto the winner. Otherwise the
+        # keywords would be stranded on the rejected row.
         if xmp_path.exists():
             _import_keywords_for_photo(db, photo_id, str(xmp_path))
+
+        # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
+        # are committed. add_photo was called without the hash, so the hook
+        # there was a no-op — we own firing it here.
+        if file_hash is not None:
+            db.check_and_resolve_duplicates_for_hash(file_hash)
 
         if photo_callback:
             photo_callback(photo_id, str(image_path))

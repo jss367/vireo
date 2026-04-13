@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Duplicates</title>
+<style>
+  body { padding-bottom: 36px; }
+  .content { max-width: 1200px; }
+
+  .page-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .page-header h1 { margin: 0; font-size: 20px; font-weight: 600; color: var(--text-primary); }
+  .page-header .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  .btn-primary {
+    background: var(--accent); color: var(--accent-text); border: none;
+    border-radius: 4px; padding: 8px 16px; font-size: 13px; cursor: pointer;
+    font-weight: 500;
+  }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-secondary {
+    background: var(--bg-tertiary); color: var(--text-secondary);
+    border: 1px solid var(--border-secondary); border-radius: 4px;
+    padding: 6px 14px; font-size: 12px; cursor: pointer;
+  }
+  .btn-secondary:hover { background: var(--border-secondary); }
+
+  .empty-state, .no-results {
+    text-align: center; padding: 48px 20px; color: var(--text-dim);
+    border: 1px dashed var(--border-primary); border-radius: 8px;
+  }
+  .empty-state .label { margin-bottom: 16px; font-size: 14px; }
+
+  .progress-box {
+    padding: 16px; border: 1px solid var(--border-primary); border-radius: 8px;
+    background: var(--bg-secondary); margin-bottom: 16px;
+  }
+  .progress-box .status { font-size: 13px; color: var(--text-secondary); }
+  .progress-box .spinner {
+    display: inline-block; width: 10px; height: 10px; margin-right: 8px;
+    border: 2px solid var(--border-secondary); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 1s linear infinite;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .summary-bar {
+    display: flex; gap: 24px; padding: 12px 16px; margin-bottom: 16px;
+    background: var(--bg-secondary); border: 1px solid var(--border-primary);
+    border-radius: 6px; align-items: center;
+  }
+  .summary-stat .num {
+    font-size: 20px; font-weight: 600; color: var(--text-primary);
+  }
+  .summary-stat .label {
+    font-size: 11px; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .dup-group {
+    border: 1px solid var(--border-primary); border-radius: 8px;
+    padding: 12px; margin-bottom: 12px; background: var(--bg-secondary);
+  }
+  .dup-group-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-primary);
+  }
+  .dup-group-header label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--text-secondary); cursor: pointer;
+    user-select: none;
+  }
+  .dup-group-header .hash {
+    font-family: monospace; font-size: 11px; color: var(--text-ghost);
+    margin-left: auto;
+  }
+
+  .dup-row { display: flex; flex-wrap: wrap; gap: 12px; }
+
+  .dup-card {
+    width: 180px; display: flex; flex-direction: column;
+    border: 2px solid transparent; border-radius: 6px;
+    padding: 6px; background: var(--bg-tertiary);
+  }
+  .dup-card.winner { border-color: var(--accent); }
+  .dup-card.loser { opacity: 0.65; }
+  .dup-card .thumb {
+    width: 100%; aspect-ratio: 4/3; object-fit: cover;
+    border-radius: 4px; background: var(--bg-primary);
+    display: block;
+  }
+  .dup-card .thumb-placeholder {
+    width: 100%; aspect-ratio: 4/3; border-radius: 4px;
+    background: var(--bg-primary); display: flex;
+    align-items: center; justify-content: center;
+    color: var(--text-ghost); font-size: 11px;
+  }
+  .dup-card .badge {
+    display: inline-block; margin-top: 6px;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    align-self: flex-start;
+  }
+  .dup-card.winner .badge {
+    background: var(--accent); color: var(--accent-text);
+  }
+  .dup-card.loser .badge {
+    background: var(--danger); color: var(--text-primary);
+  }
+  .dup-card .filename {
+    margin-top: 4px; font-size: 12px; color: var(--text-primary);
+    word-break: break-all; font-weight: 500;
+  }
+  .dup-card .path {
+    font-size: 10px; color: var(--text-dim); word-break: break-all;
+    margin-top: 2px;
+  }
+  .dup-card .reason {
+    font-size: 11px; color: var(--danger); margin-top: 4px;
+    font-style: italic;
+  }
+  .dup-card .meta {
+    font-size: 10px; color: var(--text-ghost); margin-top: 4px;
+  }
+
+  .apply-bar {
+    position: sticky; bottom: 0; background: var(--bg-primary);
+    padding: 12px 0; border-top: 1px solid var(--border-primary);
+    margin-top: 16px; display: flex; gap: 12px; align-items: center;
+  }
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="content">
+
+  <div class="page-header">
+    <div>
+      <h1>Duplicate Files</h1>
+      <div class="sub">Find exact-byte duplicate photos and reject the inferior copy.</div>
+    </div>
+    <div>
+      <button id="scanBtn" class="btn-primary" onclick="startScan()">Scan for duplicate files</button>
+    </div>
+  </div>
+
+  <div id="progress" class="progress-box" style="display:none;">
+    <span class="spinner"></span>
+    <span class="status" id="progressStatus">Starting scan...</span>
+  </div>
+
+  <div id="summary" style="display:none;"></div>
+
+  <div id="results"></div>
+
+  <div id="emptyState" class="empty-state">
+    <div class="label">Click <b>Scan for duplicate files</b> to find exact-byte duplicates in your library.</div>
+  </div>
+
+  <div id="applyBar" class="apply-bar" style="display:none;">
+    <button id="applyBtn" class="btn-primary" onclick="applyRejections()">Reject 0 losers</button>
+    <button class="btn-secondary" onclick="clearResults()">Clear results</button>
+    <span id="applyStatus" style="font-size:12px;color:var(--text-dim);"></span>
+  </div>
+
+</div>
+
+<script>
+  var _proposals = [];
+  var _currentJobId = null;
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function showProgress(msg) {
+    var pg = document.getElementById('progress');
+    pg.style.display = '';
+    document.getElementById('progressStatus').textContent = msg || 'Scanning...';
+  }
+
+  function hideProgress() {
+    document.getElementById('progress').style.display = 'none';
+  }
+
+  function setEmptyVisible(visible) {
+    document.getElementById('emptyState').style.display = visible ? '' : 'none';
+  }
+
+  async function startScan() {
+    var scanBtn = document.getElementById('scanBtn');
+    scanBtn.disabled = true;
+    setEmptyVisible(false);
+    document.getElementById('results').innerHTML = '';
+    document.getElementById('summary').style.display = 'none';
+    document.getElementById('applyBar').style.display = 'none';
+    showProgress('Starting scan...');
+
+    try {
+      var data = await safeFetch('/api/duplicates/scan', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      }, { toast: false });
+      _currentJobId = data.job_id;
+
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onProgress: function(p) {
+          var msg = p.phase || p.current_file || 'Scanning...';
+          if (p.total && p.current != null) {
+            msg += ' (' + p.current + '/' + p.total + ')';
+          }
+          showProgress(msg);
+        },
+        onComplete: function(evt) {
+          if (evt.status === 'completed') {
+            renderResults(evt.result || {});
+          } else if (evt.status === 'cancelled') {
+            hideProgress();
+            scanBtn.disabled = false;
+            setEmptyVisible(true);
+            showToast('Scan cancelled', 'error');
+          } else {
+            hideProgress();
+            scanBtn.disabled = false;
+            setEmptyVisible(true);
+            var err = (evt.errors || []).join(', ') || 'Scan failed';
+            showToast(err, 'error');
+          }
+        },
+        onError: function() {
+          hideProgress();
+          scanBtn.disabled = false;
+          setEmptyVisible(true);
+        },
+      });
+    } catch (e) {
+      hideProgress();
+      scanBtn.disabled = false;
+      setEmptyVisible(true);
+      showToast(e.message || 'Failed to start scan', 'error');
+    }
+  }
+
+  function renderResults(result) {
+    hideProgress();
+    document.getElementById('scanBtn').disabled = false;
+
+    _proposals = result.proposals || [];
+    var groupCount = result.group_count != null ? result.group_count : _proposals.length;
+    var loserCount = result.loser_count || 0;
+
+    if (_proposals.length === 0) {
+      setEmptyVisible(false);
+      document.getElementById('results').innerHTML =
+        '<div class="no-results">No duplicates found. Your library is clean.</div>';
+      return;
+    }
+
+    setEmptyVisible(false);
+
+    // Summary
+    var summary = document.getElementById('summary');
+    summary.style.display = '';
+    summary.innerHTML =
+      '<div class="summary-bar">' +
+        '<div class="summary-stat"><div class="num">' + groupCount + '</div>' +
+          '<div class="label">Duplicate groups</div></div>' +
+        '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + loserCount + '</div>' +
+          '<div class="label">Losers to reject</div></div>' +
+      '</div>';
+
+    // Groups
+    var html = '';
+    _proposals.forEach(function(group, gi) {
+      var winner = group.winner || {};
+      var losers = group.losers || [];
+      var hash = group.file_hash || '';
+
+      html += '<div class="dup-group" data-hash="' + escapeHtml(hash) + '">';
+      html += '<div class="dup-group-header">';
+      html += '<label><input type="checkbox" class="group-check" data-gi="' + gi + '" checked onchange="updateApplyCount()"> ' +
+              'Include this group (' + losers.length + ' to reject)</label>';
+      html += '<span class="hash">' + escapeHtml(hash.substring(0, 16)) + '...</span>';
+      html += '</div>';
+
+      html += '<div class="dup-row">';
+      html += renderCard(winner, true, null);
+      losers.forEach(function(loser) {
+        html += renderCard(loser, false, loser.reason);
+      });
+      html += '</div>';
+      html += '</div>';
+    });
+    document.getElementById('results').innerHTML = html;
+
+    document.getElementById('applyBar').style.display = '';
+    updateApplyCount();
+  }
+
+  function renderCard(photo, isWinner, reason) {
+    var cls = isWinner ? 'winner' : 'loser';
+    var badge = isWinner ? 'KEEP' : 'WILL REJECT';
+    var thumbUrl = photo.id != null ? ('/thumbnails/' + photo.id + '.jpg') : null;
+    var html = '<div class="dup-card ' + cls + '">';
+    if (thumbUrl) {
+      html += '<img class="thumb" src="' + escapeHtml(thumbUrl) +
+              '" alt="' + escapeHtml(photo.filename || '') +
+              '" onerror="this.outerHTML=\'<div class=\\\'thumb-placeholder\\\'>No thumbnail</div>\'">';
+    } else {
+      html += '<div class="thumb-placeholder">No thumbnail</div>';
+    }
+    html += '<span class="badge">' + badge + '</span>';
+    html += '<div class="filename">' + escapeHtml(photo.filename || '') + '</div>';
+    html += '<div class="path">' + escapeHtml(photo.path || '') + '</div>';
+    var meta = [];
+    if (photo.rating != null && photo.rating > 0) meta.push(photo.rating + '\u2605');
+    if (photo.file_size != null) meta.push(formatBytes(photo.file_size));
+    if (meta.length) html += '<div class="meta">' + meta.join(' \u00b7 ') + '</div>';
+    if (reason) html += '<div class="reason">' + escapeHtml(reason) + '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function formatBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  function getCheckedGroups() {
+    var checked = [];
+    document.querySelectorAll('.group-check').forEach(function(cb) {
+      if (cb.checked) {
+        var gi = parseInt(cb.getAttribute('data-gi'), 10);
+        if (!isNaN(gi) && _proposals[gi]) checked.push(_proposals[gi]);
+      }
+    });
+    return checked;
+  }
+
+  function updateApplyCount() {
+    var checked = getCheckedGroups();
+    var loserCount = 0;
+    checked.forEach(function(g) { loserCount += (g.losers || []).length; });
+    var btn = document.getElementById('applyBtn');
+    btn.textContent = 'Reject ' + loserCount + ' loser' + (loserCount === 1 ? '' : 's');
+    btn.disabled = loserCount === 0;
+  }
+
+  async function applyRejections() {
+    var checked = getCheckedGroups();
+    if (checked.length === 0) return;
+    var hashes = checked.map(function(g) { return g.file_hash; }).filter(Boolean);
+    if (hashes.length === 0) return;
+
+    var btn = document.getElementById('applyBtn');
+    var status = document.getElementById('applyStatus');
+    btn.disabled = true;
+    status.textContent = 'Applying...';
+
+    try {
+      var data = await safeFetch('/api/duplicates/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ hashes: hashes }),
+      });
+      var n = data.rejected_count || 0;
+      showToast('Rejected ' + n + ' duplicate' + (n === 1 ? '' : 's'), 'success');
+      clearResults();
+    } catch (e) {
+      showToast(e.message || 'Apply failed', 'error');
+      status.textContent = '';
+      btn.disabled = false;
+      // safeFetch already shows a toast on failure.
+    }
+  }
+
+  function clearResults() {
+    _proposals = [];
+    _currentJobId = null;
+    document.getElementById('results').innerHTML = '';
+    document.getElementById('summary').style.display = 'none';
+    document.getElementById('applyBar').style.display = 'none';
+    document.getElementById('applyStatus').textContent = '';
+    setEmptyVisible(true);
+  }
+</script>
+</body>
+</html>

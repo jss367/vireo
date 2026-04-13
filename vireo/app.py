@@ -384,6 +384,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def jobs_page():
         return render_template("jobs.html")
 
+    @app.route("/duplicates")
+    def duplicates_page():
+        return render_template("duplicates.html")
+
     @app.route("/move")
     def move_page():
         return render_template("move.html")
@@ -4146,6 +4150,67 @@ def create_app(db_path, thumb_cache_dir=None):
 
         job_id = runner.start("thumbnails", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/duplicates/scan", methods=["POST"])
+    def api_duplicates_scan():
+        """Start a background duplicate-detection job.
+
+        Returns immediately with the job id. The job walks every file_hash
+        group with >=2 non-rejected rows and proposes a winner/losers per
+        group (without applying). The UI polls /api/jobs/<id> to fetch the
+        proposals from job.result and lets the user apply them via
+        /api/duplicates/apply.
+        """
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            from duplicate_scan import run_duplicate_scan
+            thread_db = Database(db_path)
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+            try:
+                return run_duplicate_scan(job, thread_db)
+            finally:
+                thread_db.conn.close()
+
+        job_id = runner.start("duplicate-scan", work, workspace_id=active_ws)
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/duplicates/apply", methods=["POST"])
+    def api_duplicates_apply():
+        """Apply resolver decisions for the given list of file hashes.
+
+        Body: {"hashes": ["<hash>", ...]}. For each hash we look up every
+        non-rejected photo sharing it and hand that set to
+        apply_duplicate_resolution, which picks a winner via the pure
+        resolver and flags the losers as rejected. Returns the total number
+        of photos rejected across all hashes.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("hashes required")
+        hashes = body.get("hashes")
+        if not isinstance(hashes, list) or not hashes:
+            return json_error("hashes required")
+
+        for h in hashes:
+            if not isinstance(h, str) or not h:
+                return json_error("hashes must be a list of non-empty strings")
+
+        db = _get_db()
+        total_rejected = 0
+        for h in hashes:
+            rows = db.conn.execute(
+                "SELECT id FROM photos "
+                "WHERE file_hash = ? AND flag != 'rejected'",
+                (h,),
+            ).fetchall()
+            if len(rows) < 2:
+                continue
+            result = db.apply_duplicate_resolution([r["id"] for r in rows])
+            total_rejected += result.get("rejected", 0)
+        return jsonify({"rejected_count": total_rejected})
 
     @app.route("/api/jobs/previews", methods=["POST"])
     def api_job_previews():
