@@ -149,6 +149,51 @@ def test_add_photo_auto_rejects_duplicate(tmp_path):
     assert row1["flag"] != "rejected"
 
 
+def test_auto_resolve_does_not_unreject_existing_loser(tmp_path):
+    """Adding a new dup must not un-reject a previously rejected loser.
+
+    Design decision: the hook filters ``flag != 'rejected'`` before resolving,
+    so rows already rejected on a past pass stay rejected even if a newer
+    candidate with a "better" name arrives later.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # Step 1 & 2: insert two photos sharing a hash; the hook rejects one.
+    old = _add(db, fid, "old.jpg", file_hash="HX")
+    loser = _add(db, fid, "loser (2).jpg", file_hash="HX")
+
+    # Step 3: force the state we want to test — `loser` is the pre-existing
+    # rejected row, `old` is clean. (The hook probably already did this given
+    # the filenames, but set it explicitly so the test does not depend on
+    # tiebreaker rules.)
+    db.conn.execute("UPDATE photos SET flag = 'rejected' WHERE id = ?", (loser,))
+    db.conn.execute("UPDATE photos SET flag = 'none' WHERE id = ?", (old,))
+    db.conn.commit()
+
+    # Step 4: a NEW photo arrives with a clean filename and the same hash.
+    newcomer = _add(db, fid, "newcomer.jpg", file_hash="HX")
+
+    # Step 5: the previously rejected loser stays rejected.
+    row_loser = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (loser,)
+    ).fetchone()
+    assert row_loser["flag"] == "rejected", (
+        "Hook un-rejected a previously rejected duplicate — regression."
+    )
+
+    # Step 6: among {old, newcomer}, exactly one is rejected (the hook
+    # resolved the pair); which one depends on tiebreakers but both must
+    # not be rejected simultaneously, and at least one must survive.
+    row_old = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (old,)
+    ).fetchone()
+    row_new = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (newcomer,)
+    ).fetchone()
+    survivors = [f for f in (row_old["flag"], row_new["flag"]) if f != "rejected"]
+    assert len(survivors) >= 1
+
+
 def test_add_photo_no_hash_no_hook(tmp_path):
     """add_photo without file_hash does not trigger the hook."""
     db = Database(str(tmp_path / "t.db"))

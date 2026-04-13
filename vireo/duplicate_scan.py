@@ -3,12 +3,9 @@
 Read-only. Does not apply — the UI shows the preview and a user action (the
 ``/api/duplicates/apply`` endpoint) actually flags the losers as rejected.
 """
-import logging
 import os
 
 from duplicates import DupCandidate, resolve_duplicates
-
-log = logging.getLogger(__name__)
 
 
 def _row_to_info(row, folder_path):
