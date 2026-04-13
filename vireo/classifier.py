@@ -287,10 +287,10 @@ def _compute_embeddings_with_progress(
         all_features.append(mean_feature)
 
         done = i + 1
+        if progress_callback:
+            progress_callback(done, total)
         if done % 50 == 0 or done == total:
             log.info("Computing label embeddings: %d/%d", done, total)
-            if progress_callback:
-                progress_callback(done, total)
 
     # Stack into (num_labels, embedding_dim) then transpose to (embedding_dim, num_labels)
     stacked = np.stack(all_features, axis=0)  # (num_labels, embedding_dim)

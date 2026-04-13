@@ -498,3 +498,50 @@ def test_progress_events_include_steps(tmp_path):
     assert "steps" in last_progress["data"]
     assert len(last_progress["data"]["steps"]) == 2
     assert last_progress["data"]["steps"][0]["status"] == "running"
+
+
+def test_push_event_mirrors_progress_onto_job(tmp_path):
+    """push_event('progress', ...) merges fields onto job['progress'] so
+    polling clients (which don't subscribe to SSE) see the latest phase
+    and current_file."""
+    import threading
+    import time
+
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    gate = threading.Event()
+
+    def work(job):
+        runner.push_event(job["id"], "progress", {
+            "phase": "Step 3/5: Computing embeddings",
+            "current": 150,
+            "total": 843,
+            "current_file": "Computing label embeddings (150/843)...",
+        })
+        gate.wait(timeout=2)
+        return {}
+
+    job_id = runner.start("test", work, workspace_id=1)
+
+    # Read progress while the job is still running — this is what the UI does.
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        j = runner.get(job_id)
+        if j and j["progress"].get("phase"):
+            break
+        time.sleep(0.02)
+
+    j = runner.get(job_id)
+    assert j["progress"]["phase"] == "Step 3/5: Computing embeddings"
+    assert j["progress"]["current"] == 150
+    assert j["progress"]["total"] == 843
+    assert j["progress"]["current_file"] == "Computing label embeddings (150/843)..."
+    # 'steps' must not leak into the stored progress (it is injected only
+    # onto the outbound event payload).
+    assert "steps" not in j["progress"]
+
+    gate.set()
