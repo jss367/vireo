@@ -1,6 +1,11 @@
 import pytest
 
-from vireo.duplicates import DupCandidate, resolve_duplicates
+from vireo.duplicates import (
+    DupCandidate,
+    PhotoMetadata,
+    merge_metadata,
+    resolve_duplicates,
+)
 
 
 def test_module_exports_exist():
@@ -57,3 +62,38 @@ def test_resolve_three_way_middle_wins():
     winner, losers = resolve_duplicates([a, b, c])
     assert winner == 2
     assert sorted(losers) == [1, 3]
+
+
+def test_merge_rating_takes_max():
+    winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)
+    losers = [PhotoMetadata(id=2, rating=5, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)]
+    result = merge_metadata(winner, losers)
+    assert result.new_rating == 5
+
+
+def test_merge_keywords_union():
+    winner = PhotoMetadata(id=1, rating=0, keyword_ids={10}, collection_ids=set(), has_pending_edit=False)
+    losers = [PhotoMetadata(id=2, rating=0, keyword_ids={20, 30}, collection_ids=set(), has_pending_edit=False)]
+    result = merge_metadata(winner, losers)
+    assert result.keyword_ids_to_add == {20, 30}  # only new ones
+
+
+def test_merge_collections_union():
+    winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids={100}, has_pending_edit=False)
+    losers = [PhotoMetadata(id=2, rating=0, keyword_ids=set(), collection_ids={100, 200}, has_pending_edit=False)]
+    result = merge_metadata(winner, losers)
+    assert result.collection_ids_to_add == {200}
+
+
+def test_merge_pending_copy_when_winner_has_none():
+    winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=False)
+    losers = [PhotoMetadata(id=2, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=True)]
+    result = merge_metadata(winner, losers)
+    assert result.pending_from_loser_id == 2
+
+
+def test_merge_pending_skip_when_both_have():
+    winner = PhotoMetadata(id=1, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=True)
+    losers = [PhotoMetadata(id=2, rating=0, keyword_ids=set(), collection_ids=set(), has_pending_edit=True)]
+    result = merge_metadata(winner, losers)
+    assert result.pending_from_loser_id is None

@@ -67,3 +67,48 @@ def resolve_duplicates(candidates):
     winner = min(pool, key=lambda c: c.id)
     losers = [c for c in candidates if c.id != winner.id]
     return winner.id, [l.id for l in losers]
+
+
+@dataclass
+class PhotoMetadata:
+    id: int
+    rating: int
+    keyword_ids: set
+    collection_ids: set
+    has_pending_edit: bool
+
+
+@dataclass
+class MergeResult:
+    winner_id: int
+    new_rating: int
+    keyword_ids_to_add: set
+    collection_ids_to_add: set
+    pending_from_loser_id: int | None
+    loser_ids: list
+
+
+def merge_metadata(winner: PhotoMetadata, losers: list) -> MergeResult:
+    new_rating = max([winner.rating] + [l.rating for l in losers])
+
+    all_loser_kws = set().union(*(l.keyword_ids for l in losers)) if losers else set()
+    kws_to_add = all_loser_kws - winner.keyword_ids
+
+    all_loser_cols = set().union(*(l.collection_ids for l in losers)) if losers else set()
+    cols_to_add = all_loser_cols - winner.collection_ids
+
+    pending_from = None
+    if not winner.has_pending_edit:
+        for l in losers:
+            if l.has_pending_edit:
+                pending_from = l.id
+                break
+
+    return MergeResult(
+        winner_id=winner.id,
+        new_rating=new_rating,
+        keyword_ids_to_add=kws_to_add,
+        collection_ids_to_add=cols_to_add,
+        pending_from_loser_id=pending_from,
+        loser_ids=[l.id for l in losers],
+    )
