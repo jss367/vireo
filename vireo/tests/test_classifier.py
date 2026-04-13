@@ -446,16 +446,20 @@ class TestTreeOfLifeMode:
             assert isinstance(emb, np.ndarray)
 
 
-class TestTextEncoderBatchFallback:
-    """Tests for the per-row fallback when the text encoder's ONNX graph
-    rejects batched inputs (a known issue with bioclip-2.5-vith14 where an
-    internal Reshape node has a hardcoded batch=1 shape)."""
+class TestTextEncoderBatchRejection:
+    """Tests for the strict batched-only text encoder path.
+
+    Old BioCLIP ONNX exports baked batch=1 into a downstream Reshape node
+    (see scripts/export_onnx.py:_TextEncoderWrapper). The classifier used
+    to silently fall back to per-row inference (~50× slower); now it
+    raises a clear error that tells the user to re-download the model.
+    """
 
     def _make_batch1_only_text_session(self, embedding_dim=512):
         """Mock text session that raises for batch > 1, succeeds for batch == 1.
 
-        Simulates the bioclip-2.5-vith14 text_encoder.onnx behaviour where
-        the internal 'gemm_input_reshape' node fails whenever batch > 1.
+        Simulates the legacy text_encoder.onnx behaviour where the internal
+        'gemm_input_reshape' node fails whenever batch > 1.
         """
         session = MagicMock()
         mock_input = MagicMock()
@@ -476,9 +480,10 @@ class TestTextEncoderBatchFallback:
         session.run = fake_run
         return session
 
-    def test_falls_back_to_per_row_when_batch_rejected(self, tmp_path):
-        """If the text encoder raises on batched inputs, embeddings are still
-        computed via per-row inference."""
+    def test_raises_clear_error_when_batch_rejected(self, tmp_path):
+        """A stale text encoder ONNX must surface a re-download instruction
+        rather than silently falling back to slow per-row inference."""
+        import pytest
         from classifier import Classifier
 
         _make_model_dir(tmp_path)
@@ -498,11 +503,9 @@ class TestTextEncoderBatchFallback:
                 side_effect=[fake_image_session, fake_text_session],
             ),
             patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+            pytest.raises(RuntimeError, match="Re-download"),
         ):
-            clf = Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
-
-        assert clf._txt_embeddings.shape == (512, 2)
-        assert clf._txt_embeddings.dtype == np.float32
+            Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
 
 
 class TestEmbeddingCache:

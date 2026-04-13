@@ -429,7 +429,7 @@
 
     // Expanded content
     if (isExpanded) {
-      // 8: Throughput for running steps
+      // 8: Throughput + ETA for running steps
       if (isRunning && step.progress && step.progress.current > 0 && step.started_at) {
         var stepSecs = (Date.now() - new Date(step.started_at).getTime()) / 1000;
         if (stepSecs > 0) {
@@ -441,7 +441,15 @@
           } else {
             throughput = '~' + (1 / perSec).toFixed(1) + 's each';
           }
-          html += '<div class="tree-step-throughput">' + throughput + '</div>';
+          var statusLine = throughput;
+          // ETA only when we know the total and have a non-zero rate
+          if (step.progress.total > 0 && perSec > 0) {
+            var remaining = step.progress.total - step.progress.current;
+            if (remaining > 0) {
+              statusLine += ' &middot; ETA ' + formatElapsed(remaining / perSec);
+            }
+          }
+          html += '<div class="tree-step-throughput">' + statusLine + '</div>';
         }
       }
 
