@@ -11,9 +11,12 @@ import hashlib
 import json
 import logging
 import os
+import ssl
 import time
 import urllib.request
 from dataclasses import dataclass, field
+
+import certifi
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +24,9 @@ ONNX_REPO = "jss367/vireo-onnx-models"
 _TREE_API = "https://huggingface.co/api/models/{repo}/tree/{revision}/{subdir}"
 _MODEL_INFO_API = "https://huggingface.co/api/models/{repo}"
 _FETCH_TIMEOUT = 30  # seconds
+
+# Use certifi's CA bundle so HTTPS works on macOS without Install Certificates.command
+_ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 # Filename (inside each model directory) that pins the HF commit SHA the
 # model was downloaded from. Read by verify_if_needed so that upstream
@@ -97,7 +103,9 @@ def fetch_latest_revision(repo_id: str) -> str:
     """
     url = _MODEL_INFO_API.format(repo=repo_id)
     try:
-        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
+        with urllib.request.urlopen(
+            url, timeout=_FETCH_TIMEOUT, context=_ssl_ctx
+        ) as resp:
             payload = json.loads(resp.read())
     except Exception as e:
         raise VerifyError(
@@ -132,7 +140,9 @@ def fetch_expected_hashes(
         repo=ONNX_REPO, revision=revision, subdir=hf_subdir
     )
     try:
-        with urllib.request.urlopen(url, timeout=_FETCH_TIMEOUT) as resp:
+        with urllib.request.urlopen(
+            url, timeout=_FETCH_TIMEOUT, context=_ssl_ctx
+        ) as resp:
             payload = json.loads(resp.read())
     except Exception as e:
         raise VerifyError(

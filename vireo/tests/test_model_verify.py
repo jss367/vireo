@@ -95,7 +95,7 @@ def test_fetch_expected_hashes_returns_lfs_files_only(monkeypatch):
 
     captured_url = {}
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         captured_url["url"] = url
         return _FakeResponse(_CANNED_TREE)
 
@@ -120,7 +120,7 @@ def test_fetch_expected_hashes_raises_verify_error_on_network_failure(monkeypatc
     exception type to handle rather than urllib/http internals."""
     import model_verify
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
@@ -138,7 +138,7 @@ def test_fetch_expected_hashes_uses_pinned_revision(monkeypatch):
 
     captured_url = {}
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         captured_url["url"] = url
         return _FakeResponse(_CANNED_TREE)
 
@@ -157,7 +157,7 @@ def test_fetch_latest_revision_returns_sha(monkeypatch):
     the HF model-info API. Used by download_model to pin new downloads."""
     import model_verify
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         # HF /api/models/{repo} returns a dict with a `sha` field that is
         # the latest commit on main.
         return _FakeResponse(
@@ -177,7 +177,7 @@ def test_fetch_latest_revision_network_error_raises_verify_error(monkeypatch):
     """Same error wrapping contract as fetch_expected_hashes."""
     import model_verify
 
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         raise OSError("dns failure")
 
     monkeypatch.setattr(model_verify.urllib.request, "urlopen", fake_urlopen)
