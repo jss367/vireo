@@ -396,7 +396,7 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
             continue
         if not m.get("hf_subdir"):
             continue
-        if m.get("state") != "ok":
+        if m.get("state") not in ("ok", "unverified"):
             continue
         model_id = m["id"]
         weights_path = m.get("weights_path")
