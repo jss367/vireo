@@ -1925,3 +1925,85 @@ def test_pipeline_models_dinov2_downloaded_sums_graph_and_data(
     entry = next(m for m in resp.get_json()["models"] if m["id"] == "vit-b14")
     assert entry["status"] == "downloaded"
     assert entry["size"] == "11.0 MB"
+
+
+def test_embedding_matrix_excludes_timm_models(app_and_db, monkeypatch, tmp_path):
+    """Timm models don't use per-label text embeddings, so the matrix should
+    not list them — otherwise Settings renders a 'Compute' button that fails
+    because timm model dirs lack image_encoder.onnx."""
+    labels_file = tmp_path / "birds.txt"
+    labels_file.write_text("robin\nsparrow\n")
+
+    monkeypatch.setattr(
+        "models.get_models",
+        lambda: [
+            {
+                "id": "bioclip-vit-b-16",
+                "name": "BioCLIP",
+                "model_type": "bioclip",
+                "model_str": "ViT-B-16",
+                "weights_path": str(tmp_path),
+                "downloaded": True,
+            },
+            {
+                "id": "timm-inat21-eva02-l",
+                "name": "iNat21 (EVA-02 Large)",
+                "model_type": "timm",
+                "model_str": "hf-hub:timm/eva02",
+                "weights_path": str(tmp_path),
+                "downloaded": True,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "labels.get_saved_labels",
+        lambda: [{"name": "Birds", "labels_file": str(labels_file)}],
+    )
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/embedding-matrix")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    model_ids = [m["id"] for m in data["models"]]
+    assert "bioclip-vit-b-16" in model_ids
+    assert "timm-inat21-eva02-l" not in model_ids
+
+
+def test_precompute_embeddings_rejects_timm_models(app_and_db, monkeypatch):
+    """Hitting precompute-embeddings for a timm model must fail fast instead
+    of trying to load a non-existent image_encoder.onnx from the timm dir."""
+    monkeypatch.setattr(
+        "models.get_models",
+        lambda: [
+            {
+                "id": "timm-inat21-eva02-l",
+                "name": "iNat21 (EVA-02 Large)",
+                "model_type": "timm",
+                "model_str": "hf-hub:timm/eva02",
+                "weights_path": "/fake",
+                "downloaded": True,
+            },
+        ],
+    )
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/jobs/precompute-embeddings",
+        json={"model_id": "timm-inat21-eva02-l", "labels_file": "/tmp/x.txt"},
+    )
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    runner = app._job_runner
+    import time
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job = runner.get(job_id)
+        if job and job.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    job = runner.get(job_id)
+    assert job["status"] == "failed"
+    assert any("fixed class head" in e for e in (job.get("errors") or []))
