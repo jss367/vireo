@@ -705,6 +705,53 @@ def test_verify_all_models_no_sentinel_on_unpinned_mismatch(tmp_path, monkeypatc
     assert not (bad_dir / model_verify.REVISION_FILE).exists()
 
 
+def test_verify_all_models_unpinned_mismatch_clears_stale_verify_skipped(
+    tmp_path, monkeypatch
+):
+    """An unpinned install that was previously marked 'unverified' (transient
+    HF outage wrote .verify_skipped) must have the stale sentinel cleared
+    once a retry actually reaches HuggingFace, even if the retry returns a
+    mismatch. Otherwise get_models() keeps showing the old network-error
+    badge and the 'Retry verification' button looks ineffective."""
+    import model_verify
+
+    bad_dir = tmp_path / "bad-model"
+    bad_dir.mkdir()
+    # Simulate the previous outage: .verify_skipped sentinel is on disk.
+    (bad_dir / model_verify.VERIFY_SKIPPED_SENTINEL).write_text(
+        "Could not reach HuggingFace (prior outage)"
+    )
+    # Previously unverified state is what get_models() would now return.
+    fake_models = [{
+        "id": "bad-model",
+        "state": "unverified",
+        "downloaded": True,
+        "weights_path": str(bad_dir),
+        "hf_subdir": "bad-model",
+        "source": "hf-hub:test",
+    }]
+
+    monkeypatch.setattr(
+        model_verify,
+        "verify_model",
+        lambda d, s, revision=None: model_verify.VerifyResult(
+            ok=False, mismatches=["weights"]
+        ),
+    )
+    monkeypatch.setattr(
+        model_verify, "fetch_latest_revision", lambda repo: "rev999"
+    )
+    import models
+    monkeypatch.setattr(models, "get_models", lambda: fake_models)
+
+    results = model_verify.verify_all_models()
+    assert results["bad-model"].ok is False
+    # Stale .verify_skipped must be gone — verification actually ran.
+    assert not (bad_dir / model_verify.VERIFY_SKIPPED_SENTINEL).exists()
+    # Still no .verify_failed — mismatch for unpinned install stays ambiguous.
+    assert not (bad_dir / model_verify.VERIFY_FAILED_SENTINEL).exists()
+
+
 # ---------------------------------------------------------------------------
 # verify_if_needed — VerifyError failure backoff (Codex P2 on #501 line 207)
 # ---------------------------------------------------------------------------

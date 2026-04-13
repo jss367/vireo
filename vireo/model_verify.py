@@ -435,8 +435,15 @@ def verify_all_models(progress_callback=None) -> dict[str, VerifyResult]:
                 clear_verify_skipped(weights_path)
             else:
                 # Mismatch is ambiguous for unpinned installs — don't
-                # write sentinel, just report to the caller.
+                # write .verify_failed, just report to the caller. But
+                # do clear any stale .verify_skipped: the hash fetch
+                # succeeded this round, so the old "couldn't reach HF"
+                # reason no longer reflects reality. Without this, a
+                # previously-unverified model stays stuck with an
+                # outdated network-error badge and makes Retry look
+                # ineffective even though verification actually ran.
                 _verified_this_process.discard(model_id)
+                clear_verify_skipped(weights_path)
             continue
 
         # --- Pinned install: hard-fail on mismatch ---
