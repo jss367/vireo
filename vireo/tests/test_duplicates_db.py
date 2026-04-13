@@ -309,3 +309,160 @@ def test_find_duplicate_groups_empty(tmp_path):
     fid = db.add_folder(str(tmp_path))
     _add(db, fid, "solo.jpg", file_hash="SOLO")
     assert db.find_duplicate_groups() == []
+
+
+# -----------------------------------------------------------------------------
+# Scanner-order regression: XMP import must land BEFORE auto-resolve so a
+# loser's keywords are merged onto the winner (Codex review fix #1).
+# -----------------------------------------------------------------------------
+
+def test_auto_resolve_after_xmp_import_merges_loser_keywords(tmp_path):
+    """The loser's keywords must end up on the winner when auto-resolve fires.
+
+    Scanner flow: add_photo (no hash) -> UPDATE file_hash -> import XMP
+    keywords -> check_and_resolve_duplicates_for_hash. If XMP import ran
+    AFTER the hook, the loser's keywords would be stranded on the rejected
+    row. This test locks in the merge contract by simulating that order at
+    the DB layer: keywords linked to the loser BEFORE the hook fires, then
+    assert they are carried over to the winner.
+    """
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+
+    # Raw inserts so the auto-hook does not fire prematurely.
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, "
+        "file_mtime, file_hash, flag) VALUES (?, ?, ?, ?, ?, ?, 'none')",
+        (fid, "winner.jpg", ".jpg", 1000, 100.0, "HASH"),
+    )
+    winner_id = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = ?", ("winner.jpg",)
+    ).fetchone()["id"]
+    # Dirty-suffix filename loses to clean (tiebreaker rule 1).
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, "
+        "file_mtime, file_hash, flag) VALUES (?, ?, ?, ?, ?, ?, 'none')",
+        (fid, "winner (2).jpg", ".jpg", 1000, 100.0, "HASH"),
+    )
+    loser_id = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = ?", ("winner (2).jpg",)
+    ).fetchone()["id"]
+    db.conn.commit()
+
+    # Simulate XMP import: link a keyword to the loser ONLY.
+    kw_id = db.add_keyword("bird")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (loser_id, kw_id),
+    )
+    db.conn.commit()
+
+    # Now fire the auto-resolve hook (as scanner does after XMP import).
+    result = db.check_and_resolve_duplicates_for_hash("HASH")
+    assert result is not None
+    assert result["winner_id"] == winner_id
+    assert result["loser_ids"] == [loser_id]
+
+    # Winner must have the loser's keyword merged onto it.
+    winner_kws = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (winner_id,)
+    ).fetchall()
+    assert any(r["keyword_id"] == kw_id for r in winner_kws), (
+        "Loser's XMP keyword was not merged onto the winner — the scanner "
+        "order (XMP import before auto-resolve) is broken."
+    )
+
+    # Loser flagged rejected.
+    row = db.conn.execute(
+        "SELECT flag FROM photos WHERE id = ?", (loser_id,)
+    ).fetchone()
+    assert row["flag"] == "rejected"
+
+
+# -----------------------------------------------------------------------------
+# run_duplicate_scan must filter rows rejected after find_duplicate_groups
+# returns (race with concurrent ingest). (Codex review fix #2).
+# -----------------------------------------------------------------------------
+
+def test_run_duplicate_scan_skips_rows_rejected_after_find_groups(
+    tmp_path, monkeypatch
+):
+    """If rows are rejected between find_duplicate_groups and the per-group
+    SELECT inside the loop, the per-group SELECT must filter them out. If the
+    survivors fall below 2, the group is skipped.
+
+    We monkeypatch ``find_duplicate_groups`` to simulate the race: it returns
+    3 candidate IDs, but 2 are already rejected at the moment the per-group
+    SELECT runs — exactly the state a concurrent ingest + auto-hook would
+    leave behind between the two queries.
+    """
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    ids = []
+    for name in ("a.jpg", "b.jpg", "c.jpg"):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size, "
+            "file_mtime, file_hash, flag) VALUES (?, ?, ?, ?, ?, ?, 'none')",
+            (fid, name, ".jpg", 1000, 100.0, "HRACE"),
+        )
+        ids.append(
+            db.conn.execute(
+                "SELECT id FROM photos WHERE filename = ?", (name,)
+            ).fetchone()["id"]
+        )
+    # Reject two BEFORE the scan; then spoof find_duplicate_groups to still
+    # report all three (the race window).
+    db.conn.execute(
+        "UPDATE photos SET flag = 'rejected' WHERE filename IN (?, ?)",
+        ("a.jpg", "b.jpg"),
+    )
+    db.conn.commit()
+
+    def _stale_find_groups():
+        return [{"file_hash": "HRACE", "photo_ids": ids}]
+
+    monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
+
+    result = run_duplicate_scan({"progress": {}}, db)
+    # Only one non-rejected row; the per-group SELECT must filter to 1 and
+    # the `< 2` guard must drop it.
+    assert result["proposals"] == []
+
+
+def test_run_duplicate_scan_positive_case_with_one_rejected(
+    tmp_path, monkeypatch
+):
+    """Race-window variant: 3 reported, 1 rejected; scan proposes group of 2."""
+    from duplicate_scan import run_duplicate_scan
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    ids = []
+    for name in ("x.jpg", "x (2).jpg", "x (3).jpg"):
+        db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, extension, file_size, "
+            "file_mtime, file_hash, flag) VALUES (?, ?, ?, ?, ?, ?, 'none')",
+            (fid, name, ".jpg", 1000, 100.0, "HPOS"),
+        )
+        ids.append(
+            db.conn.execute(
+                "SELECT id FROM photos WHERE filename = ?", (name,)
+            ).fetchone()["id"]
+        )
+    db.conn.execute(
+        "UPDATE photos SET flag = 'rejected' WHERE filename = ?", ("x (3).jpg",)
+    )
+    db.conn.commit()
+
+    def _stale_find_groups():
+        return [{"file_hash": "HPOS", "photo_ids": ids}]
+
+    monkeypatch.setattr(db, "find_duplicate_groups", _stale_find_groups)
+
+    result = run_duplicate_scan({"progress": {}}, db)
+    assert len(result["proposals"]) == 1
+    prop = result["proposals"][0]
+    # 1 winner + 1 loser after filtering the rejected row.
+    assert 1 + len(prop["losers"]) == 2

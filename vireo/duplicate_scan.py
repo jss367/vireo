@@ -44,7 +44,7 @@ def run_duplicate_scan(job, db):
                        f.path AS folder_path
                 FROM photos p
                 LEFT JOIN folders f ON f.id = p.folder_id
-                WHERE p.id IN ({placeholders})""",
+                WHERE p.id IN ({placeholders}) AND p.flag != 'rejected'""",
             photo_ids,
         ).fetchall()
 
