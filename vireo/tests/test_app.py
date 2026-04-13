@@ -1882,3 +1882,46 @@ def test_system_info_megadetector_installed_when_weights_present(app_and_db, mon
 
     assert data["megadetector"] == "installed"
     assert data["megadetector_weights"] == "downloaded"
+
+
+def test_pipeline_models_dinov2_incomplete_without_data_sidecar(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """DINOv2 reports 'incomplete' when only model.onnx is on disk.
+
+    DINOv2 uses external-data ONNX: the ~1 MB model.onnx graph is useless
+    without the companion model.onnx.data weights file. Without this check
+    the status endpoint used to report "downloaded 1.0 MB" for a broken
+    install that couldn't actually run.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    variant_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-b14"
+    variant_dir.mkdir(parents=True)
+    (variant_dir / "model.onnx").write_bytes(b"\x00" * 1024)  # graph only
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/models/pipeline")
+    assert resp.status_code == 200
+    entry = next(m for m in resp.get_json()["models"] if m["id"] == "vit-b14")
+    assert entry["status"] == "incomplete"
+    assert entry["size"] is None
+
+
+def test_pipeline_models_dinov2_downloaded_sums_graph_and_data(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """DINOv2 reports 'downloaded' with total size once both files exist."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    variant_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-b14"
+    variant_dir.mkdir(parents=True)
+    (variant_dir / "model.onnx").write_bytes(b"\x00" * (1 * 1024 * 1024))
+    (variant_dir / "model.onnx.data").write_bytes(b"\x00" * (10 * 1024 * 1024))
+
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/models/pipeline")
+    assert resp.status_code == 200
+    entry = next(m for m in resp.get_json()["models"] if m["id"] == "vit-b14")
+    assert entry["status"] == "downloaded"
+    assert entry["size"] == "11.0 MB"

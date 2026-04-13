@@ -3782,11 +3782,18 @@ def create_app(db_path, thumb_cache_dir=None):
         for variant_id, name, dims, size_est in dinov2_variants:
             variant_dir = os.path.join(models_dir, f"dinov2-{variant_id}")
             model_path = os.path.join(variant_dir, "model.onnx")
+            data_path = model_path + ".data"
             status = "not downloaded"
             size = None
-            if os.path.isfile(model_path):
-                size = round(os.path.getsize(model_path) / 1024 / 1024, 1)
+            # DINOv2 uses external-data ONNX: model.onnx is just the ~1 MB graph;
+            # the real weights live in a model.onnx.data sidecar. Both must be
+            # present for the model to load.
+            if os.path.isfile(model_path) and os.path.isfile(data_path):
+                total_bytes = os.path.getsize(model_path) + os.path.getsize(data_path)
+                size = round(total_bytes / 1024 / 1024, 1)
                 status = "downloaded"
+            elif os.path.isfile(model_path) or os.path.isfile(data_path):
+                status = "incomplete"
             models.append({
                 "id": variant_id,
                 "name": name,
@@ -3834,15 +3841,15 @@ def create_app(db_path, thumb_cache_dir=None):
             },
             "vit-s14": {
                 "subfolder": "dinov2-vit-s14",
-                "files": ["model.onnx"],
+                "files": ["model.onnx", "model.onnx.data"],
             },
             "vit-b14": {
                 "subfolder": "dinov2-vit-b14",
-                "files": ["model.onnx"],
+                "files": ["model.onnx", "model.onnx.data"],
             },
             "vit-l14": {
                 "subfolder": "dinov2-vit-l14",
-                "files": ["model.onnx"],
+                "files": ["model.onnx", "model.onnx.data"],
             },
         }
 
