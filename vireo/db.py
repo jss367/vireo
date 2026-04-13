@@ -1372,13 +1372,21 @@ class Database:
         width=None,
         height=None,
         xmp_mtime=None,
+        file_hash=None,
     ):
-        """Insert a photo. Returns the photo id."""
+        """Insert a photo. Returns the photo id.
+
+        If ``file_hash`` is provided and the insert creates a new row that
+        collides with an existing non-rejected photo sharing the same hash,
+        the duplicate auto-resolver runs and flags the loser(s) as rejected.
+        The hook is wrapped in try/except so resolver bugs never break
+        inserts.
+        """
         cur = self.conn.execute(
             """INSERT OR IGNORE INTO photos
                (folder_id, filename, extension, file_size, file_mtime, xmp_mtime,
-                timestamp, width, height)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                timestamp, width, height, file_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 folder_id,
                 filename,
@@ -1389,16 +1397,36 @@ class Database:
                 timestamp,
                 width,
                 height,
+                file_hash,
             ),
         )
         self.conn.commit()
         if cur.rowcount > 0:
-            return cur.lastrowid
-        row = self.conn.execute(
-            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
-            (folder_id, filename),
-        ).fetchone()
-        return row["id"]
+            photo_id = cur.lastrowid
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (folder_id, filename),
+            ).fetchone()
+            photo_id = row["id"]
+
+        # Auto-resolve duplicates when we have a file_hash and >1 non-rejected
+        # rows share it. Disabled via env var for tests that exercise
+        # apply_duplicate_resolution directly.
+        if file_hash and not os.environ.get("VIREO_DISABLE_AUTO_DUP_RESOLVE"):
+            try:
+                dup_rows = self.conn.execute(
+                    "SELECT id FROM photos WHERE file_hash = ? AND flag != 'rejected'",
+                    (file_hash,),
+                ).fetchall()
+                if len(dup_rows) > 1:
+                    self.apply_duplicate_resolution([r["id"] for r in dup_rows])
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
+                )
+
+        return photo_id
 
     def apply_duplicate_resolution(self, photo_ids):
         """Resolve a group of photos sharing a file_hash.
