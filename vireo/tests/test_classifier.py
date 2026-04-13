@@ -446,6 +446,65 @@ class TestTreeOfLifeMode:
             assert isinstance(emb, np.ndarray)
 
 
+class TestTextEncoderBatchFallback:
+    """Tests for the per-row fallback when the text encoder's ONNX graph
+    rejects batched inputs (a known issue with bioclip-2.5-vith14 where an
+    internal Reshape node has a hardcoded batch=1 shape)."""
+
+    def _make_batch1_only_text_session(self, embedding_dim=512):
+        """Mock text session that raises for batch > 1, succeeds for batch == 1.
+
+        Simulates the bioclip-2.5-vith14 text_encoder.onnx behaviour where
+        the internal 'gemm_input_reshape' node fails whenever batch > 1.
+        """
+        session = MagicMock()
+        mock_input = MagicMock()
+        mock_input.name = "input_ids"
+        session.get_inputs.return_value = [mock_input]
+
+        def fake_run(output_names, input_dict):
+            tokens = list(input_dict.values())[0]
+            if tokens.shape[0] != 1:
+                raise RuntimeError(
+                    "Non-zero status code returned while running Reshape node. "
+                    "Name:'gemm_input_reshape' ... input_shape_size == size was false."
+                )
+            features = np.random.randn(1, embedding_dim).astype(np.float32)
+            norms = np.linalg.norm(features, axis=-1, keepdims=True)
+            return [features / norms]
+
+        session.run = fake_run
+        return session
+
+    def test_falls_back_to_per_row_when_batch_rejected(self, tmp_path):
+        """If the text encoder raises on batched inputs, embeddings are still
+        computed via per-row inference."""
+        from classifier import Classifier
+
+        _make_model_dir(tmp_path)
+        fake_image_session = _make_fake_image_session()
+        fake_text_session = self._make_batch1_only_text_session()
+        fake_tokenizer = _make_fake_tokenizer()
+
+        with (
+            patch("classifier._MODELS_ROOT", str(tmp_path)),
+            patch("classifier.CACHE_DIR", str(tmp_path / "cache")),
+            patch(
+                "classifier._MANIFEST_PATH",
+                str(tmp_path / "cache" / "manifest.json"),
+            ),
+            patch(
+                "classifier.onnx_runtime.create_session",
+                side_effect=[fake_image_session, fake_text_session],
+            ),
+            patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+        ):
+            clf = Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
+
+        assert clf._txt_embeddings.shape == (512, 2)
+        assert clf._txt_embeddings.dtype == np.float32
+
+
 class TestEmbeddingCache:
     """Tests for the embedding cache path utility."""
 
