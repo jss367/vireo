@@ -168,12 +168,22 @@ def _preprocess(image_array):
 def _postprocess(outputs, preprocess_info, confidence_threshold):
     """Post-process ONNX model outputs to detection list.
 
-    Handles common YOLOv9 ONNX output formats flexibly:
-    - (1, N, 4+1+num_classes): N candidate boxes with
-      [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
-    - (1, 4+1+num_classes, N): transposed variant
-    - (1, N, 4+num_classes): no separate objectness score,
-      [cx, cy, w, h, cls0, cls1, ...]
+    Supports two YOLO output layouts (after squeezing the batch dim and
+    transposing to (N, C) where N = number of anchor proposals):
+
+    - C == 4 + num_classes (YOLOv8/v9 — no objectness):
+        [cx, cy, w, h, cls0, cls1, ...]
+        For MegaDetector V6 (YOLOv9c, 3 classes) this is C == 7.
+    - C == 5 + num_classes (legacy YOLOv5/v7 with objectness):
+        [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
+        With 3 classes that's C == 8.
+
+    The two layouts are distinguished by an exact column count keyed off
+    ``CLASS_NAMES``. Earlier code keyed on ``num_cols >= 7``, which sent
+    the YOLOv9 7-column output down the with-objectness path and silently
+    corrupted both the confidence (animal × max(person, vehicle) ≈ 0)
+    and the category labels (off-by-one) on every MegaDetector V6
+    detection.
 
     Args:
         outputs: list of numpy arrays from ONNX session.run()
@@ -202,18 +212,10 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
             output = output.T  # transpose (C, N) -> (N, C)
 
     num_cols = output.shape[1]
+    num_classes = len(CLASS_NAMES)
 
-    if num_cols >= 7:
-        # Format: [x1, y1, x2, y2, obj_conf, cls0, cls1, cls2, ...]
-        # Separate objectness score multiplied by class score
-        boxes_raw = output[:, :4]
-        obj_conf = output[:, 4]
-        class_scores = output[:, 5:]
-        class_ids = class_scores.argmax(axis=1)
-        confidences = obj_conf * class_scores[np.arange(len(class_scores)), class_ids]
-    elif num_cols >= 5:
-        # Format: [cx, cy, w, h, cls0, cls1, ...] (no separate obj_conf)
-        # Box coords are center-x, center-y, width, height
+    if num_cols == 4 + num_classes:
+        # YOLOv8/v9 layout: [cx, cy, w, h, cls0, cls1, ...]
         cx, cy, bw, bh = output[:, 0], output[:, 1], output[:, 2], output[:, 3]
         boxes_raw = np.stack(
             [cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], axis=1
@@ -221,8 +223,20 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
         class_scores = output[:, 4:]
         class_ids = class_scores.argmax(axis=1)
         confidences = class_scores[np.arange(len(class_scores)), class_ids]
+    elif num_cols == 5 + num_classes:
+        # Legacy YOLOv5/v7 layout with objectness:
+        # [x1, y1, x2, y2, obj_conf, cls0, cls1, ...]
+        boxes_raw = output[:, :4]
+        obj_conf = output[:, 4]
+        class_scores = output[:, 5:]
+        class_ids = class_scores.argmax(axis=1)
+        confidences = obj_conf * class_scores[np.arange(len(class_scores)), class_ids]
     else:
-        log.warning("Unexpected ONNX output shape: %s", output.shape)
+        log.warning(
+            "Unexpected ONNX output shape: %s (expected %d or %d columns "
+            "for %d classes)",
+            output.shape, 4 + num_classes, 5 + num_classes, num_classes,
+        )
         return []
 
     # Filter by confidence
