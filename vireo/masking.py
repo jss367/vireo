@@ -8,6 +8,7 @@ Masks are saved as single-channel PNGs in ~/.vireo/masks/{photo_id}.png.
 
 import logging
 import os
+import threading
 
 import numpy as np
 import onnx_runtime
@@ -23,6 +24,14 @@ SAM2_VARIANTS = {
     "sam2-large": "sam2-large",
 }
 
+# Rough size estimate surfaced in the download progress message, per variant.
+_SAM2_SIZE_HINT = {
+    "sam2-tiny": "~40 MB",
+    "sam2-small": "~150 MB",
+    "sam2-base-plus": "~320 MB",
+    "sam2-large": "~900 MB",
+}
+
 # SAM2 image encoder native input size
 SAM2_INPUT_SIZE = 1024
 
@@ -33,6 +42,115 @@ _IMAGENET_STD = [0.229, 0.224, 0.225]
 _encoder_session = None
 _decoder_session = None
 _sam2_variant_loaded = None
+
+_sam2_download_lock = threading.Lock()
+
+
+def _sam2_model_dir(variant):
+    return os.path.join(
+        os.path.expanduser("~"), ".vireo", "models", variant
+    )
+
+
+def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
+    """Ensure SAM2 ONNX encoder + decoder weights for ``variant`` are on disk.
+
+    Returns the variant's model directory when both files are already present.
+    Otherwise downloads whichever file is missing from Hugging Face and copies
+    them into ``~/.vireo/models/{variant}/``. Raises RuntimeError on failure
+    so callers can abort rather than silently run without masks.
+
+    Args:
+        variant: one of sam2-tiny, sam2-small, sam2-base-plus, sam2-large
+        progress_callback: optional callable(phase: str, current: int,
+            total: int) invoked once before the download starts and once per
+            downloaded file.
+    """
+    if variant not in SAM2_VARIANTS:
+        raise ValueError(
+            f"Unknown SAM2 variant: {variant}. "
+            f"Choose from: {list(SAM2_VARIANTS.keys())}"
+        )
+
+    model_dir = _sam2_model_dir(variant)
+    encoder_path = os.path.join(model_dir, "image_encoder.onnx")
+    decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
+
+    if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
+        return model_dir
+
+    # Serialize concurrent first-run downloads so two parallel jobs don't
+    # both start a ~hundreds-of-MB download, and so a second caller never
+    # observes a half-copied file at the final path and tries to load it
+    # as ONNX.
+    with _sam2_download_lock:
+        if os.path.isfile(encoder_path) and os.path.isfile(decoder_path):
+            return model_dir
+
+        os.makedirs(model_dir, exist_ok=True)
+
+        size_hint = _SAM2_SIZE_HINT.get(variant, "")
+        files = [("image_encoder.onnx", encoder_path),
+                 ("mask_decoder.onnx", decoder_path)]
+        missing = [(name, path) for name, path in files if not os.path.isfile(path)]
+        total_files = len(missing)
+
+        if progress_callback:
+            progress_callback(
+                f"Downloading {variant} ({size_hint}, first run only)...",
+                0, total_files,
+            )
+        log.info(
+            "SAM2 weights missing for %s — downloading %d file(s) from Hugging Face",
+            variant, total_files,
+        )
+
+        try:
+            import contextlib
+            import shutil
+
+            from huggingface_hub import hf_hub_download
+            from models import ONNX_REPO
+
+            for idx, (filename, final_path) in enumerate(missing):
+                tmp_path = final_path + ".download"
+                try:
+                    cached_path = hf_hub_download(
+                        repo_id=ONNX_REPO,
+                        filename=filename,
+                        subfolder=variant,
+                    )
+                    # Copy to a sibling temp path then atomically replace so
+                    # other threads only ever observe either the missing
+                    # state or a fully written weights file — never a
+                    # partial copy.
+                    shutil.copy2(cached_path, tmp_path)
+                    os.replace(tmp_path, final_path)
+                except Exception:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+                    raise
+
+                if progress_callback:
+                    progress_callback(
+                        f"Downloaded {filename} ({idx + 1}/{total_files})",
+                        idx + 1, total_files,
+                    )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download SAM2 weights ({variant}): {e}. "
+                "Check your network connection and retry, or download "
+                "manually from the pipeline models page."
+            ) from e
+
+        if not (os.path.isfile(encoder_path) and os.path.isfile(decoder_path)):
+            raise RuntimeError(
+                f"SAM2 download completed but weights are missing at "
+                f"{model_dir}."
+            )
+
+        log.info("SAM2 weights downloaded (%s)", variant)
+        return model_dir
 
 
 def _get_sam2_sessions(variant="sam2-small"):

@@ -576,3 +576,162 @@ def test_generate_mask_with_mock():
     masking._encoder_session = None
     masking._decoder_session = None
     masking._sam2_variant_loaded = None
+
+
+# -- ensure_sam2_weights (auto-download on first pipeline run) --
+
+
+def test_ensure_sam2_weights_noop_when_present(tmp_path, monkeypatch):
+    """ensure_sam2_weights() returns immediately when both files exist and
+    must never touch Hugging Face."""
+    import sys
+    import types
+
+    import masking
+
+    model_dir = tmp_path / "sam2-small"
+    model_dir.mkdir()
+    (model_dir / "image_encoder.onnx").write_bytes(b"e" * 1024)
+    (model_dir / "mask_decoder.onnx").write_bytes(b"d" * 1024)
+    monkeypatch.setattr(
+        masking, "_sam2_model_dir", lambda variant: str(model_dir)
+    )
+
+    download_calls = []
+
+    def fake_hf_hub_download(**kwargs):
+        download_calls.append(kwargs)
+        raise AssertionError("hf_hub_download must not be called when files exist")
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress = []
+    result = masking.ensure_sam2_weights(
+        "sam2-small", progress_callback=lambda p, c, t: progress.append((p, c, t))
+    )
+
+    assert result == str(model_dir)
+    assert download_calls == []
+    assert progress == []
+
+
+def test_ensure_sam2_weights_downloads_both_files(tmp_path, monkeypatch):
+    """ensure_sam2_weights() fetches encoder + decoder and surfaces progress
+    for each file."""
+    import sys
+    import types
+
+    import masking
+
+    model_dir = tmp_path / "sam2-small"
+    monkeypatch.setattr(
+        masking, "_sam2_model_dir", lambda variant: str(model_dir)
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "image_encoder.onnx").write_bytes(b"E" * 2048)
+    (cache_dir / "mask_decoder.onnx").write_bytes(b"D" * 512)
+
+    seen_requests = []
+
+    def fake_hf_hub_download(**kwargs):
+        seen_requests.append((kwargs["filename"], kwargs["subfolder"]))
+        return str(cache_dir / kwargs["filename"])
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    progress = []
+    result = masking.ensure_sam2_weights(
+        "sam2-small",
+        progress_callback=lambda p, c, t: progress.append((p, c, t)),
+    )
+
+    assert result == str(model_dir)
+    assert (model_dir / "image_encoder.onnx").read_bytes() == b"E" * 2048
+    assert (model_dir / "mask_decoder.onnx").read_bytes() == b"D" * 512
+    assert seen_requests == [
+        ("image_encoder.onnx", "sam2-small"),
+        ("mask_decoder.onnx", "sam2-small"),
+    ]
+    # Initial announce + once per downloaded file.
+    assert progress[0][1] == 0 and progress[0][2] == 2
+    assert progress[-1][1] == 2 and progress[-1][2] == 2
+
+
+def test_ensure_sam2_weights_downloads_only_missing_file(tmp_path, monkeypatch):
+    """If the encoder is already on disk but the decoder isn't, only fetch
+    the decoder.  Lets a user recover from a partial download without paying
+    for the big encoder again."""
+    import sys
+    import types
+
+    import masking
+
+    model_dir = tmp_path / "sam2-small"
+    model_dir.mkdir()
+    (model_dir / "image_encoder.onnx").write_bytes(b"E" * 2048)
+    monkeypatch.setattr(
+        masking, "_sam2_model_dir", lambda variant: str(model_dir)
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "mask_decoder.onnx").write_bytes(b"D" * 512)
+
+    requested = []
+
+    def fake_hf_hub_download(**kwargs):
+        requested.append(kwargs["filename"])
+        return str(cache_dir / kwargs["filename"])
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    masking.ensure_sam2_weights("sam2-small")
+
+    assert requested == ["mask_decoder.onnx"]
+    assert (model_dir / "image_encoder.onnx").read_bytes() == b"E" * 2048
+
+
+def test_ensure_sam2_weights_raises_on_download_failure(tmp_path, monkeypatch):
+    """A failed download must raise RuntimeError with a remediation hint
+    and leave no partial file at the final path."""
+    import sys
+    import types
+
+    import masking
+    import pytest
+
+    model_dir = tmp_path / "sam2-small"
+    monkeypatch.setattr(
+        masking, "_sam2_model_dir", lambda variant: str(model_dir)
+    )
+
+    def fake_hf_hub_download(**kwargs):
+        raise ConnectionError("network unreachable")
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    with pytest.raises(RuntimeError, match="Failed to download SAM2"):
+        masking.ensure_sam2_weights("sam2-small")
+
+    assert not (model_dir / "image_encoder.onnx").exists()
+    assert not (model_dir / "mask_decoder.onnx").exists()
+
+
+def test_ensure_sam2_weights_rejects_unknown_variant():
+    """Guard against typos that would otherwise fetch from a wrong repo
+    path."""
+    import masking
+    import pytest
+
+    with pytest.raises(ValueError, match="Unknown SAM2 variant"):
+        masking.ensure_sam2_weights("sam2-jumbo")
