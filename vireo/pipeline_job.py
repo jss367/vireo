@@ -657,7 +657,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         files = active_model.get("files", [])
         if files and weights_path:
             state = _classify_model_state(weights_path, files)
-            if state != "ok":
+            if state not in ("ok", "unverified"):
                 raise RuntimeError(
                     _incomplete_model_message(model_name, model_is_custom)
                 )
