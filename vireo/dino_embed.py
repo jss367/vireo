@@ -109,6 +109,7 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
         tmp_path = model_path + ".download"
         tmp_data_path = data_path + ".download"
         try:
+            import contextlib
             import shutil
 
             from huggingface_hub import hf_hub_download
@@ -151,12 +152,18 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
 
             # Replace sidecar first, graph second, so ONNX Runtime never
             # sees a graph file that references a not-yet-written sidecar.
-            # Both replaces are atomic per file.
+            # If the graph replace fails after the sidecar is already in
+            # place (e.g. model.onnx is locked on Windows), roll back the
+            # sidecar so subsequent runs re-download both cleanly — prevents
+            # a mismatched pair from silently passing the existence check.
             os.replace(tmp_data_path, data_path)
-            os.replace(tmp_path, model_path)
+            try:
+                os.replace(tmp_path, model_path)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.unlink(data_path)
+                raise
         except Exception as e:
-            import contextlib
-
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
             with contextlib.suppress(OSError):

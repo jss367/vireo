@@ -615,6 +615,72 @@ def test_ensure_dinov2_weights_raises_on_sidecar_download_failure(
     assert not data_path.exists()
 
 
+def test_ensure_dinov2_weights_rolls_back_sidecar_if_graph_replace_fails(
+    tmp_path, monkeypatch,
+):
+    """Regression for Codex review: if ``os.replace(tmp_data_path, data_path)``
+    succeeds but ``os.replace(tmp_path, model_path)`` then fails (e.g. the
+    graph file is locked on Windows), the old sidecar must be removed so
+    subsequent runs don't short-circuit on a mismatched pair.
+
+    Without the rollback:
+      1. stub-only install triggers download.
+      2. new sidecar is promoted to ``data_path``.
+      3. graph replace fails, leaving old stub at ``model_path``.
+      4. Both files now exist → short-circuit → ONNX Runtime dies on mismatched
+         external-data layout with the same opaque error we worked hard to fix.
+    """
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_dir.mkdir()
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+
+    # Simulate stub-only install (old graph, no sidecar).
+    model_path.write_bytes(b"old-stub" * 128)
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"new-graph" * 128)
+    (cache_dir / "model.onnx.data").write_bytes(b"new-sidecar" * 512)
+
+    def fake_hf_hub_download(**kwargs):
+        return str(cache_dir / kwargs["filename"])
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    # Intercept os.replace: let the sidecar promotion succeed, fail the graph.
+    real_replace = os.replace
+    call_count = [0]
+
+    def patched_replace(src, dst):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: sidecar → data_path; let it succeed.
+            return real_replace(src, dst)
+        # Second call: graph → model_path; simulate a locked-file error.
+        raise OSError("file is locked")
+
+    monkeypatch.setattr(os, "replace", patched_replace)
+
+    with pytest.raises(RuntimeError, match="Failed to download DINOv2"):
+        dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # After rollback, data_path must NOT exist so the next call re-downloads
+    # both files instead of silently short-circuiting on a mismatched pair.
+    assert not data_path.exists(), (
+        "sidecar was NOT rolled back — subsequent runs will pass the "
+        "existence check with an old graph + new sidecar and ONNX Runtime "
+        "will fail on mismatched external-data layout"
+    )
+
+
 def test_ensure_dinov2_weights_rejects_unknown_variant():
     """Guard against typos that would otherwise fetch from a wrong repo path."""
     import dino_embed
