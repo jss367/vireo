@@ -518,13 +518,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # but status surfaces the problem on the job history list.
             final_status = "failed" if failed > 0 else "completed"
             stages["thumbnails"]["status"] = final_status
-            if failed > 0:
-                errors.append(
-                    f"[thumbnails] {failed} of {processed} thumbnails failed to generate"
-                )
+            thumb_rollup = (
+                f"[thumbnails] {failed} of {processed} thumbnails failed to generate"
+                if failed > 0 else None
+            )
+            if thumb_rollup:
+                errors.append(thumb_rollup)
             runner.update_step(job["id"], "thumbnails", status=final_status,
                                summary=thumb_summary(thumb_result),
                                error_count=failed,
+                               error=thumb_rollup,
                                progress={"current": processed, "total": processed})
             result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
@@ -612,10 +615,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             }
             final_status = "failed" if failed > 0 else "completed"
             stages["previews"]["status"] = final_status
-            if failed > 0:
-                errors.append(
-                    f"[previews] {failed} of {total} previews failed to generate"
-                )
+            previews_rollup = (
+                f"[previews] {failed} of {total} previews failed to generate"
+                if failed > 0 else None
+            )
+            if previews_rollup:
+                errors.append(previews_rollup)
             summary_parts = [f"{generated} generated"]
             if skipped:
                 summary_parts.append(f"{skipped} cached")
@@ -623,7 +628,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 summary_parts.append(f"{failed} failed")
             runner.update_step(job["id"], "previews", status=final_status,
                                summary=", ".join(summary_parts),
-                               error_count=failed)
+                               error_count=failed,
+                               error=previews_rollup)
         except Exception as e:
             errors.append(f"[previews] Fatal: {e}")
             log.exception("Pipeline previews stage failed")
@@ -1350,15 +1356,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             # Any per-photo classify failure flips the stage to 'failed'.
             # Summary still shows both counts; status surfaces the problem.
+            # error_count uses unique failed photo IDs (not per-model attempt
+            # count) so the badge can never exceed total photos.
+            n_failed_photos = len(failed_photo_ids)
             final_status = "failed" if total_failed > 0 else "completed"
             stages["classify"]["status"] = final_status
-            if total_failed > 0:
-                errors.append(
-                    f"[classify] {len(failed_photo_ids)} of {total} photos failed to classify"
-                )
+            classify_rollup = (
+                f"[classify] {n_failed_photos} of {total} photos failed to classify"
+                if total_failed > 0 else None
+            )
+            if classify_rollup:
+                errors.append(classify_rollup)
             runner.update_step(job["id"], "classify", status=final_status,
                                summary="; ".join(summary_parts),
-                               error_count=total_failed)
+                               error_count=n_failed_photos,
+                               error=classify_rollup)
             result["stages"]["classify"] = {
                 "total": total,
                 "predictions_stored": total_predictions_stored,
@@ -1608,16 +1620,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             final_status = "failed" if em_failed > 0 else "completed"
             stages["extract_masks"]["status"] = final_status
-            if em_failed > 0:
-                errors.append(
-                    f"[extract_masks] {em_failed} of {total} photos failed mask extraction"
-                )
+            em_rollup = (
+                f"[extract_masks] {em_failed} of {total} photos failed mask extraction"
+                if em_failed > 0 else None
+            )
+            if em_rollup:
+                errors.append(em_rollup)
             em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
             if em_failed:
                 em_summary_parts.append(f"{em_failed} failed")
             runner.update_step(job["id"], "extract_masks", status=final_status,
                                summary=", ".join(em_summary_parts),
-                               error_count=em_failed)
+                               error_count=em_failed,
+                               error=em_rollup)
             result["stages"]["extract_masks"] = {
                 "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
             }
