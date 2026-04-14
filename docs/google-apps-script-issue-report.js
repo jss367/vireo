@@ -1,15 +1,21 @@
 /**
  * Google Apps Script for receiving Vireo issue reports.
  *
- * Setup:
+ * NOTE: This script is already wired up for the maintainer's deployment —
+ * the corresponding deployment URL ships as the default value of
+ * `report_url` in `vireo/config.py`, so issue reporting works out of the
+ * box for end users with no extra configuration.
+ *
+ * Forkers who want to collect their own reports should:
  * 1. Go to https://script.google.com and create a new project.
  * 2. Paste this code into Code.gs.
  * 3. Replace YOUR_EMAIL@gmail.com with your email address.
  * 4. Click Deploy > New deployment > Web app.
  *    - Execute as: Me
  *    - Who has access: Anyone
- * 5. Copy the deployment URL and set it as "report_url" in Vireo's
- *    Settings page or in ~/.vireo/config.json.
+ * 5. Copy the deployment URL and replace the `report_url` default in
+ *    `vireo/config.py` with your own URL (or override it per-install via
+ *    Vireo's Settings page / ~/.vireo/config.json).
  */
 
 function doPost(e) {

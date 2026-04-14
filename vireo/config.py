@@ -27,7 +27,7 @@ DEFAULTS = {
     "setup_complete": False,
     "darktable_bin": "",
     "external_editor": "",
-    "report_url": "",
+    "report_url": "https://script.google.com/macros/s/AKfycbwqjy8KaB0X04b9R614PWkikRmEsbarXXdarl0S0QC6thT9Uoyn8F74Gku-5z9h-TTf/exec",
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",
