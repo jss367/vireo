@@ -2765,37 +2765,38 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
             f"expected {ws_id}."
         )
 
-    # And the skip set must now include both photos on a second run.
+    # photo_with_det must be in the skip set so the second run reuses its
+    # prediction instead of re-classifying.
     skip_set = db.get_existing_prediction_photo_ids(preds[0]["model"])
     assert photo_with_det in skip_set, (
         f"photo_with_det ({photo_with_det}) missing from skip set {skip_set} — "
         "its prediction is not reachable via the predictions→detections join."
     )
-    assert photo_without_det in skip_set, (
-        f"photo_without_det ({photo_without_det}) missing from skip set "
-        f"{skip_set} — the no-detection path must still anchor its prediction "
-        "to a detection row (e.g. a full-image detection)."
-    )
 
-    # The no-detection photo's anchor must be marked as a synthetic
-    # full-image detection so downstream stages (extract_masks_stage,
-    # photos_with_detections diagnostic) can filter it out and treat the
-    # photo as genuinely lacking a real subject. Without this marker, mask
-    # extraction would be driven by a full-frame box and the
-    # "MegaDetector produced no detections" diagnostic would never fire.
-    synth_dets = db.conn.execute(
-        "SELECT detector_model FROM detections WHERE photo_id = ?",
+    # photo_without_det must NOT have a prediction or a detection row. The
+    # pipeline classify stage is detection-driven: photos without a real
+    # MegaDetector hit are skipped, not classified against a synthetic
+    # full-image box (earlier versions did that, but it broke
+    # extract_masks_stage and caused multi-model duplicate inserts).
+    no_det_preds = db.conn.execute(
+        """SELECT pr.id FROM predictions pr
+           LEFT JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ? OR pr.detection_id IS NULL""",
         (photo_without_det,),
     ).fetchall()
-    assert synth_dets, (
-        "photo_without_det has no detection row at all — can't anchor its "
-        "prediction to a workspace without one."
+    assert not no_det_preds, (
+        f"Pipeline wrote predictions for photo_without_det: {[dict(r) for r in no_det_preds]}. "
+        "Photos without a MegaDetector detection must be skipped by the "
+        "pipeline classify stage."
     )
-    assert all(d["detector_model"] == "full-image" for d in synth_dets), (
-        f"photo_without_det detections {[dict(d) for d in synth_dets]} must "
-        "all be tagged detector_model='full-image' so extract_masks_stage "
-        "and the no-detections diagnostic can distinguish them from real "
-        "MegaDetector output."
+    leftover_dets = db.conn.execute(
+        "SELECT id, detector_model FROM detections WHERE photo_id = ?",
+        (photo_without_det,),
+    ).fetchall()
+    assert not leftover_dets, (
+        f"Pipeline created spurious detection rows for photo_without_det: "
+        f"{[dict(r) for r in leftover_dets]}. No synthetic detections should "
+        "be inserted — the photo should just be skipped."
     )
 
 
@@ -2803,16 +2804,21 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     tmp_path, monkeypatch
 ):
     """extract_masks_stage must treat detector_model='full-image' rows as
-    non-detections: they are classify-anchor rows for photos where
-    MegaDetector found nothing, not real subject boxes. Counting them toward
-    photos_with_detections hides the "weights missing / no detections"
-    diagnostic and drives mask extraction on useless full-frame boxes.
+    non-detections: they are classify-anchor rows (created by the
+    standalone classify path in classify_job.py for photos where
+    MegaDetector found nothing), not real subject boxes. Counting them
+    toward photos_with_detections hides the "weights missing / no
+    detections" diagnostic and drives mask extraction on useless full-frame
+    boxes.
+
+    The pipeline classify stage no longer creates synthetic full-image
+    detections — but classify_job.py still does, and this filter is the
+    last line of defense regardless of the source.
     """
     import classifier as classifier_mod
     import classify_job
     import config as cfg
     from db import Database
-    from PIL import Image
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
@@ -2830,25 +2836,24 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
     )
 
+    # Simulate a prior standalone classify run that inserted a full-image
+    # detection anchor for this photo.
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )
+
     model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
 
-    # Every photo has zero real detections — forces the synthetic full-image
-    # detection path in pipeline_job.
+    # No real MegaDetector hits in this pipeline pass, either.
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
         return {}, 0, {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
-
-    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
-        return (
-            Image.new("RGB", (32, 32), "white"),
-            folders.get(photo["folder_id"], ""),
-            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
-        )
-
-    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
 
     class FakeClassifier:
         def __init__(self, *args, **kwargs):
@@ -2875,15 +2880,17 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     job = _make_job()
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # The pipeline created a synthetic full-image detection to anchor the
-    # prediction.  Confirm the test really exercised that path.
+    # Confirm the pre-existing full-image detection is still the only row
+    # for this photo — the pipeline run did not create additional rows.
     all_dets = db.conn.execute(
         "SELECT detector_model FROM detections WHERE photo_id = ?",
         (photo_id,),
     ).fetchall()
-    assert all_dets and all(d["detector_model"] == "full-image" for d in all_dets), (
-        "Test setup no longer produces only synthetic full-image "
-        f"detections: {[dict(d) for d in all_dets]}"
+    assert all_dets and all(
+        d["detector_model"] == "full-image" for d in all_dets
+    ), (
+        f"Expected only full-image anchor detections, got: "
+        f"{[dict(d) for d in all_dets]}"
     )
 
     # extract_masks_stage should have reported the no-detections diagnostic
@@ -2900,4 +2907,134 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
         f"extract_masks_stage should surface the no-detections diagnostic "
         f"when every detection row is synthetic, got summaries: "
         f"{extract_summaries}"
+    )
+
+
+def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
+    tmp_path, monkeypatch
+):
+    """Regression: after the detection_id fix made pipeline predictions
+    eligible for get_existing_prediction_photo_ids, a second non-reclassify
+    run routes skipped photos through the _existing raw_results branch. If
+    those raw_results lack a detection_id key, _store_grouped_predictions
+    crashes the first time burst grouping kicks in — it calls
+    update_prediction_group_info(detection_id=item["detection_id"], ...)
+    for every _existing item in a multi-item group.
+
+    This test runs two photos through a pipeline pass that groups them into
+    a single burst, then runs the pipeline again: the second run must
+    complete without a KeyError on detection_id.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    # Two photos one second apart — burst grouping will fuse them.
+    p1 = db.add_photo(folder_id, "a.jpg", ".jpg", 1, 1_000_000.0,
+                      timestamp="2026-01-01T12:00:00")
+    p2 = db.add_photo(folder_id, "b.jpg", ".jpg", 2, 1_000_001.0,
+                      timestamp="2026-01-01T12:00:01")
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
+    )
+
+    det_p1 = db.save_detections(
+        p1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )[0]
+    det_p2 = db.save_detections(
+        p2, [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+              "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )[0]
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    det_rows = {
+        p1: [{"id": det_p1, "box_x": 0.1, "box_y": 0.1,
+              "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+              "category": "animal"}],
+        p2: [{"id": det_p2, "box_x": 0.1, "box_y": 0.1,
+              "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+              "category": "animal"}],
+    }
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {p["id"]: det_rows[p["id"]] for p in batch}
+        return det_map, len(det_map), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        return (
+            Image.new("RGB", (32, 32), "white"),
+            folders.get(photo["folder_id"], ""),
+            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
+        )
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Red-tailed Hawk", "score": 0.99}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    # First run: stores predictions.
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    preds_after_first = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM predictions WHERE detection_id IS NOT NULL"
+    ).fetchone()["c"]
+    assert preds_after_first >= 2, (
+        f"First run should have stored predictions for both photos, got "
+        f"{preds_after_first} prediction rows"
+    )
+
+    # Second run: every photo hits the _existing branch, and burst grouping
+    # calls _store_grouped_predictions with multi-item groups of _existing
+    # items. Before the fix, this raised KeyError: 'detection_id'.
+    job2 = _make_job()
+    run_pipeline_job(job2, FakeRunner(), db_path, ws_id, params)
+
+    assert not job2["errors"], (
+        f"Second pipeline run raised errors: {job2['errors']}. "
+        "The _existing raw_results dict must carry a detection_id so "
+        "_store_grouped_predictions does not crash on bursts of reused "
+        "predictions."
+    )
+    assert job2["status"] != "failed", (
+        f"Second pipeline run status is {job2['status']} (expected not "
+        "'failed')"
     )

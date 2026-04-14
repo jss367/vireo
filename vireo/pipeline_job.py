@@ -1153,8 +1153,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                     if emb_blob:
                                         import numpy as np
                                         embedding = np.frombuffer(emb_blob, dtype=np.float32)
+                                # _store_grouped_predictions reads
+                                # item["detection_id"] unconditionally on the
+                                # burst-grouping path (update_prediction_group_info).
+                                # Without it, a rerun with bursts crashes on the
+                                # first _existing item. pred_row carries
+                                # detection_id from get_prediction_for_photo's
+                                # predictions⋈detections join.
                                 raw_results.append({
                                     "photo": photo,
+                                    "detection_id": pred_row["detection_id"],
                                     "folder_path": folder_path,
                                     "image_path": image_path,
                                     "prediction": pred_row["species"],
@@ -1171,12 +1179,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         # highest-confidence detection for THIS photo (first
                         # entry, already ordered by confidence DESC) to
                         # _prepare_image, which expects a single detection
-                        # dict with box_x/y/w/h keys (or None for full-image
-                        # classification).  Passing the raw det_map caused
-                        # KeyError: 'box_w' the moment any photo in a batch
-                        # produced a detection, aborting classify mid-run.
+                        # dict with box_x/y/w/h keys.
                         photo_dets = det_map.get(photo["id"], [])
                         primary_det = photo_dets[0] if photo_dets else None
+                        # Pipeline classify is detection-driven. Photos without
+                        # a MegaDetector hit are skipped — no prediction is
+                        # written. Earlier versions synthesized a full-image
+                        # detection to anchor the FK, but that polluted
+                        # extract_masks_stage (full-frame boxes were treated
+                        # as real subjects and the no-detections diagnostic
+                        # stopped firing) and caused multi-model runs to
+                        # insert duplicate full-image rows per photo per model.
+                        if primary_det is None:
+                            continue
+
                         img, folder_path, image_path = _prepare_image(
                             photo, folders, primary_det
                         )
@@ -1184,28 +1200,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             failed += 1
                             continue
 
-                        # Every prediction must anchor to a detection row so
-                        # the workspace-scoped skip query
-                        # (predictions ⋈ detections on detection_id) can find
-                        # it. When MegaDetector found nothing, synthesize a
-                        # full-image detection row — matching the standalone
-                        # classify path at classify_job.py ≈ 772-777.
-                        if primary_det is not None:
-                            detection_id = primary_det["id"]
-                        else:
-                            full_image_det = [{
-                                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                                "confidence": 0, "category": "animal",
-                            }]
-                            full_det_ids = thread_db.save_detections(
-                                photo["id"], full_image_det,
-                                detector_model="full-image",
-                            )
-                            detection_id = full_det_ids[0]
-
                         img_batch = [{
                             "photo": photo,
-                            "detection_id": detection_id,
+                            "detection_id": primary_det["id"],
                             "folder_path": folder_path,
                             "image_path": image_path,
                             "img": img,
