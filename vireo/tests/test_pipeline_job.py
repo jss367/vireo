@@ -2641,15 +2641,28 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
     Regression: pipeline_job built img_batch entries without a detection_id
     key, so _flush_batch stored detection_id=None for every pipeline-written
     prediction.
+
+    Pipeline classify is detection-driven: photos with no MegaDetector
+    detection are skipped entirely rather than having a synthetic full-image
+    detection row inserted, which would be mistakenly treated by
+    extract_masks_stage as a real subject candidate.
     """
     import classifier as classifier_mod
     import classify_job
     import config as cfg
+    import detector as detector_mod
     from db import Database
     from PIL import Image
 
     monkeypatch.setenv("HOME", str(tmp_path))
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Stub out MegaDetector weights so ensure_megadetector_weights
+    # short-circuits without attempting a network download.
+    fake_md = tmp_path / "megadetector" / "model.onnx"
+    fake_md.parent.mkdir(parents=True, exist_ok=True)
+    fake_md.touch()
+    monkeypatch.setattr(detector_mod, "MEGADETECTOR_ONNX_PATH", str(fake_md))
 
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
@@ -2765,14 +2778,29 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
             f"expected {ws_id}."
         )
 
-    # And the skip set must now include both photos on a second run.
+    # The skip set must include photo_with_det (it has a prediction anchored
+    # to a real detection row).  photo_without_det was skipped by the pipeline
+    # (no detection → no classify → no prediction), so it is NOT in the skip
+    # set — correct pipeline behavior since there is nothing to skip.
     skip_set = db.get_existing_prediction_photo_ids(preds[0]["model"])
     assert photo_with_det in skip_set, (
         f"photo_with_det ({photo_with_det}) missing from skip set {skip_set} — "
         "its prediction is not reachable via the predictions→detections join."
     )
-    assert photo_without_det in skip_set, (
-        f"photo_without_det ({photo_without_det}) missing from skip set "
-        f"{skip_set} — the no-detection path must still anchor its prediction "
-        "to a detection row (e.g. a full-image detection)."
+    assert photo_without_det not in skip_set, (
+        f"photo_without_det ({photo_without_det}) unexpectedly found in skip "
+        f"set {skip_set} — pipeline should not classify photos that had no "
+        "MegaDetector detection."
+    )
+
+    # Confirm no synthetic full-image detections were inserted for the
+    # no-detection photo — those would fool extract_masks_stage.
+    synthetic = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = 'full-image'",
+        (photo_without_det,),
+    ).fetchall()
+    assert not synthetic, (
+        f"Pipeline inserted synthetic full-image detection(s) for "
+        f"photo_without_det: {[dict(r) for r in synthetic]}. These are "
+        "picked up by extract_masks_stage as real subject candidates."
     )

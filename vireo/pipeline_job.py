@@ -1184,28 +1184,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             failed += 1
                             continue
 
-                        # Every prediction must anchor to a detection row so
-                        # the workspace-scoped skip query
-                        # (predictions ⋈ detections on detection_id) can find
-                        # it. When MegaDetector found nothing, synthesize a
-                        # full-image detection row — matching the standalone
-                        # classify path at classify_job.py ≈ 772-777.
-                        if primary_det is not None:
-                            detection_id = primary_det["id"]
-                        else:
-                            full_image_det = [{
-                                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                                "confidence": 0, "category": "animal",
-                            }]
-                            full_det_ids = thread_db.save_detections(
-                                photo["id"], full_image_det,
-                                detector_model="full-image",
-                            )
-                            detection_id = full_det_ids[0]
+                        # Pipeline classify is detection-driven: skip photos
+                        # where MegaDetector found no animals.  Synthesizing
+                        # a full-image detection row to anchor the prediction
+                        # is wrong because extract_masks_stage calls
+                        # get_detections() without a detector_model filter and
+                        # would treat the synthetic row as a real subject
+                        # candidate, bypassing the photos_with_detections == 0
+                        # safeguard and running SAM2 on full-frame boxes.
+                        if primary_det is None:
+                            continue
 
                         img_batch = [{
                             "photo": photo,
-                            "detection_id": detection_id,
+                            "detection_id": primary_det["id"],
                             "folder_path": folder_path,
                             "image_path": image_path,
                             "img": img,
