@@ -108,33 +108,39 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
 
         tmp_path = model_path + ".download"
         tmp_data_path = data_path + ".download"
+        data_backup_path = data_path + ".prev"
+        had_prior_sidecar = os.path.isfile(data_path)
         try:
+            import contextlib
             import shutil
 
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import HfApi, hf_hub_download
             from models import ONNX_REPO
+
+            # Resolve a pinned revision upfront so BOTH fetches target the
+            # same commit.  Without this, a push to jss367/vireo-onnx-models
+            # between the graph and sidecar fetches could produce a
+            # mismatched pair that ONNX Runtime refuses to load.  Network
+            # failure here is non-fatal — fall back to the repo's default
+            # branch and accept the (tiny) race window; this is no worse
+            # than the pre-fix behaviour.
+            try:
+                pinned_rev = HfApi().model_info(ONNX_REPO).sha
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "Could not resolve HF revision for %s (%s); "
+                    "falling back to default branch",
+                    ONNX_REPO, e,
+                )
+                pinned_rev = None
 
             cached_graph = hf_hub_download(
                 repo_id=ONNX_REPO,
                 filename="model.onnx",
                 subfolder=f"dinov2-{variant}",
+                revision=pinned_rev,
             )
             shutil.copy2(cached_graph, tmp_path)
-
-            # Pin the sidecar fetch to the same commit that resolved
-            # the graph.  Without this, a repo update between the two
-            # hf_hub_download calls can produce a mismatched pair that
-            # ONNX Runtime refuses to load.  The HF cache path encodes
-            # the resolved SHA as: …/snapshots/{sha}/…
-            # Walk from the end so an ancestor directory named "snapshots"
-            # (e.g. HF_HOME=/mnt/snapshots/cache) can't hijack the match.
-            import pathlib as _pl
-            _parts = list(_pl.Path(cached_graph).parts)
-            try:
-                _idx = len(_parts) - 1 - _parts[::-1].index("snapshots")
-                _pinned_rev = _parts[_idx + 1]
-            except (ValueError, IndexError):
-                _pinned_rev = None  # graceful fallback for mock paths in tests
 
             if progress_callback:
                 progress_callback(
@@ -145,15 +151,33 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
                 repo_id=ONNX_REPO,
                 filename="model.onnx.data",
                 subfolder=f"dinov2-{variant}",
-                revision=_pinned_rev,
+                revision=pinned_rev,
             )
             shutil.copy2(cached_data, tmp_data_path)
 
-            # Replace sidecar first, graph second, so ONNX Runtime never
-            # sees a graph file that references a not-yet-written sidecar.
-            # Both replaces are atomic per file.
-            os.replace(tmp_data_path, data_path)
-            os.replace(tmp_path, model_path)
+            # Promote the pair atomically *as a pair*.  Sidecar goes first
+            # so ONNX Runtime never sees a graph that references a
+            # not-yet-written sidecar.  If the graph replace then fails
+            # (e.g. Windows file lock on the existing `model.onnx`),
+            # roll the sidecar back so we don't leave a new-sidecar /
+            # old-graph mismatch on disk that the noop check would
+            # short-circuit on the next run.
+            if had_prior_sidecar:
+                os.replace(data_path, data_backup_path)
+            try:
+                os.replace(tmp_data_path, data_path)
+                os.replace(tmp_path, model_path)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(data_path)
+                if had_prior_sidecar:
+                    with contextlib.suppress(OSError):
+                        os.replace(data_backup_path, data_path)
+                raise
+            else:
+                if had_prior_sidecar:
+                    with contextlib.suppress(OSError):
+                        os.unlink(data_backup_path)
         except Exception as e:
             import contextlib
 
@@ -161,6 +185,8 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
                 os.unlink(tmp_path)
             with contextlib.suppress(OSError):
                 os.unlink(tmp_data_path)
+            with contextlib.suppress(OSError):
+                os.unlink(data_backup_path)
             raise RuntimeError(
                 f"Failed to download DINOv2 weights ({variant}): {e}. "
                 "Check your network connection and retry, or download "
