@@ -622,3 +622,51 @@ def test_ensure_dinov2_weights_rejects_unknown_variant():
 
     with pytest.raises(ValueError, match="Unknown DINOv2 variant"):
         dino_embed.ensure_dinov2_weights("vit-xxl")
+
+
+def test_ensure_dinov2_weights_pins_revision_when_cache_root_contains_snapshots(
+    tmp_path, monkeypatch,
+):
+    """The HF cache may itself live under a directory named 'snapshots'
+    (e.g. HF_HOME=/mnt/snapshots/cache). The revision extraction must pin
+    the sidecar fetch to the commit SHA from the HF cache layout's
+    trailing '.../snapshots/<sha>/...' segment, not to an ancestor
+    directory that happens to share the name."""
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    real_sha = "a" * 40
+    # Simulate HF_HOME=/.../snapshots/hub/... — the first 'snapshots' in
+    # the path is NOT the one that precedes the SHA.
+    cache_root = tmp_path / "snapshots" / "hub" / "models--jss367--vireo-onnx-models"
+    graph_cached = cache_root / "snapshots" / real_sha / "dinov2-vit-b14" / "model.onnx"
+    data_cached = cache_root / "snapshots" / real_sha / "dinov2-vit-b14" / "model.onnx.data"
+    graph_cached.parent.mkdir(parents=True)
+    graph_cached.write_bytes(b"m" * 1024)
+    data_cached.write_bytes(b"d" * 8192)
+
+    seen_revisions = []
+
+    def fake_hf_hub_download(**kwargs):
+        seen_revisions.append(kwargs.get("revision"))
+        if kwargs["filename"] == "model.onnx":
+            return str(graph_cached)
+        return str(data_cached)
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # First call (graph) has no pinned revision; second (sidecar) must
+    # pin to the SHA from the LAST 'snapshots' segment, not "hub".
+    assert seen_revisions == [None, real_sha]
+    assert model_path.read_bytes() == b"m" * 1024
+    assert data_path.read_bytes() == b"d" * 8192

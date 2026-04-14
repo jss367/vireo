@@ -121,6 +121,21 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
             )
             shutil.copy2(cached_graph, tmp_path)
 
+            # Pin the sidecar fetch to the same commit that resolved
+            # the graph.  Without this, a repo update between the two
+            # hf_hub_download calls can produce a mismatched pair that
+            # ONNX Runtime refuses to load.  The HF cache path encodes
+            # the resolved SHA as: …/snapshots/{sha}/…
+            # Walk from the end so an ancestor directory named "snapshots"
+            # (e.g. HF_HOME=/mnt/snapshots/cache) can't hijack the match.
+            import pathlib as _pl
+            _parts = list(_pl.Path(cached_graph).parts)
+            try:
+                _idx = len(_parts) - 1 - _parts[::-1].index("snapshots")
+                _pinned_rev = _parts[_idx + 1]
+            except (ValueError, IndexError):
+                _pinned_rev = None  # graceful fallback for mock paths in tests
+
             if progress_callback:
                 progress_callback(
                     f"Downloading DINOv2 {variant} weights sidecar...", 1, 2,
@@ -130,6 +145,7 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
                 repo_id=ONNX_REPO,
                 filename="model.onnx.data",
                 subfolder=f"dinov2-{variant}",
+                revision=_pinned_rev,
             )
             shutil.copy2(cached_data, tmp_data_path)
 
