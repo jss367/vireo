@@ -57,6 +57,14 @@ class TestReportIssue:
         assert resp.status_code == 400
 
     def test_report_without_url_returns_download(self, client):
+        """With report_url explicitly cleared, the endpoint returns the
+        download bundle directly."""
+        import config as cfg
+
+        current = cfg.load()
+        current["report_url"] = ""
+        cfg.save(current)
+
         resp = client.post("/api/report-issue", json={"description": "Something broke"})
         data = resp.get_json()
         assert data["status"] == "download"
@@ -70,8 +78,24 @@ class TestReportIssue:
         assert "config" in diag
         assert "timestamp" in diag
 
+    def test_default_config_ships_report_url(self):
+        """The shipped default includes a working report URL so issue
+        reporting works out of the box without user configuration."""
+        import config as cfg
+
+        assert cfg.DEFAULTS["report_url"].startswith("https://script.google.com/")
+
     def test_diagnostics_system_fields(self, client):
-        """System info should include platform, python, architecture."""
+        """System info should include platform, python, architecture.
+
+        Uses an unreachable URL to force the download fallback so we get
+        diagnostics back regardless of network conditions in the test env."""
+        import config as cfg
+
+        current = cfg.load()
+        current["report_url"] = "http://localhost:1/nonexistent"
+        cfg.save(current)
+
         resp = client.post("/api/report-issue", json={"description": "check system"})
         system = resp.get_json()["diagnostics"]["system"]
         assert "platform" in system
@@ -85,6 +109,9 @@ class TestReportIssue:
         current = cfg.load()
         current["hf_token"] = "hf_abc123secret"
         current["inat_token"] = "my-inat-token"
+        # Force download path so we can inspect the diagnostics payload
+        # without depending on network reachability.
+        current["report_url"] = "http://localhost:1/nonexistent"
         cfg.save(current)
 
         resp = client.post("/api/report-issue", json={"description": "test redaction"})
@@ -114,7 +141,14 @@ class TestReportIssue:
         are reporting DB problems."""
         app, _ = app_and_db
 
+        import config as cfg
         from db import Database
+
+        # Force an unreachable URL so this test doesn't depend on the
+        # network reachability of the default Apps Script endpoint.
+        current = cfg.load()
+        current["report_url"] = "http://localhost:1/nonexistent"
+        cfg.save(current)
 
         def boom(self, *a, **kw):
             raise RuntimeError("schema broken")
