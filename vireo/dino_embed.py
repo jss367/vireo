@@ -126,10 +126,13 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
             # hf_hub_download calls can produce a mismatched pair that
             # ONNX Runtime refuses to load.  The HF cache path encodes
             # the resolved SHA as: …/snapshots/{sha}/…
+            # Walk from the end so an ancestor directory named "snapshots"
+            # (e.g. HF_HOME=/mnt/snapshots/cache) can't hijack the match.
             import pathlib as _pl
-            _parts = _pl.Path(cached_graph).parts
+            _parts = list(_pl.Path(cached_graph).parts)
             try:
-                _pinned_rev = _parts[list(_parts).index("snapshots") + 1]
+                _idx = len(_parts) - 1 - _parts[::-1].index("snapshots")
+                _pinned_rev = _parts[_idx + 1]
             except (ValueError, IndexError):
                 _pinned_rev = None  # graceful fallback for mock paths in tests
 
