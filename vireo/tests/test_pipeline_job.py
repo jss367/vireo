@@ -1,5 +1,6 @@
 """Tests for the streaming pipeline job orchestrator."""
 
+import contextlib
 import json
 import os
 import sys
@@ -8,6 +9,18 @@ import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from pipeline_job import PipelineParams, run_pipeline_job
+
+
+def _drop_jpeg(folder_path, filename):
+    """Write a tiny valid JPEG at folder_path/filename so previews/thumbnails
+    can load it. Tests that use db.add_photo need a matching file on disk now
+    that missing files count as stage failures."""
+    import os as _os
+
+    from PIL import Image
+    path = _os.path.join(folder_path, filename)
+    Image.new("RGB", (16, 16), "black").save(path)
+    return path
 
 
 def _make_job():
@@ -689,10 +702,11 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     db = Database(db_path)
     ws_id = db._active_workspace_id
 
+    from PIL import Image
     src = tmp_path / "photos"
     src.mkdir()
     for i in range(12):
-        (src / f"img{i:02d}.jpg").write_bytes(b'\xff\xd8\xff\xe0' + b'\x00' * 100)
+        Image.new("RGB", (40, 40), "blue").save(str(src / f"img{i:02d}.jpg"))
 
     runner = JobRunner()
     progress_events = []
@@ -1750,6 +1764,7 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
     db.save_detections(
         photo_id,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
@@ -1921,6 +1936,7 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "bird.jpg")
     col_id = db.add_collection(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -1972,7 +1988,12 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
 
     runner = FakeRunner()
     job = _make_job()
-    run_pipeline_job(job, runner, db_path, ws_id, params)
+    # The fake _prepare_image returns None by design to short-circuit before
+    # the classifier runs — we only care about what argument it received.
+    # That now counts as a classify failure, which propagates to a pipeline
+    # RuntimeError; swallow it so we can still inspect `captured`.
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
 
     assert captured, (
         "_prepare_image was never called — test setup no longer exercises "
@@ -2028,6 +2049,7 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "test.jpg")
 
     # Prior-run detection row (e.g. a prior false positive).
     prior_det_ids = db.save_detections(
@@ -2129,6 +2151,8 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     folder_id = db.add_folder(folder_path)
     photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
     photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+    _drop_jpeg(folder_path, "photo1.jpg")
+    _drop_jpeg(folder_path, "photo2.jpg")
 
     # Give each photo a prior-run detection row.
     prior_det1 = db.save_detections(
@@ -2261,6 +2285,8 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
     folder_id = db.add_folder(folder_path)
     photo1_id = db.add_photo(folder_id, "photo1.jpg", ".jpg", 11111, 1_000_000.0)
     photo2_id = db.add_photo(folder_id, "photo2.jpg", ".jpg", 22222, 1_000_000.0)
+    _drop_jpeg(folder_path, "photo1.jpg")
+    _drop_jpeg(folder_path, "photo2.jpg")
 
     prior_det1 = db.save_detections(
         photo1_id,
@@ -2742,6 +2768,8 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
     photo_without_det = db.add_photo(
         folder_id, "empty.jpg", ".jpg", 12346, 1_000_100.0
     )
+    _drop_jpeg(folder_path, "hawk.jpg")
+    _drop_jpeg(folder_path, "empty.jpg")
     col_id = db.add_collection(
         "Test",
         json.dumps([
@@ -2909,6 +2937,7 @@ def test_extract_masks_stage_ignores_synthetic_full_image_detections(
     os.makedirs(folder_path, exist_ok=True)
     folder_id = db.add_folder(folder_path)
     photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "empty.jpg")
     col_id = db.add_collection(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
@@ -3024,6 +3053,8 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
                       timestamp="2026-01-01T12:00:00")
     p2 = db.add_photo(folder_id, "b.jpg", ".jpg", 2, 1_000_001.0,
                       timestamp="2026-01-01T12:00:01")
+    _drop_jpeg(folder_path, "a.jpg")
+    _drop_jpeg(folder_path, "b.jpg")
     col_id = db.add_collection(
         "Test",
         json.dumps([{"field": "photo_ids", "value": [p1, p2]}]),
@@ -3115,4 +3146,174 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
     assert job2["status"] != "failed", (
         f"Second pipeline run status is {job2['status']} (expected not "
         "'failed')"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Failure rollup — per-file failures surface at the stage/job level
+# ---------------------------------------------------------------------------
+
+
+def _make_photo_dir(tmp_path, n):
+    """Drop n tiny JPEGs in a fresh dir and return it."""
+    from PIL import Image
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for i in range(n):
+        img = Image.new("RGB", (40, 40), "red")
+        img.save(str(photo_dir / f"p_{i}.jpg"))
+    return photo_dir
+
+
+def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
+    """If any thumbnail fails, the stage status must be 'failed' (not 'completed'),
+    even when some thumbnails succeeded. Mixed-outcome rollups are 'failed'."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    photo_dir = _make_photo_dir(tmp_path, 4)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Make every second thumbnail "fail" by returning None.
+    import thumbnails as thumbnails_mod
+    real_gen = thumbnails_mod.generate_thumbnail
+    call_count = {"n": 0}
+
+    def flaky_gen(photo_id, photo_path, cache_dir, size=300):
+        call_count["n"] += 1
+        if call_count["n"] % 2 == 0:
+            return None
+        return real_gen(photo_id, photo_path, cache_dir, size=size)
+
+    monkeypatch.setattr(thumbnails_mod, "generate_thumbnail", flaky_gen)
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+    runner = FakeRunner()
+
+    pipeline_result = None
+    try:
+        pipeline_result = run_pipeline_job(job, runner, db_path, ws_id, params)
+    except RuntimeError:
+        # Expected: pipeline raises when a stage ends up in 'failed'.
+        pipeline_result = job.get("result")
+
+    thumb_result = pipeline_result["stages"]["thumbnails"]
+    assert thumb_result["failed"] > 0, (
+        f"Test setup bug: expected thumbnail failures. Result: {thumb_result}"
+    )
+    assert thumb_result["generated"] > 0, (
+        f"Test setup bug: expected some thumbnail successes. Result: {thumb_result}"
+    )
+
+    # Inspect the final stages status as updated on the job runner.
+    final_thumb_updates = [
+        kwargs for (_, step, kwargs) in runner.step_updates
+        if step == "thumbnails" and kwargs.get("status")
+    ]
+    final_status = final_thumb_updates[-1]["status"]
+    assert final_status == "failed", (
+        f"Mixed-outcome rollup must report 'failed', got {final_status!r}. "
+        f"Result: {thumb_result}"
+    )
+
+
+def test_thumbnail_failures_append_rollup_error(tmp_path, monkeypatch):
+    """Per-file thumbnail failures must surface as exactly one rollup entry
+    in the pipeline errors list — not N per-file entries."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    photo_dir = _make_photo_dir(tmp_path, 3)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # All thumbnails fail.
+    import thumbnails as thumbnails_mod
+    monkeypatch.setattr(
+        thumbnails_mod, "generate_thumbnail",
+        lambda photo_id, photo_path, cache_dir, size=300: None,
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+
+    errors = job["errors"]
+    thumb_errors = [e for e in errors if "thumbnail" in e.lower()]
+    assert len(thumb_errors) == 1, (
+        f"Expected exactly one rollup entry for thumbnail failures, got "
+        f"{len(thumb_errors)}: {thumb_errors}"
+    )
+    assert "3" in thumb_errors[0], (
+        f"Rollup should mention the failure count (3), got: {thumb_errors[0]!r}"
+    )
+
+
+def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
+    """stages['thumbnails']['count'] must include failed items so the UI
+    progress bar reflects work actually attempted, not just successes."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    photo_dir = _make_photo_dir(tmp_path, 2)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    import thumbnails as thumbnails_mod
+    monkeypatch.setattr(
+        thumbnails_mod, "generate_thumbnail",
+        lambda photo_id, photo_path, cache_dir, size=300: None,
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    job = _make_job()
+    runner = FakeRunner()
+
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # stages dict's own counter (shown on the dashboard) must include failed.
+    # Apr 5 bug: scan reported "1472 photos" but stages['thumbnails']['count']
+    # sat at 0 (generated + skipped = 0 + 0) despite all 1472 files processed.
+    thumb_progress_events = [
+        data for (_, evt, data) in runner.events
+        if evt == "progress" and data.get("stage_id") == "thumbnails"
+    ]
+    assert thumb_progress_events, "No thumbnails progress events emitted"
+    last = thumb_progress_events[-1]
+    thumb_stage_count = last["stages"]["thumbnails"].get("count", 0)
+    assert thumb_stage_count > 0, (
+        f"stages['thumbnails']['count'] must include failed items (was {thumb_stage_count}). "
+        f"Last event stages: {last['stages']}"
     )
