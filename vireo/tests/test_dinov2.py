@@ -378,18 +378,44 @@ def test_input_size_constant():
 # -- ensure_dinov2_weights (auto-download on first pipeline run) --
 
 
-def test_ensure_dinov2_weights_noop_when_present(tmp_path, monkeypatch):
-    """ensure_dinov2_weights() returns path without downloading when file
-    is already on disk."""
+def _install_fake_hf(monkeypatch, hf_hub_download, repo_sha="a" * 40):
+    """Install a stub ``huggingface_hub`` module with ``hf_hub_download``
+    and an ``HfApi`` whose ``model_info`` returns a fixed SHA (so the
+    upfront revision-pin call in ``ensure_dinov2_weights`` resolves
+    deterministically).  Returns the SHA that tests can assert against.
+    """
     import sys
     import types
 
+    class _FakeModelInfo:
+        def __init__(self, sha):
+            self.sha = sha
+
+    class _FakeHfApi:
+        def model_info(self, repo_id):
+            return _FakeModelInfo(repo_sha)
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = hf_hub_download
+    fake_hf.HfApi = _FakeHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    return repo_sha
+
+
+def test_ensure_dinov2_weights_noop_only_when_stub_and_sidecar_present(
+    tmp_path, monkeypatch,
+):
+    """ensure_dinov2_weights() short-circuits only when BOTH ``model.onnx``
+    and ``model.onnx.data`` are on disk.  A stub-only install must NOT
+    count as complete."""
     import dino_embed
 
     model_dir = tmp_path / "dinov2-vit-b14"
     model_dir.mkdir()
     model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
     model_path.write_bytes(b"x" * 1024)
+    data_path.write_bytes(b"X" * 4096)
 
     monkeypatch.setattr(
         dino_embed, "_dinov2_model_path",
@@ -397,11 +423,9 @@ def test_ensure_dinov2_weights_noop_when_present(tmp_path, monkeypatch):
     )
 
     def fake_hf_hub_download(**kwargs):
-        raise AssertionError("must not download when file already exists")
+        raise AssertionError("must not download when both files exist")
 
-    fake_hf = types.ModuleType("huggingface_hub")
-    fake_hf.hf_hub_download = fake_hf_hub_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
 
     progress = []
     result = dino_embed.ensure_dinov2_weights(
@@ -412,54 +436,138 @@ def test_ensure_dinov2_weights_noop_when_present(tmp_path, monkeypatch):
     assert progress == []
 
 
-def test_ensure_dinov2_weights_downloads_when_missing(tmp_path, monkeypatch):
-    """ensure_dinov2_weights() fetches model.onnx and surfaces progress."""
-    import sys
-    import types
+def test_ensure_dinov2_weights_refetches_when_only_stub_present(
+    tmp_path, monkeypatch,
+):
+    """Regression: a previous install that left only the ~1 MB ``model.onnx``
+    graph stub (without the ``model.onnx.data`` sidecar) must trigger a
+    refetch of both files, not persist silently.
 
+    This is the bug users hit after a pre-#550 UI download: the stub
+    passed the noop check, the sidecar never arrived, and every pipeline
+    run died with ``model_path must not be empty`` from ONNX Runtime.
+    """
     import dino_embed
 
     model_dir = tmp_path / "dinov2-vit-b14"
+    model_dir.mkdir()
     model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+    # Stub-only partial install from a prior broken download.
+    model_path.write_bytes(b"stub" * 256)
 
     monkeypatch.setattr(
         dino_embed, "_dinov2_model_path",
         lambda variant: (str(model_dir), str(model_path)),
     )
 
-    cache_path = tmp_path / "hf-cache" / "model.onnx"
-    cache_path.parent.mkdir()
-    cache_path.write_bytes(b"m" * 4096)
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"M" * 1024)
+    (cache_dir / "model.onnx.data").write_bytes(b"D" * 8192)
+
+    requested = []
+
+    def fake_hf_hub_download(**kwargs):
+        requested.append(kwargs["filename"])
+        return str(cache_dir / kwargs["filename"])
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    dino_embed.ensure_dinov2_weights("vit-b14")
+
+    assert requested == ["model.onnx", "model.onnx.data"]
+    assert model_path.read_bytes() == b"M" * 1024
+    assert data_path.read_bytes() == b"D" * 8192
+
+
+def test_ensure_dinov2_weights_refetches_when_only_sidecar_present(
+    tmp_path, monkeypatch,
+):
+    """The mirror case: sidecar on disk from a half-finished install but
+    no graph stub.  Both files must be fetched."""
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_dir.mkdir()
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+    data_path.write_bytes(b"sidecar only" * 100)
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"M" * 1024)
+    (cache_dir / "model.onnx.data").write_bytes(b"D" * 8192)
+
+    requested = []
+
+    def fake_hf_hub_download(**kwargs):
+        requested.append(kwargs["filename"])
+        return str(cache_dir / kwargs["filename"])
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    dino_embed.ensure_dinov2_weights("vit-b14")
+
+    assert requested == ["model.onnx", "model.onnx.data"]
+    assert model_path.read_bytes() == b"M" * 1024
+    assert data_path.read_bytes() == b"D" * 8192
+
+
+def test_ensure_dinov2_weights_downloads_both_when_missing(tmp_path, monkeypatch):
+    """Fresh install fetches graph + external-data sidecar in order and
+    surfaces progress for each step."""
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"m" * 1024)
+    (cache_dir / "model.onnx.data").write_bytes(b"d" * 8192)
 
     seen_requests = []
 
     def fake_hf_hub_download(**kwargs):
         seen_requests.append((kwargs["filename"], kwargs["subfolder"]))
-        return str(cache_path)
+        return str(cache_dir / kwargs["filename"])
 
-    fake_hf = types.ModuleType("huggingface_hub")
-    fake_hf.hf_hub_download = fake_hf_hub_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
 
     progress = []
-    result = dino_embed.ensure_dinov2_weights(
+    dino_embed.ensure_dinov2_weights(
         "vit-b14",
         progress_callback=lambda p, c, t: progress.append((p, c, t)),
     )
 
-    assert result == str(model_path)
-    assert model_path.read_bytes() == b"m" * 4096
-    assert seen_requests == [("model.onnx", "dinov2-vit-b14")]
-    assert progress[0] == (progress[0][0], 0, 1)
-    assert progress[-1][1] == 1 and progress[-1][2] == 1
+    assert seen_requests == [
+        ("model.onnx", "dinov2-vit-b14"),
+        ("model.onnx.data", "dinov2-vit-b14"),
+    ]
+    assert model_path.read_bytes() == b"m" * 1024
+    assert data_path.read_bytes() == b"d" * 8192
+    # (initial announce, mid-download update, final ready) — total=2.
+    assert progress[0][1] == 0 and progress[0][2] == 2
+    assert progress[-1][1] == 2 and progress[-1][2] == 2
 
 
-def test_ensure_dinov2_weights_raises_on_download_failure(tmp_path, monkeypatch):
-    """A failed download must raise RuntimeError and leave no partial file
-    at the final path."""
-    import sys
-    import types
-
+def test_ensure_dinov2_weights_raises_on_graph_download_failure(
+    tmp_path, monkeypatch,
+):
+    """A failed graph download must raise RuntimeError and leave no
+    partial files at the final paths."""
     import dino_embed
     import pytest
 
@@ -473,14 +581,52 @@ def test_ensure_dinov2_weights_raises_on_download_failure(tmp_path, monkeypatch)
     def fake_hf_hub_download(**kwargs):
         raise ConnectionError("network unreachable")
 
-    fake_hf = types.ModuleType("huggingface_hub")
-    fake_hf.hf_hub_download = fake_hf_hub_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
 
     with pytest.raises(RuntimeError, match="Failed to download DINOv2"):
         dino_embed.ensure_dinov2_weights("vit-b14")
 
     assert not model_path.exists()
+    assert not (model_dir / "model.onnx.data").exists()
+
+
+def test_ensure_dinov2_weights_raises_on_sidecar_download_failure(
+    tmp_path, monkeypatch,
+):
+    """If the graph fetch succeeds but the sidecar fetch fails, NEITHER
+    file should be left at its final path.  Otherwise a future run would
+    see `model.onnx` on disk with no sidecar and reproduce the broken
+    state we're trying to prevent."""
+    import dino_embed
+    import pytest
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"graph" * 200)
+
+    def fake_hf_hub_download(**kwargs):
+        if kwargs["filename"] == "model.onnx.data":
+            raise ConnectionError("sidecar network failed")
+        return str(cache_dir / kwargs["filename"])
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    with pytest.raises(RuntimeError, match="Failed to download DINOv2"):
+        dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # Neither final file should exist — the graph tmp is cleaned up and
+    # never promoted, so a retry will re-download both.
+    assert not model_path.exists()
+    assert not data_path.exists()
 
 
 def test_ensure_dinov2_weights_rejects_unknown_variant():
@@ -490,3 +636,161 @@ def test_ensure_dinov2_weights_rejects_unknown_variant():
 
     with pytest.raises(ValueError, match="Unknown DINOv2 variant"):
         dino_embed.ensure_dinov2_weights("vit-xxl")
+
+
+def test_ensure_dinov2_weights_pins_both_fetches_to_same_revision(
+    tmp_path, monkeypatch,
+):
+    """Both ``hf_hub_download`` calls must share the same ``revision`` so
+    a push to the ONNX repo between the graph and sidecar fetches can't
+    produce a mismatched pair that ONNX Runtime refuses to load.
+
+    The revision is resolved upfront via ``HfApi.model_info`` before
+    either fetch runs.
+    """
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"m" * 1024)
+    (cache_dir / "model.onnx.data").write_bytes(b"d" * 8192)
+
+    seen_revisions = []
+
+    def fake_hf_hub_download(**kwargs):
+        seen_revisions.append(kwargs.get("revision"))
+        return str(cache_dir / kwargs["filename"])
+
+    pinned = _install_fake_hf(monkeypatch, fake_hf_hub_download, repo_sha="b" * 40)
+
+    dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # Both fetches must use the same non-None revision — the SHA
+    # resolved from HfApi.model_info before either download started.
+    assert len(seen_revisions) == 2
+    assert seen_revisions[0] == pinned
+    assert seen_revisions[1] == pinned
+
+
+def test_ensure_dinov2_weights_falls_back_when_model_info_fails(
+    tmp_path, monkeypatch,
+):
+    """If ``HfApi.model_info`` raises (e.g. transient network blip), we
+    must still attempt both fetches with ``revision=None`` rather than
+    fail the whole install.  This is best-effort graceful degradation."""
+    import sys
+    import types
+
+    import dino_embed
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_path = model_dir / "model.onnx"
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"m" * 1024)
+    (cache_dir / "model.onnx.data").write_bytes(b"d" * 8192)
+
+    seen_revisions = []
+
+    def fake_hf_hub_download(**kwargs):
+        seen_revisions.append(kwargs.get("revision"))
+        return str(cache_dir / kwargs["filename"])
+
+    class _BrokenHfApi:
+        def model_info(self, repo_id):
+            raise ConnectionError("HfApi network blip")
+
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = fake_hf_hub_download
+    fake_hf.HfApi = _BrokenHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # Both fetches fall back to revision=None (HF default branch).
+    assert seen_revisions == [None, None]
+    assert model_path.read_bytes() == b"m" * 1024
+
+
+def test_ensure_dinov2_weights_rolls_back_sidecar_if_graph_replace_fails(
+    tmp_path, monkeypatch,
+):
+    """If the graph ``os.replace`` fails after the sidecar has already
+    been promoted (e.g. Windows file lock on the existing ``model.onnx``),
+    the new sidecar must be rolled back to the prior install's sidecar.
+    Otherwise the on-disk pair is mismatched and the noop check on the
+    next run would short-circuit, sticking the user on a broken install
+    forever.
+    """
+    import dino_embed
+    import pytest
+
+    model_dir = tmp_path / "dinov2-vit-b14"
+    model_dir.mkdir()
+    model_path = model_dir / "model.onnx"
+    data_path = model_dir / "model.onnx.data"
+    # Prior partial install: sidecar present, graph missing.  That
+    # combination triggers a refetch (both-files check fails), exercising
+    # the rollback path: new sidecar replaces old sidecar, new graph
+    # replace fails, old sidecar must be restored.
+    data_path.write_bytes(b"OLD_SIDECAR" * 400)
+    prior_sidecar = data_path.read_bytes()
+
+    monkeypatch.setattr(
+        dino_embed, "_dinov2_model_path",
+        lambda variant: (str(model_dir), str(model_path)),
+    )
+
+    cache_dir = tmp_path / "hf-cache"
+    cache_dir.mkdir()
+    (cache_dir / "model.onnx").write_bytes(b"NEW_GRAPH" * 100)
+    (cache_dir / "model.onnx.data").write_bytes(b"NEW_SIDECAR" * 500)
+
+    def fake_hf_hub_download(**kwargs):
+        return str(cache_dir / kwargs["filename"])
+
+    _install_fake_hf(monkeypatch, fake_hf_hub_download)
+
+    # Make the graph replace (second os.replace call) blow up while the
+    # sidecar replace (first call) succeeds.
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        # Call sequence inside the try block:
+        #   1. backup old sidecar   → allow
+        #   2. promote new sidecar  → allow
+        #   3. promote new graph    → BOOM (simulate Windows lock)
+        if calls["n"] == 3:
+            raise PermissionError("simulated file-lock on model.onnx")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+
+    with pytest.raises(RuntimeError, match="Failed to download DINOv2"):
+        dino_embed.ensure_dinov2_weights("vit-b14")
+
+    # Sidecar must be back to its prior contents — no mismatched
+    # "new sidecar + missing graph" pair left on disk.
+    assert data_path.read_bytes() == prior_sidecar
+    # Graph replace never promoted, so model.onnx stays absent — the
+    # next run will see an incomplete install and refetch cleanly.
+    assert not model_path.exists()
+    # No leftover .prev backup or .download tmps.
+    assert not (model_dir / "model.onnx.data.prev").exists()
+    assert not (model_dir / "model.onnx.download").exists()
+    assert not (model_dir / "model.onnx.data.download").exists()

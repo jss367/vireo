@@ -53,10 +53,18 @@ def _dinov2_model_path(variant):
 def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
 
-    Returns the weights path when already downloaded.  Otherwise fetches
-    ``dinov2-{variant}/model.onnx`` from Hugging Face and copies it into
-    ``~/.vireo/models/dinov2-{variant}/``.  Raises RuntimeError on failure
-    so callers can abort rather than silently run without embeddings.
+    DINOv2 ONNX exports use external-data layout: ``model.onnx`` is a
+    ~1 MB graph stub that references the real weights in a sibling
+    ``model.onnx.data`` sidecar (~85 MB / ~346 MB / ~1.2 GB depending on
+    variant).  BOTH files must be on disk — without the sidecar, ONNX
+    Runtime fails with the opaque
+    ``model_path must not be empty`` error on every inference call.
+
+    Returns the graph path when both files are already downloaded.
+    Otherwise fetches whichever is missing from Hugging Face into
+    ``~/.vireo/models/dinov2-{variant}/``.  Raises RuntimeError on
+    failure so callers can abort rather than silently run without
+    embeddings.
 
     Args:
         variant: one of vit-s14, vit-b14, vit-l14
@@ -71,11 +79,18 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
         )
 
     model_dir, model_path = _dinov2_model_path(variant)
-    if os.path.isfile(model_path):
+    data_path = model_path + ".data"
+
+    # Require BOTH files to short-circuit.  A lingering stub-only
+    # ``model.onnx`` from a pre-#550 UI download (or a past partial
+    # download) must NOT skip the sidecar fetch — otherwise ONNX Runtime
+    # keeps crashing with ``model_path must not be empty`` on every
+    # pipeline run and the broken state never self-heals.
+    if os.path.isfile(model_path) and os.path.isfile(data_path):
         return model_path
 
     with _dinov2_download_lock:
-        if os.path.isfile(model_path):
+        if os.path.isfile(model_path) and os.path.isfile(data_path):
             return model_path
 
         os.makedirs(model_dir, exist_ok=True)
@@ -84,7 +99,7 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
         if progress_callback:
             progress_callback(
                 f"Downloading DINOv2 {variant} ({size_hint}, first run only)...",
-                0, 1,
+                0, 2,
             )
         log.info(
             "DINOv2 weights missing for %s — downloading from Hugging Face",
@@ -92,44 +107,106 @@ def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
         )
 
         tmp_path = model_path + ".download"
+        tmp_data_path = data_path + ".download"
+        data_backup_path = data_path + ".prev"
+        had_prior_sidecar = os.path.isfile(data_path)
         try:
+            import contextlib
             import shutil
 
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import HfApi, hf_hub_download
             from models import ONNX_REPO
 
-            cached_path = hf_hub_download(
+            # Resolve a pinned revision upfront so BOTH fetches target the
+            # same commit.  Without this, a push to jss367/vireo-onnx-models
+            # between the graph and sidecar fetches could produce a
+            # mismatched pair that ONNX Runtime refuses to load.  Network
+            # failure here is non-fatal — fall back to the repo's default
+            # branch and accept the (tiny) race window; this is no worse
+            # than the pre-fix behaviour.
+            try:
+                pinned_rev = HfApi().model_info(ONNX_REPO).sha
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "Could not resolve HF revision for %s (%s); "
+                    "falling back to default branch",
+                    ONNX_REPO, e,
+                )
+                pinned_rev = None
+
+            cached_graph = hf_hub_download(
                 repo_id=ONNX_REPO,
                 filename="model.onnx",
                 subfolder=f"dinov2-{variant}",
+                revision=pinned_rev,
             )
-            # Copy to a sibling temp path then atomically replace so other
-            # threads only ever observe either the missing state or a
-            # fully written weights file — never a partial copy.
-            shutil.copy2(cached_path, tmp_path)
-            os.replace(tmp_path, model_path)
+            shutil.copy2(cached_graph, tmp_path)
+
+            if progress_callback:
+                progress_callback(
+                    f"Downloading DINOv2 {variant} weights sidecar...", 1, 2,
+                )
+
+            cached_data = hf_hub_download(
+                repo_id=ONNX_REPO,
+                filename="model.onnx.data",
+                subfolder=f"dinov2-{variant}",
+                revision=pinned_rev,
+            )
+            shutil.copy2(cached_data, tmp_data_path)
+
+            # Promote the pair atomically *as a pair*.  Sidecar goes first
+            # so ONNX Runtime never sees a graph that references a
+            # not-yet-written sidecar.  If the graph replace then fails
+            # (e.g. Windows file lock on the existing `model.onnx`),
+            # roll the sidecar back so we don't leave a new-sidecar /
+            # old-graph mismatch on disk that the noop check would
+            # short-circuit on the next run.
+            if had_prior_sidecar:
+                os.replace(data_path, data_backup_path)
+            try:
+                os.replace(tmp_data_path, data_path)
+                os.replace(tmp_path, model_path)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(data_path)
+                if had_prior_sidecar:
+                    with contextlib.suppress(OSError):
+                        os.replace(data_backup_path, data_path)
+                raise
+            else:
+                if had_prior_sidecar:
+                    with contextlib.suppress(OSError):
+                        os.unlink(data_backup_path)
         except Exception as e:
             import contextlib
 
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_data_path)
+            with contextlib.suppress(OSError):
+                os.unlink(data_backup_path)
             raise RuntimeError(
                 f"Failed to download DINOv2 weights ({variant}): {e}. "
                 "Check your network connection and retry, or download "
                 "manually from the pipeline models page."
             ) from e
 
-        if not os.path.isfile(model_path):
+        if not (os.path.isfile(model_path) and os.path.isfile(data_path)):
             raise RuntimeError(
-                "DINOv2 download completed but weights file is missing at "
-                f"{model_path}."
+                "DINOv2 download completed but weights are missing at "
+                f"{model_dir}."
             )
 
-        size_mb = round(os.path.getsize(model_path) / 1024 / 1024, 1)
+        # Size totals both files — reporting just the 1 MB graph makes a
+        # successful install look broken.
+        total_bytes = os.path.getsize(model_path) + os.path.getsize(data_path)
+        size_mb = round(total_bytes / 1024 / 1024, 1)
         log.info("DINOv2 weights downloaded (%s, %s MB)", variant, size_mb)
         if progress_callback:
             progress_callback(
-                f"DINOv2 {variant} ready ({size_mb} MB)", 1, 1,
+                f"DINOv2 {variant} ready ({size_mb} MB)", 2, 2,
             )
 
         return model_path
