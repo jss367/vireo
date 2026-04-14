@@ -524,6 +524,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 )
             runner.update_step(job["id"], "thumbnails", status=final_status,
                                summary=thumb_summary(thumb_result),
+                               error_count=failed,
                                progress={"current": processed, "total": processed})
             result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
@@ -621,7 +622,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if failed:
                 summary_parts.append(f"{failed} failed")
             runner.update_step(job["id"], "previews", status=final_status,
-                               summary=", ".join(summary_parts))
+                               summary=", ".join(summary_parts),
+                               error_count=failed)
         except Exception as e:
             errors.append(f"[previews] Fatal: {e}")
             log.exception("Pipeline previews stage failed")
@@ -965,6 +967,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total_detected = 0
             total_failed = 0
             total_skipped_existing = 0
+            # Track unique photo IDs that failed in any model so the rollup
+            # message always produces a valid X-of-N ratio. total_failed sums
+            # per-model failures and can exceed total in multi-model runs.
+            failed_photo_ids: set = set()
 
             # For reclassify: start with an empty already_detected so model 1
             # re-runs MegaDetector on every photo. We intentionally do NOT
@@ -1257,6 +1263,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         )
                         if img is None:
                             failed += 1
+                            failed_photo_ids.add(photo["id"])
                             continue
 
                         img_batch = [{
@@ -1266,8 +1273,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             "image_path": image_path,
                             "img": img,
                         }]
-                        failed += _flush_batch(img_batch, clf, model_type, model_name,
-                                               thread_db, raw_results)
+                        n_batch_failed = _flush_batch(img_batch, clf, model_type, model_name,
+                                                      thread_db, raw_results)
+                        if n_batch_failed:
+                            failed_photo_ids.add(photo["id"])
+                        failed += n_batch_failed
 
                 # Group and store predictions for this model
                 group_result = _store_grouped_predictions(
@@ -1344,10 +1354,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             stages["classify"]["status"] = final_status
             if total_failed > 0:
                 errors.append(
-                    f"[classify] {total_failed} of {total} photos failed to classify"
+                    f"[classify] {len(failed_photo_ids)} of {total} photos failed to classify"
                 )
             runner.update_step(job["id"], "classify", status=final_status,
-                               summary="; ".join(summary_parts))
+                               summary="; ".join(summary_parts),
+                               error_count=total_failed)
             result["stages"]["classify"] = {
                 "total": total,
                 "predictions_stored": total_predictions_stored,
@@ -1605,7 +1616,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if em_failed:
                 em_summary_parts.append(f"{em_failed} failed")
             runner.update_step(job["id"], "extract_masks", status=final_status,
-                               summary=", ".join(em_summary_parts))
+                               summary=", ".join(em_summary_parts),
+                               error_count=em_failed)
             result["stages"]["extract_masks"] = {
                 "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
             }
