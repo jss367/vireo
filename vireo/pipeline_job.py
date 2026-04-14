@@ -1345,10 +1345,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # Build a map of photo_id -> primary detection (highest confidence)
             # from the detections table. Only photos with detections and without
             # masks need processing.
+            #
+            # Skip synthetic full-image detections (detector_model='full-image').
+            # Those rows exist only to give classify predictions a non-NULL FK
+            # anchor for photos where MegaDetector found no animals — they are
+            # not real subject boxes and should not drive mask extraction or
+            # count toward the photos_with_detections safeguard below (which
+            # surfaces the "weights missing / no detections" diagnostic).
             photo_det_map = {}
             photos_with_detections = 0
             for p in photos:
-                dets = thread_db.get_detections(p["id"])
+                dets = [
+                    d for d in thread_db.get_detections(p["id"])
+                    if d["detector_model"] != "full-image"
+                ]
                 if dets:
                     photos_with_detections += 1
                     primary = dets[0]  # already ordered by confidence DESC

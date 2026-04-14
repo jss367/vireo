@@ -2776,3 +2776,128 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
         f"{skip_set} — the no-detection path must still anchor its prediction "
         "to a detection row (e.g. a full-image detection)."
     )
+
+    # The no-detection photo's anchor must be marked as a synthetic
+    # full-image detection so downstream stages (extract_masks_stage,
+    # photos_with_detections diagnostic) can filter it out and treat the
+    # photo as genuinely lacking a real subject. Without this marker, mask
+    # extraction would be driven by a full-frame box and the
+    # "MegaDetector produced no detections" diagnostic would never fire.
+    synth_dets = db.conn.execute(
+        "SELECT detector_model FROM detections WHERE photo_id = ?",
+        (photo_without_det,),
+    ).fetchall()
+    assert synth_dets, (
+        "photo_without_det has no detection row at all — can't anchor its "
+        "prediction to a workspace without one."
+    )
+    assert all(d["detector_model"] == "full-image" for d in synth_dets), (
+        f"photo_without_det detections {[dict(d) for d in synth_dets]} must "
+        "all be tagged detector_model='full-image' so extract_masks_stage "
+        "and the no-detections diagnostic can distinguish them from real "
+        "MegaDetector output."
+    )
+
+
+def test_extract_masks_stage_ignores_synthetic_full_image_detections(
+    tmp_path, monkeypatch
+):
+    """extract_masks_stage must treat detector_model='full-image' rows as
+    non-detections: they are classify-anchor rows for photos where
+    MegaDetector found nothing, not real subject boxes. Counting them toward
+    photos_with_detections hides the "weights missing / no detections"
+    diagnostic and drives mask extraction on useless full-frame boxes.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Every photo has zero real detections — forces the synthetic full-image
+    # detection path in pipeline_job.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        return (
+            Image.new("RGB", (32, 32), "white"),
+            folders.get(photo["folder_id"], ""),
+            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
+        )
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Unknown", "score": 0.5}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=False,  # exercise extract_masks_stage
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The pipeline created a synthetic full-image detection to anchor the
+    # prediction.  Confirm the test really exercised that path.
+    all_dets = db.conn.execute(
+        "SELECT detector_model FROM detections WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert all_dets and all(d["detector_model"] == "full-image" for d in all_dets), (
+        "Test setup no longer produces only synthetic full-image "
+        f"detections: {[dict(d) for d in all_dets]}"
+    )
+
+    # extract_masks_stage should have reported the no-detections diagnostic
+    # rather than silently completing with masked=0 masked photos.
+    extract_summaries = [
+        kwargs.get("summary", "")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == "extract_masks" and kwargs.get("status") in (
+            "completed", "failed", "skipped",
+        )
+    ]
+    joined = " ".join(extract_summaries).lower()
+    assert "no detections" in joined or "megadetector" in joined, (
+        f"extract_masks_stage should surface the no-detections diagnostic "
+        f"when every detection row is synthetic, got summaries: "
+        f"{extract_summaries}"
+    )
