@@ -1174,6 +1174,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total_skipped_existing = 0
             skipped_model_names: list = []
             models_succeeded = 0
+            # Track photo IDs actually processed by the first successful
+            # model's classify loop so the stale-detection purge is scoped
+            # to reclassified photos only. Using detect_state["processed_ids"]
+            # (all detected photos) would incorrectly delete detections for
+            # photos that weren't reached if the job was aborted mid-classify.
+            first_model_photo_ids: set = set()
 
             from datetime import datetime as dt
 
@@ -1277,6 +1283,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     )
 
                     for photo in batch:
+                        # Record this photo as classify-processed for the first
+                        # successful model. Used by the stale-detection purge to
+                        # restrict deletions to photos actually reclassified.
+                        if models_succeeded == 0:
+                            first_model_photo_ids.add(photo["id"])
                         if photo["id"] in existing_preds:
                             skipped_existing += 1
                             pred_row = thread_db.get_prediction_for_photo(
@@ -1387,12 +1398,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     and detect_state["pre_run_det_ids"]
                 ):
                     pre_ids = detect_state["pre_run_det_ids"]
-                    proc_ids = detect_state["processed_ids"]
+                    # Use the classify-loop coverage, not the detect-stage
+                    # coverage, so an abort mid-classify doesn't cascade-delete
+                    # detections (and their FK-linked predictions) for photos
+                    # that were detected but never reached by the classifier.
+                    classify_ids = first_model_photo_ids
                     stale_ids = [
                         det_id
                         for photo_id, id_set in pre_ids.items()
                         for det_id in id_set
-                        if photo_id in proc_ids
+                        if photo_id in classify_ids
                     ]
                     if stale_ids:
                         getattr(
@@ -1404,8 +1419,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             "reclassify: purged %d stale detection rows for "
                             "%d photos (%d not processed, rows preserved)",
                             len(stale_ids),
-                            len(proc_ids & pre_ids.keys()),
-                            len(pre_ids) - len(proc_ids & pre_ids.keys()),
+                            len(classify_ids & pre_ids.keys()),
+                            len(pre_ids) - len(classify_ids & pre_ids.keys()),
                         )
 
                 parts = [f"{preds} predictions"]
