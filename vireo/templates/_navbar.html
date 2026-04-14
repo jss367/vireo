@@ -2992,6 +2992,7 @@ function formatDuration(seconds) {
       renderJobs();
       updateSummary();
       updateActivityDot();
+      updateDockProgress();
     }
   });
 
@@ -3004,8 +3005,46 @@ function formatDuration(seconds) {
         renderJobs();
         updateSummary();
         updateActivityDot();
+        updateDockProgress();
       })
       .catch(function() {});
+  }
+
+  // Show OS-level progress on the dock/taskbar icon for the longest-running
+  // job so users can see progress when the window is minimized. No-op outside
+  // Tauri. With multiple concurrent jobs we pick the one that started first
+  // (earliest started_at); phases without a known total pulse instead.
+  var _lastDockProgress = { state: null, value: -1 };
+  function updateDockProgress() {
+    if (!window.__TAURI_INTERNALS__) return;
+    var running = activeJobs.filter(function(j) { return j.status === 'running'; });
+    var state, value;
+    if (running.length === 0) {
+      state = 'none'; value = null;
+    } else {
+      var longest = running[0];
+      for (var i = 1; i < running.length; i++) {
+        var a = running[i].started_at || '';
+        var b = longest.started_at || '';
+        if (a && (!b || a < b)) longest = running[i];
+      }
+      var total = longest.progress && longest.progress.total;
+      var current = longest.progress && longest.progress.current;
+      if (total && total > 0) {
+        var pct = Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+        state = 'normal'; value = pct;
+      } else {
+        state = 'indeterminate'; value = null;
+      }
+    }
+    if (_lastDockProgress.state === state && _lastDockProgress.value === value) return;
+    _lastDockProgress = { state: state, value: value };
+    try {
+      window.__TAURI_INTERNALS__.invoke('set_job_progress', {
+        progress: value,
+        indeterminate: state === 'indeterminate',
+      }).catch(function() {});
+    } catch (e) { /* ignore */ }
   }
 
   function renderJobs() {
