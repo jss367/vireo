@@ -2377,6 +2377,15 @@ def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(classifier_mod, "Classifier", boom)
+    # Force hash check to report the files as bad, so the ONNX failure
+    # handler commits the sentinel write (the "real corruption" path).
+    monkeypatch.setattr(
+        model_verify,
+        "verify_model",
+        lambda *a, **k: model_verify.VerifyResult(
+            ok=False, mismatches=["image_encoder.onnx.data"]
+        ),
+    )
 
     params = PipelineParams(
         collection_id=col_id,
@@ -2409,6 +2418,75 @@ def test_onnx_load_failure_writes_verify_failed_sentinel(tmp_path, monkeypatch):
     assert state == "incomplete", (
         f"_classify_model_state should return 'incomplete' after the "
         f"sentinel is written, but got '{state}'"
+    )
+
+
+def test_onnx_load_failure_skips_sentinel_when_files_verify_ok(
+    tmp_path, monkeypatch
+):
+    """If ONNX Runtime fails to load but SHA256 verification reports the
+    files are intact, the .verify_failed sentinel must NOT be written.
+
+    This is the guard against a transient ONNXRuntime hiccup (memory
+    pressure, mmap race, a pytest monkeypatch from a worktree running
+    against the same $HOME) permanently marking a healthy model as
+    'Incomplete — repair available'. Left unchecked, every subsequent
+    pipeline run told the user to click Repair, and Repair succeeded
+    but the sentinel came back on the next transient failure.
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    import model_verify
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+    model_dir = tmp_path / "models" / model_id
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(
+            "[ONNXRuntimeError] model_path must not be empty. Ensure that "
+            "a path is provided when the model is created or loaded."
+        )
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+    # Files hash-check clean — the ONNX error is transient, not corruption.
+    monkeypatch.setattr(
+        model_verify,
+        "verify_model",
+        lambda *a, **k: model_verify.VerifyResult(ok=True),
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError) as exc:
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+    assert not sentinel.exists(), (
+        "verified-clean files must not get a .verify_failed sentinel "
+        "from a transient ONNXRuntime error — that's what traps users "
+        "in the 'Repair never sticks' loop."
+    )
+    # And the user-facing error should NOT say "click Repair" since the
+    # files are fine; it should suggest a retry instead.
+    assert "Repair" not in str(exc.value), (
+        f"Expected transient-failure message, got: {exc.value}"
     )
 
 

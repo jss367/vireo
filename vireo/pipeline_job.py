@@ -712,24 +712,57 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         except Exception as load_err:
             # ONNXRuntime signals missing external-data with a
             # "model_path must not be empty" / "Initializer" error. Treat
-            # any load failure as an incomplete-model hint for the user.
+            # any load failure as an incomplete-model hint for the user —
+            # but only when we can confirm the on-disk files are actually
+            # bad. A transient ONNX failure (memory pressure, mmap race,
+            # test-suite monkeypatches from another process) should not
+            # permanently mark a healthy install as "Incomplete".
             if _looks_like_missing_external_data(load_err):
-                # Write the .verify_failed sentinel so that
-                # _classify_model_state (used by get_models() / Settings
-                # UI) also reports 'incomplete' and shows the Repair
-                # button.  Without this the pipeline tells the user to
-                # "click Repair" but Settings sees all files present and
-                # no sentinel, so no Repair button appears.
-                if weights_path:
-                    import model_verify
+                import model_verify
+
+                files_ok = False
+                hf_subdir = active_model.get("hf_subdir")
+                if (
+                    weights_path
+                    and hf_subdir
+                    and not model_is_custom
+                ):
                     try:
-                        with open(
-                            os.path.join(
-                                weights_path,
-                                model_verify.VERIFY_FAILED_SENTINEL,
-                            ),
-                            "w",
-                        ) as f:
+                        result = model_verify.verify_model(
+                            weights_path, hf_subdir
+                        )
+                        files_ok = result.ok
+                    except model_verify.VerifyError:
+                        # Network unavailable — can't confirm either way.
+                        # Fall through to the conservative path that writes
+                        # the sentinel so the user sees Repair.
+                        files_ok = False
+
+                if files_ok:
+                    # Files match HF hashes exactly — the ONNX error is
+                    # transient, not corruption. Do NOT write
+                    # .verify_failed; do NOT tell the user to Repair. Just
+                    # re-raise with a retry hint.
+                    log.warning(
+                        "ONNXRuntime load failed for %s but on-disk files "
+                        "pass SHA256 verification — treating as transient.",
+                        active_model.get("id", "<unknown>"),
+                    )
+                    raise RuntimeError(
+                        f"Model '{model_name}' failed to load "
+                        f"(transient ONNXRuntime error). Retry the "
+                        f"pipeline. If this keeps happening, restart Vireo."
+                    ) from load_err
+
+                # Files are bad or unverifiable — write the sentinel so
+                # Settings surfaces the Repair button.
+                if weights_path:
+                    sentinel_path = os.path.join(
+                        weights_path,
+                        model_verify.VERIFY_FAILED_SENTINEL,
+                    )
+                    try:
+                        with open(sentinel_path, "w") as f:
                             f.write(f"onnx-load-failure: {load_err}\n")
                     except OSError:
                         pass
