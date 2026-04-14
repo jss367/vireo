@@ -2084,18 +2084,19 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
 def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     tmp_path, monkeypatch
 ):
-    """A partial/aborted reclassify must NOT delete detection rows for photos
-    whose batches were never submitted to _detect_batch.
+    """A reclassify aborted before any model finishes classifying must NOT
+    delete pre-run detection rows. The purge is gated on a successful
+    model run (see Codex P1 on #566) — otherwise a cancel mid-detect would
+    destroy prior detections with no replacement predictions.
 
-    Scenario: 2 photos each have a prior detection row. Batch size is patched
-    to 1 so each photo is its own batch. After the first batch completes,
-    _should_abort returns True so the second batch is never processed.
+    Scenario: 2 photos each have a prior detection row. Batch size is
+    patched to 1 so each photo is its own batch in detect_stage. After
+    the first detect batch completes, _should_abort returns True so the
+    rest of the pipeline short-circuits before classify_stage writes any
+    predictions.
 
-    Expected outcome:
-    - photo1's stale detection row is purged (its batch was processed).
-    - photo2's detection row is preserved (its batch was never reached).
-
-    Regression guard for Codex P1 review on #513 line 1040.
+    Expected outcome: BOTH photos' prior detection rows are preserved,
+    because `models_succeeded` never reaches 1.
     """
     import json
 
@@ -2197,16 +2198,18 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     remaining1 = verify_db.get_detections(photo1_id)
     remaining2 = verify_db.get_detections(photo2_id)
 
-    assert remaining1 == [], (
-        f"photo1 was processed in model 1's batch loop; its stale prior-run "
-        f"detection must be purged, but get_detections returned {remaining1!r}. "
-        "Regression for Codex P1 review on #513 line 1040."
+    # No model ran to completion (abort fired before classify could store
+    # predictions), so neither photo's prior row may be purged — otherwise
+    # cancelling a reclassify would destroy prior detections and their
+    # cascaded predictions with no replacement data.
+    assert remaining1, (
+        f"photo1's prior detection row must be preserved on an aborted "
+        f"reclassify — no classifier ran to completion, so the stale purge "
+        f"must not fire. get_detections returned {remaining1!r}."
     )
-    assert remaining2 != [], (
-        "photo2's batch was never reached (run was aborted before it). "
-        "Its prior-run detection row must be preserved to avoid data loss "
-        "in partial reclassify runs. "
-        "Regression for Codex P1 review on #513 line 1040."
+    assert remaining2, (
+        "photo2's prior detection row must be preserved on an aborted "
+        "reclassify — no classifier ran to completion."
     )
 
 
@@ -3484,3 +3487,179 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
             f"per-model summary for {mid} should mention prediction counts, "
             f"got {summary!r}"
         )
+
+
+def test_pipeline_reclassify_purge_deferred_until_a_model_succeeds(
+    tmp_path, monkeypatch
+):
+    """On a reclassify run where every model fails to load, the pre-run
+    detection rows MUST NOT be deleted. Deleting them ahead of a
+    successful classify would cascade through the predictions FK and
+    destroy prior results even though no new predictions were written.
+
+    Regression test for Codex P1 on PR #566.
+    """
+    import json
+
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Seed a prior-run detection so the reclassify purge has something to
+    # potentially delete.
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "test.jpg", ".jpg", 12345, 1_000_000.0)
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    # Every Classifier construction raises — simulating the "all models
+    # fail to load" case the purge must defend against.
+    class AlwaysFailClassifier:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("simulated catastrophic load failure")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", AlwaysFailClassifier)
+
+    # Snapshot pre-run detection row count so we can assert it survived.
+    pre_count = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections"
+    ).fetchone()["c"]
+    assert pre_count >= 1, "fixture should have inserted at least 1 row"
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=["bioclip-vit-b-16", "bioclip-2"],
+        reclassify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The original detection row MUST still exist: no model succeeded, so
+    # the purge must not have fired.
+    post = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections WHERE id = ?",
+        (db.conn.execute(
+            "SELECT id FROM detections LIMIT 1"
+        ).fetchone()["id"],),
+    ).fetchone()
+    # Simpler: just confirm some prior detections survived.
+    survivors = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections WHERE detector_model != 'full-image'"
+    ).fetchone()["c"]
+    assert survivors >= 1, (
+        "reclassify must not purge pre-run detection rows when every model "
+        "failed to load — it would cascade-destroy prior predictions "
+        f"(survivors={survivors})"
+    )
+
+
+def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
+    tmp_path, monkeypatch
+):
+    """When classify_stage hits a fatal exception AFTER one model has
+    already finished, the completed model's `classify:<id>` row must stay
+    `completed` — not be rewritten to `failed` by the catch-all error
+    handler. Otherwise per-model status is misreported.
+
+    Regression test for Codex P2 on PR #566.
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir))
+    Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
+    photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+    first_id, second_id = model_ids
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    # Let the first model's grouping/storage succeed normally, then blow
+    # up when the SECOND model asks _store_grouped_predictions to run.
+    call_count = {"n": 0}
+    original_store = classify_job._store_grouped_predictions
+
+    def maybe_explode(raw_results, job_id, model_name, *args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("simulated mid-loop fatal after model 1")
+        return original_store(raw_results, job_id, model_name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        classify_job, "_store_grouped_predictions", maybe_explode,
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # First model's row must end in 'completed' and stay that way; the
+    # fatal handler must NOT have overwritten it with 'failed'.
+    first_final = None
+    for (_, step_id, kwargs) in runner.step_updates:
+        if step_id == f"classify:{first_id}" and "status" in kwargs:
+            first_final = kwargs["status"]
+    assert first_final == "completed", (
+        f"First model's row should remain 'completed' after a later fatal "
+        f"error, got final status {first_final!r}"
+    )

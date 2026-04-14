@@ -1066,32 +1066,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 processed_ids.update(det_processed)
 
             detect_state["total_detected"] = total_detected
-
-            # Reclassify purge: drop the pre-run stale detection rows for
-            # every photo that actually completed a fresh detect iteration.
-            # Photos whose iteration never ran (cancelled, or mid-batch
-            # exception in _detect_batch) keep their old rows so a partial
-            # reclassify doesn't silently lose data.
-            if params.reclassify and pre_run_det_ids:
-                stale_ids = [
-                    det_id
-                    for photo_id, id_set in pre_run_det_ids.items()
-                    for det_id in id_set
-                    if photo_id in processed_ids
-                ]
-                if stale_ids:
-                    getattr(
-                        thread_db, "delete_detections_by_ids", lambda _: None
-                    )(stale_ids)
-                    log.debug(
-                        "reclassify: purged %d stale detection rows for %d "
-                        "photos (%d not processed, rows preserved)",
-                        len(stale_ids),
-                        len(processed_ids & pre_run_det_ids.keys()),
-                        len(pre_run_det_ids) - len(
-                            processed_ids & pre_run_det_ids.keys()
-                        ),
-                    )
+            # The stale-detection purge is DEFERRED to classify_stage and
+            # only fires after the first model successfully classifies.
+            # Deleting the pre-run detection rows here would cascade through
+            # the predictions FK and destroy prior results in the case where
+            # every classifier ends up failing to load — leaving the user
+            # with no detections AND no predictions. See classify_stage for
+            # the actual delete.
 
             stages["detect"]["status"] = "completed"
             runner.update_step(
@@ -1155,6 +1136,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         stages["classify"]["status"] = "running"
         _update_stages(runner, job["id"], stages)
+
+        # Track which per-model rows have reached a terminal state so a
+        # fatal error raised by one model doesn't overwrite the status of
+        # already-completed models (P2 from the Codex review). Defined
+        # outside the try so the except handler can read them.
+        completed_step_ids: set = set()
+        failed_step_ids: set = set()
 
         try:
             import config as cfg
@@ -1232,6 +1220,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             error=str(model_err),
                             summary=f"Failed to load: {model_err}",
                         )
+                        failed_step_ids.add(step_id)
                         continue
                     loaded_models.update(bundle)
                     clf = bundle["clf"]
@@ -1385,6 +1374,39 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 total_failed += failed
                 total_skipped_existing += skipped_existing
                 models_succeeded += 1
+                completed_step_ids.add(step_id)
+
+                # Reclassify stale-row purge: only fires after the FIRST
+                # successful model has written fresh predictions, so a run
+                # where every model fails to load leaves prior detections
+                # (and their cascaded predictions) intact. Photos whose
+                # detect iteration never completed keep their old rows.
+                if (
+                    params.reclassify
+                    and models_succeeded == 1
+                    and detect_state["pre_run_det_ids"]
+                ):
+                    pre_ids = detect_state["pre_run_det_ids"]
+                    proc_ids = detect_state["processed_ids"]
+                    stale_ids = [
+                        det_id
+                        for photo_id, id_set in pre_ids.items()
+                        for det_id in id_set
+                        if photo_id in proc_ids
+                    ]
+                    if stale_ids:
+                        getattr(
+                            thread_db,
+                            "delete_detections_by_ids",
+                            lambda _: None,
+                        )(stale_ids)
+                        log.debug(
+                            "reclassify: purged %d stale detection rows for "
+                            "%d photos (%d not processed, rows preserved)",
+                            len(stale_ids),
+                            len(proc_ids & pre_ids.keys()),
+                            len(pre_ids) - len(proc_ids & pre_ids.keys()),
+                        )
 
                 parts = [f"{preds} predictions"]
                 if skipped_existing:
@@ -1419,13 +1441,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             log.exception("Pipeline classify stage failed")
             abort.set()
             stages["classify"]["status"] = "failed"
-            # Surface the fatal error on any per-model row still in the
-            # running/pending state so the jobs view doesn't show an
-            # indeterminate row.
+            # Only surface the fatal error on rows that haven't already
+            # reached a terminal state. Without this, a late-loop exception
+            # would overwrite the 'completed' status of earlier models that
+            # finished successfully, misreporting per-model outcomes.
             specs_for_step_ids = loaded_models.get("resolved_specs") or []
             for spec in specs_for_step_ids:
+                sid = f"classify:{spec['id']}"
+                if sid in completed_step_ids or sid in failed_step_ids:
+                    continue
                 runner.update_step(
-                    job["id"], f"classify:{spec['id']}",
+                    job["id"], sid,
                     status="failed", error=str(e),
                 )
 
