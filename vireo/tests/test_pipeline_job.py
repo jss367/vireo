@@ -2698,6 +2698,13 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
 
+    # Prevent ensure_megadetector_weights from trying to download weights.
+    # photo_without_det has no detection row, so needs_fresh_detection=True
+    # and the pipeline would call ensure_megadetector_weights before
+    # reaching _detect_batch.
+    import detector as detector_mod
+    monkeypatch.setattr(detector_mod, "ensure_megadetector_weights", lambda **_: None)
+
     def fake_prepare_image(photo, folders, detection, vireo_dir=None):
         return (
             Image.new("RGB", (32, 32), "white"),
@@ -2765,14 +2772,37 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
             f"expected {ws_id}."
         )
 
-    # And the skip set must now include both photos on a second run.
+    # The skip set must include photo_with_det (has a real detection + prediction).
     skip_set = db.get_existing_prediction_photo_ids(preds[0]["model"])
     assert photo_with_det in skip_set, (
         f"photo_with_det ({photo_with_det}) missing from skip set {skip_set} — "
         "its prediction is not reachable via the predictions→detections join."
     )
-    assert photo_without_det in skip_set, (
-        f"photo_without_det ({photo_without_det}) missing from skip set "
-        f"{skip_set} — the no-detection path must still anchor its prediction "
-        "to a detection row (e.g. a full-image detection)."
+
+    # photo_without_det has no MegaDetector detection, so the pipeline
+    # classify stage must skip it entirely. No prediction and no synthetic
+    # detection row should have been written for it.
+    assert photo_without_det not in skip_set, (
+        f"photo_without_det ({photo_without_det}) unexpectedly in skip set — "
+        "the pipeline must not classify photos that MegaDetector found no "
+        "detections in, to avoid corrupting extract_masks_stage with "
+        "synthetic full-image detection rows."
+    )
+    no_det_preds = db.conn.execute(
+        """SELECT pr.id FROM predictions pr
+           JOIN detections d ON d.id = pr.detection_id
+           WHERE d.photo_id = ?""",
+        (photo_without_det,),
+    ).fetchall()
+    assert not no_det_preds, (
+        f"Found predictions for photo_without_det via real detections: "
+        f"{[dict(r) for r in no_det_preds]}."
+    )
+    synthetic_dets = db.conn.execute(
+        "SELECT id, detector_model FROM detections WHERE photo_id = ?",
+        (photo_without_det,),
+    ).fetchall()
+    assert not synthetic_dets, (
+        f"Synthetic detection rows were created for photo_without_det: "
+        f"{[dict(r) for r in synthetic_dets]}. These corrupt extract_masks_stage."
     )
