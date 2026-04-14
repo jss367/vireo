@@ -1774,12 +1774,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     # Phase 2: detect (needs collection; runs MegaDetector once across all
     # photos so each per-model classify step reuses cached detections
     # instead of re-running the detector).
-    if not abort.is_set():
-        detect_stage()
+    #
+    # Always invoked — even when `abort` is set by an earlier stage — so
+    # the `detect` step row reaches a terminal status. Skipping the call
+    # would leave the row pending forever on a model-loader failure.
+    # detect_stage handles abort internally and marks itself skipped.
+    detect_stage()
 
-    # Phase 3: classify per model (reads cached detections from detect_stage)
-    if not abort.is_set():
-        classify_stage()
+    # Phase 3: classify per model (reads cached detections from detect_stage).
+    # Always invoked for the same reason: every `classify:<model_id>` row
+    # must land in a terminal state so the jobs tree finalizes cleanly on
+    # a loader-triggered abort.
+    classify_stage()
 
     # Phase 3: extract-masks (needs classify output)
     if not abort.is_set():

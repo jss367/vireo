@@ -3663,3 +3663,74 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
         f"First model's row should remain 'completed' after a later fatal "
         f"error, got final status {first_final!r}"
     )
+
+
+def test_pipeline_loader_abort_finalizes_detect_and_classify_rows(
+    tmp_path, monkeypatch
+):
+    """When model_loader_stage sets abort (single-model preload failure),
+    the phase dispatcher must still invoke detect_stage and classify_stage
+    so their step rows reach a terminal status. Without this, the newly
+    added `detect` and `classify:<id>` rows stay `pending` forever on a
+    loader-triggered failure, which is exactly the scenario these rows
+    were added to clarify.
+
+    Regression test for Codex P2 on PR #566 (line 1781).
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Single-model run where construction always fails — this triggers
+    # model_loader_stage's fatal path and sets abort before detect_stage.
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated single-model preload failure")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The `detect` and every `classify:<id>` row must reach a terminal
+    # state. A pending status means the jobs view would display an
+    # indeterminate spinner for a run that has already finished — the
+    # exact bug this test guards against.
+    terminal = {"completed", "failed", "skipped"}
+    steps_of_interest = [
+        s["id"] for s in runner.steps_defined
+        if s["id"] == "detect" or s["id"].startswith("classify:")
+    ]
+    assert steps_of_interest, (
+        "test precondition: expected detect + classify rows in step_defs"
+    )
+    for sid in steps_of_interest:
+        statuses = [
+            kw.get("status")
+            for (_, s, kw) in runner.step_updates
+            if s == sid and "status" in kw
+        ]
+        final = statuses[-1] if statuses else None
+        assert final in terminal, (
+            f"Step {sid!r} must reach a terminal status on loader-triggered "
+            f"abort, got {final!r} (history={statuses})"
+        )
