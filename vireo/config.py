@@ -27,6 +27,7 @@ DEFAULTS = {
     "setup_complete": False,
     "darktable_bin": "",
     "external_editor": "",
+    "report_url": "",
     "darktable_style": "",
     "darktable_output_format": "jpg",
     "darktable_output_dir": "",

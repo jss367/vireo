@@ -13,6 +13,7 @@ import queue
 import subprocess
 import time
 import webbrowser
+from datetime import UTC
 from pathlib import Path
 from urllib.parse import quote
 
@@ -5106,6 +5107,124 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         limit = min(max(1, request.args.get("limit", 10, type=int)), 1000)
         return jsonify(app._job_runner.get_history(db, limit=limit))
+
+    @app.route("/api/report-issue", methods=["POST"])
+    def api_report_issue():
+        """Collect diagnostics and optionally send to a configured report URL."""
+        import platform
+        import sys
+        import urllib.request
+
+        data = request.get_json(force=True, silent=True) or {}
+        description = (data.get("description") or "").strip()
+        if not description:
+            return json_error("A description is required")
+
+        # --- Version (same logic as api_version) ---
+        try:
+            from importlib.metadata import version as pkg_version
+            vireo_version = pkg_version("vireo")
+        except Exception:
+            import tomllib
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                    vireo_version = tomllib.load(f)["project"]["version"]
+            except Exception:
+                vireo_version = "unknown"
+
+        # --- App state ---
+        db = None
+        try:
+            db = _get_db()
+            ws = db.get_active_workspace()
+            ws_name = ws["name"] if ws else "unknown"
+            folder_count = db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+            photo_count = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            pred_count = db.conn.execute(
+                "SELECT COUNT(*) FROM predictions WHERE workspace_id = ?",
+                (db._ws_id(),)
+            ).fetchone()[0]
+        except Exception:
+            ws_name = "unknown"
+            folder_count = photo_count = pred_count = 0
+
+        # --- Recent jobs ---
+        try:
+            recent_jobs = app._job_runner.get_history(db, limit=10)
+        except Exception:
+            recent_jobs = []
+
+        # --- Config (sanitized) ---
+        import config as cfg
+
+        def _redact(obj):
+            if isinstance(obj, dict):
+                out = {}
+                for k, v in obj.items():
+                    if any(s in k.lower() for s in ("token", "key", "secret", "password")):
+                        out[k] = "[REDACTED]"
+                    else:
+                        out[k] = _redact(v)
+                return out
+            if isinstance(obj, list):
+                return [_redact(item) for item in obj]
+            return obj
+
+        sanitized_config = _redact(cfg.load())
+
+        # --- Build the bundle ---
+        from datetime import datetime
+
+        bundle = {
+            "description": description,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "vireo_version": vireo_version,
+            "system": {
+                "platform": platform.platform(),
+                "python": sys.version,
+                "architecture": platform.machine(),
+            },
+            "logs": app._log_broadcaster.get_recent(200),
+            "app_state": {
+                "workspace": ws_name,
+                "folders": folder_count,
+                "photos": photo_count,
+                "predictions": pred_count,
+            },
+            "recent_jobs": recent_jobs,
+            "config": sanitized_config,
+        }
+
+        # --- Send or download ---
+        # Fall back to plain cfg.load() if the DB is degraded (e.g. schema or
+        # connection errors) so the download path still works when users are
+        # reporting DB problems.
+        try:
+            effective = db.get_effective_config(cfg.load()) if db else cfg.load()
+        except Exception:
+            log.exception("Failed to load effective config for issue report")
+            effective = cfg.load()
+        report_url = effective.get("report_url", "")
+
+        if report_url:
+            try:
+                payload = json.dumps(bundle).encode("utf-8")
+                req = urllib.request.Request(
+                    report_url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                resp = urllib.request.urlopen(req, timeout=10)
+                if 200 <= resp.status < 300:
+                    return jsonify({"status": "sent"})
+                else:
+                    return jsonify({"status": "download", "diagnostics": bundle})
+            except Exception:
+                log.exception("Failed to send report to %s", report_url)
+                return jsonify({"status": "download", "diagnostics": bundle})
+
+        return jsonify({"status": "download", "diagnostics": bundle})
 
     # -- Image serving --
 
