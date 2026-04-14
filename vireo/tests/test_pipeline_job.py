@@ -2627,3 +2627,152 @@ def test_pipeline_single_model_still_aborts_on_failure(tmp_path, monkeypatch):
     assert any(
         "model_loader" in e for e in job["result"]["errors"]
     ), f"Expected a model_loader error, got: {job['result']['errors']}"
+
+
+def test_pipeline_classify_stores_predictions_with_detection_id(
+    tmp_path, monkeypatch
+):
+    """Predictions written by the pipeline classify stage MUST carry a valid
+    detection_id. Without it, predictions are orphaned — the workspace-scoped
+    skip query (get_existing_prediction_photo_ids) inner-joins on
+    detection_id, so every subsequent run re-classifies the same photos
+    instead of reusing the stored predictions.
+
+    Regression: pipeline_job built img_batch entries without a detection_id
+    key, so _flush_batch stored detection_id=None for every pipeline-written
+    prediction.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_with_det = db.add_photo(
+        folder_id, "hawk.jpg", ".jpg", 12345, 1_000_000.0
+    )
+    photo_without_det = db.add_photo(
+        folder_id, "empty.jpg", ".jpg", 12346, 1_000_100.0
+    )
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([
+            {"field": "photo_ids", "value": [photo_with_det, photo_without_det]}
+        ]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Persist a real detection row for photo_with_det so det_map carries a
+    # valid DB id the pipeline can bind predictions to.
+    real_det_ids = db.save_detections(
+        photo_with_det,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.95, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    real_det_id = real_det_ids[0]
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        for p in batch:
+            if p["id"] == photo_with_det:
+                det_map[p["id"]] = [{
+                    "id": real_det_id,
+                    "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
+                    "confidence": 0.95, "category": "animal",
+                }]
+        return det_map, len(det_map), {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        return (
+            Image.new("RGB", (32, 32), "white"),
+            folders.get(photo["folder_id"], ""),
+            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
+        )
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Red-tailed Hawk", "score": 0.99}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # At least one prediction should have been stored.
+    preds = db.conn.execute(
+        "SELECT id, detection_id, species, model FROM predictions"
+    ).fetchall()
+    assert preds, (
+        "Pipeline classify stage produced no predictions — test setup did "
+        "not exercise the write path."
+    )
+
+    # None of those predictions should have a NULL detection_id.
+    orphans = [dict(p) for p in preds if p["detection_id"] is None]
+    assert not orphans, (
+        f"Pipeline wrote predictions with NULL detection_id: {orphans}. "
+        "get_existing_prediction_photo_ids filters these out, so the skip "
+        "logic never matches and every pipeline run re-classifies everything."
+    )
+
+    # Every prediction's detection_id must resolve to a real detection row in
+    # the active workspace (so the workspace-scoped skip query picks it up).
+    for p in preds:
+        det = db.conn.execute(
+            "SELECT photo_id, workspace_id FROM detections WHERE id = ?",
+            (p["detection_id"],),
+        ).fetchone()
+        assert det is not None, (
+            f"Prediction {dict(p)} references detection_id "
+            f"{p['detection_id']} which does not exist in detections table."
+        )
+        assert det["workspace_id"] == ws_id, (
+            f"Prediction bound to detection in workspace {det['workspace_id']}, "
+            f"expected {ws_id}."
+        )
+
+    # And the skip set must now include both photos on a second run.
+    skip_set = db.get_existing_prediction_photo_ids(preds[0]["model"])
+    assert photo_with_det in skip_set, (
+        f"photo_with_det ({photo_with_det}) missing from skip set {skip_set} — "
+        "its prediction is not reachable via the predictions→detections join."
+    )
+    assert photo_without_det in skip_set, (
+        f"photo_without_det ({photo_without_det}) missing from skip set "
+        f"{skip_set} — the no-detection path must still anchor its prediction "
+        "to a detection row (e.g. a full-image detection)."
+    )
