@@ -1806,38 +1806,26 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
 
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
-    # _detect_batch should have been called twice (one batch per model).
-    assert len(detect_calls) == 2, (
-        f"Expected 2 _detect_batch calls (one per model), got {len(detect_calls)}"
+    # With the detect pre-pass, _detect_batch runs ONCE across the whole
+    # collection regardless of how many models are classifying downstream.
+    # Every subsequent classify stage reads from the shared cache rather
+    # than invoking the detector again.
+    assert len(detect_calls) == 1, (
+        f"Expected exactly 1 _detect_batch call (shared pre-pass), got "
+        f"{len(detect_calls)}"
     )
 
-    # Model 1 (reclassify=True): already_detected must be empty because this
-    # is a fresh reclassify run — no stale prior-run IDs should be seeded.
+    # Reclassify: the shared pre-pass must start with an empty
+    # already_detected so every photo's detection is recomputed — no stale
+    # prior-run IDs should leak in.
     assert photo_id not in detect_calls[0]["already_detected_ids"], (
-        f"Prior-run photo_id {photo_id} leaked into already_detected_ids for "
-        "model 1. already_detected must start empty on reclassify runs."
+        f"Prior-run photo_id {photo_id} leaked into already_detected_ids on "
+        "the reclassify pre-pass. already_detected must start empty."
     )
-
-    # Model 2: already_detected SHOULD contain photo_id because model 1
-    # processed it (even with zero detections).  This tells model 2 to skip
-    # MegaDetector and use cached_detections from this run instead of falling
-    # back to db.get_detections() which would return stale rows.
-    assert photo_id in detect_calls[1]["already_detected_ids"], (
-        f"photo_id {photo_id} missing from already_detected_ids for model 2. "
-        "Zero-detection photos from model 1 must be tracked so model 2 "
-        "does not redundantly re-run MegaDetector."
-    )
-
-    # Model 2 must receive cached_detections with an empty list for the
-    # zero-detection photo, preventing fallback to db.get_detections().
-    assert photo_id in detect_calls[1]["cached_detections"], (
-        f"photo_id {photo_id} missing from cached_detections for model 2. "
-        "Zero-detection photos must be cached so model 2 uses the fresh "
-        "(empty) result instead of stale DB rows."
-    )
-    assert detect_calls[1]["cached_detections"][photo_id] == [], (
-        "cached_detections entry for a zero-detection photo should be an "
-        "empty list."
+    assert detect_calls[0]["reclassify"] is True, (
+        "Detect pre-pass should be called with reclassify=True on a "
+        "reclassify run so MegaDetector re-runs instead of short-circuiting "
+        "against existing DB rows."
     )
 
 
@@ -2564,16 +2552,24 @@ def test_pipeline_continues_when_first_model_fails(tmp_path, monkeypatch):
     assert model_loader_summaries, "model_loader should complete (not fail)"
     assert "failed to preload" in " ".join(model_loader_summaries)
 
-    # classify summary should mention the skipped model.
-    classify_summaries = [
-        kwargs.get("summary", "")
+    # The failing model's per-model classify row should be 'failed'; the
+    # surviving model's row should be 'completed'.
+    bad_id, good_id = model_ids
+    bad_statuses = [
+        kwargs.get("status")
         for (_, step_id, kwargs) in runner.step_updates
-        if step_id == "classify" and kwargs.get("status") == "completed"
+        if step_id == f"classify:{bad_id}" and "status" in kwargs
     ]
-    assert classify_summaries, "classify stage should complete"
-    joined_classify = " ".join(classify_summaries)
-    assert "skipped" in joined_classify.lower(), (
-        f"classify summary should mention skipped model, got: {classify_summaries}"
+    assert "failed" in bad_statuses, (
+        f"Failing model's row should be marked failed, got {bad_statuses}"
+    )
+    good_statuses = [
+        kwargs.get("status")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{good_id}" and "status" in kwargs
+    ]
+    assert "completed" in good_statuses, (
+        f"Surviving model's row should be completed, got {good_statuses}"
     )
 
     # The returned result must record the skipped model info.
@@ -2635,16 +2631,22 @@ def test_pipeline_continues_when_secondary_model_fails(tmp_path, monkeypatch):
         f"Expected at least 1 construction call, got {len(construction_calls)}"
     )
 
-    # classify summary should mention the skipped model.
-    classify_summaries = [
-        kwargs.get("summary", "")
+    good_id, bad_id = model_ids
+    good_statuses = [
+        kwargs.get("status")
         for (_, step_id, kwargs) in runner.step_updates
-        if step_id == "classify" and kwargs.get("status") == "completed"
+        if step_id == f"classify:{good_id}" and "status" in kwargs
     ]
-    assert classify_summaries, "classify stage should complete"
-    joined_classify = " ".join(classify_summaries)
-    assert "skipped" in joined_classify.lower(), (
-        f"classify summary should mention skipped model, got: {classify_summaries}"
+    assert "completed" in good_statuses, (
+        f"First (good) model row should be completed, got {good_statuses}"
+    )
+    bad_statuses = [
+        kwargs.get("status")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{bad_id}" and "status" in kwargs
+    ]
+    assert "failed" in bad_statuses, (
+        f"Second (bad) model row should be failed, got {bad_statuses}"
     )
 
     assert isinstance(result, dict)
@@ -3116,3 +3118,369 @@ def test_pipeline_rerun_with_existing_prediction_and_bursts_does_not_crash(
         f"Second pipeline run status is {job2['status']} (expected not "
         "'failed')"
     )
+
+
+def test_pipeline_step_defs_include_detect_and_per_model_classify(
+    tmp_path, monkeypatch
+):
+    """With multiple models, step_defs should contain one 'detect' row and
+    one 'classify:<model_id>' row per model. The detect row must come before
+    every classify row so users see detection progress as its own phase."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    step_ids = [s["id"] for s in runner.steps_defined]
+
+    assert "detect" in step_ids, (
+        f"Expected a standalone 'detect' step in step_defs, got {step_ids}"
+    )
+    per_model_ids = [
+        sid for sid in step_ids if sid.startswith("classify:")
+    ]
+    assert len(per_model_ids) == len(model_ids), (
+        f"Expected one 'classify:<model_id>' step per model (got "
+        f"{per_model_ids} for models {model_ids})"
+    )
+    for mid in model_ids:
+        assert f"classify:{mid}" in step_ids, (
+            f"Missing classify step for model {mid!r}: {step_ids}"
+        )
+    # Legacy single 'classify' row must not coexist with per-model rows.
+    assert "classify" not in step_ids, (
+        f"Legacy 'classify' step should be replaced by per-model rows: {step_ids}"
+    )
+
+    detect_idx = step_ids.index("detect")
+    for pid in per_model_ids:
+        assert step_ids.index(pid) > detect_idx, (
+            f"'detect' step must come before classify rows (detect={detect_idx}, "
+            f"{pid}={step_ids.index(pid)})"
+        )
+
+
+def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch):
+    """Even a single-model run uses one 'classify:<model_id>' row — labeled
+    with the model's display name — for consistency with multi-model runs."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_id="bioclip-vit-b-16",
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    step_ids = [s["id"] for s in runner.steps_defined]
+    assert "classify:bioclip-vit-b-16" in step_ids, (
+        f"Single-model run should still produce a per-model classify row, "
+        f"got {step_ids}"
+    )
+    step_by_id = {s["id"]: s for s in runner.steps_defined}
+    label = step_by_id["classify:bioclip-vit-b-16"]["label"]
+    assert "bioclip" in label.lower() or "BioCLIP" in label, (
+        f"Per-model classify row should be labeled with the model's display "
+        f"name, got {label!r}"
+    )
+
+
+def test_pipeline_detect_runs_once_before_any_classifier_loads(
+    tmp_path, monkeypatch
+):
+    """Detection should run as its own pre-pass across all photos BEFORE any
+    classifier is constructed, so users see detection as a distinct phase
+    rather than interleaved with model 1's classify loop."""
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # Create real photos so collection has something to iterate.
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir))
+    photo_ids = []
+    import json
+    for i in range(3):
+        img_path = photo_dir / f"p{i}.jpg"
+        Image.new("RGB", (64, 64), "red").save(str(img_path))
+        photo_ids.append(
+            db.add_photo(folder_id, f"p{i}.jpg", ".jpg", 1000 + i, 1_000_000.0)
+        )
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    events = []
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        events.append(("detect", [p["id"] for p in batch]))
+        return {}, 0, {p["id"] for p in batch}
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            events.append(("classifier_init", kwargs.get("pretrained_str")))
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Every detect event should come strictly before any classifier_init for a
+    # *second* model. (Model 1's classifier is allowed to load in parallel
+    # via the model_loader stage, but NO model should classify before detect
+    # has finished running on all photos.)
+    kinds = [e[0] for e in events]
+    assert kinds, "expected detect / classifier events to be recorded"
+    # At least one detect must have fired before any call into encode_image
+    # (which is the actual classification work).  We check: the LAST detect
+    # event must be before any classifier is "used" for classification; since
+    # encode_image isn't tracked here, we verify that all detect events occur
+    # before any classifier_init that corresponds to model 2+.
+    classifier_inits = [i for i, k in enumerate(kinds) if k == "classifier_init"]
+    detect_events = [i for i, k in enumerate(kinds) if k == "detect"]
+    assert detect_events, "expected detect to run"
+    last_detect = max(detect_events)
+    # All detects should happen before classify actually starts — i.e. before
+    # classifier_init for model 2 (model 1 may preload earlier).
+    if len(classifier_inits) > 1:
+        second_init = classifier_inits[1]
+        assert last_detect < second_init, (
+            f"Detection pre-pass should complete before model 2 is loaded, "
+            f"but saw event order: {kinds}"
+        )
+
+
+def test_pipeline_one_model_fails_to_load_other_model_still_runs(
+    tmp_path, monkeypatch
+):
+    """If the FIRST of two models fails to load, the second must still run
+    and its per-model classify row must complete with predictions. The failed
+    model's row must be marked 'failed' so users see exactly which model
+    broke, not a buried note inside an aggregate summary."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir))
+    import json
+    Image.new("RGB", (64, 64), "red").save(str(photo_dir / "x.jpg"))
+    photo_id = db.add_photo(folder_id, "x.jpg", ".jpg", 1000, 1_000_000.0)
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+    bad_id = model_ids[0]
+    good_id = model_ids[1]
+
+    class SelectiveClassifier:
+        def __init__(self, *args, **kwargs):
+            # Fail whenever we're asked to build the BAD model; succeed for
+            # the other one. Keyed off the pretrained path so the behavior
+            # is stable across however many construction attempts
+            # model_loader + classify_stage make.
+            pretrained = kwargs.get("pretrained_str", "")
+            if bad_id in str(pretrained):
+                raise RuntimeError("simulated bad weights for model 1")
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", SelectiveClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Model 1 row should be in failed state.
+    bad_statuses = [
+        kwargs.get("status")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{bad_id}" and "status" in kwargs
+    ]
+    assert "failed" in bad_statuses, (
+        f"Failed model's classify row should be marked 'failed', got "
+        f"status history {bad_statuses}"
+    )
+
+    # Good model row should be in completed state.
+    good_statuses = [
+        kwargs.get("status")
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id == f"classify:{good_id}" and "status" in kwargs
+    ]
+    assert "completed" in good_statuses, (
+        f"Surviving model's classify row should complete, got "
+        f"status history {good_statuses}"
+    )
+
+
+def test_pipeline_per_model_step_summary_includes_prediction_count(
+    tmp_path, monkeypatch
+):
+    """Each per-model classify row's completion summary should report
+    counts (predictions stored, detections reused, etc.) so users can see
+    which model found what without reading the aggregate."""
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir))
+    import json
+    Image.new("RGB", (64, 64), "red").save(str(photo_dir / "p.jpg"))
+    photo_id = db.add_photo(folder_id, "p.jpg", ".jpg", 1000, 1_000_000.0)
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_ids = _setup_two_fake_downloaded_models(tmp_path, monkeypatch)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=model_ids,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    for mid in model_ids:
+        completed_summaries = [
+            kwargs.get("summary", "")
+            for (_, step_id, kwargs) in runner.step_updates
+            if step_id == f"classify:{mid}"
+            and kwargs.get("status") == "completed"
+            and "summary" in kwargs
+        ]
+        assert completed_summaries, (
+            f"classify:{mid} row must record a summary on completion"
+        )
+        summary = completed_summaries[-1]
+        assert "prediction" in summary.lower(), (
+            f"per-model summary for {mid} should mention prediction counts, "
+            f"got {summary!r}"
+        )
