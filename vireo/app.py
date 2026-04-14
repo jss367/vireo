@@ -2393,7 +2393,14 @@ def create_app(db_path, thumb_cache_dir=None):
         from labels import get_saved_labels
         from models import get_models
 
-        models = [m for m in get_models() if m["downloaded"]]
+        # Only BioCLIP-style models use per-label text embeddings. timm models
+        # have a fixed class head and never need embedding precomputation, so
+        # excluding them here prevents the Settings UI from offering a
+        # "Compute" button that would fail with a missing-file error.
+        models = [
+            m for m in get_models()
+            if m["downloaded"] and m.get("model_type", "bioclip") != "timm"
+        ]
         label_sets = get_saved_labels()
 
         matrix = []
@@ -2449,6 +2456,11 @@ def create_app(db_path, thumb_cache_dir=None):
                     break
             if not model or not model["downloaded"]:
                 raise RuntimeError(f"Model {model_id} not found or not downloaded")
+            if model.get("model_type", "bioclip") == "timm":
+                raise RuntimeError(
+                    f"Model {model['name']} has a fixed class head and does "
+                    "not use per-label embeddings — nothing to precompute."
+                )
 
             runner.push_event(
                 job["id"],
@@ -3338,7 +3350,12 @@ def create_app(db_path, thumb_cache_dir=None):
             from models import get_active_model
 
             active_model = get_active_model()
-            if active_model and active_model["downloaded"]:
+            # timm models have a fixed class head — no per-label embeddings.
+            if (
+                active_model
+                and active_model["downloaded"]
+                and active_model.get("model_type", "bioclip") != "timm"
+            ):
                 try:
                     from classifier import _embedding_cache_path, _resolve_model_dir
 
