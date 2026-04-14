@@ -1153,8 +1153,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                     if emb_blob:
                                         import numpy as np
                                         embedding = np.frombuffer(emb_blob, dtype=np.float32)
+                                # _store_grouped_predictions reads
+                                # item["detection_id"] unconditionally on the
+                                # burst-grouping path (update_prediction_group_info).
+                                # Without it, a rerun with bursts crashes on the
+                                # first _existing item. pred_row carries
+                                # detection_id from get_prediction_for_photo's
+                                # predictions⋈detections join.
                                 raw_results.append({
                                     "photo": photo,
+                                    "detection_id": pred_row["detection_id"],
                                     "folder_path": folder_path,
                                     "image_path": image_path,
                                     "prediction": pred_row["species"],
@@ -1171,12 +1179,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         # highest-confidence detection for THIS photo (first
                         # entry, already ordered by confidence DESC) to
                         # _prepare_image, which expects a single detection
-                        # dict with box_x/y/w/h keys (or None for full-image
-                        # classification).  Passing the raw det_map caused
-                        # KeyError: 'box_w' the moment any photo in a batch
-                        # produced a detection, aborting classify mid-run.
+                        # dict with box_x/y/w/h keys.
                         photo_dets = det_map.get(photo["id"], [])
                         primary_det = photo_dets[0] if photo_dets else None
+                        # Pipeline classify is detection-driven. Photos without
+                        # a MegaDetector hit are skipped — no prediction is
+                        # written. Earlier versions synthesized a full-image
+                        # detection to anchor the FK, but that polluted
+                        # extract_masks_stage (full-frame boxes were treated
+                        # as real subjects and the no-detections diagnostic
+                        # stopped firing) and caused multi-model runs to
+                        # insert duplicate full-image rows per photo per model.
+                        if primary_det is None:
+                            continue
+
                         img, folder_path, image_path = _prepare_image(
                             photo, folders, primary_det
                         )
@@ -1184,8 +1200,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             failed += 1
                             continue
 
-                        img_batch = [{"photo": photo, "folder_path": folder_path,
-                                      "image_path": image_path, "img": img}]
+                        img_batch = [{
+                            "photo": photo,
+                            "detection_id": primary_det["id"],
+                            "folder_path": folder_path,
+                            "image_path": image_path,
+                            "img": img,
+                        }]
                         failed += _flush_batch(img_batch, clf, model_type, model_name,
                                                thread_db, raw_results)
 
@@ -1321,10 +1342,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # Build a map of photo_id -> primary detection (highest confidence)
             # from the detections table. Only photos with detections and without
             # masks need processing.
+            #
+            # Skip synthetic full-image detections (detector_model='full-image').
+            # Those rows exist only to give classify predictions a non-NULL FK
+            # anchor for photos where MegaDetector found no animals — they are
+            # not real subject boxes and should not drive mask extraction or
+            # count toward the photos_with_detections safeguard below (which
+            # surfaces the "weights missing / no detections" diagnostic).
             photo_det_map = {}
             photos_with_detections = 0
             for p in photos:
-                dets = thread_db.get_detections(p["id"])
+                dets = [
+                    d for d in thread_db.get_detections(p["id"])
+                    if d["detector_model"] != "full-image"
+                ]
                 if dets:
                     photos_with_detections += 1
                     primary = dets[0]  # already ordered by confidence DESC
