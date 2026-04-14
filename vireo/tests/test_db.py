@@ -1737,6 +1737,40 @@ def test_add_prediction_with_detection(tmp_path):
     assert preds[0]["confidence"] == 0.92
 
 
+def test_add_prediction_rejects_null_detection_id(tmp_path):
+    """add_prediction must reject None detection_id to prevent orphans
+    that are invisible to workspace-scoped queries."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    with pytest.raises(ValueError, match="non-null detection_id"):
+        db.add_prediction(None, species="Elk", confidence=0.9, model="bioclip")
+
+
+def test_init_purges_orphan_predictions(tmp_path):
+    """Reopening a DB must delete pre-existing predictions with NULL
+    detection_id.  They're invisible to the UI and regenerable via reclassify;
+    purging prevents stale rows from polluting the table forever."""
+    from db import Database
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    # Bypass the add_prediction guard to simulate a legacy orphan row.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, species, confidence, model, status) "
+        "VALUES (NULL, 'Elk', 0.9, 'bioclip', 'pending')"
+    )
+    db.conn.commit()
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE detection_id IS NULL"
+    ).fetchone()[0] == 1
+    db.conn.close()
+
+    db2 = Database(db_path)
+    assert db2.conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE detection_id IS NULL"
+    ).fetchone()[0] == 0
+
+
 def test_get_predictions_includes_photo_and_box(tmp_path):
     """get_predictions should include photo filename and bounding box from detection."""
     from db import Database

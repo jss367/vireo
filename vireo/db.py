@@ -625,6 +625,18 @@ class Database:
             """)
             self.conn.commit()
 
+        # Purge orphaned predictions with NULL detection_id.  These are
+        # invisible to every workspace-scoped query (which JOINs through
+        # detections) and accumulated on some installs before the
+        # add_prediction NOT-NULL guard existed.  Regenerable via reclassify.
+        orphan_cnt = self.conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE detection_id IS NULL"
+        ).fetchone()[0]
+        if orphan_cnt:
+            log.info("Purging %d orphaned predictions (NULL detection_id)", orphan_cnt)
+            self.conn.execute("DELETE FROM predictions WHERE detection_id IS NULL")
+            self.conn.commit()
+
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")
@@ -3038,6 +3050,12 @@ class Database:
             taxonomy: optional dict with keys kingdom, phylum, class, order,
                       family, genus, scientific_name from taxonomy lookup
         """
+        if detection_id is None:
+            raise ValueError(
+                "add_prediction requires a non-null detection_id; "
+                "predictions without a detection row are orphaned and "
+                "invisible to workspace-scoped queries"
+            )
         tax = taxonomy or {}
         self.conn.execute(
             """INSERT OR IGNORE INTO predictions
