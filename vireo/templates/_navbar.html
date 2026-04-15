@@ -1734,6 +1734,14 @@ async function createWorkspace() {
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lightboxCurrentId = null;
 
+var _lbZoom = 1.0;          // current zoom (1.0 = fit)
+var _lbPanX = 0;            // pan translation in CSS pixels
+var _lbPanY = 0;
+var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
+var _lbPhotoW = null;       // original photo width (px)
+var _lbPhotoH = null;       // original photo height (px)
+var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
+
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
 var _lbColorPalette = [
@@ -1795,6 +1803,27 @@ function openLightbox(photoId, filename, photoList) {
   // Clear previous detection overlays
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
+
+  // Reset continuous zoom state for new photo
+  _lbZoom = 1.0;
+  _lbPanX = 0;
+  _lbPanY = 0;
+  _lbNativeZoom = null;
+  _lbPhotoW = null;
+  _lbPhotoH = null;
+  _lbCurrentSrcKey = 'full';
+
+  // Fetch original dimensions (async, non-blocking for image display)
+  fetch('/api/photos/' + photoId)
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data || _lightboxCurrentId !== photoId) return;
+      _lbPhotoW = data.width || null;
+      _lbPhotoH = data.height || null;
+      _lbRecomputeNativeZoom();
+    })
+    .catch(function() {});
+
   img.src = '/photos/' + photoId + '/full';
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
@@ -2255,6 +2284,10 @@ function formatShortcut(str) {
   return str.split('+').map(function(p) {
     return p.charAt(0).toUpperCase() + p.slice(1);
   }).join('+');
+}
+
+function _lbRecomputeNativeZoom() {
+  // Filled in by Task 2
 }
 </script>
 
