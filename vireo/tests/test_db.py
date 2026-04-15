@@ -555,6 +555,7 @@ def test_default_collections_created(tmp_path):
 
     colls = db.get_collections()
     names = {c['name'] for c in colls}
+    assert 'All Photos' in names
     assert 'Needs Classification' in names
     assert 'Untagged' in names
     assert 'Flagged' in names
@@ -571,7 +572,7 @@ def test_default_collections_idempotent(tmp_path):
     db.create_default_collections()
 
     colls = db.get_collections()
-    assert len(colls) == 4
+    assert len(colls) == 5
 
 
 def test_default_collections_adds_missing(tmp_path):
@@ -588,10 +589,30 @@ def test_default_collections_adds_missing(tmp_path):
 
     colls = db.get_collections()
     names = {c['name'] for c in colls}
+    assert 'All Photos' in names
     assert 'Needs Classification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert len(colls) == 4  # no duplicate Flagged
+    assert len(colls) == 5  # no duplicate Flagged
+
+
+def test_all_photos_collection_returns_all_photos(tmp_path):
+    """The default 'All Photos' collection (empty rules) matches every photo in the workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+
+    db.create_default_collections()
+    all_photos = next(c for c in db.get_collections() if c['name'] == 'All Photos')
+
+    photos = db.get_collection_photos(all_photos['id'])
+    assert {p['filename'] for p in photos} == {'a.jpg', 'b.jpg', 'c.jpg'}
+    assert db.count_collection_photos(all_photos['id']) == 3
 
 
 # --- Helper to set up a workspace with photos ---

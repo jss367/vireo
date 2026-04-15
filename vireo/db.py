@@ -4059,6 +4059,7 @@ class Database:
         existing_names = {c["name"] for c in self.get_collections()}
 
         defaults = [
+            ("All Photos", []),
             (
                 "Needs Classification",
                 [{"field": "has_species", "op": "equals", "value": 0}],
