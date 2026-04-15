@@ -1437,7 +1437,6 @@ function sendReport() {
       rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
       flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
       undo: 'Undo', redo: 'Redo', select_all: 'Select all', zoom: 'Toggle zoom',
-      zoom_in: 'Zoom in', zoom_out: 'Zoom out', zoom_reset: 'Zoom to fit',
     },
   };
 
@@ -1454,7 +1453,6 @@ function sendReport() {
       rate_4: '4', rate_5: '5',
       flag: 'p', reject: 'x', unflag: 'u',
       undo: 'ctrl+z', redo: 'ctrl+shift+z', select_all: 'ctrl+a', zoom: 'z',
-      zoom_in: '+', zoom_out: '-', zoom_reset: '0',
     },
   };
 
@@ -2261,17 +2259,22 @@ document.addEventListener('keydown', function(e) {
     toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
     e.preventDefault();
   }
-  // Continuous zoom keyboard shortcuts — guarded against browser zoom (Ctrl/Cmd +/-/0).
+  // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
+  // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
+  // would also fire rate_0 and silently clear the photo's rating.
   if (!e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === '+' || e.key === '=') {
       _lbSetZoom(_lbZoom * 1.25, null, null);
       e.preventDefault();
+      e.stopImmediatePropagation();
     } else if (e.key === '-' || e.key === '_') {
       _lbSetZoom(_lbZoom * 0.8, null, null);
       e.preventDefault();
+      e.stopImmediatePropagation();
     } else if (e.key === '0') {
       _lbSetZoom(1.0, null, null);
       e.preventDefault();
+      e.stopImmediatePropagation();
     }
   }
 });
