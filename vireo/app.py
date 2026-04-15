@@ -2150,6 +2150,28 @@ def create_app(db_path, thumb_cache_dir=None):
             }
         )
 
+    @app.route("/api/pipeline/extract-readiness")
+    def api_extract_readiness():
+        """Report SAM2/DINOv2 download status for the Extract Features card."""
+        from dino_embed import DINOV2_VARIANTS, dinov2_status
+        from masking import SAM2_VARIANTS, sam2_status
+
+        db = _get_db()
+        pipeline_cfg = db.get_effective_config(cfg.load()).get("pipeline", {})
+        sam2_variant = request.args.get("sam2_variant") or pipeline_cfg.get(
+            "sam2_variant", "sam2-small"
+        )
+        dinov2_variant = request.args.get("dinov2_variant") or pipeline_cfg.get(
+            "dinov2_variant", "vit-b14"
+        )
+
+        return jsonify({
+            "sam2": sam2_status(sam2_variant),
+            "sam2_known": sam2_variant in SAM2_VARIANTS,
+            "dinov2": dinov2_status(dinov2_variant),
+            "dinov2_known": dinov2_variant in DINOV2_VARIANTS,
+        })
+
     @app.route("/api/system/install-exiftool", methods=["POST"])
     def api_install_exiftool():
         """Install exiftool via Homebrew."""

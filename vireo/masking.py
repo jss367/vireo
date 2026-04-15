@@ -52,6 +52,23 @@ def _sam2_model_dir(variant):
     )
 
 
+def sam2_status(variant):
+    """Report whether SAM2 weights for ``variant`` are already on disk.
+
+    Returns a dict with ``variant``, ``ready`` (bool), and ``size_hint`` (str).
+    Unknown variants come back as not-ready with an empty size hint so callers
+    can render a generic "not downloaded" state without raising.
+    """
+    model_dir = _sam2_model_dir(variant)
+    encoder_path = os.path.join(model_dir, "image_encoder.onnx")
+    decoder_path = os.path.join(model_dir, "mask_decoder.onnx")
+    return {
+        "variant": variant,
+        "ready": os.path.isfile(encoder_path) and os.path.isfile(decoder_path),
+        "size_hint": _SAM2_SIZE_HINT.get(variant, ""),
+    }
+
+
 def ensure_sam2_weights(variant="sam2-small", progress_callback=None):
     """Ensure SAM2 ONNX encoder + decoder weights for ``variant`` are on disk.
 

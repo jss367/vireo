@@ -827,6 +827,7 @@ body { padding-bottom: 36px; }
           </div>
         </div>
       </div>
+      <div class="readiness-panel" id="extractReadinessPanel" style="display:none;"></div>
       <span class="status-msg" id="statusExtract"></span>
       <div class="progress-wrap" id="progressExtract" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
@@ -955,6 +956,7 @@ function initPipelinePage() {
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
+      if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
 
       // Populate recent destinations
       var recents = data.recent_destinations || [];
@@ -2584,6 +2586,76 @@ function onModelConfigChange() {
       _savedModelConfig = newCfg;
     }
   }).catch(function() {});
+
+  updateExtractReadiness();
+}
+
+async function updateExtractReadiness() {
+  var panel = document.getElementById('extractReadinessPanel');
+  if (!panel) return;
+  var sam2 = document.getElementById('cfgSam2').value;
+  var dinov2 = document.getElementById('cfgDinov2').value;
+  try {
+    var r = await safeFetch(
+      '/api/pipeline/extract-readiness'
+        + '?sam2_variant=' + encodeURIComponent(sam2)
+        + '&dinov2_variant=' + encodeURIComponent(dinov2),
+      {}, { toast: false }
+    );
+    panel.textContent = '';
+    panel.appendChild(renderModelReadiness('SAM2', r.sam2, r.sam2_known));
+    panel.appendChild(document.createElement('br'));
+    panel.appendChild(renderModelReadiness('DINOv2', r.dinov2, r.dinov2_known));
+    panel.style.display = '';
+  } catch(e) {
+    panel.style.display = 'none';
+  }
+}
+
+// Build the readiness line as DOM nodes so variant strings (which
+// originate from /api/pipeline/config and may be arbitrary) can never
+// be interpreted as HTML — avoids a stored DOM-XSS sink on /pipeline.
+function renderModelReadiness(label, info, known) {
+  var frag = document.createDocumentFragment();
+  var variant = info ? info.variant : '?';
+  var icon = document.createElement('span');
+
+  if (known === false) {
+    icon.style.color = 'var(--danger,#e74c3c)';
+    icon.textContent = '\u2717';
+    frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(' ' + label + ': '));
+    var nameEl = document.createElement('b');
+    nameEl.textContent = variant;
+    frag.appendChild(nameEl);
+    frag.appendChild(document.createTextNode(
+      ' \u2014 unknown variant; pick a supported one above'));
+    return frag;
+  }
+
+  if (info && info.ready) {
+    icon.style.color = 'var(--accent,#24E5CA)';
+    icon.textContent = '\u2713';
+    frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(' ' + label + ': '));
+    var readyName = document.createElement('b');
+    readyName.textContent = variant;
+    frag.appendChild(readyName);
+    frag.appendChild(document.createTextNode(' \u2014 ready'));
+    return frag;
+  }
+
+  icon.style.color = 'var(--warning,#f0c040)';
+  icon.textContent = '\u25CF';
+  frag.appendChild(icon);
+  frag.appendChild(document.createTextNode(' ' + label + ': '));
+  var downloadName = document.createElement('b');
+  downloadName.textContent = variant;
+  frag.appendChild(downloadName);
+  var size = info && info.size_hint ? ' (' + info.size_hint + ')' : '';
+  frag.appendChild(document.createTextNode(
+    ' \u2014 will download' + size + ' on first run'));
+  return frag;
 }
 
 async function runExtractStep(collectionId) {
