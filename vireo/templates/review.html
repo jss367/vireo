@@ -864,7 +864,11 @@ function renderGrid() {
 document.getElementById('grid').addEventListener('click', function(e) {
   var img = e.target.closest('img[data-photo-id]');
   if (img) {
-    openLightbox(parseInt(img.dataset.photoId, 10), img.dataset.filename || '');
+    var photoList = Array.prototype.map.call(
+      document.getElementById('grid').querySelectorAll('img[data-photo-id]'),
+      function(el) { return { id: parseInt(el.dataset.photoId, 10), filename: el.dataset.filename || '' }; }
+    );
+    openLightbox(parseInt(img.dataset.photoId, 10), img.dataset.filename || '', photoList);
     return;
   }
   var groupBtn = e.target.closest('button[data-group-id]');
