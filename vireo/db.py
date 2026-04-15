@@ -3196,8 +3196,13 @@ class Database:
             self.conn.commit()
 
     def get_group_predictions(self, group_id):
-        """Get all predictions and photo data for a burst group."""
-        return self.conn.execute(
+        """Get all predictions and photo data for a burst group.
+
+        Each returned row is a dict with an ``alternatives`` list containing
+        the per-detection alternative species predictions (status='alternative'),
+        sorted by confidence descending.
+        """
+        primaries = self.conn.execute(
             """SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence, p.filename, p.timestamp, p.sharpness,
                       p.quality_score, p.subject_sharpness, p.subject_size,
@@ -3209,6 +3214,41 @@ class Database:
                ORDER BY p.quality_score DESC""",
             (group_id, self._ws_id()),
         ).fetchall()
+        rows = [dict(r) for r in primaries]
+        if not rows:
+            return rows
+        # Alternatives are correlated by (detection_id, model): a detection may
+        # have been classified by multiple models (and those may even share a
+        # group), so we must not merge alternatives across models.
+        #
+        # Fetch all alternatives for the distinct detection_ids in one IN(...)
+        # query, then filter by model in Python. This keeps the SQL expression
+        # depth bounded even for very large burst groups (SQLite's default
+        # expression-depth limit breaks with one OR branch per row).
+        det_model_pairs = {
+            (r['detection_id'], r.get('model'))
+            for r in rows if r.get('detection_id') is not None
+        }
+        alts_by_key = {pair: [] for pair in det_model_pairs}
+        det_ids = list({did for did, _ in det_model_pairs})
+        if det_ids:
+            placeholders = ','.join('?' * len(det_ids))
+            alt_rows = self.conn.execute(
+                f"""SELECT detection_id, model, species, confidence
+                    FROM predictions
+                    WHERE status = 'alternative' AND detection_id IN ({placeholders})
+                    ORDER BY confidence DESC""",
+                det_ids,
+            ).fetchall()
+            for a in alt_rows:
+                key = (a['detection_id'], a['model'])
+                if key in alts_by_key:
+                    alts_by_key[key].append(
+                        {'species': a['species'], 'confidence': a['confidence']}
+                    )
+        for r in rows:
+            r['alternatives'] = alts_by_key.get((r.get('detection_id'), r.get('model')), [])
+        return rows
 
     def update_predictions_status_by_photo(self, photo_id, status):
         """Update status for all predictions of a photo in the active workspace."""
