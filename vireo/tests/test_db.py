@@ -822,6 +822,23 @@ def test_get_group_predictions_alternatives_filtered_by_model(tmp_path):
     assert alts == ['Sparrow']
 
 
+def test_get_group_predictions_alternatives_keyed_by_detection_and_model(tmp_path):
+    """If the same detection has primaries from multiple models in one group,
+    each primary gets only its own model's alternatives."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
+    det = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
+    db.add_prediction(det[0], species='Sparrow', confidence=0.4, model='modelA', status='alternative')
+    db.add_prediction(det[0], species='Eagle', confidence=0.90, model='modelB', group_id='g1')
+    db.add_prediction(det[0], species='Hawk', confidence=0.3, model='modelB', status='alternative')
+
+    results = [dict(r) for r in db.get_group_predictions('g1')]
+    by_model = {r['model']: [a['species'] for a in r['alternatives']] for r in results}
+    assert by_model == {'modelA': ['Sparrow'], 'modelB': ['Hawk']}
+
+
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
