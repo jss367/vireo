@@ -428,6 +428,29 @@ def test_preview_sized_caches_per_size(app_and_db):
     assert size_2560 > size_1920
 
 
+def test_preview_returns_404_for_deleted_photo_even_with_stale_cache(app_and_db):
+    """Defense against SQLite id reuse: don't serve a cached image for a row
+    that no longer exists.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Delete the photo (cascades FK-dependent rows) then simulate a leftover
+    # cache file, e.g. crash-after-commit-before-cleanup.
+    db.delete_photos([pid])
+    stale = os.path.join(preview_dir, f"{pid}_1920.jpg")
+    Image.new("RGB", (10, 10)).save(stale, "JPEG")
+
+    resp = client.get(f"/photos/{pid}/preview?size=1920")
+    assert resp.status_code == 404
+
+
 def test_preview_rejects_unsupported_size(app_and_db):
     """Preview endpoint rejects sizes outside the allowlist to prevent cache-bombing."""
     app, db = app_and_db

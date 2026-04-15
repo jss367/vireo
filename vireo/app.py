@@ -1067,7 +1067,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews, working copies)
+        # Clean up cached files (thumbnails, previews, working copies).
+        # The preview dir also holds per-size variants named <id>_<size>.jpg,
+        # which must be removed so SQLite id reuse can't surface stale images.
+        import glob as _glob
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -1078,6 +1081,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 cached = os.path.join(d, f"{pid}.jpg")
                 if os.path.isfile(cached):
                     os.remove(cached)
+            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+                try:
+                    os.remove(variant)
+                except OSError:
+                    pass
 
         trashed = 0
         trash_failed = []
@@ -6820,6 +6828,14 @@ def create_app(db_path, thumb_cache_dir=None):
         if size not in PREVIEW_SIZE_ALLOWLIST:
             return "Unsupported size", 400
 
+        # Confirm the photo still exists before any cache return so that a
+        # deleted photo can't be served from a stale per-size cache (and so
+        # SQLite id reuse can't surface the wrong image).
+        db = _get_db()
+        photo = db.get_photo(photo_id)
+        if not photo:
+            return "Not found", 404
+
         preview_dir = os.path.join(
             os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
         )
@@ -6829,11 +6845,6 @@ def create_app(db_path, thumb_cache_dir=None):
             return send_file(cache_path, mimetype="image/jpeg")
 
         from image_loader import load_image
-
-        db = _get_db()
-        photo = db.get_photo(photo_id)
-        if not photo:
-            return "Not found", 404
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         image_path = None
