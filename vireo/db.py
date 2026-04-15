@@ -2215,19 +2215,33 @@ class Database:
 
         where = "WHERE " + " AND ".join(conditions)
 
+        # When filtering by species, surface that species in the row so the map
+        # popup/legend match the active filter. Otherwise fall back to the
+        # most-recently-tagged species keyword (highest rowid), which reflects
+        # the user's latest confirmed identification when multiple tags exist.
+        if species is not None:
+            species_col_sql = "? AS species"
+            species_col_params = [species]
+        else:
+            species_col_sql = (
+                "(SELECT k2.name FROM photo_keywords pk2 "
+                "JOIN keywords k2 ON k2.id = pk2.keyword_id "
+                "WHERE pk2.photo_id = p.id AND k2.is_species = 1 "
+                "ORDER BY pk2.rowid DESC LIMIT 1) AS species"
+            )
+            species_col_params = []
+
         query = f"""
             SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
                    p.timestamp, p.rating, p.folder_id,
-                   (SELECT MIN(k2.name) FROM photo_keywords pk2
-                    JOIN keywords k2 ON k2.id = pk2.keyword_id
-                    WHERE pk2.photo_id = p.id AND k2.is_species = 1) AS species
+                   {species_col_sql}
             FROM photos p
             {join_clause}
             {where}
             GROUP BY p.id
             ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
-        return self.conn.execute(query, params).fetchall()
+        return self.conn.execute(query, species_col_params + params).fetchall()
 
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
@@ -2943,11 +2957,16 @@ class Database:
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                LEFT JOIN (
-                   SELECT pk.photo_id, MIN(k.name) AS species
-                   FROM photo_keywords pk
-                   JOIN keywords k ON k.id = pk.keyword_id
-                   WHERE k.is_species = 1
-                   GROUP BY pk.photo_id
+                   SELECT photo_id, name AS species FROM (
+                       SELECT pk.photo_id, k.name,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY pk.photo_id
+                                  ORDER BY pk.rowid DESC
+                              ) AS rn
+                       FROM photo_keywords pk
+                       JOIN keywords k ON k.id = pk.keyword_id
+                       WHERE k.is_species = 1
+                   ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
                WHERE p.folder_id = ?
                  AND wf.workspace_id = ?

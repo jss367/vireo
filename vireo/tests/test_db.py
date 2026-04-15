@@ -1089,9 +1089,14 @@ def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
     for pr in db.get_predictions(photo_ids=[p1]):
         db.accept_prediction(pr['id'])
 
-    # Photo is tagged with both; either filter value must return it.
-    assert len(db.get_geolocated_photos(species='Red-tailed Hawk')) == 1
-    assert len(db.get_geolocated_photos(species='Sparrow')) == 1
+    # Photo is tagged with both; either filter value must return it,
+    # and the species label in the returned row must match the filter.
+    rows = db.get_geolocated_photos(species='Red-tailed Hawk')
+    assert len(rows) == 1
+    assert rows[0]['species'] == 'Red-tailed Hawk'
+    rows = db.get_geolocated_photos(species='Sparrow')
+    assert len(rows) == 1
+    assert rows[0]['species'] == 'Sparrow'
     assert db.get_geolocated_photos(species='Cardinal') == []
 
 
