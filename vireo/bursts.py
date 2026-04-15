@@ -21,10 +21,27 @@ DEFAULTS = {
 }
 
 
+_warned_dim_mismatch = False
+
+
 def _cosine_sim(a, b):
     """Cosine similarity between two vectors, clamped to [0, 1]."""
     if a is None or b is None:
         return 1.0  # no embedding → don't cut on this criterion
+    if a.shape != b.shape:
+        # Stale DINOv2 embeddings from a previous variant can reach here on
+        # datasets that straddle a variant switch. Treat as "no embedding
+        # signal" — same as the None branch — so the burst-cut decision
+        # falls back to time + phash instead of raising.
+        global _warned_dim_mismatch
+        if not _warned_dim_mismatch:
+            log.warning(
+                "Embedding dim mismatch in burst detection (%s vs %s) — "
+                "stale DINOv2 embeddings present; re-embed affected photos",
+                a.shape, b.shape,
+            )
+            _warned_dim_mismatch = True
+        return 1.0
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
     if norm_a == 0 or norm_b == 0:

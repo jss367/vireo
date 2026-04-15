@@ -141,6 +141,24 @@ def test_burst_no_cut_similar_embedding():
     assert len(bursts) == 1
 
 
+def test_burst_mismatched_embedding_dims_does_not_crash():
+    """Adjacent photos with stale-variant embeddings at different dims must
+    not raise 'shapes not aligned' — treat as 'no embedding signal' so the
+    cut decision falls back to time + phash."""
+    from bursts import detect_bursts
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    photos = [
+        _make_photo(0.0, subj_emb=emb_768),
+        _make_photo(0.5, subj_emb=emb_1024),
+        _make_photo(1.0, subj_emb=emb_768),
+    ]
+    bursts = detect_bursts(photos)
+    assert isinstance(bursts, list)
+    assert sum(len(b) for b in bursts) == 3
+
+
 def test_burst_no_cut_missing_embedding():
     """Missing embeddings should not trigger a cut on that criterion."""
     from bursts import detect_bursts
