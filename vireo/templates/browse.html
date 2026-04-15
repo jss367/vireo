@@ -1337,17 +1337,10 @@ async function filterByCollection(id) {
   activeCollectionId = id;
   photos = [];
   currentPage = 1;
-  allLoaded = true;  // collections handle their own pagination
+  allLoaded = false;
   document.getElementById('grid').innerHTML = '';
   closeDetail();
-
-  try {
-    var data = await safeFetch('/api/collections/' + id + '/photos?per_page=200', {}, { toast: false });
-    photos = data.photos;
-    totalPhotos = photos.length;
-    renderGrid();
-    updateFilterSummary();
-  } catch(e) {}
+  await loadPhotos();
 }
 
 /* ---------- Collection Modal ---------- */
@@ -1468,28 +1461,37 @@ async function loadPhotos() {
   loading = true;
   document.getElementById('loadingState').style.display = 'block';
 
-  var params = new URLSearchParams();
-  params.set('page', currentPage);
-  params.set('per_page', perPage);
-  params.set('sort', document.getElementById('sortSelect').value);
+  var url;
+  if (activeCollectionId) {
+    var cparams = new URLSearchParams();
+    cparams.set('page', currentPage);
+    cparams.set('per_page', perPage);
+    url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
+  } else {
+    var params = new URLSearchParams();
+    params.set('page', currentPage);
+    params.set('per_page', perPage);
+    params.set('sort', document.getElementById('sortSelect').value);
 
-  if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
+    if (activeFolderId) params.set('folder_id', activeFolderId);
+    if (filterRating > 0) params.set('rating_min', filterRating);
 
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
+    var colorFilter = document.getElementById('colorFilter').value;
+    if (colorFilter) params.set('color_label', colorFilter);
 
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
+    var dateFrom = document.getElementById('dateFrom').value;
+    var dateTo = document.getElementById('dateTo').value;
+    if (dateFrom) params.set('date_from', dateFrom);
+    if (dateTo) params.set('date_to', dateTo);
 
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+    var search = document.getElementById('searchInput').value.trim();
+    if (search) params.set('keyword', search);
+    if (activeKeyword) params.set('keyword', activeKeyword);
+    url = '/api/photos?' + params.toString();
+  }
 
   try {
-    var data = await safeFetch('/api/photos?' + params.toString());
+    var data = await safeFetch(url);
     totalPhotos = data.total;
 
     if (data.photos.length === 0) {
