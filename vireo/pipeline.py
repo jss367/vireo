@@ -28,9 +28,34 @@ _PIPELINE_PHOTO_COLS = """
     p.subject_clip_high, p.subject_clip_low, p.subject_y_median,
     p.phash_crop,
     p.dino_subject_embedding, p.dino_global_embedding,
+    p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
     p.flag, p.rating
 """
+
+
+def _embedding_usable(stored_variant, expected_variant, emb_bytes):
+    """Decide whether a stored embedding blob can be used under expected_variant.
+
+    - No configured variant → accept whatever is stored (back-compat for tests).
+    - stored_variant matches expected → accept.
+    - stored_variant is NULL (pre-migration) → accept only when the blob's
+      byte-length matches the expected variant's dim × 4 (float32).
+    - Otherwise drop. Feeding mismatched-dim vectors to cosine sim raises
+      "shapes not aligned" in encounters.sim_embedding.
+    """
+    if expected_variant is None:
+        return True
+    if stored_variant == expected_variant:
+        return True
+    if stored_variant is None:
+        try:
+            from dino_embed import get_embedding_dim
+            expected_dim = get_embedding_dim(expected_variant)
+        except Exception:
+            return False
+        return emb_bytes is not None and (len(emb_bytes) // 4) == expected_dim
+    return False
 
 
 def _resolve_collection_photo_ids(db, collection_id):
@@ -154,18 +179,30 @@ def load_photo_features(db, collection_id=None, config=None):
     for row in species_kw_rows:
         confirmed_by_photo.setdefault(row["photo_id"], row["name"])
 
+    # Only accept embeddings written with the currently configured DINOv2
+    # variant. Without this check, switching variants leaves stale embeddings
+    # of the old dim in place and the regroup stage crashes with
+    # "shapes (1024,) and (768,) not aligned" in encounters.sim_embedding.
+    expected_variant = (config or {}).get("pipeline", {}).get("dinov2_variant")
+    variant_mismatches = 0
+
     photos = []
     for row in rows:
         pid = row["id"]
 
-        # Decode embeddings from BLOBs
-        subj_emb = None
-        if row["dino_subject_embedding"]:
-            subj_emb = np.frombuffer(row["dino_subject_embedding"], dtype=np.float32)
+        stored_variant = row["dino_embedding_variant"]
 
+        subj_bytes = row["dino_subject_embedding"]
+        subj_emb = None
+        if subj_bytes and _embedding_usable(stored_variant, expected_variant, subj_bytes):
+            subj_emb = np.frombuffer(subj_bytes, dtype=np.float32)
+        elif subj_bytes:
+            variant_mismatches += 1
+
+        glob_bytes = row["dino_global_embedding"]
         global_emb = None
-        if row["dino_global_embedding"]:
-            global_emb = np.frombuffer(row["dino_global_embedding"], dtype=np.float32)
+        if glob_bytes and _embedding_usable(stored_variant, expected_variant, glob_bytes):
+            global_emb = np.frombuffer(glob_bytes, dtype=np.float32)
 
         det = primary_det_by_photo.get(pid)
         det_box = None
@@ -208,6 +245,14 @@ def load_photo_features(db, collection_id=None, config=None):
         })
 
     log.info("Loaded %d photos with pipeline features", len(photos))
+    if variant_mismatches:
+        log.warning(
+            "Dropped %d stale subject embeddings that don't match configured "
+            "DINOv2 variant %s; those photos will need re-embedding for "
+            "grouping to use their embeddings",
+            variant_mismatches,
+            expected_variant,
+        )
     return photos
 
 

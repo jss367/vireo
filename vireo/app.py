@@ -5703,6 +5703,7 @@ def create_app(db_path, thumb_cache_dir=None):
                         photo_id,
                         dino_subject_embedding=subj_emb_blob,
                         dino_global_embedding=global_emb_blob,
+                        variant=dinov2_variant,
                     )
                     masked += 1
 
