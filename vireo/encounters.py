@@ -308,11 +308,22 @@ def cut_microsegments(photos, config=None):
 
 
 def _segment_mean_embedding(segment, key):
-    """Compute mean embedding for a segment."""
+    """Compute mean embedding for a segment.
+
+    When a segment straddles a DINOv2 variant switch (stale rows left behind
+    at a different dim), np.mean over a ragged list raises. Take the mean
+    over the majority shape only — matches the dominant variant in the
+    segment and ignores the minority outliers for merge scoring.
+    """
     embeddings = [p[key] for p in segment if p.get(key) is not None]
     if not embeddings:
         return None
-    return np.mean(embeddings, axis=0)
+    shape_counts = defaultdict(int)
+    for e in embeddings:
+        shape_counts[e.shape] += 1
+    majority_shape = max(shape_counts, key=shape_counts.get)
+    matching = [e for e in embeddings if e.shape == majority_shape]
+    return np.mean(matching, axis=0)
 
 
 def _segment_mean_species(segment):
