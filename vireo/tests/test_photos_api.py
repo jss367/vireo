@@ -216,8 +216,7 @@ def test_api_photos_geo_species_filter(app_and_db):
     db.add_prediction(det3[0], 'Sparrow', 0.8, 'bioclip')
     preds = db.get_predictions(photo_ids=[1, 3])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     client = app.test_client()
     resp = client.get('/api/photos/geo?species=Cardinal')
@@ -233,8 +232,7 @@ def test_api_species_list(app_and_db):
     det_ids = db.save_detections(1, [{"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}], detector_model="MDV6")
     db.add_prediction(det_ids[0], 'Cardinal', 0.9, 'bioclip')
     preds = db.get_predictions(photo_ids=[1])
-    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
-    db.conn.commit()
+    db.accept_prediction(preds[0]['id'])
 
     client = app.test_client()
     resp = client.get('/api/species')
