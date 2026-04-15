@@ -3205,26 +3205,32 @@ class Database:
         # Alternatives are correlated by (detection_id, model): a detection may
         # have been classified by multiple models (and those may even share a
         # group), so we must not merge alternatives across models.
-        det_model_pairs = [
+        #
+        # Fetch all alternatives for the distinct detection_ids in one IN(...)
+        # query, then filter by model in Python. This keeps the SQL expression
+        # depth bounded even for very large burst groups (SQLite's default
+        # expression-depth limit breaks with one OR branch per row).
+        det_model_pairs = {
             (r['detection_id'], r.get('model'))
             for r in rows if r.get('detection_id') is not None
-        ]
+        }
         alts_by_key = {pair: [] for pair in det_model_pairs}
-        if det_model_pairs:
-            clauses = ' OR '.join(['(detection_id = ? AND model = ?)'] * len(det_model_pairs))
-            params = [v for pair in det_model_pairs for v in pair]
+        det_ids = list({did for did, _ in det_model_pairs})
+        if det_ids:
+            placeholders = ','.join('?' * len(det_ids))
             alt_rows = self.conn.execute(
                 f"""SELECT detection_id, model, species, confidence
                     FROM predictions
-                    WHERE status = 'alternative' AND ({clauses})
+                    WHERE status = 'alternative' AND detection_id IN ({placeholders})
                     ORDER BY confidence DESC""",
-                params,
+                det_ids,
             ).fetchall()
             for a in alt_rows:
                 key = (a['detection_id'], a['model'])
-                alts_by_key.setdefault(key, []).append(
-                    {'species': a['species'], 'confidence': a['confidence']}
-                )
+                if key in alts_by_key:
+                    alts_by_key[key].append(
+                        {'species': a['species'], 'confidence': a['confidence']}
+                    )
         for r in rows:
             r['alternatives'] = alts_by_key.get((r.get('detection_id'), r.get('model')), [])
         return rows

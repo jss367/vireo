@@ -822,6 +822,22 @@ def test_get_group_predictions_alternatives_filtered_by_model(tmp_path):
     assert alts == ['Sparrow']
 
 
+def test_get_group_predictions_handles_large_group(tmp_path):
+    """Very large burst groups must not blow up SQLite's expression depth."""
+    size = 1005
+    photos = [{'quality_score': 0.5} for _ in range(size)]
+    db, pids = _make_workspace_with_photos(tmp_path, photos)
+    for pid in pids:
+        det = db.save_detections(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+        ], detector_model="MDV6")
+        db.add_prediction(det[0], species='Robin', confidence=0.9, model='test', group_id='g1')
+
+    results = db.get_group_predictions('g1')
+    assert len(results) == size
+    assert all(dict(r)['alternatives'] == [] for r in results)
+
+
 def test_get_group_predictions_alternatives_keyed_by_detection_and_model(tmp_path):
     """If the same detection has primaries from multiple models in one group,
     each primary gets only its own model's alternatives."""
