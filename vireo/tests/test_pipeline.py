@@ -463,3 +463,90 @@ def test_serialize_results_has_burst_species_predictions(tmp_path):
             assert "photo_ids" in burst
             assert "species_predictions" in burst
             assert "species_override" in burst
+
+
+# -- DINOv2 variant filtering --
+
+
+def _add_photo_with_embedding(db, fid, filename, emb, variant=None, ts=None):
+    """Helper: insert a photo and attach a subject+global embedding."""
+    from dino_embed import embedding_to_blob
+    pid = db.add_photo(
+        fid, filename, ".jpg", 1000, 1.0,
+        timestamp=(ts or datetime(2026, 3, 20, 10, 0, 0)).isoformat(),
+        width=4000, height=3000,
+    )
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=embedding_to_blob(emb),
+        dino_global_embedding=embedding_to_blob(emb),
+        variant=variant,
+    )
+    return pid
+
+
+def test_load_photo_features_filters_variant_mismatch(tmp_path):
+    """load_photo_features drops embeddings whose stored variant differs from configured variant."""
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # Photo A: stored as vit-b14 (768-dim)
+    emb_b = np.ones(768, dtype=np.float32) / np.sqrt(768)
+    pid_b = _add_photo_with_embedding(db, fid, "b.jpg", emb_b, variant="vit-b14")
+
+    # Photo L: stored as vit-l14 (1024-dim)
+    emb_l = np.ones(1024, dtype=np.float32) / np.sqrt(1024)
+    pid_l = _add_photo_with_embedding(db, fid, "l.jpg", emb_l, variant="vit-l14")
+
+    # Configure pipeline to use vit-b14
+    cfg = {"pipeline": {"dinov2_variant": "vit-b14"}}
+    photos = load_photo_features(db, config=cfg)
+    by_id = {p["id"]: p for p in photos}
+
+    assert by_id[pid_b]["dino_subject_embedding"] is not None
+    assert len(by_id[pid_b]["dino_subject_embedding"]) == 768
+    # Mismatched variant must be dropped so it can't feed a dot product of wrong dim
+    assert by_id[pid_l]["dino_subject_embedding"] is None
+    assert by_id[pid_l]["dino_global_embedding"] is None
+
+
+def test_load_photo_features_legacy_null_variant_dim_fallback(tmp_path):
+    """Photos with NULL variant (pre-migration) are kept only if embedding dim matches."""
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    # Legacy 768-dim embedding, NULL variant
+    emb_768 = np.ones(768, dtype=np.float32) / np.sqrt(768)
+    pid_match = _add_photo_with_embedding(db, fid, "m.jpg", emb_768, variant=None)
+    # Legacy 1024-dim embedding, NULL variant
+    emb_1024 = np.ones(1024, dtype=np.float32) / np.sqrt(1024)
+    pid_mismatch = _add_photo_with_embedding(db, fid, "x.jpg", emb_1024, variant=None)
+
+    cfg = {"pipeline": {"dinov2_variant": "vit-b14"}}
+    photos = load_photo_features(db, config=cfg)
+    by_id = {p["id"]: p for p in photos}
+
+    assert by_id[pid_match]["dino_subject_embedding"] is not None
+    assert by_id[pid_mismatch]["dino_subject_embedding"] is None
+
+
+def test_load_photo_features_no_variant_configured_keeps_embeddings(tmp_path):
+    """If config doesn't specify a variant, behavior is unchanged (backward compat for tests)."""
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    emb = np.ones(768, dtype=np.float32) / np.sqrt(768)
+    pid = _add_photo_with_embedding(db, fid, "a.jpg", emb, variant=None)
+
+    photos = load_photo_features(db)  # no config
+    assert len(photos) == 1
+    assert photos[0]["dino_subject_embedding"] is not None
