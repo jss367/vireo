@@ -2020,6 +2020,11 @@ var _stageToProgress = {
   scan: 'Scan',
   thumbnails: 'Previews',
   previews: 'Previews',
+  // Detect runs as a distinct backend stage, but the UI has no separate
+  // card for it — route detect progress through the Classify card so the
+  // detect pre-pass doesn't look stalled (it can be the longest phase of
+  // a run on large collections).
+  detect: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
   regroup: 'Group',

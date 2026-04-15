@@ -197,20 +197,32 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         step_defs.append({"id": "model_loader", "label": "Load models"})
         step_defs.append({"id": "detect", "label": "Detect subjects"})
         # One row per model — label = model display name, id = classify:<mid>.
-        if resolved_specs:
+        # When resolution partially failed (e.g. 3 ids requested, 2nd not
+        # downloaded), resolved_specs is a non-empty prefix of the requested
+        # list. Emitting rows from resolved_specs alone would hide the later
+        # failed ids — their "failed" update_step calls would then no-op
+        # silently. Drive row creation off effective_model_ids whenever
+        # resolution reported an error, so every requested model has a visible
+        # step the model_loader stage can mark 'failed'.
+        if resolved_specs and not resolution_error:
             for spec in resolved_specs:
                 step_defs.append({
                     "id": f"classify:{spec['id']}",
                     "label": f"Classify with {spec['name']}",
                 })
         elif effective_model_ids:
-            # Resolution failed but we know which ids the user requested; emit
-            # placeholder rows so each failed model has a visible step the
-            # model_loader stage can mark 'failed'.
+            # Partial or total resolution failure: use display names from any
+            # resolved specs we did get, fall back to the raw id otherwise.
+            by_id = {s["id"]: s for s in resolved_specs}
             for mid in effective_model_ids:
+                spec = by_id.get(mid)
+                label = (
+                    f"Classify with {spec['name']}" if spec
+                    else f"Classify with {mid}"
+                )
                 step_defs.append({
                     "id": f"classify:{mid}",
-                    "label": f"Classify with {mid}",
+                    "label": label,
                 })
         else:
             # No ids, no resolved spec (active-model resolution failed).
@@ -1247,6 +1259,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         "current": 0, "total": total,
                         "stages": {k: dict(v) for k, v in stages.items()},
                     })
+                    # Drop the prior model's per-photo payload BEFORE loading
+                    # the next bundle so we don't hold old results + new model
+                    # weights concurrently. Without this, multi-model runs on
+                    # large collections can hit transient OOMs.
+                    with contextlib.suppress(NameError, UnboundLocalError):
+                        raw_results.clear()  # noqa: F821 — bound in prior iter
                     for k in ("clf", "model_type", "model_name", "model_str",
                               "labels", "use_tol", "active_model"):
                         loaded_models.pop(k, None)

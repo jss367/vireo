@@ -3226,6 +3226,61 @@ def test_pipeline_step_defs_include_detect_and_per_model_classify(
         )
 
 
+def test_pipeline_step_defs_cover_every_requested_id_on_partial_resolution(
+    tmp_path, monkeypatch
+):
+    """When only a prefix of requested model ids resolves (e.g. a later id
+    isn't downloaded), step_defs must still emit one 'classify:<mid>' row per
+    REQUESTED id. Driving row creation off a partial resolved_specs hides the
+    later failed ids — their later 'failed' update_step calls then no-op
+    silently and the user can't see which model broke.
+
+    Regression test for Codex P2 on PR #566 (step_defs at line 203).
+    """
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    # Install the first model as downloaded; second is requested but not
+    # downloaded, so resolution raises partway through.
+    import models
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
+    _write_fake_model_files(tmp_path / "models" / "bioclip-vit-b-16")
+    # "bioclip-2" deliberately NOT installed.
+    models.set_active_model("bioclip-vit-b-16")
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=["bioclip-vit-b-16", "bioclip-2"],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # Resolution failure propagates as a model_loader stage failure, so the
+    # pipeline raises. We only care about what was registered in step_defs.
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    step_ids = [s["id"] for s in runner.steps_defined]
+    assert "classify:bioclip-vit-b-16" in step_ids, (
+        f"Resolved id should have its own row, got {step_ids}"
+    )
+    assert "classify:bioclip-2" in step_ids, (
+        f"Unresolved-but-requested id must still have a row so its failure "
+        f"is visible to the user, got {step_ids}"
+    )
+
+
 def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch):
     """Even a single-model run uses one 'classify:<model_id>' row — labeled
     with the model's display name — for consistency with multi-model runs."""
