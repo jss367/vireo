@@ -1949,6 +1949,7 @@ function toggleLightboxZoom(e) {
     }
     _lbPanX = panStartX + dx;
     _lbPanY = panStartY + dy;
+    _lbClampPan();
     _lbApplyTransform();
   });
 
@@ -2390,9 +2391,54 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
     _lbPanY = 0;
   }
 
+  _lbClampPan();
   wrap.classList.toggle('zoomed', _lbZoom > 1.001);
   _lbApplyTransform();
   _lbScheduleSourceSwap();
+}
+
+function _lbClampPan() {
+  var wrap = document.getElementById('lightboxWrap');
+  var t = document.getElementById('lightboxTransform');
+  if (!wrap || !t) return;
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var wrapW = wrap.clientWidth;
+  var wrapH = wrap.clientHeight;
+  // Pre-transform size of the transform container equals img.clientWidth/Height,
+  // because #lightboxDetections is absolutely positioned.
+  var baseW = img.clientWidth;
+  var baseH = img.clientHeight;
+  if (!baseW || !baseH) return;
+  // Effective rendered size after scale
+  var scaledW = baseW * _lbZoom;
+  var scaledH = baseH * _lbZoom;
+  // The transform element's pre-transform top-left is determined by flex centering.
+  // Flex-centered top-left = ((wrapW - baseW) / 2, (wrapH - baseH) / 2)
+  var baseLeft = (wrapW - baseW) / 2;
+  var baseTop = (wrapH - baseH) / 2;
+  // After applying transform, the rendered top-left is baseLeft + _lbPanX,
+  // and the rendered bottom-right is baseLeft + _lbPanX + scaledW.
+  // Clamp so at least minVisible px of image stays inside the wrap, per axis.
+  var minVisible = 80;
+  // X: rendered right >= minVisible; rendered left <= wrapW - minVisible
+  //   panX >= minVisible - baseLeft - scaledW
+  //   panX <= wrapW - minVisible - baseLeft
+  var minPanX = minVisible - baseLeft - scaledW;
+  var maxPanX = wrapW - minVisible - baseLeft;
+  if (scaledW <= wrapW) {
+    // Image fits horizontally; center it
+    _lbPanX = 0;
+  } else {
+    _lbPanX = Math.max(minPanX, Math.min(maxPanX, _lbPanX));
+  }
+  var minPanY = minVisible - baseTop - scaledH;
+  var maxPanY = wrapH - minVisible - baseTop;
+  if (scaledH <= wrapH) {
+    _lbPanY = 0;
+  } else {
+    _lbPanY = Math.max(minPanY, Math.min(maxPanY, _lbPanY));
+  }
 }
 
 var _lbSwapTimer = null;
