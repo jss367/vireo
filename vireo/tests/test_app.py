@@ -182,6 +182,166 @@ def test_encounter_species_updates_pipeline_cache(app_and_db):
     assert enc["confirmed_species"] == "Blue Jay"
 
 
+def _seed_encounter_cache(app, db, photo_ids, *, confirmed_species=None, bursts=None):
+    """Write a pipeline cache with one encounter for the given photos."""
+    import json as _json
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    enc = {
+        "species": ["Sparrow", 0.8],
+        "confirmed_species": confirmed_species,
+        "species_predictions": [],
+        "species_confirmed": confirmed_species is not None,
+        "photo_count": len(photo_ids),
+        "burst_count": len(bursts) if bursts else 0,
+        "time_range": [None, None],
+        "photo_ids": photo_ids,
+    }
+    if bursts is not None:
+        enc["bursts"] = bursts
+    results = {
+        "encounters": [enc],
+        "photos": [{"id": pid, "label": "KEEP", "filename": f"{pid}.jpg"} for pid in photo_ids],
+        "summary": {"total_photos": len(photo_ids), "encounter_count": 1,
+                    "burst_count": enc["burst_count"],
+                    "keep_count": len(photo_ids), "review_count": 0,
+                    "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+    return path
+
+
+def test_encounter_species_change_cancels_pending_add(app_and_db):
+    """Changing the confirmed species before sync cancels the stale add."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+
+    # First confirm as Sparrow
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Sparrow", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    # Still pending (not synced yet) — change to Blue Jay
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["previous_species"] == "Sparrow"
+
+    # Photos should now have Blue Jay but not Sparrow
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" in names
+        assert "Sparrow" not in names
+
+    # Pending changes should contain keyword_add:Blue Jay only.
+    # The Sparrow add had not synced, so it should be cancelled, not followed
+    # by a keyword_remove (otherwise the sidecar would see a remove for a
+    # keyword that was never written).
+    changes = [dict(c) for c in db.get_pending_changes()]
+    values_by_type = {(c["change_type"], c["value"]) for c in changes}
+    assert ("keyword_add", "Blue Jay") in values_by_type
+    assert ("keyword_add", "Sparrow") not in values_by_type
+    assert ("keyword_remove", "Sparrow") not in values_by_type
+
+
+def test_encounter_species_change_queues_remove_after_sync(app_and_db):
+    """If the previous species was already synced, changing it queues a remove."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+
+    # Confirm as Sparrow, then simulate a completed sync by clearing pending.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Sparrow", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Change to Blue Jay
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    # Photos have Blue Jay, not Sparrow
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" in names
+        assert "Sparrow" not in names
+
+    # Now a keyword_remove:Sparrow must be queued so the XMP drops the
+    # already-written Sparrow tag.
+    values_by_type = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_remove", "Sparrow") in values_by_type
+    assert ("keyword_add", "Blue Jay") in values_by_type
+
+
+def test_burst_override_change_untags_previous(app_and_db):
+    """Changing a burst override removes the previously overridden species."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    burst_ids = photo_ids[:1]
+
+    bursts = [{
+        "photo_ids": burst_ids,
+        "species_predictions": [],
+        "species_override": None,
+    }]
+    _seed_encounter_cache(app, db, photo_ids, bursts=bursts)
+
+    # Override burst 0 to Sparrow
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Sparrow", "photo_ids": burst_ids,
+                             "burst_index": 0})
+    assert resp.status_code == 200
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Now change the burst override to Junco
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Junco", "photo_ids": burst_ids,
+                             "burst_index": 0})
+    assert resp.status_code == 200
+    assert resp.get_json()["previous_species"] == "Sparrow"
+
+    for pid in burst_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Junco" in names
+        assert "Sparrow" not in names
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_remove", "Sparrow") in values
+    assert ("keyword_add", "Junco") in values
+
+
+def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
+    """Re-confirming the same species doesn't queue a remove."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Sparrow", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    assert resp.get_json()["previous_species"] is None
+
+    values = {c["change_type"] for c in db.get_pending_changes()}
+    assert "keyword_remove" not in values
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db

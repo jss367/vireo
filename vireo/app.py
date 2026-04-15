@@ -5957,15 +5957,22 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/encounters/species", methods=["POST"])
     def api_encounter_species():
-        """Confirm species for all photos in an encounter.
+        """Confirm species for all photos in an encounter or a single burst.
 
-        Expects JSON: {"species": "Blue Jay", "photo_ids": [1, 2, 3]}
-        Creates species keyword, tags photos, queues pending changes.
+        Expects JSON: {"species": "Blue Jay", "photo_ids": [1, 2, 3],
+                       "burst_index": <int|null>}
+
+        Creates the species keyword, tags photos, and queues a sidecar add.
+        If the encounter (or burst) was previously confirmed as a different
+        species, also untags that species and queues a sidecar remove — or
+        cancels the still-pending add if it hadn't synced yet — so the XMP
+        doesn't accumulate stale species keywords.
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         species = body.get("species", "").strip()
         photo_ids = body.get("photo_ids", [])
+        burst_index = body.get("burst_index")
 
         if not species:
             return json_error("species is required")
@@ -5982,69 +5989,104 @@ def create_app(db_path, thumb_cache_dir=None):
         if missing:
             return json_error(f"Unknown photo_ids: {missing}")
 
-        # Create or find the species keyword (commits on its own)
-        kid = db.add_keyword(species, is_species=True)
-
-        # Tag all photos and queue pending changes in a single transaction
-        ws_id = db._ws_id()
-        try:
-            for pid in photo_ids:
-                db.conn.execute(
-                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
-                    (pid, kid),
-                )
-                existing = db.conn.execute(
-                    "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",
-                    (pid, "keyword_add", species, ws_id),
-                ).fetchone()
-                if not existing:
-                    db.conn.execute(
-                        "INSERT INTO pending_changes (photo_id, change_type, value, workspace_id) VALUES (?, ?, ?, ?)",
-                        (pid, "keyword_add", species, ws_id),
-                    )
-            db.conn.commit()
-        except Exception:
-            db.conn.rollback()
-            raise
-
-        # Record edit history
-        items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)} for pid in photo_ids]
-        db.record_edit('keyword_add',
-                       f'Confirmed species "{species}" on {len(photo_ids)} photos',
-                       str(kid), items, is_batch=len(photo_ids) > 1)
-
-        # Update pipeline cache if it exists
+        # Look up the previous species (if any) from the pipeline cache before
+        # mutating. We reuse the same cached dict to write the update below.
         from pipeline import load_results_raw, save_results_raw
 
         cache_dir = os.path.dirname(db_path)
         cached = load_results_raw(cache_dir, db._active_workspace_id)
+        previous_species = None
+        target_enc = None
         if cached:
             photo_id_set = set(photo_ids)
-            burst_index = body.get("burst_index")
             for enc in cached.get("encounters", []):
                 enc_ids = set(enc.get("photo_ids", []))
                 if not photo_id_set.issubset(enc_ids):
                     continue
-                if burst_index is not None and "bursts" in enc:
-                    # Burst-level confirmation
-                    if 0 <= burst_index < len(enc["bursts"]):
-                        burst = enc["bursts"][burst_index]
-                        burst["species_override"] = {
-                            "species": species,
-                            "confirmed": True,
-                        }
+                target_enc = enc
+                if burst_index is not None and "bursts" in enc \
+                        and 0 <= burst_index < len(enc["bursts"]):
+                    ovr = enc["bursts"][burst_index].get("species_override")
+                    if ovr and ovr.get("species"):
+                        previous_species = ovr["species"]
+                    else:
+                        # No burst override yet — inherit the encounter's
+                        # confirmed species, which is what those photos were
+                        # actually tagged with.
+                        previous_species = enc.get("confirmed_species")
                 else:
-                    # Encounter-level confirmation
-                    enc["species_confirmed"] = True
-                    enc["confirmed_species"] = species
+                    previous_species = enc.get("confirmed_species")
                 break
+
+        ws_id = db._ws_id()
+
+        # If the species is changing, untag the old keyword from these photos
+        # and cancel/queue a sidecar remove so the XMP stays in sync.
+        if previous_species and previous_species.strip().lower() != species.lower():
+            old_kid_row = db.conn.execute(
+                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE",
+                (previous_species,),
+            ).fetchone()
+            if old_kid_row:
+                old_kid = old_kid_row["id"]
+                for pid in photo_ids:
+                    db.untag_photo(pid, old_kid)
+                    _queue_keyword_remove(pid, previous_species, workspace_id=ws_id)
+                old_items = [
+                    {"photo_id": pid, "old_value": str(old_kid), "new_value": ""}
+                    for pid in photo_ids
+                ]
+                db.record_edit(
+                    "keyword_remove",
+                    f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
+                    str(old_kid),
+                    old_items,
+                    is_batch=len(photo_ids) > 1,
+                )
+
+        # Create or find the new species keyword (commits on its own)
+        kid = db.add_keyword(species, is_species=True)
+
+        for pid in photo_ids:
+            db.tag_photo(pid, kid)
+            _queue_keyword_add(pid, species, workspace_id=ws_id)
+
+        items = [
+            {"photo_id": pid, "old_value": "", "new_value": str(kid)}
+            for pid in photo_ids
+        ]
+        db.record_edit(
+            "keyword_add",
+            f'Confirmed species "{species}" on {len(photo_ids)} photos',
+            str(kid),
+            items,
+            is_batch=len(photo_ids) > 1,
+        )
+
+        # Update pipeline cache
+        if cached and target_enc is not None:
+            if burst_index is not None and "bursts" in target_enc \
+                    and 0 <= burst_index < len(target_enc["bursts"]):
+                target_enc["bursts"][burst_index]["species_override"] = {
+                    "species": species,
+                    "confirmed": True,
+                }
+            else:
+                target_enc["species_confirmed"] = True
+                target_enc["confirmed_species"] = species
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
+        replaced = (
+            previous_species
+            if previous_species and previous_species.strip().lower() != species.lower()
+            else None
+        )
         return jsonify({
             "ok": True,
             "species": species,
             "keyword_id": kid,
             "photo_count": len(photo_ids),
+            "previous_species": replaced,
         })
 
     @app.route("/api/species/search")
