@@ -101,6 +101,25 @@ def test_extract_readiness_reports_ready_when_files_present(
         assert data["dinov2"]["ready"] is True
 
 
+def test_extract_readiness_flags_unknown_variants(setup, tmp_path, monkeypatch):
+    """An unknown variant (possible from a stale workspace override, since
+    /api/pipeline/config accepts any string) must come back with
+    ``*_known=False`` so the UI can flag the bad config instead of
+    falsely promising a download that ``ensure_sam2_weights`` /
+    DINOv2 session validation will reject at extract time."""
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/extract-readiness"
+                     "?sam2_variant=sam2-bogus&dinov2_variant=vit-bogus")
+        data = resp.get_json()
+        assert data["sam2_known"] is False
+        assert data["sam2"]["ready"] is False
+        assert data["dinov2_known"] is False
+        assert data["dinov2"]["ready"] is False
+
+
 def test_extract_readiness_dinov2_graph_only_is_not_ready(
     setup, tmp_path, monkeypatch
 ):

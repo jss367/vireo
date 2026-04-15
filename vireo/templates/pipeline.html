@@ -2598,8 +2598,8 @@ async function updateExtractReadiness() {
       {}, { toast: false }
     );
     var items = [];
-    items.push(renderModelReadiness('SAM2', r.sam2));
-    items.push(renderModelReadiness('DINOv2', r.dinov2));
+    items.push(renderModelReadiness('SAM2', r.sam2, r.sam2_known));
+    items.push(renderModelReadiness('DINOv2', r.dinov2, r.dinov2_known));
     panel.innerHTML = items.join('<br>');
     panel.style.display = '';
   } catch(e) {
@@ -2607,14 +2607,24 @@ async function updateExtractReadiness() {
   }
 }
 
-function renderModelReadiness(label, info) {
+function renderModelReadiness(label, info, known) {
+  var variant = info ? info.variant : '?';
+  // Unknown variant (e.g. stale override pointing at a removed model):
+  // the download-on-first-run path would be misleading because
+  // ensure_sam2_weights / DINOv2 session validation will reject it at
+  // extract time, so flag the bad config up-front instead.
+  if (known === false) {
+    return '<span style="color:var(--danger,#e74c3c);">&#10007;</span> '
+      + label + ': <b>' + variant + '</b> &mdash; unknown variant; '
+      + 'pick a supported one above';
+  }
   if (info && info.ready) {
     return '<span style="color:var(--accent,#24E5CA);">&#10003;</span> '
-      + label + ': <b>' + info.variant + '</b> &mdash; ready';
+      + label + ': <b>' + variant + '</b> &mdash; ready';
   }
   var size = info && info.size_hint ? ' (' + info.size_hint + ')' : '';
   return '<span style="color:var(--warning,#f0c040);">&#9679;</span> '
-    + label + ': <b>' + (info ? info.variant : '?')
+    + label + ': <b>' + variant
     + '</b> &mdash; will download' + size + ' on first run';
 }
 
