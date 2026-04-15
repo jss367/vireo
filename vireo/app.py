@@ -1188,7 +1188,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews, working copies)
+        # Clean up cached files (thumbnails, previews, working copies).
+        # The preview dir also holds per-size variants named <id>_<size>.jpg,
+        # which must be removed so SQLite id reuse can't surface stale images.
+        import glob as _glob
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -1199,6 +1202,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 cached = os.path.join(d, f"{pid}.jpg")
                 if os.path.isfile(cached):
                     os.remove(cached)
+            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+                try:
+                    os.remove(variant)
+                except OSError:
+                    pass
 
         trashed = 0
         trash_failed = []
@@ -6931,6 +6939,68 @@ def create_app(db_path, thumb_cache_dir=None):
             image_path = os.path.join(folder["path"], photo["filename"])
 
         img = load_image(image_path, max_size=max_size)
+        if img is None:
+            return "Could not load image", 500
+
+        os.makedirs(preview_dir, exist_ok=True)
+        preview_quality = cfg.load().get("preview_quality", 90)
+        img.save(cache_path, format="JPEG", quality=preview_quality)
+        return send_file(cache_path, mimetype="image/jpeg")
+
+    PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
+
+    @app.route("/photos/<int:photo_id>/preview")
+    def serve_photo_preview(photo_id):
+        """Serve a JPEG preview at a chosen max-size, cached per size.
+
+        Query params:
+          size: int — max dimension (longest side). Must be in PREVIEW_SIZE_ALLOWLIST
+                to avoid unbounded cache growth.
+        """
+        import config as cfg
+        from flask import request, send_file
+
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        if size not in PREVIEW_SIZE_ALLOWLIST:
+            return "Unsupported size", 400
+
+        # Confirm the photo still exists before any cache return so that a
+        # deleted photo can't be served from a stale per-size cache (and so
+        # SQLite id reuse can't surface the wrong image).
+        db = _get_db()
+        photo = db.get_photo(photo_id)
+        if not photo:
+            return "Not found", 404
+
+        preview_dir = os.path.join(
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+        )
+        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+
+        if os.path.exists(cache_path):
+            return send_file(cache_path, mimetype="image/jpeg")
+
+        from image_loader import load_image
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
+        img = load_image(image_path, max_size=size)
         if img is None:
             return "Could not load image", 500
 
