@@ -1161,21 +1161,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             or not collection_id
             or not has_models_to_try
         ):
-            stages["classify"]["status"] = "skipped"
-            # Mark every per-model step completed/skipped so the job tree
-            # doesn't show pending rows forever.
+            # Distinguish loader-driven abort (model resolution or preload
+            # failure) from benign skips (skip_classify, user cancellation,
+            # missing collection): rows for the former must surface as
+            # 'failed' so the per-model failure is visible on the job tree
+            # — the whole point of splitting classify into per-model rows.
+            loader_failed = stages["model_loader"]["status"] == "failed"
+            loader_err = next(
+                (e for e in errors if e.startswith("[model_loader] Fatal:")),
+                None,
+            )
+            row_status = "failed" if loader_failed else "completed"
+            row_summary = (
+                "Model load failed" if loader_failed else "Skipped"
+            )
+            stages["classify"]["status"] = (
+                "failed" if loader_failed else "skipped"
+            )
+
             specs_for_step_ids = loaded_models.get("resolved_specs") or []
             if specs_for_step_ids:
                 for spec in specs_for_step_ids:
                     runner.update_step(
                         job["id"], f"classify:{spec['id']}",
-                        status="completed", summary="Skipped",
+                        status=row_status, summary=row_summary,
+                        error=loader_err if loader_failed else None,
                     )
             else:
                 for mid in (effective_model_ids or ["__unresolved__"]):
                     runner.update_step(
                         job["id"], f"classify:{mid}",
-                        status="completed", summary="Skipped",
+                        status=row_status, summary=row_summary,
+                        error=loader_err if loader_failed else None,
                     )
             _update_stages(runner, job["id"], stages)
             return

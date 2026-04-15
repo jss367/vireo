@@ -3824,6 +3824,70 @@ def test_pipeline_loader_abort_finalizes_detect_and_classify_rows(
         )
 
 
+def test_pipeline_loader_failure_marks_classify_rows_failed_not_skipped(
+    tmp_path, monkeypatch
+):
+    """When model_loader_stage fails (e.g. single-model preload failure or
+    id resolution failure), classify_stage's early-skip branch must finalize
+    the per-model rows as 'failed' — NOT 'completed' with summary='Skipped'.
+
+    Otherwise the failed model is misreported as a clean skip, which hides
+    the per-model failure context the row split is meant to surface.
+
+    Regression test for Codex P2 on PR #566 (pipeline_job.py:1173).
+    """
+    import classifier as classifier_mod
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    col_id = db.add_collection("Test", "[]")
+
+    _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Single-model run where construction always fails → model_loader_stage
+    # catches the error, sets abort, and marks itself failed.
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated single-model preload failure")
+
+    monkeypatch.setattr(classifier_mod, "Classifier", boom)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    classify_rows = [
+        (step_id, kwargs)
+        for (_, step_id, kwargs) in runner.step_updates
+        if step_id.startswith("classify:") and "status" in kwargs
+    ]
+    assert classify_rows, (
+        "test precondition: expected at least one classify:<id> update"
+    )
+    for step_id, kwargs in classify_rows:
+        # The final status on a loader-failure abort must be 'failed', not
+        # 'completed' (which would render as a clean skipped row).
+        assert kwargs["status"] == "failed", (
+            f"Row {step_id!r} should be 'failed' after loader aborted the "
+            f"pipeline, got status={kwargs['status']!r}, "
+            f"summary={kwargs.get('summary')!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Failure rollup — per-file failures surface at the stage/job level
 # ---------------------------------------------------------------------------
