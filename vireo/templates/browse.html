@@ -1025,6 +1025,7 @@ var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // 
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
+var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var filterRating = 0;
 var activeFolderId = null;
 var activeKeyword = null;
@@ -1337,17 +1338,12 @@ async function filterByCollection(id) {
   activeCollectionId = id;
   photos = [];
   currentPage = 1;
-  allLoaded = true;  // collections handle their own pagination
+  allLoaded = false;
+  loadEpoch++;         // invalidate any in-flight loadPhotos response
+  loading = false;     // safe to clear: the stale response will be dropped
   document.getElementById('grid').innerHTML = '';
   closeDetail();
-
-  try {
-    var data = await safeFetch('/api/collections/' + id + '/photos?per_page=200', {}, { toast: false });
-    photos = data.photos;
-    totalPhotos = photos.length;
-    renderGrid();
-    updateFilterSummary();
-  } catch(e) {}
+  await loadPhotos();
 }
 
 /* ---------- Collection Modal ---------- */
@@ -1453,6 +1449,8 @@ function resetAndLoad() {
   photos = [];
   currentPage = 1;
   allLoaded = false;
+  loadEpoch++;
+  loading = false;
   selectedPhotoId = null;
   selectedIndex = -1;
   // Leaving collection mode when applying non-collection filters (sort, rating,
@@ -1466,30 +1464,41 @@ function resetAndLoad() {
 async function loadPhotos() {
   if (loading || allLoaded) return;
   loading = true;
+  var epoch = loadEpoch;
   document.getElementById('loadingState').style.display = 'block';
 
-  var params = new URLSearchParams();
-  params.set('page', currentPage);
-  params.set('per_page', perPage);
-  params.set('sort', document.getElementById('sortSelect').value);
+  var url;
+  if (activeCollectionId) {
+    var cparams = new URLSearchParams();
+    cparams.set('page', currentPage);
+    cparams.set('per_page', perPage);
+    url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
+  } else {
+    var params = new URLSearchParams();
+    params.set('page', currentPage);
+    params.set('per_page', perPage);
+    params.set('sort', document.getElementById('sortSelect').value);
 
-  if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
+    if (activeFolderId) params.set('folder_id', activeFolderId);
+    if (filterRating > 0) params.set('rating_min', filterRating);
 
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
+    var colorFilter = document.getElementById('colorFilter').value;
+    if (colorFilter) params.set('color_label', colorFilter);
 
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
+    var dateFrom = document.getElementById('dateFrom').value;
+    var dateTo = document.getElementById('dateTo').value;
+    if (dateFrom) params.set('date_from', dateFrom);
+    if (dateTo) params.set('date_to', dateTo);
 
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+    var search = document.getElementById('searchInput').value.trim();
+    if (search) params.set('keyword', search);
+    if (activeKeyword) params.set('keyword', activeKeyword);
+    url = '/api/photos?' + params.toString();
+  }
 
   try {
-    var data = await safeFetch('/api/photos?' + params.toString());
+    var data = await safeFetch(url);
+    if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
 
     if (data.photos.length === 0) {
@@ -1506,11 +1515,14 @@ async function loadPhotos() {
     renderGrid();
     updateFilterSummary();
   } catch(e) {
+    if (epoch !== loadEpoch) return;
     document.getElementById('loadingState').textContent = 'Error loading photos.';
+  } finally {
+    if (epoch === loadEpoch) {
+      loading = false;
+      document.getElementById('loadingState').style.display = 'none';
+    }
   }
-
-  loading = false;
-  document.getElementById('loadingState').style.display = 'none';
 }
 
 /* ---------- Calendar Heatmap ---------- */

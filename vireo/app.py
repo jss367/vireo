@@ -1450,6 +1450,11 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Collection not found", 404)
 
         rules = json.loads(row["rules"])
+        # Refuse to mutate smart/system collections like "All Photos" — adding
+        # a photo_ids rule would AND-combine with the sentinel and silently
+        # convert the dynamic default into a static subset.
+        if any(r.get("field") == "all" for r in rules):
+            return json_error("Cannot add photos to this collection", 400)
         # Find or create a photo_ids rule
         ids_rule = None
         for r in rules:
