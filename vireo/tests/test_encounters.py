@@ -91,6 +91,33 @@ def test_sim_embedding_none():
     assert sim_embedding(None, None) == 0.0
 
 
+def test_sim_embedding_mismatched_dims_returns_zero():
+    """Mismatched embedding dims (from a variant switch leaving stale rows)
+    must not crash the pipeline. Treat as 'no similarity info' = 0.0."""
+    from encounters import sim_embedding
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    assert sim_embedding(emb_768, emb_1024) == 0.0
+    assert sim_embedding(emb_1024, emb_768) == 0.0
+
+
+def test_segment_encounters_survives_mixed_dims():
+    """A run containing both 768-dim and 1024-dim embeddings must segment
+    without raising 'shapes not aligned' from np.dot."""
+    from encounters import segment_encounters
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    photos = [
+        _make_photo(ts_offset_s=0, subj_emb=emb_768, global_emb=emb_768),
+        _make_photo(ts_offset_s=5, subj_emb=emb_1024, global_emb=emb_1024),
+        _make_photo(ts_offset_s=10, subj_emb=emb_768, global_emb=emb_768),
+    ]
+    encounters = segment_encounters(photos)
+    assert isinstance(encounters, list)
+
+
 # -- sim_species --
 
 
