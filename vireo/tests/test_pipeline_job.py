@@ -1265,6 +1265,64 @@ def test_pipeline_collection_mode_marks_scan_skipped(tmp_path, monkeypatch):
         f"scan should be 'skipped' in collection mode, saw: {scan_statuses}"
 
 
+def test_pipeline_collection_mode_generates_missing_thumbnails(tmp_path, monkeypatch):
+    """In collection mode the thumbnail stage must still process the collection's
+    photos. Previously it drained an empty queue (only fed by the scanner) and
+    completed with '0 thumbnails' even when photos were missing thumbs."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ["a.jpg", "b.jpg", "c.jpg"]:
+        Image.new("RGB", (100, 100), "red").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # First pipeline run: scan + build collection + generate thumbnails.
+    runner = FakeRunner()
+    job = _make_job()
+    result = run_pipeline_job(
+        job, runner, db_path, ws_id,
+        PipelineParams(
+            source=str(photo_dir),
+            skip_classify=True, skip_extract_masks=True, skip_regroup=True,
+        ),
+    )
+    coll_id = result["collection_id"]
+
+    # Wipe the thumbnail cache to simulate thumbs that were lost or never built.
+    thumb_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+    for f in os.listdir(thumb_dir):
+        os.remove(os.path.join(thumb_dir, f))
+
+    # Second run: replay the pipeline against the existing collection
+    # (skip_scan path). Thumbnails must be regenerated for all 3 photos.
+    runner2 = FakeRunner()
+    job2 = _make_job()
+    result2 = run_pipeline_job(
+        job2, runner2, db_path, ws_id,
+        PipelineParams(
+            collection_id=coll_id,
+            skip_classify=True, skip_extract_masks=True, skip_regroup=True,
+        ),
+    )
+
+    thumb_result = result2["stages"].get("thumbnails", {})
+    assert thumb_result.get("generated", 0) == 3, (
+        f"Expected 3 thumbnails regenerated in collection mode, "
+        f"got {thumb_result}"
+    )
+    thumb_files = [f for f in os.listdir(thumb_dir) if not f.startswith(".")]
+    assert len(thumb_files) == 3
+
+
 # ---------------------------------------------------------------------------
 # Stage failure propagation (fixes the silent model-loader failure incident)
 # ---------------------------------------------------------------------------

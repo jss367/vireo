@@ -578,6 +578,56 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
+            # Collection mode: the scanner is skipped so the queue above was
+            # empty. Iterate the collection's photos directly — mirrors the
+            # pattern used by previews_stage — so replays against an existing
+            # collection still regenerate any missing thumbs.
+            if skip_scan and collection_id:
+                coll_photos = _filter_excluded(
+                    thread_db.get_collection_photos(collection_id, per_page=999999)
+                )
+                folders = {f["id"]: f["path"] for f in thread_db.get_folder_tree()}
+                total = len(coll_photos)
+                for photo in coll_photos:
+                    if _should_abort(abort):
+                        break
+                    photo_id = photo["id"]
+                    folder_path = folders.get(photo["folder_id"], "")
+                    photo_path = os.path.join(folder_path, photo["filename"])
+                    thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+                    already_exists = os.path.exists(thumb_path)
+                    try:
+                        result_path = generate_thumbnail(
+                            photo_id, photo_path, cache_dir, size=thumb_size,
+                        )
+                        if result_path is None:
+                            failed += 1
+                        elif already_exists:
+                            skipped += 1
+                        else:
+                            generated += 1
+                    except Exception:
+                        failed += 1
+                        log.debug("Thumbnail failed for photo %s", photo_id)
+                    stages["thumbnails"]["count"] = generated + skipped + failed
+                    processed = generated + skipped + failed
+                    runner.update_step(
+                        job["id"], "thumbnails",
+                        current_file=os.path.basename(photo_path),
+                        progress={"current": processed, "total": total},
+                    )
+                    elapsed = time.time() - job["_start_time"]
+                    rate = round(processed / max(elapsed, 0.01) * 60, 1)
+                    runner.push_event(job["id"], "progress", {
+                        "phase": "Generating thumbnails",
+                        "stage_id": "thumbnails",
+                        "current": processed,
+                        "total": total,
+                        "current_file": os.path.basename(photo_path),
+                        "rate": rate,
+                        "stages": {k: dict(v) for k, v in stages.items()},
+                    })
+
             from thumbnails import format_summary as thumb_summary
             thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
             processed = generated + skipped + failed
