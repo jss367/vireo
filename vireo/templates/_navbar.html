@@ -1898,6 +1898,25 @@ function toggleLightboxZoom(e) {
   }
 }
 
+// Scroll wheel and trackpad pinch zoom — cursor-anchored
+(function() {
+  document.addEventListener('wheel', function(e) {
+    var overlay = document.getElementById('lightboxOverlay');
+    if (!overlay || !overlay.classList.contains('active')) return;
+    var wrap = document.getElementById('lightboxWrap');
+    if (!wrap) return;
+    // Only react to wheel events over the image wrap
+    if (!wrap.contains(e.target) && e.target !== wrap) return;
+
+    e.preventDefault();
+    // Trackpad pinch: e.ctrlKey === true; zoom factor more sensitive.
+    var scale = e.ctrlKey ? 0.02 : 0.0015;
+    var zoomFactor = Math.exp(-e.deltaY * scale);
+    var newZoom = _lbZoom * zoomFactor;
+    _lbSetZoom(newZoom, e.clientX, e.clientY);
+  }, { passive: false });
+})();
+
 // Drag to pan when zoomed; single click (no drag) zooms out
 (function() {
   var wrap, dragging = false, didDrag = false, startX, startY, scrollStartX, scrollStartY;
