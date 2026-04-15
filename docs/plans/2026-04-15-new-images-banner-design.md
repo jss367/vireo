@@ -22,22 +22,24 @@ Currently, unreachable folders are already surfaced via the "Missing Folders" ba
 
 ## Detection Logic
 
-New helper in `vireo/scanner.py` (or adjacent module) that, given a folder path and the set of known filenames from the DB, returns the count and sample of image files on disk not yet ingested.
+New helper in `vireo/scanner.py` (or adjacent module) that, given a folder path and the set of known paths (relative to the folder root) from the DB, returns the count and sample of image files on disk not yet ingested.
 
 Pseudocode:
 
 ```python
-def count_new_images(folder_path: str, known_filenames: set[str]) -> dict:
+def count_new_images(folder_path: str, known_rel_paths: set[str]) -> dict:
     """Return {"new_count": int, "sample": list[str]} for a folder.
 
-    Walks folder_path recursively, filters to image extensions, returns
-    count and up to 5 sample filenames of files not in known_filenames.
+    Walks folder_path recursively, filters to image extensions, and
+    returns count and up to 5 sample *relative* paths of files whose
+    relative path is not in known_rel_paths.
     """
 ```
 
+- **Path-based identity, not basename** — keys are paths relative to the folder root (e.g. `a/b/IMG_0001.JPG`), so two subdirectories with the same filename are not conflated. This matches the scan job's own identity model (`existing_by_path` in `vireo/scanner.py`). Basename-only keying would undercount whenever camera exports produce repeating names like `IMG_0001.JPG` across subfolders.
 - **Image extensions** — reuse the canonical list from `vireo/scanner.py` (whatever the scan job uses). Do not re-invent.
 - **Recursive** — matches the scan job's behavior.
-- **Sample** — up to 5 filenames, useful for debug/logging and potentially surfacing in the banner on hover.
+- **Sample** — up to 5 relative paths, useful for debug/logging and potentially surfacing in the banner on hover.
 
 ## Caching
 
@@ -46,7 +48,6 @@ In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`)
 ```python
 {
     (workspace_id, folder_id): {
-        "folder_mtime": float,        # recursive max mtime at check time
         "new_count": int,
         "sample": list[str],
         "checked_at": float,
@@ -57,11 +58,12 @@ In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`)
 **Invalidation triggers:**
 
 1. **Scan-job completion** — when a scan job finishes for a workspace, clear cache entries for that workspace. The next workspace open recomputes.
-2. **Folder mtime change** — on every workspace open, stat the folder (and top-level subdirectories) to compute a cheap recursive mtime signature. If it matches the cached `folder_mtime`, return cached `new_count`. If it differs, re-walk.
-
-**No TTL.** The filesystem is the source of truth; if nothing has changed on disk, the cache is valid.
+2. **TTL ceiling** — cache entries expire after 5 minutes. This is the staleness ceiling: a user who imports files via Finder (outside Vireo) will see the banner appear within 5 min on any workspace-related page load. Chosen over `mtime`-based gating because directory mtime only bubbles up one level — adding `/root/A/B/new.jpg` updates `B` but not necessarily `A`, so a shallow mtime check misses deep additions. A full recursive mtime walk would cost roughly the same as the actual filename diff, so it's not a meaningful optimization.
+3. **Manual refresh** — the banner can include a small "Check now" affordance that bypasses the cache. Low priority; the TTL + scan invalidation covers the common cases.
 
 **Cache lifetime is process-only** — lost on app restart. First workspace open after restart repopulates.
+
+**Why a walk on every cache miss is OK:** directory listing (dirent-only, no per-file stat beyond what `os.walk` already does) is fast even on NAS for 10k+ files — typically well under a second. The expensive part of scanning is image decode / EXIF / hash, none of which the detection check does.
 
 ## Surface: Banner in `_navbar.html`
 
@@ -128,5 +130,6 @@ Response:
 
 ## Open Questions
 
-- **Cost of recursive mtime stat on NAS** — if even the mtime gate is slow for multi-10k-file hierarchies, consider stopping at top-level subdirectory mtimes only. Measure during implementation.
+- **Cost of the recursive walk on NAS** — expected to be sub-second for 10k files, but measure during implementation. If it turns out to be slow, fall back to running the walk in a background thread and streaming the result to the banner via SSE or polling rather than blocking the API response.
 - **Should dismissal be per-workspace or app-wide?** — current plan is app-wide session dismissal. Reasonable alternative: per-workspace, so dismissing in USA2026 doesn't hide it in a different workspace. Lean toward per-workspace; decide during implementation.
+- **TTL value** — 5 minutes is a guess. If users routinely import while Vireo is open and find the lag annoying, shorten to 60s. If the walk turns out to be slow and users notice re-walks, lengthen.
