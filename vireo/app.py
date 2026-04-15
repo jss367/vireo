@@ -6034,7 +6034,12 @@ def create_app(db_path, thumb_cache_dir=None):
 
         # If the species is changing, untag the old keyword from these photos
         # and cancel/queue a sidecar remove so the XMP stays in sync.
-        if previous_species and previous_species.strip().lower() != species.lower():
+        old_kid = None
+        is_replacement = (
+            previous_species is not None
+            and previous_species.strip().lower() != species.lower()
+        )
+        if is_replacement:
             # Match add_keyword's write path: species keywords live as root
             # keywords (parent_id IS NULL) with is_species=1. Looking up by
             # name alone could collide with a non-species homonym nested under
@@ -6051,17 +6056,6 @@ def create_app(db_path, thumb_cache_dir=None):
                 for pid in photo_ids:
                     db.untag_photo(pid, old_kid)
                     _queue_keyword_remove(pid, previous_species, workspace_id=ws_id)
-                old_items = [
-                    {"photo_id": pid, "old_value": str(old_kid), "new_value": ""}
-                    for pid in photo_ids
-                ]
-                db.record_edit(
-                    "keyword_remove",
-                    f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
-                    str(old_kid),
-                    old_items,
-                    is_batch=len(photo_ids) > 1,
-                )
 
         # Create or find the new species keyword (commits on its own)
         kid = db.add_keyword(species, is_species=True)
@@ -6070,17 +6064,33 @@ def create_app(db_path, thumb_cache_dir=None):
             db.tag_photo(pid, kid)
             _queue_keyword_add(pid, species, workspace_id=ws_id)
 
-        items = [
-            {"photo_id": pid, "old_value": "", "new_value": str(kid)}
-            for pid in photo_ids
-        ]
-        db.record_edit(
-            "keyword_add",
-            f'Confirmed species "{species}" on {len(photo_ids)} photos',
-            str(kid),
-            items,
-            is_batch=len(photo_ids) > 1,
-        )
+        # Record the full action as a single undoable edit so one undo
+        # restores the previous confirmed species rather than leaving the
+        # photos with neither keyword.
+        if is_replacement and old_kid is not None:
+            items = [
+                {"photo_id": pid, "old_value": str(old_kid), "new_value": str(kid)}
+                for pid in photo_ids
+            ]
+            db.record_edit(
+                "species_replace",
+                f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
+                str(kid),
+                items,
+                is_batch=len(photo_ids) > 1,
+            )
+        else:
+            items = [
+                {"photo_id": pid, "old_value": "", "new_value": str(kid)}
+                for pid in photo_ids
+            ]
+            db.record_edit(
+                "keyword_add",
+                f'Confirmed species "{species}" on {len(photo_ids)} photos',
+                str(kid),
+                items,
+                is_batch=len(photo_ids) > 1,
+            )
 
         # Update pipeline cache. burst_index was validated above, so the
         # branch here is unambiguous: burst-scoped requests only touch the

@@ -342,6 +342,117 @@ def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     assert "keyword_remove" not in values
 
 
+def test_encounter_species_replacement_is_atomic_in_history(app_and_db):
+    """Replacing the encounter species records one history entry, not two."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    # Clear history from the initial confirm so we're only looking at the
+    # replacement.
+    db.conn.execute("DELETE FROM edit_history")
+    db.conn.commit()
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert history[0]['action_type'] == 'species_replace'
+    assert 'Sparrow' in history[0]['description']
+    assert 'Blue Jay' in history[0]['description']
+
+
+def test_encounter_species_replacement_undo_restores_previous(app_and_db):
+    """One undo after a replacement restores the previous species, not neither."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    client.post("/api/encounters/species",
+                json={"species": "Blue Jay", "photo_ids": photo_ids})
+
+    # One undo should swap the photos back to Sparrow.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone['action_type'] == 'species_replace'
+
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Sparrow" in names
+        assert "Blue Jay" not in names
+
+    # Neither species was synced, so undo should cancel the pending swap
+    # outright rather than queue a keyword_remove for a never-written tag.
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_remove", "Blue Jay") not in values
+    assert ("keyword_remove", "Sparrow") not in values
+    # Original keyword_add:Sparrow is back in the queue because the replace
+    # had cancelled it — and undoing the replace's own add (Blue Jay) means
+    # the sidecar state matches what was there before Blue Jay was confirmed.
+    assert ("keyword_add", "Sparrow") in values
+    assert ("keyword_add", "Blue Jay") not in values
+
+
+def test_encounter_species_replacement_undo_after_sync_queues_swap(app_and_db):
+    """If the replacement already synced, undo queues the reverse XMP ops."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    client.post("/api/encounters/species",
+                json={"species": "Blue Jay", "photo_ids": photo_ids})
+    # Pretend the replacement has synced: drop all pending changes.
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone['action_type'] == 'species_replace'
+
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Sparrow" in names
+        assert "Blue Jay" not in names
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_remove", "Blue Jay") in values
+    assert ("keyword_add", "Sparrow") in values
+
+
+def test_encounter_species_replacement_redo_reapplies(app_and_db):
+    """Redo after undo re-applies the replacement."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+    client.post("/api/encounters/species",
+                json={"species": "Sparrow", "photo_ids": photo_ids})
+    client.post("/api/encounters/species",
+                json={"species": "Blue Jay", "photo_ids": photo_ids})
+
+    db.undo_last_edit()
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone['action_type'] == 'species_replace'
+
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" in names
+        assert "Sparrow" not in names
+
+
 def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     """A stale burst_index must not silently fall through to an encounter update."""
     app, db = app_and_db

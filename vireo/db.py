@@ -3706,6 +3706,34 @@ class Database:
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
                     self.remove_pending_changes(pid, 'keyword_remove', kw['name'])
+            elif entry['action_type'] == 'species_replace':
+                # Atomic swap: the edit replaced old_value's species with
+                # new_value's. Undo untags the new species and retags the
+                # old one, symmetrically reversing the pending-change queue.
+                new_kid = int(item['new_value']) if item['new_value'] else None
+                old_kid = int(old_val) if old_val else None
+                if new_kid:
+                    self.untag_photo(pid, new_kid)
+                    new_kw = self.conn.execute(
+                        "SELECT name FROM keywords WHERE id = ?", (new_kid,)
+                    ).fetchone()
+                    if new_kw:
+                        cancelled = self.remove_pending_changes(
+                            pid, 'keyword_add', new_kw['name']
+                        )
+                        if cancelled == 0:
+                            self.queue_change(pid, 'keyword_remove', new_kw['name'])
+                if old_kid:
+                    self.tag_photo(pid, old_kid)
+                    old_kw = self.conn.execute(
+                        "SELECT name FROM keywords WHERE id = ?", (old_kid,)
+                    ).fetchone()
+                    if old_kw:
+                        cancelled = self.remove_pending_changes(
+                            pid, 'keyword_remove', old_kw['name']
+                        )
+                        if cancelled == 0:
+                            self.queue_change(pid, 'keyword_add', old_kw['name'])
 
     def _apply_redo(self, entry, items):
         """Re-apply the effects of an undone edit entry."""
@@ -3754,6 +3782,32 @@ class Database:
                                        (int(entry['new_value']),)).fetchone()
                 if kw:
                     self.queue_change(pid, 'keyword_remove', kw['name'])
+            elif entry['action_type'] == 'species_replace':
+                # Re-apply the swap: untag old, retag new, mirror pending queue.
+                new_kid = int(new_val) if new_val else None
+                old_kid = int(item['old_value']) if item['old_value'] else None
+                if old_kid:
+                    self.untag_photo(pid, old_kid)
+                    old_kw = self.conn.execute(
+                        "SELECT name FROM keywords WHERE id = ?", (old_kid,)
+                    ).fetchone()
+                    if old_kw:
+                        cancelled = self.remove_pending_changes(
+                            pid, 'keyword_add', old_kw['name']
+                        )
+                        if cancelled == 0:
+                            self.queue_change(pid, 'keyword_remove', old_kw['name'])
+                if new_kid:
+                    self.tag_photo(pid, new_kid)
+                    new_kw = self.conn.execute(
+                        "SELECT name FROM keywords WHERE id = ?", (new_kid,)
+                    ).fetchone()
+                    if new_kw:
+                        cancelled = self.remove_pending_changes(
+                            pid, 'keyword_remove', new_kw['name']
+                        )
+                        if cancelled == 0:
+                            self.queue_change(pid, 'keyword_add', new_kw['name'])
 
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
