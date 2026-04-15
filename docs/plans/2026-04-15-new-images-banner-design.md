@@ -57,7 +57,7 @@ In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`)
 
 **Invalidation triggers:**
 
-1. **Scan-job completion** — when a scan job finishes for a workspace, clear cache entries for that workspace. The next workspace open recomputes.
+1. **Scan-job completion** — when a scan job finishes, clear cache entries for every `(workspace_id, folder_id)` whose `folder_id` was touched by the scan. Because `workspace_folders` is many-to-many and `photos` is global by `folder_id`, ingesting into a folder from workspace A changes the "new images" truth for every other workspace that also links that folder; invalidating only the scanning workspace would leave stale banners in the others. Simplest safe implementation: on scan completion, clear all cache entries whose `folder_id` is in the set of scanned folders, across all workspaces.
 2. **TTL ceiling** — cache entries expire after 5 minutes. This is the staleness ceiling: a user who imports files via Finder (outside Vireo) will see the banner appear within 5 min on any workspace-related page load. Chosen over `mtime`-based gating because directory mtime only bubbles up one level — adding `/root/A/B/new.jpg` updates `B` but not necessarily `A`, so a shallow mtime check misses deep additions. A full recursive mtime walk would cost roughly the same as the actual filename diff, so it's not a meaningful optimization.
 3. **Manual refresh** — the banner can include a small "Check now" affordance that bypasses the cache. Low priority; the TTL + scan invalidation covers the common cases.
 
@@ -106,10 +106,10 @@ Response:
 ## Implementation Scope
 
 **Backend (`vireo/db.py`, `vireo/scanner.py`, `vireo/app.py`):**
-- `count_new_images()` helper (scanner module)
-- In-memory cache structure, mtime-gated
+- `count_new_images()` helper (scanner module), path-based identity
+- In-memory cache structure with 5-minute TTL ceiling
 - `db.get_new_images_for_workspace()` aggregating over reachable workspace folders
-- Cache invalidation hook in the scan job's completion path
+- Cache invalidation hook in the scan job's completion path, scoped by `folder_id` across all workspaces that link the scanned folders
 - New route: `GET /api/workspace/new-images`
 
 **Frontend (`vireo/templates/_navbar.html`):**
@@ -119,8 +119,8 @@ Response:
 - Auto-refresh hook when scan jobs complete
 
 **Tests (`vireo/tests/`):**
-- Unit test for `count_new_images` (filename diff, extension filtering, recursion)
-- Cache invalidation test (mtime change → re-walk; scan completion → clear)
+- Unit test for `count_new_images` (relative-path diff, extension filtering, recursion, collision case where two subdirs share a basename like `IMG_0001.JPG`)
+- Cache invalidation tests: TTL expiry re-walks; scan completion clears entries for every workspace linked to the scanned folders; workspace B sees the updated count after a scan ran in workspace A over a shared folder
 - API endpoint test (`GET /api/workspace/new-images` with fixtures for reachable/unreachable folders, empty/populated DB)
 
 **No changes to:**
