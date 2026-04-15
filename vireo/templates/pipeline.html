@@ -2597,35 +2597,60 @@ async function updateExtractReadiness() {
         + '&dinov2_variant=' + encodeURIComponent(dinov2),
       {}, { toast: false }
     );
-    var items = [];
-    items.push(renderModelReadiness('SAM2', r.sam2, r.sam2_known));
-    items.push(renderModelReadiness('DINOv2', r.dinov2, r.dinov2_known));
-    panel.innerHTML = items.join('<br>');
+    panel.textContent = '';
+    panel.appendChild(renderModelReadiness('SAM2', r.sam2, r.sam2_known));
+    panel.appendChild(document.createElement('br'));
+    panel.appendChild(renderModelReadiness('DINOv2', r.dinov2, r.dinov2_known));
     panel.style.display = '';
   } catch(e) {
     panel.style.display = 'none';
   }
 }
 
+// Build the readiness line as DOM nodes so variant strings (which
+// originate from /api/pipeline/config and may be arbitrary) can never
+// be interpreted as HTML — avoids a stored DOM-XSS sink on /pipeline.
 function renderModelReadiness(label, info, known) {
+  var frag = document.createDocumentFragment();
   var variant = info ? info.variant : '?';
-  // Unknown variant (e.g. stale override pointing at a removed model):
-  // the download-on-first-run path would be misleading because
-  // ensure_sam2_weights / DINOv2 session validation will reject it at
-  // extract time, so flag the bad config up-front instead.
+  var icon = document.createElement('span');
+
   if (known === false) {
-    return '<span style="color:var(--danger,#e74c3c);">&#10007;</span> '
-      + label + ': <b>' + variant + '</b> &mdash; unknown variant; '
-      + 'pick a supported one above';
+    icon.style.color = 'var(--danger,#e74c3c)';
+    icon.textContent = '\u2717';
+    frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(' ' + label + ': '));
+    var nameEl = document.createElement('b');
+    nameEl.textContent = variant;
+    frag.appendChild(nameEl);
+    frag.appendChild(document.createTextNode(
+      ' \u2014 unknown variant; pick a supported one above'));
+    return frag;
   }
+
   if (info && info.ready) {
-    return '<span style="color:var(--accent,#24E5CA);">&#10003;</span> '
-      + label + ': <b>' + variant + '</b> &mdash; ready';
+    icon.style.color = 'var(--accent,#24E5CA)';
+    icon.textContent = '\u2713';
+    frag.appendChild(icon);
+    frag.appendChild(document.createTextNode(' ' + label + ': '));
+    var readyName = document.createElement('b');
+    readyName.textContent = variant;
+    frag.appendChild(readyName);
+    frag.appendChild(document.createTextNode(' \u2014 ready'));
+    return frag;
   }
+
+  icon.style.color = 'var(--warning,#f0c040)';
+  icon.textContent = '\u25CF';
+  frag.appendChild(icon);
+  frag.appendChild(document.createTextNode(' ' + label + ': '));
+  var downloadName = document.createElement('b');
+  downloadName.textContent = variant;
+  frag.appendChild(downloadName);
   var size = info && info.size_hint ? ' (' + info.size_hint + ')' : '';
-  return '<span style="color:var(--warning,#f0c040);">&#9679;</span> '
-    + label + ': <b>' + variant
-    + '</b> &mdash; will download' + size + ' on first run';
+  frag.appendChild(document.createTextNode(
+    ' \u2014 will download' + size + ' on first run'));
+  return frag;
 }
 
 async function runExtractStep(collectionId) {
