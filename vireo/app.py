@@ -6175,12 +6175,16 @@ def create_app(db_path, thumb_cache_dir=None):
                 break
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        return jsonify({
+        response = {
             "ok": True,
             "species": species,
             "keyword_id": kid,
             "photo_count": len(photo_ids),
-        })
+        }
+        if cached:
+            response["encounters"] = cached.get("encounters", [])
+            response["summary"] = cached.get("summary", {})
+        return jsonify(response)
 
     @app.route("/api/species/search")
     def api_species_search():

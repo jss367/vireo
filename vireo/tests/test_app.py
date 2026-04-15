@@ -833,6 +833,13 @@ def test_encounter_species_auto_detaches_mixed_burst(app_and_db):
                        json={"species": "Golden Eagle", "photo_ids": [3], "burst_index": 1})
     assert resp.status_code == 200
 
+    # Response must include updated encounters so the client can refresh its
+    # local state and avoid overwriting the detach via a later save-cache POST.
+    body = resp.get_json()
+    assert "encounters" in body
+    assert "summary" in body
+    assert len(body["encounters"]) == 2
+
     with open(path) as f:
         updated = _json.load(f)
     encounters = updated["encounters"]

@@ -1806,8 +1806,17 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   });
   if (!resp || !resp.ok) return;
 
-  // Update local state optimistically
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+  // Prefer the server's encounter list — the endpoint may auto-detach a burst
+  // into a new or adjacent encounter when its confirmed species differs from
+  // the encounter's, and a stale local list would lose that change on the
+  // next save-cache POST.
+  if (resp.encounters) {
+    pipelineResults.encounters = resp.encounters;
+    if (resp.summary) {
+      pipelineResults.summary = resp.summary;
+      updateSummaryBar(pipelineResults.summary);
+    }
+  } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
     enc.bursts[burstIdx].species_override = { species: speciesName, confirmed: true };
   } else {
     enc.species_confirmed = true;
