@@ -2322,29 +2322,28 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
   var t = document.getElementById('lightboxTransform');
   if (!wrap || !t) return;
 
-  // Adjust pan so the anchor point in image space stays under the anchor cursor.
+  // The transform container is flex-centered in the wrap, so wrap-local
+  // coordinates are NOT image-local. Use the transform element's own
+  // getBoundingClientRect() — it already bakes in the current translate+scale.
+  // Cursor at clientX has image-local coord (clientX - rect.left) / zoom.
+  // Anchor invariant: that image coord must still land under the cursor after zoom.
+  //   newPanX = _lbPanX + (clientX - rect.left) - imgX * newZoom
+  var rect = t.getBoundingClientRect();
+  var anchorX, anchorY;
   if (anchorClientX != null && anchorClientY != null) {
-    var wrapRect = wrap.getBoundingClientRect();
-    // Anchor in wrap-local coordinates
-    var ax = anchorClientX - wrapRect.left;
-    var ay = anchorClientY - wrapRect.top;
-    // Same anchor in current image space
-    var imgX = (ax - _lbPanX) / _lbZoom;
-    var imgY = (ay - _lbPanY) / _lbZoom;
-    _lbZoom = newZoom;
-    _lbPanX = ax - imgX * _lbZoom;
-    _lbPanY = ay - imgY * _lbZoom;
+    anchorX = anchorClientX;
+    anchorY = anchorClientY;
   } else {
-    // Center anchor: keep visual center fixed
-    var wrapRect2 = wrap.getBoundingClientRect();
-    var cx = wrapRect2.width / 2;
-    var cy = wrapRect2.height / 2;
-    var imgCX = (cx - _lbPanX) / _lbZoom;
-    var imgCY = (cy - _lbPanY) / _lbZoom;
-    _lbZoom = newZoom;
-    _lbPanX = cx - imgCX * _lbZoom;
-    _lbPanY = cy - imgCY * _lbZoom;
+    // Center anchor: use wrap's visual center
+    var wrapRect = wrap.getBoundingClientRect();
+    anchorX = wrapRect.left + wrapRect.width / 2;
+    anchorY = wrapRect.top + wrapRect.height / 2;
   }
+  var imgX = (anchorX - rect.left) / _lbZoom;
+  var imgY = (anchorY - rect.top) / _lbZoom;
+  _lbPanX = _lbPanX + (anchorX - rect.left) - imgX * newZoom;
+  _lbPanY = _lbPanY + (anchorY - rect.top) - imgY * newZoom;
+  _lbZoom = newZoom;
 
   if (_lbZoom <= 1.001) {
     _lbPanX = 0;
