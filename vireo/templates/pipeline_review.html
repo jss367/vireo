@@ -1667,8 +1667,15 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
   if (level === 'burst') {
     var burst = enc.bursts[burstIdx];
     var ovr = burst.species_override;
-    isConfirmed = ovr && ovr.confirmed;
-    displayName = (ovr && ovr.species) || (enc.species ? enc.species[0] : 'Unknown');
+    if (ovr) {
+      isConfirmed = !!ovr.confirmed;
+      displayName = ovr.species || (enc.species ? enc.species[0] : 'Unknown');
+    } else {
+      // No per-burst override: inherit from the encounter so confirming the
+      // encounter visibly cascades to every burst.
+      isConfirmed = !!enc.species_confirmed;
+      displayName = enc.confirmed_species || (enc.species ? enc.species[0] : 'Unknown');
+    }
     predictions = burst.species_predictions || [];
   } else {
     isConfirmed = enc.species_confirmed;
