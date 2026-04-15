@@ -6800,6 +6800,65 @@ def create_app(db_path, thumb_cache_dir=None):
         img.save(cache_path, format="JPEG", quality=preview_quality)
         return send_file(cache_path, mimetype="image/jpeg")
 
+    PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
+
+    @app.route("/photos/<int:photo_id>/preview")
+    def serve_photo_preview(photo_id):
+        """Serve a JPEG preview at a chosen max-size, cached per size.
+
+        Query params:
+          size: int — max dimension (longest side). Must be in PREVIEW_SIZE_ALLOWLIST
+                to avoid unbounded cache growth.
+        """
+        import config as cfg
+        from flask import request, send_file
+
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        if size not in PREVIEW_SIZE_ALLOWLIST:
+            return "Unsupported size", 400
+
+        preview_dir = os.path.join(
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+        )
+        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+
+        if os.path.exists(cache_path):
+            return send_file(cache_path, mimetype="image/jpeg")
+
+        from image_loader import load_image
+
+        db = _get_db()
+        photo = db.get_photo(photo_id)
+        if not photo:
+            return "Not found", 404
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
+        img = load_image(image_path, max_size=size)
+        if img is None:
+            return "Could not load image", 500
+
+        os.makedirs(preview_dir, exist_ok=True)
+        preview_quality = cfg.load().get("preview_quality", 90)
+        img.save(cache_path, format="JPEG", quality=preview_quality)
+        return send_file(cache_path, mimetype="image/jpeg")
+
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):
         """Serve full-resolution image for 1:1 zoom."""
