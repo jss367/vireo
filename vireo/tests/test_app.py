@@ -453,6 +453,35 @@ def test_encounter_species_replacement_redo_reapplies(app_and_db):
         assert "Sparrow" not in names
 
 
+def test_encounter_species_rejects_photo_ids_not_in_burst(app_and_db):
+    """A valid burst_index plus photo_ids from a different burst must be rejected."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+    assert len(photo_ids) >= 2
+
+    # Two bursts: burst 0 holds photo_ids[:1], burst 1 holds photo_ids[1:].
+    bursts = [
+        {"photo_ids": photo_ids[:1], "species_predictions": [], "species_override": None},
+        {"photo_ids": photo_ids[1:], "species_predictions": [], "species_override": None},
+    ]
+    _seed_encounter_cache(app, db, photo_ids, bursts=bursts)
+
+    # burst_index 0 is in range, but we're submitting photos from burst 1.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay",
+                             "photo_ids": photo_ids[1:],
+                             "burst_index": 0})
+    assert resp.status_code == 400
+    assert "bursts[0]" in resp.get_json()["error"]
+
+    # Nothing should have been written.
+    for pid in photo_ids:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" not in names
+    assert not db.get_pending_changes()
+
+
 def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     """A stale burst_index must not silently fall through to an encounter update."""
     app, db = app_and_db

@@ -2893,13 +2893,19 @@ class Database:
         if _commit:
             self.conn.commit()
 
-    def untag_photo(self, photo_id, keyword_id):
-        """Remove a keyword association from a photo."""
+    def untag_photo(self, photo_id, keyword_id, _commit=True):
+        """Remove a keyword association from a photo.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         self.conn.execute(
             "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
             (photo_id, keyword_id),
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
 
     def get_photo_keywords(self, photo_id):
         """Return all keywords for a photo."""
@@ -3568,8 +3574,13 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
-    def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None):
-        """Delete matching pending changes. Returns rows removed."""
+    def remove_pending_changes(self, photo_id, change_type=None, value=None, workspace_id=None, _commit=True):
+        """Delete matching pending changes. Returns rows removed.
+
+        Args:
+            _commit: If False, skip the internal commit (caller is responsible
+                     for committing the transaction).
+        """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         clauses = ["photo_id = ?", "workspace_id = ?"]
         params = [photo_id, ws_id]
@@ -3584,7 +3595,8 @@ class Database:
             f"DELETE FROM pending_changes WHERE {' AND '.join(clauses)}",
             params,
         )
-        self.conn.commit()
+        if _commit:
+            self.conn.commit()
         return cur.rowcount
 
     def remove_pending_change_token(self, change_token):
@@ -3611,10 +3623,15 @@ class Database:
 
     # -- Edit History --
 
-    def record_edit(self, action_type, description, new_value, items, is_batch=False):
+    def record_edit(self, action_type, description, new_value, items, is_batch=False, _commit=True):
         """Record an edit action with per-photo before/after values.
 
         Clears the redo stack (any undone entries) since a new action invalidates them.
+
+        Args:
+            _commit: If False, skip the internal commit and the history prune
+                     (caller is responsible for committing the transaction;
+                     prune can be run later).
         """
         # Clear redo stack — new edit invalidates undone entries
         self.conn.execute(
@@ -3631,8 +3648,9 @@ class Database:
                 "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
                 (edit_id, item['photo_id'], item['old_value'], item['new_value']),
             )
-        self.conn.commit()
-        self._prune_edit_history()
+        if _commit:
+            self.conn.commit()
+            self._prune_edit_history()
         return edit_id
 
     def get_edit_history(self, limit=50, offset=0):

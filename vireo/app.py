@@ -902,19 +902,31 @@ def create_app(db_path, thumb_cache_dir=None):
         log.info("Keyword cleanup: merged %d duplicates", merged)
         return jsonify({"ok": True, "merged": merged})
 
-    def _queue_keyword_add(photo_id, keyword_name, workspace_id=None):
+    def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword add unless it cancels a pending removal."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_remove", keyword_name,
+            workspace_id=workspace_id, _commit=_commit,
+        )
         if removed == 0:
-            db.queue_change(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
+            db.queue_change(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=_commit,
+            )
 
-    def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None):
+    def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword removal unless it cancels a pending add."""
         db = _get_db()
-        removed = db.remove_pending_changes(photo_id, "keyword_add", keyword_name, workspace_id=workspace_id)
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_add", keyword_name,
+            workspace_id=workspace_id, _commit=_commit,
+        )
         if removed == 0:
-            db.queue_change(photo_id, "keyword_remove", keyword_name, workspace_id=workspace_id)
+            db.queue_change(
+                photo_id, "keyword_remove", keyword_name,
+                workspace_id=workspace_id, _commit=_commit,
+            )
 
     # -- Edit API routes --
 
@@ -6143,14 +6155,21 @@ def create_app(db_path, thumb_cache_dir=None):
                 break
 
         # If this is a burst-scoped request, the burst must actually exist in
-        # the cached encounter. A stale client (e.g. submitting after a burst
-        # regrouping) could otherwise fall through to an encounter-level cache
-        # update even though only the submitted photo_ids were retagged.
+        # the cached encounter AND the submitted photo_ids must be a subset of
+        # that burst's photos. Otherwise a stale client (e.g. one that still
+        # holds a burst index from before a regrouping) could retag photos
+        # that don't belong to this burst while the cache update below touches
+        # the wrong override.
         if burst_index is not None:
             bursts = target_enc.get("bursts") if target_enc else None
             if not bursts or not (0 <= burst_index < len(bursts)):
                 return json_error(
                     f"Unknown burst_index {burst_index} for submitted photos",
+                )
+            burst_photo_ids = set(bursts[burst_index].get("photo_ids", []))
+            if not set(photo_ids).issubset(burst_photo_ids):
+                return json_error(
+                    f"photo_ids are not members of bursts[{burst_index}]",
                 )
 
         if target_enc is not None:
@@ -6168,8 +6187,6 @@ def create_app(db_path, thumb_cache_dir=None):
 
         ws_id = db._ws_id()
 
-        # If the species is changing, untag the old keyword from these photos
-        # and cancel/queue a sidecar remove so the XMP stays in sync.
         old_kid = None
         is_replacement = (
             previous_species is not None
@@ -6189,44 +6206,59 @@ def create_app(db_path, thumb_cache_dir=None):
             ).fetchone()
             if old_kid_row:
                 old_kid = old_kid_row["id"]
+
+        # Run all mutations in a single transaction so that a mid-loop failure
+        # (SQLite lock, disk error, etc.) can't leave half the photos retagged
+        # while the other half still carry the old species.
+        try:
+            if is_replacement and old_kid is not None:
                 for pid in photo_ids:
-                    db.untag_photo(pid, old_kid)
-                    _queue_keyword_remove(pid, previous_species, workspace_id=ws_id)
+                    db.untag_photo(pid, old_kid, _commit=False)
+                    _queue_keyword_remove(
+                        pid, previous_species,
+                        workspace_id=ws_id, _commit=False,
+                    )
 
-        # Create or find the new species keyword (commits on its own)
-        kid = db.add_keyword(species, is_species=True)
+            kid = db.add_keyword(species, is_species=True, _commit=False)
 
-        for pid in photo_ids:
-            db.tag_photo(pid, kid)
-            _queue_keyword_add(pid, species, workspace_id=ws_id)
+            for pid in photo_ids:
+                db.tag_photo(pid, kid, _commit=False)
+                _queue_keyword_add(
+                    pid, species, workspace_id=ws_id, _commit=False,
+                )
 
-        # Record the full action as a single undoable edit so one undo
-        # restores the previous confirmed species rather than leaving the
-        # photos with neither keyword.
-        if is_replacement and old_kid is not None:
-            items = [
-                {"photo_id": pid, "old_value": str(old_kid), "new_value": str(kid)}
-                for pid in photo_ids
-            ]
-            db.record_edit(
-                "species_replace",
-                f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
-                str(kid),
-                items,
-                is_batch=len(photo_ids) > 1,
-            )
-        else:
-            items = [
-                {"photo_id": pid, "old_value": "", "new_value": str(kid)}
-                for pid in photo_ids
-            ]
-            db.record_edit(
-                "keyword_add",
-                f'Confirmed species "{species}" on {len(photo_ids)} photos',
-                str(kid),
-                items,
-                is_batch=len(photo_ids) > 1,
-            )
+            if is_replacement and old_kid is not None:
+                items = [
+                    {"photo_id": pid, "old_value": str(old_kid), "new_value": str(kid)}
+                    for pid in photo_ids
+                ]
+                db.record_edit(
+                    "species_replace",
+                    f'Replaced species "{previous_species}" with "{species}" on {len(photo_ids)} photos',
+                    str(kid),
+                    items,
+                    is_batch=len(photo_ids) > 1,
+                    _commit=False,
+                )
+            else:
+                items = [
+                    {"photo_id": pid, "old_value": "", "new_value": str(kid)}
+                    for pid in photo_ids
+                ]
+                db.record_edit(
+                    "keyword_add",
+                    f'Confirmed species "{species}" on {len(photo_ids)} photos',
+                    str(kid),
+                    items,
+                    is_batch=len(photo_ids) > 1,
+                    _commit=False,
+                )
+            db.conn.commit()
+        except Exception:
+            db.conn.rollback()
+            raise
+        # Prune oldest edit-history rows now that the transaction has landed.
+        db._prune_edit_history()
 
         # Update pipeline cache. burst_index was validated above, so the
         # branch here is unambiguous: burst-scoped requests only touch the
