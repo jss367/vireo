@@ -58,6 +58,39 @@ def test_diversity_missing_features():
     assert 0.3 < score < 0.9
 
 
+def test_diversity_mismatched_embedding_dims_does_not_crash():
+    """Photos embedded under different DINOv2 variants must not crash MMR.
+
+    If the DB still holds embeddings of mixed dims (e.g. 768 from vit-b14
+    and 1024 from vit-l14) because a variant switch left stale rows,
+    diversity_distance should treat them as 'no embedding comparison
+    available' and degrade gracefully instead of raising ValueError.
+    """
+    from selection import diversity_distance
+
+    emb_a = np.ones(768, dtype=np.float32)
+    emb_b = np.ones(1024, dtype=np.float32)
+    a = _make_photo(1, 0.8, emb=emb_a, phash="0000000000000000")
+    b = _make_photo(2, 0.7, emb=emb_b, phash="ffffffffffffffff")
+    score = diversity_distance(a, b)
+    assert 0.0 <= score <= 1.0
+
+
+def test_mmr_runs_with_mixed_embedding_dims():
+    """MMR over a mixed-dim candidate set should produce selections, not crash."""
+    from selection import mmr_select
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    candidates = [
+        _make_photo(1, 0.9, emb=emb_768, phash="0000000000000000"),
+        _make_photo(2, 0.7, emb=emb_1024, phash="ffffffffffffffff"),
+        _make_photo(3, 0.5, emb=emb_768, phash="aaaaaaaaaaaaaaaa"),
+    ]
+    selected = mmr_select(candidates, lam=0.70, max_keep=2)
+    assert len(selected) == 2
+
+
 # -- mmr_select --
 
 
