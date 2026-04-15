@@ -22,33 +22,43 @@ Currently, unreachable folders are already surfaced via the "Missing Folders" ba
 
 ## Detection Logic
 
-New helper in `vireo/scanner.py` (or adjacent module) that, given a folder path and the set of known paths (relative to the folder root) from the DB, returns the count and sample of image files on disk not yet ingested.
+**Important constraint from the codebase:** `Database.add_folder` auto-registers every discovered subfolder as its own `folders` row *and* auto-links it to the active workspace (`vireo/db.py:964`). So `workspace_folders` contains not only the user-mapped roots but also every nested descendant that a prior scan ingested. This means a naive "iterate every `workspace_folders` row and walk recursively" would count each file once per ancestor folder that's also linked — severe over-count.
+
+**Strategy: walk mapped roots only, diff by absolute path.**
+
+A "mapped root" for a workspace is a `workspace_folders` entry whose `folders.parent_id` is either NULL or points to a folder that is *not* linked to the same workspace. Roots walk recursively; non-root descendants are skipped from the walk entirely (they're covered by their ancestor root).
 
 Pseudocode:
 
 ```python
-def count_new_images(folder_path: str, known_rel_paths: set[str]) -> dict:
-    """Return {"new_count": int, "sample": list[str]} for a folder.
+def count_new_images_for_workspace(db, workspace_id) -> dict:
+    """Return {"new_count": int, "per_root": [...], "sample": [...]}.
 
-    Walks folder_path recursively, filters to image extensions, and
-    returns count and up to 5 sample *relative* paths of files whose
-    relative path is not in known_rel_paths.
+    1. Fetch mapped roots for workspace_id (reachable only).
+    2. Fetch the set of known absolute paths for all photos in this
+       workspace — computed as folders.path + '/' + photos.filename
+       via a single JOIN.
+    3. For each root, recursively walk and collect image files.
+    4. Diff walked absolute paths against known absolute paths.
+    5. Aggregate counts; return up to 5 sample absolute paths.
     """
 ```
 
-- **Path-based identity, not basename** — keys are paths relative to the folder root (e.g. `a/b/IMG_0001.JPG`), so two subdirectories with the same filename are not conflated. This matches the scan job's own identity model (`existing_by_path` in `vireo/scanner.py`). Basename-only keying would undercount whenever camera exports produce repeating names like `IMG_0001.JPG` across subfolders.
-- **Image extensions** — reuse the canonical list from `vireo/scanner.py` (whatever the scan job uses). Do not re-invent.
-- **Recursive** — matches the scan job's behavior.
-- **Sample** — up to 5 relative paths, useful for debug/logging and potentially surfacing in the banner on hover.
+- **Roots only, not per-folder** — prevents the double-counting described above. A file in `/USA/2026/day1/IMG_0001.JPG` is counted exactly once, by the walk from its root `/USA/2026/`, regardless of how many of its ancestors are also in `workspace_folders`.
+- **Absolute-path identity** — keys the diff on full filesystem path. Matches `scanner.py`'s path-based identity and avoids basename collisions across subdirectories (e.g. repeating camera names like `IMG_0001.JPG`).
+- **Known-paths set is per-workspace, not per-folder** — one SQL query computes all known absolute paths via `JOIN folders ON photos.folder_id = folders.id` filtered to the workspace. Single set-diff. This is also what makes aggregation across multiple roots safe: the known set is global to the workspace, so a file that appears under two distinct roots (shouldn't happen in practice, but defensively) would only be "unknown" if it's not already ingested somewhere in the workspace.
+- **Image extensions** — reuse the canonical list from `vireo/scanner.py`. Do not re-invent.
+- **Sample** — up to 5 absolute paths, for debug/logging and possible hover display.
 
 ## Caching
 
-In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`) keyed by `(workspace_id, folder_id)`:
+In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`) keyed by `workspace_id` (since detection is per-workspace, not per-folder):
 
 ```python
 {
-    (workspace_id, folder_id): {
+    workspace_id: {
         "new_count": int,
+        "per_root": [{"folder_id": int, "path": str, "new_count": int}, ...],
         "sample": list[str],
         "checked_at": float,
     }
@@ -57,7 +67,7 @@ In-memory cache on the `Database` instance (or a sibling `WorkspaceHealthCache`)
 
 **Invalidation triggers:**
 
-1. **Scan-job completion** — when a scan job finishes, clear cache entries for every `(workspace_id, folder_id)` whose `folder_id` was touched by the scan. Because `workspace_folders` is many-to-many and `photos` is global by `folder_id`, ingesting into a folder from workspace A changes the "new images" truth for every other workspace that also links that folder; invalidating only the scanning workspace would leave stale banners in the others. Simplest safe implementation: on scan completion, clear all cache entries whose `folder_id` is in the set of scanned folders, across all workspaces.
+1. **Scan-job completion** — when a scan job finishes, clear cache for every workspace linked to any of the scanned `folder_id`s (via `workspace_folders`). Because `workspace_folders` is many-to-many and `photos` is global by `folder_id`, ingesting into a folder from workspace A changes the "new images" truth for every other workspace that also links that folder; invalidating only the scanning workspace would leave stale banners in the others.
 2. **TTL ceiling** — cache entries expire after 5 minutes. This is the staleness ceiling: a user who imports files via Finder (outside Vireo) will see the banner appear within 5 min on any workspace-related page load. Chosen over `mtime`-based gating because directory mtime only bubbles up one level — adding `/root/A/B/new.jpg` updates `B` but not necessarily `A`, so a shallow mtime check misses deep additions. A full recursive mtime walk would cost roughly the same as the actual filename diff, so it's not a meaningful optimization.
 3. **Manual refresh** — the banner can include a small "Check now" affordance that bypasses the cache. Low priority; the TTL + scan invalidation covers the common cases.
 
@@ -89,11 +99,12 @@ New endpoint: `GET /api/workspace/new-images`
 
 Response:
 ```json
-{"new_count": 47, "per_folder": [{"folder_id": 7, "path": "/Volumes/.../USA/2026", "new_count": 47}]}
+{"new_count": 47, "per_root": [{"folder_id": 7, "path": "/Volumes/.../USA/2026", "new_count": 47}]}
 ```
 
 - Respects the cache described above.
-- Runs only against reachable folders (skip any with `folders.status = 'missing'`).
+- `per_root` contains one entry per mapped root, not per workspace_folder. Nested descendant folders never appear here.
+- Runs only against reachable roots (skip any with `folders.status = 'missing'`).
 - Called asynchronously by `_navbar.html` JS shortly after workspace switch completes.
 
 ## Frontend Behavior
@@ -106,10 +117,10 @@ Response:
 ## Implementation Scope
 
 **Backend (`vireo/db.py`, `vireo/scanner.py`, `vireo/app.py`):**
-- `count_new_images()` helper (scanner module), path-based identity
-- In-memory cache structure with 5-minute TTL ceiling
-- `db.get_new_images_for_workspace()` aggregating over reachable workspace folders
-- Cache invalidation hook in the scan job's completion path, scoped by `folder_id` across all workspaces that link the scanned folders
+- `count_new_images_for_workspace()` helper — resolves mapped roots, walks each, diffs by absolute path
+- Helper to resolve "mapped roots" for a workspace (filter `workspace_folders` to rows whose parent is not also linked to the workspace)
+- In-memory cache keyed by `workspace_id` with 5-minute TTL ceiling
+- Cache invalidation hook in the scan job's completion path, clearing cache for every workspace linked to any of the scanned folders
 - New route: `GET /api/workspace/new-images`
 
 **Frontend (`vireo/templates/_navbar.html`):**
@@ -119,9 +130,11 @@ Response:
 - Auto-refresh hook when scan jobs complete
 
 **Tests (`vireo/tests/`):**
-- Unit test for `count_new_images` (relative-path diff, extension filtering, recursion, collision case where two subdirs share a basename like `IMG_0001.JPG`)
-- Cache invalidation tests: TTL expiry re-walks; scan completion clears entries for every workspace linked to the scanned folders; workspace B sees the updated count after a scan ran in workspace A over a shared folder
-- API endpoint test (`GET /api/workspace/new-images` with fixtures for reachable/unreachable folders, empty/populated DB)
+- Unit test for `count_new_images_for_workspace`: absolute-path diff, extension filtering, recursion
+- Basename-collision case: two subdirs share a basename like `IMG_0001.JPG`, only one ingested — the other must count as new
+- No-double-counting case: the scanner auto-linked every subfolder to `workspace_folders`; adding a new file to a deeply nested directory must count as 1, not once per ancestor
+- Cache invalidation tests: TTL expiry re-walks; scan completion clears cache for every workspace linked to the scanned folders; workspace B sees the updated count after a scan ran in workspace A over a shared folder
+- API endpoint test (`GET /api/workspace/new-images` with fixtures for reachable/unreachable roots, empty/populated DB)
 
 **No changes to:**
 - `pipeline.html` or the pipeline job itself
