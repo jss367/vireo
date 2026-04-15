@@ -597,7 +597,7 @@ def test_default_collections_adds_missing(tmp_path):
 
 
 def test_all_photos_collection_returns_all_photos(tmp_path):
-    """The default 'All Photos' collection (empty rules) matches every photo in the workspace."""
+    """The default 'All Photos' collection matches every photo in the workspace."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
