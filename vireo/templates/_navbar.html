@@ -2497,6 +2497,19 @@ function _lbScheduleSourceSwap() {
       if (_lbDesiredSrcKey !== key) return;
       var img = document.getElementById('lightboxImg');
       if (!img) return;
+      // If API dimensions were missing and we just loaded the original, learn the
+      // native size from the loaded image so nativeZoom becomes accurate.
+      if (!_lbPhotoW && key === 'original') {
+        img.addEventListener('load', function learnDims() {
+          img.removeEventListener('load', learnDims);
+          if (!_lbPhotoW && img.naturalWidth && _lightboxCurrentId === photoId) {
+            _lbPhotoW = img.naturalWidth;
+            _lbPhotoH = img.naturalHeight;
+            _lbRecomputeNativeZoom();
+            _lbApplyTransform();
+          }
+        });
+      }
       img.src = url;
       _lbCurrentSrcKey = key;
     };
