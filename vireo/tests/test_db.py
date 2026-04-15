@@ -2802,3 +2802,57 @@ def test_redo_color_label(tmp_path):
 
     db.redo_last_undo()
     assert db.get_color_label(pid) == 'red'
+
+
+def test_dino_embedding_variant_column_exists(tmp_path):
+    """The photos table has a dino_embedding_variant column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute("SELECT dino_embedding_variant FROM photos LIMIT 0")
+
+
+def test_update_photo_embeddings_stores_variant(tmp_path):
+    """update_photo_embeddings persists the DINOv2 variant alongside the blobs."""
+    import numpy as np
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+
+    blob = np.ones(1024, dtype=np.float32).tobytes()
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=blob,
+        dino_global_embedding=blob,
+        variant="vit-l14",
+    )
+    row = db.conn.execute(
+        "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
+    ).fetchone()
+    assert row["dino_embedding_variant"] == "vit-l14"
+
+
+def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
+    """Re-embedding a photo with a new variant overwrites the stored variant."""
+    import numpy as np
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 100, 1.0)
+
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=np.ones(768, dtype=np.float32).tobytes(),
+        dino_global_embedding=np.ones(768, dtype=np.float32).tobytes(),
+        variant="vit-b14",
+    )
+    db.update_photo_embeddings(
+        pid,
+        dino_subject_embedding=np.ones(1024, dtype=np.float32).tobytes(),
+        dino_global_embedding=np.ones(1024, dtype=np.float32).tobytes(),
+        variant="vit-l14",
+    )
+    row = db.conn.execute(
+        "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
+    ).fetchone()
+    assert row["dino_embedding_variant"] == "vit-l14"

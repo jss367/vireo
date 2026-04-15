@@ -554,22 +554,23 @@ jobs:
     if: >-
       github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
-      - name: Find approved claude-agent PRs
+      - name: Find approved open PRs
         id: approved
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TRUSTED_ACTORS="jss367 chatgpt-codex-connector[bot]"
 
-          # Get all open PRs with claude-agent label
           prs=$(gh pr list --repo "${{ github.repository }}" \
-            --label claude-agent --state open \
+            --state open \
             --json number -q '.[].number')
 
           if [[ -z "$prs" ]]; then
-            echo "No open claude-agent PRs."
+            echo "No open PRs."
             echo "has_approved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -580,10 +581,11 @@ jobs:
             last_push=$(gh pr view "$pr" --repo "${{ github.repository }}" \
               --json commits --jq '.commits[-1].committedDate')
 
-            # Check for +1 reactions from trusted actors that are newer than the last push
+            # `gh api --jq` only accepts a single jq expression, not --arg. Pipe
+            # to a standalone `jq` to inject the cutoff timestamp.
             reaction_match=$(gh api "repos/${{ github.repository }}/issues/${pr}/reactions" \
-              --jq --arg cutoff "$last_push" \
-              '[.[] | select(.content == "+1" and .created_at > $cutoff) | .user.login]')
+              | jq --arg cutoff "$last_push" \
+                '[.[] | select(.content == "+1" and .created_at > $cutoff) | .user.login]')
 
             for actor in $TRUSTED_ACTORS; do
               if echo "$reaction_match" | jq -e "index(\"$actor\")" > /dev/null 2>&1; then
@@ -596,7 +598,7 @@ jobs:
 
           approved_prs=$(echo "$approved_prs" | xargs)
           if [[ -z "$approved_prs" ]]; then
-            echo "No claude-agent PRs with trusted +1 reactions."
+            echo "No PRs with trusted +1 reactions."
             echo "has_approved=false" >> "$GITHUB_OUTPUT"
           else
             echo "Approved PRs: $approved_prs"
@@ -620,7 +622,7 @@ jobs:
               continue
             fi
 
-            children=$(gh pr list --repo "$REPO" --base "$head" --label claude-agent --state open --json number -q 'length')
+            children=$(gh pr list --repo "$REPO" --base "$head" --state open --json number -q 'length')
             if [[ "$children" -gt 0 ]]; then
               echo "PR #${pr}: ${children} open child PR(s) target '${head}' — skipping (no comment posted by scheduled poll)."
               continue

@@ -4,10 +4,35 @@ mod tray;
 mod updater;
 use sidecar::SidecarState;
 use tauri::{Manager, RunEvent};
+use tauri::window::{ProgressBarState, ProgressBarStatus};
 
 #[tauri::command]
 fn get_server_port(state: tauri::State<'_, SidecarState>) -> u16 {
     state.port
+}
+
+// Update the OS-level progress indicator on the dock/taskbar icon.
+// `progress` is 0-100 (None = clear). When `indeterminate` is true the bar
+// pulses instead of filling — used for phases without a known total.
+#[tauri::command]
+fn set_job_progress(
+    window: tauri::WebviewWindow,
+    progress: Option<u64>,
+    indeterminate: bool,
+) -> Result<(), String> {
+    let (status, progress) = if indeterminate {
+        (ProgressBarStatus::Indeterminate, Some(0))
+    } else if let Some(p) = progress {
+        (ProgressBarStatus::Normal, Some(p.min(100)))
+    } else {
+        (ProgressBarStatus::None, None)
+    };
+    window
+        .set_progress_bar(ProgressBarState {
+            status: Some(status),
+            progress,
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -114,11 +139,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_server_port,
+            set_job_progress,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let RunEvent::Exit = event {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.set_progress_bar(ProgressBarState {
+                        status: Some(ProgressBarStatus::None),
+                        progress: None,
+                    });
+                }
                 if let Some(state) = app_handle.try_state::<SidecarState>() {
                     sidecar::stop_sidecar(&state);
                 }

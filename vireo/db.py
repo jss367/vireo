@@ -357,6 +357,15 @@ class Database:
             self.conn.execute("SELECT noise_estimate FROM photos LIMIT 0")
         except sqlite3.OperationalError:
             self.conn.execute("ALTER TABLE photos ADD COLUMN noise_estimate REAL")
+        # DINOv2 variant that produced the embeddings. NULL for legacy rows
+        # written before this column existed; pipeline treats those as "unknown"
+        # and drops them when the dim doesn't match the configured variant.
+        try:
+            self.conn.execute("SELECT dino_embedding_variant FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos ADD COLUMN dino_embedding_variant TEXT"
+            )
         # Enhanced EXIF metadata columns
         try:
             self.conn.execute("SELECT focal_length FROM photos LIMIT 0")
@@ -2640,7 +2649,8 @@ class Database:
         return result
 
     def update_photo_embeddings(
-        self, photo_id, dino_subject_embedding=None, dino_global_embedding=None
+        self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
+        variant=None,
     ):
         """Store DINOv2 embedding BLOBs for a photo.
 
@@ -2648,10 +2658,15 @@ class Database:
             photo_id: photo ID
             dino_subject_embedding: bytes (float32 numpy array .tobytes())
             dino_global_embedding: bytes (float32 numpy array .tobytes())
+            variant: DINOv2 variant name that produced the embeddings
+                (e.g. "vit-b14"). Stored so the pipeline can detect stale
+                embeddings after a variant switch and drop them instead of
+                feeding mismatched-dim vectors to cosine similarity.
         """
         self.conn.execute(
-            "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=? WHERE id=?",
-            (dino_subject_embedding, dino_global_embedding, photo_id),
+            "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, "
+            "dino_embedding_variant=? WHERE id=?",
+            (dino_subject_embedding, dino_global_embedding, variant, photo_id),
         )
         self.conn.commit()
 
