@@ -791,6 +791,188 @@ def test_pipeline_detach_photo(app_and_db):
     assert "Eagle" in new_species
 
 
+def test_encounter_species_auto_detaches_mixed_burst(app_and_db):
+    """Confirming a burst to a species different from its encounter auto-detaches it."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Bald Eagle", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [{"species": "Bald Eagle", "count": 3, "models": []}],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:05:00"],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02", "species_top5": [["Bald Eagle", 0.9, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg", "timestamp": "2024-06-10T09:05:00", "species_top5": [["Golden Eagle", 0.6, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    # Confirm burst 1 (photo 3) as Golden Eagle — differs from encounter's Bald Eagle
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [3], "burst_index": 1})
+    assert resp.status_code == 200
+
+    # Response must include updated encounters so the client can refresh its
+    # local state and avoid overwriting the detach via a later save-cache POST.
+    body = resp.get_json()
+    assert "encounters" in body
+    assert "summary" in body
+    assert len(body["encounters"]) == 2
+
+    with open(path) as f:
+        updated = _json.load(f)
+    encounters = updated["encounters"]
+    # Original encounter should no longer contain burst with photo 3
+    assert len(encounters) == 2
+    bald_enc = next(e for e in encounters if 1 in e["photo_ids"])
+    eagle_enc = next(e for e in encounters if 3 in e["photo_ids"])
+    assert bald_enc is not eagle_enc
+    assert bald_enc["photo_ids"] == [1, 2]
+    assert eagle_enc["photo_ids"] == [3]
+    assert eagle_enc["species_confirmed"] is True
+    assert eagle_enc["confirmed_species"] == "Golden Eagle"
+
+
+def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
+    """Confirming the only burst in an encounter does not detach (nothing to split from)."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Bald Eagle", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 2,
+                "burst_count": 1,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:00:02"],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02"},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 2, "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [1, 2], "burst_index": 0})
+    assert resp.status_code == 200
+
+    with open(path) as f:
+        updated = _json.load(f)
+    # Still one encounter, burst stays put, override recorded
+    assert len(updated["encounters"]) == 1
+    enc = updated["encounters"][0]
+    assert len(enc["bursts"]) == 1
+    assert enc["bursts"][0]["species_override"] == {"species": "Golden Eagle", "confirmed": True}
+
+
+def test_encounter_species_detach_merges_into_adjacent_encounter(app_and_db):
+    """Detaching a second burst merges it into an adjacent encounter with matching confirmed species."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    # Original encounter has 3 bursts, all "Bald Eagle" predictions.
+    # After first burst confirmed Golden Eagle and auto-detached, confirming another
+    # burst to Golden Eagle should merge into the detached encounter (adjacent in time).
+    results = {
+        "encounters": [
+            {
+                "species": ["Bald Eagle", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 3,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:10:00"],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:05:00"},
+            {"id": 3, "label": "KEEP", "filename": "c.jpg", "timestamp": "2024-06-10T09:10:00"},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 3,
+                     "keep_count": 3, "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    # Confirm burst 2 (photo 3) as Golden Eagle -> detaches to new Golden Eagle encounter
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [3], "burst_index": 2})
+    assert resp.status_code == 200
+
+    # Now confirm burst (photo 2, still in original encounter) as Golden Eagle.
+    # Its burst_index in the original encounter is now 1 (after photo 3 detached).
+    with open(path) as f:
+        mid = _json.load(f)
+    bald_idx = next(i for i, e in enumerate(mid["encounters"]) if 1 in e["photo_ids"])
+    burst_idx_in_bald = next(
+        i for i, b in enumerate(mid["encounters"][bald_idx]["bursts"]) if 2 in b["photo_ids"]
+    )
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Golden Eagle", "photo_ids": [2],
+                             "burst_index": burst_idx_in_bald,
+                             "encounter_index": bald_idx})
+    assert resp.status_code == 200
+
+    with open(path) as f:
+        final = _json.load(f)
+    # Expect 2 encounters: original Bald Eagle (photo 1), one Golden Eagle with photos 2 & 3
+    assert len(final["encounters"]) == 2
+    golden = next(e for e in final["encounters"] if e.get("confirmed_species") == "Golden Eagle")
+    assert set(golden["photo_ids"]) == {2, 3}
+    assert len(golden["bursts"]) == 2
+    bald = next(e for e in final["encounters"] if e is not golden)
+    assert bald["photo_ids"] == [1]
+
+
 def test_keyword_duplicates_scoped_by_workspace(app_and_db):
     """Keyword duplicates endpoint only reports duplicates within the active workspace."""
     app, db = app_and_db
