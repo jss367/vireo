@@ -51,6 +51,78 @@ def test_import_full_returns_job_id(setup):
         shutil.rmtree(dest, ignore_errors=True)
 
 
+def test_extract_readiness_reports_missing_models(setup, tmp_path, monkeypatch):
+    """Default state with no weights on disk: both models report not-ready
+    with the variant-specific size hint, so the UI can warn before launch."""
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/extract-readiness"
+                     "?sam2_variant=sam2-tiny&dinov2_variant=vit-s14")
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+        assert data["sam2"]["variant"] == "sam2-tiny"
+        assert data["sam2"]["ready"] is False
+        assert "MB" in data["sam2"]["size_hint"]
+        assert data["sam2_known"] is True
+
+        assert data["dinov2"]["variant"] == "vit-s14"
+        assert data["dinov2"]["ready"] is False
+        assert "MB" in data["dinov2"]["size_hint"]
+        assert data["dinov2_known"] is True
+
+
+def test_extract_readiness_reports_ready_when_files_present(
+    setup, tmp_path, monkeypatch
+):
+    """When all required weight files exist on disk, ``ready`` flips true.
+    DINOv2 needs both the graph stub and the external-data sidecar — a
+    graph-only state must NOT report ready, because the loader fails."""
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sam2_dir = tmp_path / ".vireo" / "models" / "sam2-tiny"
+    sam2_dir.mkdir(parents=True)
+    (sam2_dir / "image_encoder.onnx").write_bytes(b"x")
+    (sam2_dir / "mask_decoder.onnx").write_bytes(b"x")
+
+    dinov2_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-s14"
+    dinov2_dir.mkdir(parents=True)
+    (dinov2_dir / "model.onnx").write_bytes(b"x")
+    (dinov2_dir / "model.onnx.data").write_bytes(b"x")
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/extract-readiness"
+                     "?sam2_variant=sam2-tiny&dinov2_variant=vit-s14")
+        data = resp.get_json()
+        assert data["sam2"]["ready"] is True
+        assert data["dinov2"]["ready"] is True
+
+
+def test_extract_readiness_dinov2_graph_only_is_not_ready(
+    setup, tmp_path, monkeypatch
+):
+    """Regression guard: a stub-only model.onnx (e.g. lingering from a
+    pre-#550 partial download) must surface as not-ready so the user
+    sees the re-download warning instead of a silent ONNX Runtime
+    crash on first run."""
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    dinov2_dir = tmp_path / ".vireo" / "models" / "dinov2-vit-b14"
+    dinov2_dir.mkdir(parents=True)
+    (dinov2_dir / "model.onnx").write_bytes(b"x")
+    # Sidecar deliberately missing.
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/extract-readiness"
+                     "?dinov2_variant=vit-b14")
+        data = resp.get_json()
+        assert data["dinov2"]["ready"] is False
+
+
 def test_import_full_requires_source_and_destination(setup):
     app, db_path = setup
     with app.test_client() as c:

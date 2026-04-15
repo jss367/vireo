@@ -50,6 +50,23 @@ def _dinov2_model_path(variant):
     return model_dir, os.path.join(model_dir, "model.onnx")
 
 
+def dinov2_status(variant):
+    """Report whether DINOv2 weights for ``variant`` are already on disk.
+
+    Both the graph stub (``model.onnx``) and external-data sidecar
+    (``model.onnx.data``) must be present — a graph-only state is treated
+    as not-ready so the readiness UI matches what the loader actually
+    requires (see ``ensure_dinov2_weights``).
+    """
+    _, model_path = _dinov2_model_path(variant)
+    data_path = model_path + ".data"
+    return {
+        "variant": variant,
+        "ready": os.path.isfile(model_path) and os.path.isfile(data_path),
+        "size_hint": _DINOV2_SIZE_HINT.get(variant, ""),
+    }
+
+
 def ensure_dinov2_weights(variant="vit-b14", progress_callback=None):
     """Ensure DINOv2 ONNX weights for ``variant`` are on disk.
 

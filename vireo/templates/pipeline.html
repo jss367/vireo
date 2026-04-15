@@ -827,6 +827,7 @@ body { padding-bottom: 36px; }
           </div>
         </div>
       </div>
+      <div class="readiness-panel" id="extractReadinessPanel" style="display:none;"></div>
       <span class="status-msg" id="statusExtract"></span>
       <div class="progress-wrap" id="progressExtract" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillExtract"></div></div>
@@ -955,6 +956,7 @@ function initPipelinePage() {
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
+      if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
 
       // Populate recent destinations
       var recents = data.recent_destinations || [];
@@ -2579,6 +2581,41 @@ function onModelConfigChange() {
       _savedModelConfig = newCfg;
     }
   }).catch(function() {});
+
+  updateExtractReadiness();
+}
+
+async function updateExtractReadiness() {
+  var panel = document.getElementById('extractReadinessPanel');
+  if (!panel) return;
+  var sam2 = document.getElementById('cfgSam2').value;
+  var dinov2 = document.getElementById('cfgDinov2').value;
+  try {
+    var r = await safeFetch(
+      '/api/pipeline/extract-readiness'
+        + '?sam2_variant=' + encodeURIComponent(sam2)
+        + '&dinov2_variant=' + encodeURIComponent(dinov2),
+      {}, { toast: false }
+    );
+    var items = [];
+    items.push(renderModelReadiness('SAM2', r.sam2));
+    items.push(renderModelReadiness('DINOv2', r.dinov2));
+    panel.innerHTML = items.join('<br>');
+    panel.style.display = '';
+  } catch(e) {
+    panel.style.display = 'none';
+  }
+}
+
+function renderModelReadiness(label, info) {
+  if (info && info.ready) {
+    return '<span style="color:var(--accent,#24E5CA);">&#10003;</span> '
+      + label + ': <b>' + info.variant + '</b> &mdash; ready';
+  }
+  var size = info && info.size_hint ? ' (' + info.size_hint + ')' : '';
+  return '<span style="color:var(--warning,#f0c040);">&#9679;</span> '
+    + label + ': <b>' + (info ? info.variant : '?')
+    + '</b> &mdash; will download' + size + ' on first run';
 }
 
 async function runExtractStep(collectionId) {
