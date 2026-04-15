@@ -2388,7 +2388,66 @@ function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
 
   wrap.classList.toggle('zoomed', _lbZoom > 1.001);
   _lbApplyTransform();
-  // Task 6 will add: _lbScheduleSourceSwap();
+  _lbScheduleSourceSwap();
+}
+
+var _lbSwapTimer = null;
+var _lbDesiredSrcKey = null;
+
+function _lbPickSourceKey() {
+  // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
+  if (!_lbPhotoW || !_lbPhotoH) return 'full';
+  var longEdge = Math.max(_lbPhotoW, _lbPhotoH);
+  // Displayed long edge in CSS pixels at current zoom.
+  // At zoom == _lbNativeZoom, displayed long edge == longEdge.
+  var displayedLong = (_lbNativeZoom && _lbNativeZoom > 0)
+    ? longEdge * (_lbZoom / _lbNativeZoom)
+    : 0;
+  // DPR consideration: high-DPI screens need more pixels for a crisp display.
+  var dpr = window.devicePixelRatio || 1;
+  var needed = displayedLong * dpr;
+  if (needed <= 1920) return 'full';
+  if (needed <= 2560) return '2560';
+  if (needed <= 3840) return '3840';
+  return 'original';
+}
+
+function _lbSrcUrl(photoId, key) {
+  if (key === 'original') return '/photos/' + photoId + '/original';
+  if (key === 'full') return '/photos/' + photoId + '/full';
+  return '/photos/' + photoId + '/preview?size=' + key;
+}
+
+function _lbScheduleSourceSwap() {
+  if (!_lightboxCurrentId) return;
+  var desired = _lbPickSourceKey();
+  _lbDesiredSrcKey = desired;
+  if (desired === _lbCurrentSrcKey) return;
+
+  if (_lbSwapTimer) clearTimeout(_lbSwapTimer);
+  _lbSwapTimer = setTimeout(function() {
+    _lbSwapTimer = null;
+    if (_lbDesiredSrcKey !== desired) return;          // newer request won
+    if (_lbDesiredSrcKey === _lbCurrentSrcKey) return; // already there
+    var photoId = _lightboxCurrentId;
+    var key = _lbDesiredSrcKey;
+    var url = _lbSrcUrl(photoId, key);
+
+    var preloader = new Image();
+    preloader.onload = function() {
+      // Ignore stale: different photo, or desired key changed to something else
+      if (_lightboxCurrentId !== photoId) return;
+      if (_lbDesiredSrcKey !== key) return;
+      var img = document.getElementById('lightboxImg');
+      if (!img) return;
+      img.src = url;
+      _lbCurrentSrcKey = key;
+    };
+    preloader.onerror = function() {
+      // Keep current source on failure
+    };
+    preloader.src = url;
+  }, 150);
 }
 </script>
 
