@@ -1068,6 +1068,33 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     assert results[0]['filename'] == 'heron.jpg'
 
 
+def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
+    """Filter matches any species tag on the photo, not only the alphabetical first."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    p1 = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
+    db.conn.commit()
+    det1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    ], detector_model="MDV6")
+    det2 = db.save_detections(p1, [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det2[0], "Sparrow", 0.60, 'bioclip')
+    for pr in db.get_predictions(photo_ids=[p1]):
+        db.accept_prediction(pr['id'])
+
+    # Photo is tagged with both; either filter value must return it.
+    assert len(db.get_geolocated_photos(species='Red-tailed Hawk')) == 1
+    assert len(db.get_geolocated_photos(species='Sparrow')) == 1
+    assert db.get_geolocated_photos(species='Cardinal') == []
+
+
 def test_get_accepted_species(tmp_path):
     """get_accepted_species returns distinct marker species from geolocated photos."""
     from db import Database

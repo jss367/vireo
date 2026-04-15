@@ -2201,13 +2201,19 @@ class Database:
             params.append(f"%{keyword}%")
             params.append(f"%{keyword}%")
 
-        where = "WHERE " + " AND ".join(conditions)
-
-        having_clause = ""
-        having_params = []
+        # Match any species tag on the photo, not just MIN(name) — a photo can be
+        # tagged with multiple species keywords.
         if species is not None:
-            having_clause = "HAVING species = ?"
-            having_params.append(species)
+            conditions.append(
+                """EXISTS (SELECT 1 FROM photo_keywords pk_f
+                           JOIN keywords k_f ON k_f.id = pk_f.keyword_id
+                           WHERE pk_f.photo_id = p.id
+                             AND k_f.is_species = 1
+                             AND k_f.name = ?)"""
+            )
+            params.append(species)
+
+        where = "WHERE " + " AND ".join(conditions)
 
         query = f"""
             SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
@@ -2219,10 +2225,8 @@ class Database:
             {join_clause}
             {where}
             GROUP BY p.id
-            {having_clause}
             ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
-        params.extend(having_params)
         return self.conn.execute(query, params).fetchall()
 
     def get_accepted_species(self):
