@@ -2168,8 +2168,9 @@ class Database:
         """Return all geolocated photos with optional species, scoped to active workspace.
 
         Returns photos that have non-null latitude and longitude. No pagination —
-        returns all matching photos for map rendering. Includes the highest-confidence
-        accepted prediction species name (or NULL if none).
+        returns all matching photos for map rendering. Includes the photo's
+        species keyword (or NULL if none), derived from photo_keywords joined to
+        keywords where is_species = 1.
         """
         conditions = ["wf.workspace_id = ?",
                       "p.latitude IS NOT NULL",
@@ -2211,12 +2212,9 @@ class Database:
         query = f"""
             SELECT p.id, p.latitude, p.longitude, p.thumb_path, p.filename,
                    p.timestamp, p.rating, p.folder_id,
-                   (SELECT pr.species FROM predictions pr
-                    JOIN detections d ON d.id = pr.detection_id
-                    WHERE d.photo_id = p.id
-                      AND d.workspace_id = ?
-                      AND pr.status = 'accepted'
-                    ORDER BY pr.confidence DESC LIMIT 1) AS species
+                   (SELECT MIN(k2.name) FROM photo_keywords pk2
+                    JOIN keywords k2 ON k2.id = pk2.keyword_id
+                    WHERE pk2.photo_id = p.id AND k2.is_species = 1) AS species
             FROM photos p
             {join_clause}
             {where}
@@ -2224,40 +2222,33 @@ class Database:
             {having_clause}
             ORDER BY p.timestamp ASC, p.filename ASC, p.id ASC
         """
-        params.insert(0, self._ws_id())  # for the subquery
         params.extend(having_params)
         return self.conn.execute(query, params).fetchall()
 
     def get_accepted_species(self):
         """Return distinct marker species from geolocated photos in the active workspace.
 
-        Uses the same derivation as get_geolocated_photos: the highest-confidence
-        accepted prediction per photo.  Only considers photos that have GPS
-        coordinates, so every returned species can actually produce a map marker.
+        Uses the same derivation as get_geolocated_photos: species keywords
+        (is_species = 1) tagged on the photo.  Only considers photos that have
+        GPS coordinates, so every returned species can actually produce a map marker.
         """
         ws = self._ws_id()
         return [
             row[0]
             for row in self.conn.execute(
                 """
-                SELECT DISTINCT top_species FROM (
-                    SELECT (SELECT pr.species FROM predictions pr
-                            JOIN detections d ON d.id = pr.detection_id
-                            WHERE d.photo_id = p.id
-                              AND d.workspace_id = ?
-                              AND pr.status = 'accepted'
-                            ORDER BY pr.confidence DESC LIMIT 1) AS top_species
-                    FROM photos p
-                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                    JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
-                    WHERE wf.workspace_id = ?
-                      AND p.latitude IS NOT NULL
-                      AND p.longitude IS NOT NULL
-                )
-                WHERE top_species IS NOT NULL
-                ORDER BY top_species ASC
+                SELECT DISTINCT k.name
+                FROM photos p
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+                JOIN photo_keywords pk ON pk.photo_id = p.id
+                JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
+                WHERE wf.workspace_id = ?
+                  AND p.latitude IS NOT NULL
+                  AND p.longitude IS NOT NULL
+                ORDER BY k.name ASC
                 """,
-                (ws, ws),
+                (ws,),
             ).fetchall()
         ]
 
@@ -2929,8 +2920,12 @@ class Database:
         """Return photos eligible for highlights selection.
 
         Returns photos in the given folder that have a quality_score >= min_quality
-        and are not user-rejected. Includes the top accepted prediction species
-        (or NULL) and DINO embeddings for MMR diversity.
+        and are not user-rejected. Includes the photo's species keyword (or NULL)
+        and DINO embeddings for MMR diversity.
+
+        Species is derived from photo_keywords joined to keywords where
+        is_species = 1, which covers both accepted predictions (accept_prediction
+        tags the photo) and manual identification via the confirm-species flow.
 
         Ordered by quality_score DESC.
         """
@@ -2944,22 +2939,19 @@ class Database:
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                LEFT JOIN (
-                   SELECT det.photo_id, pred.species,
-                          ROW_NUMBER() OVER (
-                              PARTITION BY det.photo_id
-                              ORDER BY pred.confidence DESC
-                          ) AS rn
-                   FROM detections det
-                   JOIN predictions pred ON pred.detection_id = det.id
-                   WHERE det.workspace_id = ? AND pred.status = 'accepted'
-               ) bp ON bp.photo_id = p.id AND bp.rn = 1
+                   SELECT pk.photo_id, MIN(k.name) AS species
+                   FROM photo_keywords pk
+                   JOIN keywords k ON k.id = pk.keyword_id
+                   WHERE k.is_species = 1
+                   GROUP BY pk.photo_id
+               ) bp ON bp.photo_id = p.id
                WHERE p.folder_id = ?
                  AND wf.workspace_id = ?
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (self._ws_id(), folder_id, self._ws_id(), min_quality),
+            (folder_id, self._ws_id(), min_quality),
         ).fetchall()
         return rows
 

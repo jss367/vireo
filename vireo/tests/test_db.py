@@ -1012,10 +1012,8 @@ def test_get_geolocated_photos_with_species(tmp_path):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    # Accept the prediction
     pred = db.get_predictions(photo_ids=[p1])
-    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pred[0]['id'],))
-    db.conn.commit()
+    db.accept_prediction(pred[0]['id'])
 
     results = db.get_geolocated_photos()
     assert len(results) == 1
@@ -1059,8 +1057,7 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     results = db.get_geolocated_photos(species='Red-tailed Hawk')
     assert len(results) == 1
@@ -1094,8 +1091,7 @@ def test_get_accepted_species(tmp_path):
     db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     species = db.get_accepted_species()
     assert 'Great Blue Heron' in species
@@ -1143,8 +1139,8 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     assert species == []
 
 
-def test_get_accepted_species_uses_top_confidence(tmp_path):
-    """get_accepted_species returns only the highest-confidence species per photo."""
+def test_get_accepted_species_multiple_species_per_photo(tmp_path):
+    """get_accepted_species returns all distinct species keywords tagged on photos."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -1164,12 +1160,11 @@ def test_get_accepted_species_uses_top_confidence(tmp_path):
     db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     species = db.get_accepted_species()
-    # Only the top-confidence species should appear
-    assert species == ['Red-tailed Hawk']
+    # Both species keywords tagged on the photo appear, alphabetical.
+    assert species == ["Cooper's Hawk", 'Red-tailed Hawk']
 
 
 def test_count_photos_without_gps(tmp_path):
