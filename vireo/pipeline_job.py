@@ -482,10 +482,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         skipped += 1
                     else:
                         generated += 1
-                    stages["thumbnails"]["count"] = generated + skipped
                 except Exception:
                     failed += 1
                     log.debug("Thumbnail failed for photo %s", photo_id)
+                # Include failed in the progress counter so the dashboard
+                # reflects all work attempted, not just successes. Mixed
+                # success/failure must not hide behind a 0/N progress bar.
+                stages["thumbnails"]["count"] = generated + skipped + failed
                 processed = generated + skipped + failed
                 # Use scan count directly regardless of whether scan has
                 # completed yet — this avoids the total staying at 0/? when
@@ -507,12 +510,24 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
-            stages["thumbnails"]["status"] = "completed"
             from thumbnails import format_summary as thumb_summary
             thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
             processed = generated + skipped + failed
-            runner.update_step(job["id"], "thumbnails", status="completed",
+            # Mixed-outcome rollup: any failure flips status to 'failed'.
+            # The summary still shows both counts so partial success is visible,
+            # but status surfaces the problem on the job history list.
+            final_status = "failed" if failed > 0 else "completed"
+            stages["thumbnails"]["status"] = final_status
+            thumb_rollup = (
+                f"[thumbnails] {failed} of {processed} thumbnails failed to generate"
+                if failed > 0 else None
+            )
+            if thumb_rollup:
+                errors.append(thumb_rollup)
+            runner.update_step(job["id"], "thumbnails", status=final_status,
                                summary=thumb_summary(thumb_result),
+                               error_count=failed,
+                               error=thumb_rollup,
                                progress={"current": processed, "total": processed})
             result["stages"]["thumbnails"] = thumb_result
         except Exception as e:
@@ -559,6 +574,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total = len(photos)
             generated = 0
             skipped = 0
+            failed = 0
 
             for i, photo in enumerate(photos):
                 if _should_abort(abort):
@@ -573,6 +589,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
                         generated += 1
+                    else:
+                        # image_loader already logged the failure at WARNING;
+                        # count it here so it surfaces in the rollup.
+                        failed += 1
 
                 stages["previews"]["count"] = i + 1
                 runner.update_step(job["id"], "previews",
@@ -591,11 +611,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 })
 
             result["stages"]["previews"] = {
-                "generated": generated, "skipped": skipped, "total": total
+                "generated": generated, "skipped": skipped, "failed": failed, "total": total
             }
-            stages["previews"]["status"] = "completed"
-            runner.update_step(job["id"], "previews", status="completed",
-                               summary=f"{generated} generated")
+            final_status = "failed" if failed > 0 else "completed"
+            stages["previews"]["status"] = final_status
+            previews_rollup = (
+                f"[previews] {failed} of {total} previews failed to generate"
+                if failed > 0 else None
+            )
+            if previews_rollup:
+                errors.append(previews_rollup)
+            summary_parts = [f"{generated} generated"]
+            if skipped:
+                summary_parts.append(f"{skipped} cached")
+            if failed:
+                summary_parts.append(f"{failed} failed")
+            runner.update_step(job["id"], "previews", status=final_status,
+                               summary=", ".join(summary_parts),
+                               error_count=failed,
+                               error=previews_rollup)
         except Exception as e:
             errors.append(f"[previews] Fatal: {e}")
             log.exception("Pipeline previews stage failed")
@@ -939,6 +973,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             total_detected = 0
             total_failed = 0
             total_skipped_existing = 0
+            # Track unique photo IDs that failed in any model so the rollup
+            # message always produces a valid X-of-N ratio. total_failed sums
+            # per-model failures and can exceed total in multi-model runs.
+            failed_photo_ids: set = set()
 
             # For reclassify: start with an empty already_detected so model 1
             # re-runs MegaDetector on every photo. We intentionally do NOT
@@ -1231,6 +1269,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         )
                         if img is None:
                             failed += 1
+                            failed_photo_ids.add(photo["id"])
                             continue
 
                         img_batch = [{
@@ -1240,8 +1279,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             "image_path": image_path,
                             "img": img,
                         }]
-                        failed += _flush_batch(img_batch, clf, model_type, model_name,
-                                               thread_db, raw_results)
+                        n_batch_failed = _flush_batch(img_batch, clf, model_type, model_name,
+                                                      thread_db, raw_results)
+                        if n_batch_failed:
+                            failed_photo_ids.add(photo["id"])
+                        failed += n_batch_failed
 
                 # Group and store predictions for this model
                 group_result = _store_grouped_predictions(
@@ -1304,15 +1346,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 raise RuntimeError(fail_msg)
 
             summary_parts = [f"{total_predictions_stored} predictions"]
+            if total_failed:
+                summary_parts.append(f"{total_failed} failed")
             if skipped_model_names:
                 skipped_str = ", ".join(skipped_model_names)
                 summary_parts.append(
                     f"{len(skipped_model_names)} model(s) skipped: {skipped_str}"
                 )
 
-            stages["classify"]["status"] = "completed"
-            runner.update_step(job["id"], "classify", status="completed",
-                               summary="; ".join(summary_parts))
+            # Any per-photo classify failure flips the stage to 'failed'.
+            # Summary still shows both counts; status surfaces the problem.
+            # error_count uses unique failed photo IDs (not per-model attempt
+            # count) so the badge can never exceed total photos.
+            n_failed_photos = len(failed_photo_ids)
+            final_status = "failed" if total_failed > 0 else "completed"
+            stages["classify"]["status"] = final_status
+            classify_rollup = (
+                f"[classify] {n_failed_photos} of {total} photos failed to classify"
+                if total_failed > 0 else None
+            )
+            if classify_rollup:
+                errors.append(classify_rollup)
+            runner.update_step(job["id"], "classify", status=final_status,
+                               summary="; ".join(summary_parts),
+                               error_count=n_failed_photos,
+                               error=classify_rollup)
             result["stages"]["classify"] = {
                 "total": total,
                 "predictions_stored": total_predictions_stored,
@@ -1547,7 +1605,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 except Exception:
                     em_failed += 1
                     log.warning("Mask extraction failed for photo %s", photo_id, exc_info=True)
-                    errors.append(f"Photo {photo_id}: mask extraction failed")
 
                 stages["extract_masks"]["count"] = i + 1
                 runner.update_step(job["id"], "extract_masks",
@@ -1562,9 +1619,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
-            stages["extract_masks"]["status"] = "completed"
-            runner.update_step(job["id"], "extract_masks", status="completed",
-                               summary=f"{masked} masked, {skipped} skipped")
+            final_status = "failed" if em_failed > 0 else "completed"
+            stages["extract_masks"]["status"] = final_status
+            em_rollup = (
+                f"[extract_masks] {em_failed} of {total} photos failed mask extraction"
+                if em_failed > 0 else None
+            )
+            if em_rollup:
+                errors.append(em_rollup)
+            em_summary_parts = [f"{masked} masked", f"{skipped} skipped"]
+            if em_failed:
+                em_summary_parts.append(f"{em_failed} failed")
+            runner.update_step(job["id"], "extract_masks", status=final_status,
+                               summary=", ".join(em_summary_parts),
+                               error_count=em_failed,
+                               error=em_rollup)
             result["stages"]["extract_masks"] = {
                 "masked": masked, "skipped": skipped, "failed": em_failed, "total": total,
             }
