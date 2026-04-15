@@ -1222,9 +1222,28 @@ function renderGroupModal() {
   document.getElementById('grmCandidates').innerHTML = candidateItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">All sorted</span>';
   document.getElementById('grmRejects').innerHTML = rejectItems.map(renderCard).join('') || '<span style="font-size:12px;color:var(--text-ghost,#555);">Drag or press ↓ to reject</span>';
 
-  // Species input — use the consensus
+  // Species input — prefill with the group consensus. Matches the backend
+  // consensus_prediction algorithm: pick the species with the highest sum of
+  // per-frame confidence (== count × avg_confidence), tie-broken by vote count.
   if (!document.getElementById('grmSpecies').value && items.length > 0) {
-    document.getElementById('grmSpecies').value = items[0].species || '';
+    var votes = {};
+    items.forEach(function(it) {
+      if (!it.species) return;
+      if (!votes[it.species]) votes[it.species] = { count: 0, confSum: 0 };
+      votes[it.species].count += 1;
+      votes[it.species].confSum += (it.confidence || 0);
+    });
+    var consensus = '';
+    var bestConf = -1, bestCount = -1;
+    Object.keys(votes).forEach(function(sp) {
+      var v = votes[sp];
+      if (v.confSum > bestConf || (v.confSum === bestConf && v.count > bestCount)) {
+        bestConf = v.confSum;
+        bestCount = v.count;
+        consensus = sp;
+      }
+    });
+    document.getElementById('grmSpecies').value = consensus;
   }
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
