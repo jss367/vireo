@@ -806,6 +806,22 @@ def test_get_group_predictions_includes_alternatives(tmp_path):
     assert row0['alternatives'][0]['confidence'] == 0.30
 
 
+def test_get_group_predictions_alternatives_filtered_by_model(tmp_path):
+    """Alternatives from a different classifier model must not leak in."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
+    det = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
+    db.add_prediction(det[0], species='Sparrow', confidence=0.4, model='modelA', status='alternative')
+    # Alternative from a different model on the same detection — must be excluded
+    db.add_prediction(det[0], species='Eagle', confidence=0.9, model='modelB', status='alternative')
+
+    results = db.get_group_predictions('g1')
+    alts = [a['species'] for a in dict(results[0])['alternatives']]
+    assert alts == ['Sparrow']
+
+
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])

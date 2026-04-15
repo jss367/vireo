@@ -3202,16 +3202,24 @@ class Database:
         rows = [dict(r) for r in primaries]
         if not rows:
             return rows
-        det_ids = [r['detection_id'] for r in rows if r.get('detection_id') is not None]
-        alts_by_det = {did: [] for did in det_ids}
-        if det_ids:
-            placeholders = ','.join('?' * len(det_ids))
+        # Each detection's alternatives must match that detection's primary
+        # model — a detection may have been classified by multiple models, and
+        # we only want to show alternatives from the model that produced the
+        # group's primary prediction.
+        det_model_pairs = [
+            (r['detection_id'], r.get('model'))
+            for r in rows if r.get('detection_id') is not None
+        ]
+        alts_by_det = {did: [] for did, _ in det_model_pairs}
+        if det_model_pairs:
+            clauses = ' OR '.join(['(detection_id = ? AND model = ?)'] * len(det_model_pairs))
+            params = [v for pair in det_model_pairs for v in pair]
             alt_rows = self.conn.execute(
                 f"""SELECT detection_id, species, confidence
                     FROM predictions
-                    WHERE status = 'alternative' AND detection_id IN ({placeholders})
+                    WHERE status = 'alternative' AND ({clauses})
                     ORDER BY confidence DESC""",
-                det_ids,
+                params,
             ).fetchall()
             for a in alt_rows:
                 alts_by_det.setdefault(a['detection_id'], []).append(
