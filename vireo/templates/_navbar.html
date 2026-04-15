@@ -418,8 +418,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .lightbox-overlay.active { display: flex; }
 .lightbox-img-wrap {
-  max-width: 95vw;
-  max-height: 92vh;
+  width: 95vw;
+  height: 92vh;
   overflow: hidden;
   position: relative;
   display: flex;
@@ -427,28 +427,30 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   justify-content: center;
 }
 .lightbox-img-wrap.zoomed {
-  overflow: auto;
   cursor: grab;
-  align-items: flex-start;
-  justify-content: flex-start;
 }
 .lightbox-img-wrap.zoomed:active {
   cursor: grabbing;
 }
+.lightbox-transform {
+  /* Shared container for img + detection overlay; gets transform applied */
+  position: relative;
+  transform-origin: 0 0;
+  will-change: transform;
+}
 .lightbox-overlay img {
-  max-width: 100%;
+  max-width: 95vw;
   max-height: 92vh;
+  display: block;
   object-fit: contain;
   border-radius: 4px;
   cursor: zoom-in;
+  user-select: none;
+  -webkit-user-drag: none;
 }
+.lightbox-img-wrap.zoomed .lightbox-overlay img,
 .lightbox-img-wrap.zoomed img {
-  max-width: none;
-  max-height: none;
   cursor: grab;
-}
-.lightbox-img-wrap.zoomed:active img {
-  cursor: grabbing;
 }
 .lightbox-zoom-badge {
   position: absolute;
@@ -1663,10 +1665,12 @@ async function createWorkspace() {
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed') && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
-    <img id="lightboxImg" src="" alt="">
-    <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+    <div class="lightbox-transform" id="lightboxTransform">
+      <img id="lightboxImg" src="" alt="">
+      <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+    </div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
@@ -1825,6 +1829,11 @@ function openLightbox(photoId, filename, photoList) {
     .catch(function() {});
 
   img.src = '/photos/' + photoId + '/full';
+  img.onload = function() {
+    img.onload = null;
+    _lbRecomputeNativeZoom();
+    _lbApplyTransform();
+  };
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
@@ -1866,45 +1875,26 @@ function lightboxNav(delta) {
 }
 
 function toggleLightboxZoom(e) {
+  // Fit to 1:1 toggle. Preserved for existing 'z' shortcut and click-to-zoom.
   var wrap = document.getElementById('lightboxWrap');
   var img = document.getElementById('lightboxImg');
-  var badge = document.getElementById('lightboxZoomBadge');
-  var isZoomed = wrap.classList.contains('zoomed');
+  if (!img) return;
 
-  var detOverlay = document.getElementById('lightboxDetections');
+  // If we don't know native zoom yet (e.g. dimensions fetch still pending),
+  // fall back to old two-tier behavior: load original, no continuous control.
+  if (!_lbNativeZoom) {
+    _lbRecomputeNativeZoom();
+  }
+
+  var isZoomed = _lbZoom > 1.001;
   if (isZoomed) {
-    // Zoom out — switch back to preview image
-    wrap.classList.remove('zoomed');
-    badge.style.display = 'none';
-    if (detOverlay) detOverlay.style.display = '';
-    wrap.scrollTop = 0;
-    wrap.scrollLeft = 0;
-    if (_lightboxCurrentId) {
-      img.src = '/photos/' + _lightboxCurrentId + '/full';
-    }
-  } else {
-    // Zoom to 1:1 — load full-resolution original
-    // Measure click position relative to the image BEFORE changing layout
-    var imgRect = img.getBoundingClientRect();
-    var clickX = imgRect.width ? (e.clientX - imgRect.left) / imgRect.width : 0.5;
-    var clickY = imgRect.height ? (e.clientY - imgRect.top) / imgRect.height : 0.5;
-
-    wrap.classList.add('zoomed');
-    badge.style.display = '';
-    if (detOverlay) detOverlay.style.display = 'none';
-
-    if (_lightboxCurrentId) {
-      img.src = '/photos/' + _lightboxCurrentId + '/original';
-    }
-
-    // Scroll to click position once the full-res image loads
-    img.onload = function() {
-      img.onload = null;
-      var scrollX = (img.naturalWidth * clickX) - (wrap.clientWidth / 2);
-      var scrollY = (img.naturalHeight * clickY) - (wrap.clientHeight / 2);
-      wrap.scrollLeft = Math.max(0, scrollX);
-      wrap.scrollTop = Math.max(0, scrollY);
-    };
+    _lbSetZoom(1.0, null, null);
+  } else if (_lbNativeZoom) {
+    // Anchor zoom on click position (or center if no event)
+    var rect = img.getBoundingClientRect();
+    var anchorX = e && e.clientX ? e.clientX : rect.left + rect.width / 2;
+    var anchorY = e && e.clientY ? e.clientY : rect.top + rect.height / 2;
+    _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
   }
 }
 
@@ -1951,7 +1941,11 @@ function toggleLightboxZoom(e) {
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
   var wrap = document.getElementById('lightboxWrap');
-  if (wrap) { wrap.classList.remove('zoomed'); wrap.scrollTop = 0; wrap.scrollLeft = 0; }
+  if (wrap) { wrap.classList.remove('zoomed'); }
+  _lbZoom = 1.0;
+  _lbPanX = 0;
+  _lbPanY = 0;
+  _lbApplyTransform();
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
@@ -2286,8 +2280,80 @@ function formatShortcut(str) {
   }).join('+');
 }
 
+function _lbApplyTransform() {
+  var t = document.getElementById('lightboxTransform');
+  if (!t) return;
+  t.style.transform = 'translate(' + _lbPanX + 'px, ' + _lbPanY + 'px) scale(' + _lbZoom + ')';
+  var badge = document.getElementById('lightboxZoomBadge');
+  if (!badge) return;
+  if (_lbZoom <= 1.001) {
+    badge.style.display = 'none';
+  } else if (_lbNativeZoom) {
+    badge.style.display = '';
+    badge.textContent = Math.round((_lbZoom / _lbNativeZoom) * 100) + '%';
+  } else {
+    badge.style.display = '';
+    badge.textContent = 'zoom';
+  }
+}
+
 function _lbRecomputeNativeZoom() {
-  // Filled in by Task 2
+  // Compute zoom value that corresponds to 1:1 (one screen pixel == one image pixel).
+  // We need the displayed size of the image at zoom=1.0 (fit) to compare against native.
+  var img = document.getElementById('lightboxImg');
+  if (!img || !_lbPhotoW || !img.naturalWidth) {
+    _lbNativeZoom = null;
+    return;
+  }
+  var fitDisplayedW = img.clientWidth || img.naturalWidth;
+  if (fitDisplayedW <= 0) {
+    _lbNativeZoom = null;
+    return;
+  }
+  // Guard: very small images (nativeZoom < 1) clamp to 1.0 so fit == 1:1
+  _lbNativeZoom = Math.max(1.0, _lbPhotoW / fitDisplayedW);
+}
+
+function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
+  // Clamp to valid range. Max is 4x native (or 4x fit if no nativeZoom).
+  var maxZoom = _lbNativeZoom ? _lbNativeZoom * 4 : 4;
+  newZoom = Math.max(1.0, Math.min(maxZoom, newZoom));
+  var wrap = document.getElementById('lightboxWrap');
+  var t = document.getElementById('lightboxTransform');
+  if (!wrap || !t) return;
+
+  // Adjust pan so the anchor point in image space stays under the anchor cursor.
+  if (anchorClientX != null && anchorClientY != null) {
+    var wrapRect = wrap.getBoundingClientRect();
+    // Anchor in wrap-local coordinates
+    var ax = anchorClientX - wrapRect.left;
+    var ay = anchorClientY - wrapRect.top;
+    // Same anchor in current image space
+    var imgX = (ax - _lbPanX) / _lbZoom;
+    var imgY = (ay - _lbPanY) / _lbZoom;
+    _lbZoom = newZoom;
+    _lbPanX = ax - imgX * _lbZoom;
+    _lbPanY = ay - imgY * _lbZoom;
+  } else {
+    // Center anchor: keep visual center fixed
+    var wrapRect2 = wrap.getBoundingClientRect();
+    var cx = wrapRect2.width / 2;
+    var cy = wrapRect2.height / 2;
+    var imgCX = (cx - _lbPanX) / _lbZoom;
+    var imgCY = (cy - _lbPanY) / _lbZoom;
+    _lbZoom = newZoom;
+    _lbPanX = cx - imgCX * _lbZoom;
+    _lbPanY = cy - imgCY * _lbZoom;
+  }
+
+  if (_lbZoom <= 1.001) {
+    _lbPanX = 0;
+    _lbPanY = 0;
+  }
+
+  wrap.classList.toggle('zoomed', _lbZoom > 1.001);
+  _lbApplyTransform();
+  // Task 6 will add: _lbScheduleSourceSwap();
 }
 </script>
 
