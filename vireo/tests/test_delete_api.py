@@ -191,6 +191,38 @@ def test_api_batch_delete_vireo_mode(app_and_db):
     assert db.get_photo(pid) is None
 
 
+def test_api_batch_delete_purges_sized_preview_variants(app_and_db):
+    """Delete removes every <id>_<size>.jpg preview variant, not just <id>.jpg.
+
+    Without this, SQLite id reuse could cause a newly inserted photo to be
+    served stale bytes from a previous photo's cached preview.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Seed cache with both legacy <id>.jpg and sized variants
+    legacy = os.path.join(preview_dir, f"{pid}.jpg")
+    v1920 = os.path.join(preview_dir, f"{pid}_1920.jpg")
+    v2560 = os.path.join(preview_dir, f"{pid}_2560.jpg")
+    for p in (legacy, v1920, v2560):
+        Image.new("RGB", (10, 10)).save(p, "JPEG")
+
+    resp = client.post("/api/batch/delete", json={
+        "photo_ids": [pid],
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200
+
+    assert not os.path.exists(legacy)
+    assert not os.path.exists(v1920)
+    assert not os.path.exists(v2560)
+
+
 def test_api_batch_delete_disk_mode(app_and_db, tmp_path):
     """API endpoint in disk mode moves files to trash (or deletes them)."""
     app, db = app_and_db

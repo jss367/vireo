@@ -555,6 +555,7 @@ def test_default_collections_created(tmp_path):
 
     colls = db.get_collections()
     names = {c['name'] for c in colls}
+    assert 'All Photos' in names
     assert 'Needs Classification' in names
     assert 'Untagged' in names
     assert 'Flagged' in names
@@ -571,7 +572,7 @@ def test_default_collections_idempotent(tmp_path):
     db.create_default_collections()
 
     colls = db.get_collections()
-    assert len(colls) == 4
+    assert len(colls) == 5
 
 
 def test_default_collections_adds_missing(tmp_path):
@@ -588,10 +589,30 @@ def test_default_collections_adds_missing(tmp_path):
 
     colls = db.get_collections()
     names = {c['name'] for c in colls}
+    assert 'All Photos' in names
     assert 'Needs Classification' in names
     assert 'Untagged' in names
     assert 'Recent Import' in names
-    assert len(colls) == 4  # no duplicate Flagged
+    assert len(colls) == 5  # no duplicate Flagged
+
+
+def test_all_photos_collection_returns_all_photos(tmp_path):
+    """The default 'All Photos' collection matches every photo in the workspace."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    db.add_photo(folder_id=fid, filename='c.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+
+    db.create_default_collections()
+    all_photos = next(c for c in db.get_collections() if c['name'] == 'All Photos')
+
+    photos = db.get_collection_photos(all_photos['id'])
+    assert {p['filename'] for p in photos} == {'a.jpg', 'b.jpg', 'c.jpg'}
+    assert db.count_collection_photos(all_photos['id']) == 3
 
 
 # --- Helper to set up a workspace with photos ---
@@ -777,6 +798,82 @@ def test_get_group_predictions(tmp_path):
     assert results[1]['quality_score'] == 0.5
     # Should include photo fields
     assert 'filename' in dict(results[0])
+
+
+def test_get_group_predictions_includes_alternatives(tmp_path):
+    """Each primary row includes per-detection alternatives sorted by confidence."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'quality_score': 0.9}, {'quality_score': 0.5},
+    ])
+    det0 = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det1 = db.save_detections(pids[1], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det0[0], species='Robin', confidence=0.95, model='test', group_id='g1')
+    db.add_prediction(det0[0], species='Sparrow', confidence=0.30, model='test', status='alternative')
+    db.add_prediction(det0[0], species='Wren', confidence=0.10, model='test', status='alternative')
+    db.add_prediction(det1[0], species='Robin', confidence=0.80, model='test', group_id='g1')
+    db.add_prediction(det1[0], species='Finch', confidence=0.25, model='test', status='alternative')
+
+    results = db.get_group_predictions('g1')
+    assert len(results) == 2
+    row0 = dict(results[0])
+    row1 = dict(results[1])
+    # Alternatives attached per detection, sorted desc by confidence
+    assert [a['species'] for a in row0['alternatives']] == ['Sparrow', 'Wren']
+    assert [a['species'] for a in row1['alternatives']] == ['Finch']
+    assert row0['alternatives'][0]['confidence'] == 0.30
+
+
+def test_get_group_predictions_alternatives_filtered_by_model(tmp_path):
+    """Alternatives from a different classifier model must not leak in."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
+    det = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
+    db.add_prediction(det[0], species='Sparrow', confidence=0.4, model='modelA', status='alternative')
+    # Alternative from a different model on the same detection — must be excluded
+    db.add_prediction(det[0], species='Eagle', confidence=0.9, model='modelB', status='alternative')
+
+    results = db.get_group_predictions('g1')
+    alts = [a['species'] for a in dict(results[0])['alternatives']]
+    assert alts == ['Sparrow']
+
+
+def test_get_group_predictions_handles_large_group(tmp_path):
+    """Very large burst groups must not blow up SQLite's expression depth."""
+    size = 1005
+    photos = [{'quality_score': 0.5} for _ in range(size)]
+    db, pids = _make_workspace_with_photos(tmp_path, photos)
+    for pid in pids:
+        det = db.save_detections(pid, [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+        ], detector_model="MDV6")
+        db.add_prediction(det[0], species='Robin', confidence=0.9, model='test', group_id='g1')
+
+    results = db.get_group_predictions('g1')
+    assert len(results) == size
+    assert all(dict(r)['alternatives'] == [] for r in results)
+
+
+def test_get_group_predictions_alternatives_keyed_by_detection_and_model(tmp_path):
+    """If the same detection has primaries from multiple models in one group,
+    each primary gets only its own model's alternatives."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{'quality_score': 0.9}])
+    det = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det[0], species='Robin', confidence=0.95, model='modelA', group_id='g1')
+    db.add_prediction(det[0], species='Sparrow', confidence=0.4, model='modelA', status='alternative')
+    db.add_prediction(det[0], species='Eagle', confidence=0.90, model='modelB', group_id='g1')
+    db.add_prediction(det[0], species='Hawk', confidence=0.3, model='modelB', status='alternative')
+
+    results = [dict(r) for r in db.get_group_predictions('g1')]
+    by_model = {r['model']: [a['species'] for a in r['alternatives']] for r in results}
+    assert by_model == {'modelA': ['Sparrow'], 'modelB': ['Hawk']}
 
 
 def test_update_predictions_status_by_photo(tmp_path):
@@ -1012,10 +1109,8 @@ def test_get_geolocated_photos_with_species(tmp_path):
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
-    # Accept the prediction
     pred = db.get_predictions(photo_ids=[p1])
-    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pred[0]['id'],))
-    db.conn.commit()
+    db.accept_prediction(pred[0]['id'])
 
     results = db.get_geolocated_photos()
     assert len(results) == 1
@@ -1059,8 +1154,7 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     results = db.get_geolocated_photos(species='Red-tailed Hawk')
     assert len(results) == 1
@@ -1069,6 +1163,38 @@ def test_get_geolocated_photos_species_filter(tmp_path):
     results = db.get_geolocated_photos(species='Great Blue Heron')
     assert len(results) == 1
     assert results[0]['filename'] == 'heron.jpg'
+
+
+def test_get_geolocated_photos_species_filter_multi_species(tmp_path):
+    """Filter matches any species tag on the photo, not only the alphabetical first."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    p1 = db.add_photo(folder_id=fid, filename='both.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=37.0, longitude=-122.0 WHERE id=?", (p1,))
+    db.conn.commit()
+    det1 = db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.95, "category": "animal"}
+    ], detector_model="MDV6")
+    det2 = db.save_detections(p1, [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.4}, "confidence": 0.60, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det1[0], 'Red-tailed Hawk', 0.95, 'bioclip')
+    db.add_prediction(det2[0], "Sparrow", 0.60, 'bioclip')
+    for pr in db.get_predictions(photo_ids=[p1]):
+        db.accept_prediction(pr['id'])
+
+    # Photo is tagged with both; either filter value must return it,
+    # and the species label in the returned row must match the filter.
+    rows = db.get_geolocated_photos(species='Red-tailed Hawk')
+    assert len(rows) == 1
+    assert rows[0]['species'] == 'Red-tailed Hawk'
+    rows = db.get_geolocated_photos(species='Sparrow')
+    assert len(rows) == 1
+    assert rows[0]['species'] == 'Sparrow'
+    assert db.get_geolocated_photos(species='Cardinal') == []
 
 
 def test_get_accepted_species(tmp_path):
@@ -1094,8 +1220,7 @@ def test_get_accepted_species(tmp_path):
     db.add_prediction(det_ids2[0], 'Great Blue Heron', 0.90, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1, p2])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     species = db.get_accepted_species()
     assert 'Great Blue Heron' in species
@@ -1143,8 +1268,8 @@ def test_get_accepted_species_excludes_non_accepted(tmp_path):
     assert species == []
 
 
-def test_get_accepted_species_uses_top_confidence(tmp_path):
-    """get_accepted_species returns only the highest-confidence species per photo."""
+def test_get_accepted_species_multiple_species_per_photo(tmp_path):
+    """get_accepted_species returns all distinct species keywords tagged on photos."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder('/photos', name='photos')
@@ -1164,12 +1289,11 @@ def test_get_accepted_species_uses_top_confidence(tmp_path):
     db.add_prediction(det_ids2[0], 'Cooper\'s Hawk', 0.60, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
     for pr in preds:
-        db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (pr['id'],))
-    db.conn.commit()
+        db.accept_prediction(pr['id'])
 
     species = db.get_accepted_species()
-    # Only the top-confidence species should appear
-    assert species == ['Red-tailed Hawk']
+    # Both species keywords tagged on the photo appear, alphabetical.
+    assert species == ["Cooper's Hawk", 'Red-tailed Hawk']
 
 
 def test_count_photos_without_gps(tmp_path):

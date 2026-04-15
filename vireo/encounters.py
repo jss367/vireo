@@ -38,9 +38,27 @@ DEFAULTS = {
 }
 
 
+_warned_dim_mismatch = False
+
+
 def _cosine_sim(a, b):
     """Cosine similarity between two vectors, clamped to [0, 1]."""
     if a is None or b is None:
+        return 0.0
+    if a.shape != b.shape:
+        # Stale DINOv2 embeddings from a previous variant can slip through
+        # when pipeline.dinov2_variant isn't configured (load_photo_features
+        # only filters when it is). Treat as "no similarity signal" instead
+        # of crashing the grouping stage with "shapes not aligned".
+        global _warned_dim_mismatch
+        if not _warned_dim_mismatch:
+            log.warning(
+                "Embedding dim mismatch (%s vs %s) — stale DINOv2 embeddings "
+                "present; re-embed affected photos or set "
+                "pipeline.dinov2_variant in config to drop them cleanly",
+                a.shape, b.shape,
+            )
+            _warned_dim_mismatch = True
         return 0.0
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)
@@ -290,11 +308,22 @@ def cut_microsegments(photos, config=None):
 
 
 def _segment_mean_embedding(segment, key):
-    """Compute mean embedding for a segment."""
+    """Compute mean embedding for a segment.
+
+    When a segment straddles a DINOv2 variant switch (stale rows left behind
+    at a different dim), np.mean over a ragged list raises. Take the mean
+    over the majority shape only — matches the dominant variant in the
+    segment and ignores the minority outliers for merge scoring.
+    """
     embeddings = [p[key] for p in segment if p.get(key) is not None]
     if not embeddings:
         return None
-    return np.mean(embeddings, axis=0)
+    shape_counts = defaultdict(int)
+    for e in embeddings:
+        shape_counts[e.shape] += 1
+    majority_shape = max(shape_counts, key=shape_counts.get)
+    matching = [e for e in embeddings if e.shape == majority_shape]
+    return np.mean(matching, axis=0)
 
 
 def _segment_mean_species(segment):

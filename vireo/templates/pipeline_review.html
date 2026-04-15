@@ -759,6 +759,8 @@ input[type="range"]::-moz-range-thumb {
   flex-shrink: 0;
 }
 .grm-footer .grm-hint { font-size: 11px; color: var(--text-ghost); flex: 1; }
+.grm-res-control { display: flex; align-items: center; gap: 8px; }
+.grm-res-control input[type="range"] { width: 100px; }
 
 /* Loupe mode — split layout with preview on right */
 .grm-body {
@@ -983,6 +985,7 @@ input[type="range"]::-moz-range-thumb {
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
       <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
+      <button class="filter-btn" id="hideConfirmedBtn" onclick="toggleHideConfirmed()" title="Hide encounters/bursts whose species has been confirmed">Hide confirmed</button>
       <div class="species-filter-wrap">
         <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
         <button class="species-filter-clear" id="speciesFilterClear" onclick="clearSpeciesFilter()" title="Clear filter">&times;</button>
@@ -1057,6 +1060,11 @@ input[type="range"]::-moz-range-thumb {
     <label style="font-size:12px;color:var(--text-muted);">Species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
+    <div class="grm-res-control" title="Image resolution — higher = slower but better for pixel-peeping">
+      <label style="font-size:12px;color:var(--text-muted);">Res:</label>
+      <input type="range" id="grmResSlider" min="0" max="3" step="1" value="0" oninput="grmSetResolution(this.value)">
+      <span id="grmResLabel" style="font-size:11px;color:var(--text-dim);min-width:140px;">1920 · preview</span>
+    </div>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;background:var(--accent);color:var(--accent-text);">Apply & Close</button>
   </div>
@@ -1067,6 +1075,55 @@ var pipelineResults = null;
 var activeFilter = 'all';
 var minConfidence = 40;
 var speciesFilter = '';
+var hideConfirmed = false;
+
+// GRM resolution slider — index into GRM_RES_STOPS. Persists across photos within a session.
+var GRM_RES_STOPS = [
+  {size: 1920, label: '1920', kind: 'preview'},
+  {size: 2560, label: '2560', kind: 'preview'},
+  {size: 3840, label: '4K',   kind: 'preview'},
+  {size: 0,    label: 'Original', kind: 'original'}
+];
+var grmResolutionIdx = 0;
+
+function grmPhotoUrl(photoId) {
+  var stop = GRM_RES_STOPS[grmResolutionIdx];
+  if (stop.kind === 'original') return '/photos/' + photoId + '/original';
+  return '/photos/' + photoId + '/preview?size=' + stop.size;
+}
+
+function grmUpdateResLabel() {
+  var el = document.getElementById('grmResLabel');
+  if (!el) return;
+  var stop = GRM_RES_STOPS[grmResolutionIdx];
+  var dims = '';
+  var photo = grmState && grmState.selected
+    ? grmState.items.find(function(p) { return p.id === grmState.selected; })
+    : (grmState && grmState.items[0]);
+  if (photo && photo.width && photo.height) {
+    if (stop.kind === 'original') {
+      dims = photo.width + '×' + photo.height;
+    } else {
+      var longest = Math.max(photo.width, photo.height);
+      var scale = longest > stop.size ? stop.size / longest : 1;
+      var w = Math.round(photo.width * scale);
+      var h = Math.round(photo.height * scale);
+      dims = w + '×' + h;
+    }
+  }
+  el.textContent = (dims ? dims + ' · ' : stop.label + ' · ') + stop.kind;
+}
+
+function grmSetResolution(idx) {
+  grmResolutionIdx = parseInt(idx, 10) || 0;
+  renderGroupModal();
+  // If a photo is selected, reload the loupe at the new resolution
+  if (grmState && grmState.selected) {
+    var img = document.getElementById('grmLoupePhoto');
+    if (img) img.src = grmPhotoUrl(grmState.selected);
+  }
+  grmUpdateResLabel();
+}
 
 function setSpeciesFilter(val) {
   speciesFilter = val.toLowerCase();
@@ -1116,10 +1173,29 @@ function renderResults() {
     });
   }
 
-  // Update filter counts (respecting species filter)
+  // Build set of photos hidden because their burst/encounter is confirmed
+  var confirmedHiddenIds = null;
+  if (hideConfirmed) {
+    confirmedHiddenIds = new Set();
+    pipelineResults.encounters.forEach(function(enc) {
+      if (enc.bursts && enc.bursts.length > 0) {
+        enc.bursts.forEach(function(burst) {
+          if (isBurstConfirmed(enc, burst)) {
+            var ids = burst.photo_ids || burst || [];
+            ids.forEach(function(pid) { confirmedHiddenIds.add(pid); });
+          }
+        });
+      } else if (enc.species_confirmed) {
+        (enc.photo_ids || []).forEach(function(pid) { confirmedHiddenIds.add(pid); });
+      }
+    });
+  }
+
+  // Update filter counts (respecting species filter and hide-confirmed)
   var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0};
   pipelineResults.photos.forEach(function(p) {
     if (speciesVisibleIds && !speciesVisibleIds.has(p.id)) return;
+    if (confirmedHiddenIds && confirmedHiddenIds.has(p.id)) return;
     counts.all++;
     if (p.label) counts[p.label] = (counts[p.label] || 0) + 1;
   });
@@ -1140,11 +1216,21 @@ function renderResults() {
     // Check if encounter passes species filter
     if (!encounterMatchesSpecies(enc)) return;
 
-    // Check if any photo in this encounter passes the label filter
+    // Hide confirmed: skip the whole encounter if every one of its photos is hidden
     var encPhotoIds = enc.photo_ids || [];
+    if (hideConfirmed) {
+      var anyVisible = encPhotoIds.some(function(pid) {
+        return !confirmedHiddenIds.has(pid);
+      });
+      if (!anyVisible) return;
+    }
+
+    // Check if any photo in this encounter passes the label filter
     var hasVisible = encPhotoIds.some(function(pid) {
       var p = photoMap[pid];
-      return p && (activeFilter === 'all' || p.label === activeFilter);
+      if (!p) return false;
+      if (confirmedHiddenIds && confirmedHiddenIds.has(pid)) return false;
+      return activeFilter === 'all' || p.label === activeFilter;
     });
     if (!hasVisible) return;
 
@@ -1161,6 +1247,7 @@ function renderResults() {
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
+        if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         var burstIds = burst.photo_ids || burst;
         html += '<div class="burst-strip">';
         html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
@@ -1230,9 +1317,22 @@ function toggleEncounter(idx) {
 
 function setFilter(f) {
   activeFilter = f;
-  document.querySelectorAll('.filter-btn').forEach(function(btn) {
+  document.querySelectorAll('.filter-btn[data-filter]').forEach(function(btn) {
     btn.classList.toggle('active', btn.getAttribute('data-filter') === f);
   });
+  renderResults();
+}
+
+function isBurstConfirmed(enc, burst) {
+  var ovr = burst && burst.species_override;
+  if (ovr) return !!ovr.confirmed;
+  return !!(enc && enc.species_confirmed);
+}
+
+function toggleHideConfirmed() {
+  hideConfirmed = !hideConfirmed;
+  var btn = document.getElementById('hideConfirmedBtn');
+  if (btn) btn.classList.toggle('active', hideConfirmed);
   renderResults();
 }
 
@@ -1667,8 +1767,15 @@ function renderSpeciesWidget(enc, encIdx, level, burstIdx) {
   if (level === 'burst') {
     var burst = enc.bursts[burstIdx];
     var ovr = burst.species_override;
-    isConfirmed = ovr && ovr.confirmed;
-    displayName = (ovr && ovr.species) || (enc.species ? enc.species[0] : 'Unknown');
+    if (ovr) {
+      isConfirmed = !!ovr.confirmed;
+      displayName = ovr.species || (enc.species ? enc.species[0] : 'Unknown');
+    } else {
+      // No per-burst override: inherit from the encounter so confirming the
+      // encounter visibly cascades to every burst.
+      isConfirmed = !!enc.species_confirmed;
+      displayName = enc.confirmed_species || (enc.species ? enc.species[0] : 'Unknown');
+    }
     predictions = burst.species_predictions || [];
   } else {
     isConfirmed = enc.species_confirmed;
@@ -1806,8 +1913,17 @@ async function confirmSpecies(event, encIdx, burstIdx, speciesName) {
   });
   if (!resp || !resp.ok) return;
 
-  // Update local state optimistically
-  if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
+  // Prefer the server's encounter list — the endpoint may auto-detach a burst
+  // into a new or adjacent encounter when its confirmed species differs from
+  // the encounter's, and a stale local list would lose that change on the
+  // next save-cache POST.
+  if (resp.encounters) {
+    pipelineResults.encounters = resp.encounters;
+    if (resp.summary) {
+      pipelineResults.summary = resp.summary;
+      updateSummaryBar(pipelineResults.summary);
+    }
+  } else if (burstIdx != null && enc.bursts && enc.bursts[burstIdx]) {
     enc.bursts[burstIdx].species_override = { species: speciesName, confirmed: true };
   } else {
     enc.species_confirmed = true;
@@ -1991,6 +2107,11 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   document.getElementById('grmOverlay').classList.add('open');
 
+  // Sync slider DOM with persisted resolution choice
+  var slider = document.getElementById('grmResSlider');
+  if (slider) slider.value = grmResolutionIdx;
+  grmUpdateResLabel();
+
   // Auto-select the requested photo (or the best)
   var initSelect = selectPhotoId || (best ? best.id : null);
   if (initSelect) {
@@ -2027,7 +2148,7 @@ function renderGroupModal() {
 
     return '<div class="' + cls + '" data-photo-id="' + p.id + '" onclick="grmSelect(' + p.id + ')">' +
       '<div style="position:relative;">' +
-        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy">' +
+        '<img src="' + grmPhotoUrl(p.id) + '" loading="lazy">' +
         flagHtml +
       '</div>' +
       '<div class="grm-card-info">' +
@@ -2065,7 +2186,7 @@ function grmSelect(photoId) {
   var detailEl = document.getElementById('grmLoupeDetail');
 
   if (grmState.selected) {
-    loupeImg.src = '/photos/' + grmState.selected + '/full';
+    loupeImg.src = grmPhotoUrl(grmState.selected);
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -2074,6 +2195,7 @@ function grmSelect(photoId) {
       // Render pipeline metadata in detail panel
       detailEl.innerHTML = buildPipelineMetadataHtml(photo);
     }
+    grmUpdateResLabel();
   } else {
     loupeImg.src = '';
     loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
