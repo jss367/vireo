@@ -342,6 +342,70 @@ def test_encounter_species_confirm_same_species_noop_on_keywords(app_and_db):
     assert "keyword_remove" not in values
 
 
+def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
+    """A stale burst_index must not silently fall through to an encounter update."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Encounter has exactly one burst.
+    bursts = [{
+        "photo_ids": photo_ids[:1],
+        "species_predictions": [],
+        "species_override": None,
+    }]
+    _seed_encounter_cache(app, db, photo_ids, bursts=bursts)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay",
+                             "photo_ids": photo_ids[:1],
+                             "burst_index": 99})
+    assert resp.status_code == 400
+    assert "burst_index" in resp.get_json()["error"]
+
+    # Nothing should have been written.
+    for pid in photo_ids[:1]:
+        names = {k["name"] for k in db.get_photo_keywords(pid)}
+        assert "Blue Jay" not in names
+    assert not db.get_pending_changes()
+
+
+def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
+    """Old-species lookup must be scoped to root species keywords only."""
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    _seed_encounter_cache(app, db, photo_ids)
+
+    # Confirm as Sparrow (creates root species keyword).
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Sparrow", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+    root_sparrow_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Sparrow' AND parent_id IS NULL"
+    ).fetchone()["id"]
+
+    # Create a non-species homonym "Sparrow" nested under another keyword. If
+    # the replacement lookup were scoped by name only, it could resolve here
+    # and leave the real species tag intact.
+    parent = db.add_keyword("Birds")
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species) VALUES ('Sparrow', ?, 0)",
+        (parent,),
+    )
+    db.conn.commit()
+
+    # Change species — the root Sparrow tag must still be removed.
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Blue Jay", "photo_ids": photo_ids})
+    assert resp.status_code == 200
+
+    for pid in photo_ids:
+        kw_ids = {k["id"] for k in db.get_photo_keywords(pid)}
+        assert root_sparrow_id not in kw_ids
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db

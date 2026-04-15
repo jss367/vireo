@@ -6004,27 +6004,46 @@ def create_app(db_path, thumb_cache_dir=None):
                 if not photo_id_set.issubset(enc_ids):
                     continue
                 target_enc = enc
-                if burst_index is not None and "bursts" in enc \
-                        and 0 <= burst_index < len(enc["bursts"]):
-                    ovr = enc["bursts"][burst_index].get("species_override")
-                    if ovr and ovr.get("species"):
-                        previous_species = ovr["species"]
-                    else:
-                        # No burst override yet — inherit the encounter's
-                        # confirmed species, which is what those photos were
-                        # actually tagged with.
-                        previous_species = enc.get("confirmed_species")
-                else:
-                    previous_species = enc.get("confirmed_species")
                 break
+
+        # If this is a burst-scoped request, the burst must actually exist in
+        # the cached encounter. A stale client (e.g. submitting after a burst
+        # regrouping) could otherwise fall through to an encounter-level cache
+        # update even though only the submitted photo_ids were retagged.
+        if burst_index is not None:
+            bursts = target_enc.get("bursts") if target_enc else None
+            if not bursts or not (0 <= burst_index < len(bursts)):
+                return json_error(
+                    f"Unknown burst_index {burst_index} for submitted photos",
+                )
+
+        if target_enc is not None:
+            if burst_index is not None:
+                ovr = target_enc["bursts"][burst_index].get("species_override")
+                if ovr and ovr.get("species"):
+                    previous_species = ovr["species"]
+                else:
+                    # No burst override yet — inherit the encounter's confirmed
+                    # species, which is what those photos were actually tagged
+                    # with.
+                    previous_species = target_enc.get("confirmed_species")
+            else:
+                previous_species = target_enc.get("confirmed_species")
 
         ws_id = db._ws_id()
 
         # If the species is changing, untag the old keyword from these photos
         # and cancel/queue a sidecar remove so the XMP stays in sync.
         if previous_species and previous_species.strip().lower() != species.lower():
+            # Match add_keyword's write path: species keywords live as root
+            # keywords (parent_id IS NULL) with is_species=1. Looking up by
+            # name alone could collide with a non-species homonym nested under
+            # another keyword (schema allows UNIQUE(name, parent_id)).
             old_kid_row = db.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? COLLATE NOCASE",
+                """SELECT id FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL
+                     AND is_species = 1""",
                 (previous_species,),
             ).fetchone()
             if old_kid_row:
@@ -6063,10 +6082,11 @@ def create_app(db_path, thumb_cache_dir=None):
             is_batch=len(photo_ids) > 1,
         )
 
-        # Update pipeline cache
+        # Update pipeline cache. burst_index was validated above, so the
+        # branch here is unambiguous: burst-scoped requests only touch the
+        # burst override, encounter-scoped requests only touch the encounter.
         if cached and target_enc is not None:
-            if burst_index is not None and "bursts" in target_enc \
-                    and 0 <= burst_index < len(target_enc["bursts"]):
+            if burst_index is not None:
                 target_enc["bursts"][burst_index]["species_override"] = {
                     "species": species,
                     "confirmed": True,
