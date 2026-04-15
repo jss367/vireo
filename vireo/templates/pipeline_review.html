@@ -1126,7 +1126,8 @@ function renderResults() {
       if (enc.bursts && enc.bursts.length > 0) {
         enc.bursts.forEach(function(burst) {
           if (isBurstConfirmed(enc, burst)) {
-            (burst.photo_ids || []).forEach(function(pid) { confirmedHiddenIds.add(pid); });
+            var ids = burst.photo_ids || burst || [];
+            ids.forEach(function(pid) { confirmedHiddenIds.add(pid); });
           }
         });
       } else if (enc.species_confirmed) {
