@@ -45,7 +45,24 @@ async fn do_update_check(
     app: &AppHandle,
     user_initiated: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let update = app.updater()?.check().await?;
+    let updater = app.updater()?;
+    let update = match updater.check().await {
+        Ok(u) => u,
+        // A missing platform key in the manifest means the release pipeline
+        // didn't publish an artifact for the current OS/arch (e.g. macOS
+        // notarization failed mid-release). That's a broken release for the
+        // developer to fix — not something to alarm end users about. Log
+        // loudly so it shows up in vireo.log, then fall through to the
+        // normal "no update available" path.
+        Err(
+            e @ (tauri_plugin_updater::Error::TargetNotFound(_)
+            | tauri_plugin_updater::Error::TargetsNotFound(_)),
+        ) => {
+            log::error!("Update manifest missing platform entry: {e}");
+            None
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     match update {
         Some(update) => {
