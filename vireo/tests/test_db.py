@@ -779,6 +779,33 @@ def test_get_group_predictions(tmp_path):
     assert 'filename' in dict(results[0])
 
 
+def test_get_group_predictions_includes_alternatives(tmp_path):
+    """Each primary row includes per-detection alternatives sorted by confidence."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'quality_score': 0.9}, {'quality_score': 0.5},
+    ])
+    det0 = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    det1 = db.save_detections(pids[1], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det0[0], species='Robin', confidence=0.95, model='test', group_id='g1')
+    db.add_prediction(det0[0], species='Sparrow', confidence=0.30, model='test', status='alternative')
+    db.add_prediction(det0[0], species='Wren', confidence=0.10, model='test', status='alternative')
+    db.add_prediction(det1[0], species='Robin', confidence=0.80, model='test', group_id='g1')
+    db.add_prediction(det1[0], species='Finch', confidence=0.25, model='test', status='alternative')
+
+    results = db.get_group_predictions('g1')
+    assert len(results) == 2
+    row0 = dict(results[0])
+    row1 = dict(results[1])
+    # Alternatives attached per detection, sorted desc by confidence
+    assert [a['species'] for a in row0['alternatives']] == ['Sparrow', 'Wren']
+    assert [a['species'] for a in row1['alternatives']] == ['Finch']
+    assert row0['alternatives'][0]['confidence'] == 0.30
+
+
 def test_update_predictions_status_by_photo(tmp_path):
     """Updates prediction status for all predictions of a photo."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])

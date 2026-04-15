@@ -475,6 +475,35 @@
     border-top: 1px solid var(--border-primary, #14374E);
     text-align: center;
   }
+  .grm-loupe-preds {
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--border-primary, #14374E);
+    font-size: 11px;
+  }
+  .grm-loupe-preds-title {
+    color: var(--text-dim, #888);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+    font-size: 10px;
+  }
+  .grm-loupe-preds-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    color: var(--text-primary, #E0F0F0);
+  }
+  .grm-loupe-preds-row.top {
+    font-weight: 600;
+  }
+  .grm-loupe-preds-row .conf {
+    color: var(--text-dim, #888);
+    font-variant-numeric: tabular-nums;
+  }
+  .grm-loupe-preds-empty {
+    color: var(--text-ghost, #555);
+    font-style: italic;
+  }
   .grm-loupe-crosshair {
     position: absolute;
     pointer-events: none;
@@ -1208,18 +1237,42 @@ function grmSelect(photoId) {
   // Update loupe preview
   var loupeImg = document.getElementById('grmLoupePhoto');
   var loupeInfo = document.getElementById('grmLoupeInfo');
+  var loupePreds = document.getElementById('grmLoupePreds');
   if (grmState.selected) {
     loupeImg.src = '/photos/' + grmState.selected + '/full';
     var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
     if (item) {
       var sharp = item.subject_sharpness != null ? Math.round(item.subject_sharpness) : (item.sharpness != null ? Math.round(item.sharpness) : '?');
       loupeInfo.textContent = (item.filename || '') + ' — sharpness: ' + sharp + ' — move cursor to compare';
+      loupePreds.innerHTML = renderLoupePreds(item);
     }
   } else {
     loupeImg.src = '';
     loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
+    loupePreds.innerHTML = '';
     grmLoupeReset();
   }
+}
+
+function renderLoupePreds(item) {
+  var preds = [];
+  if (item.species) {
+    preds.push({ species: item.species, confidence: item.confidence || 0, top: true });
+  }
+  (item.alternatives || []).forEach(function(a) {
+    preds.push({ species: a.species, confidence: a.confidence || 0, top: false });
+  });
+  preds = preds.slice(0, 5);
+  var header = '<div class="grm-loupe-preds-title">This photo\u2019s top predictions</div>';
+  if (!preds.length) {
+    return header + '<div class="grm-loupe-preds-empty">No predictions available.</div>';
+  }
+  return header + preds.map(function(p) {
+    return '<div class="grm-loupe-preds-row' + (p.top ? ' top' : '') + '">' +
+      '<span>' + escapeHtml(p.species) + '</span>' +
+      '<span class="conf">' + Math.round((p.confidence || 0) * 100) + '%</span>' +
+    '</div>';
+  }).join('');
 }
 
 var _grmZoomLevel = 4;
@@ -1438,10 +1491,11 @@ document.addEventListener('keydown', function(e) {
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
+      <div class="grm-loupe-preds" id="grmLoupePreds"></div>
     </div>
   </div>
   <div class="grm-footer">
-    <label style="font-size:12px;color:var(--text-muted,#888);">Species:</label>
+    <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
     <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
