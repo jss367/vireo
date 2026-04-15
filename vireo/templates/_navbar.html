@@ -1921,19 +1921,20 @@ function toggleLightboxZoom(e) {
 
 // Drag to pan when zoomed; single click (no drag) zooms out
 (function() {
-  var wrap, dragging = false, didDrag = false, startX, startY, scrollStartX, scrollStartY;
-  var DRAG_THRESHOLD = 5; // px of movement before it counts as a drag
+  var dragging = false, didDrag = false, startX, startY, panStartX, panStartY;
+  var DRAG_THRESHOLD = 5;
 
   document.addEventListener('mousedown', function(e) {
-    wrap = document.getElementById('lightboxWrap');
-    if (!wrap || !wrap.classList.contains('zoomed')) return;
+    var wrap = document.getElementById('lightboxWrap');
+    if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+    if (!wrap.contains(e.target) && e.target !== wrap) return;
     dragging = true;
     didDrag = false;
     startX = e.clientX;
     startY = e.clientY;
-    scrollStartX = wrap.scrollLeft;
-    scrollStartY = wrap.scrollTop;
+    panStartX = _lbPanX;
+    panStartY = _lbPanY;
     e.preventDefault();
   });
 
@@ -1944,17 +1945,18 @@ function toggleLightboxZoom(e) {
     if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
       didDrag = true;
     }
-    wrap.scrollLeft = scrollStartX - dx;
-    wrap.scrollTop = scrollStartY - dy;
+    _lbPanX = panStartX + dx;
+    _lbPanY = panStartY + dy;
+    _lbApplyTransform();
   });
 
   document.addEventListener('mouseup', function(e) {
     if (!dragging) return;
     dragging = false;
-    // Single click without dragging = zoom out
-    if (!didDrag && wrap && wrap.classList.contains('zoomed')) {
-      toggleLightboxZoom(e);
-      window._lightboxZoomHandled = true;  // Prevent onclick from re-zooming
+    if (!didDrag && _lbZoom > 1.001) {
+      // Single click without dragging = zoom out to fit
+      _lbSetZoom(1.0, null, null);
+      window._lightboxZoomHandled = true;
     }
   });
 })();
