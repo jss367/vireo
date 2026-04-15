@@ -28,9 +28,27 @@ DEFAULTS = {
 # -- Diversity distance (Section 5.1) --
 
 
+_warned_dim_mismatch = False
+
+
 def _cosine_sim(a, b):
-    """Cosine similarity, 0 if either is None."""
+    """Cosine similarity, 0 if either is None or dims don't match."""
     if a is None or b is None:
+        return 0.0
+    if a.shape != b.shape:
+        # Stale DINOv2 embeddings from a previous variant can coexist with
+        # current-variant embeddings in the DB; pipeline.load_photo_features
+        # filters them when pipeline.dinov2_variant is configured, but
+        # highlights and other call paths can still receive mixed dims.
+        # Degrade to "no similarity signal" rather than crashing MMR.
+        global _warned_dim_mismatch
+        if not _warned_dim_mismatch:
+            log.warning(
+                "Embedding dim mismatch (%s vs %s) — stale DINOv2 embeddings "
+                "present; re-embed affected photos to restore MMR diversity",
+                a.shape, b.shape,
+            )
+            _warned_dim_mismatch = True
         return 0.0
     norm_a = np.linalg.norm(a)
     norm_b = np.linalg.norm(b)

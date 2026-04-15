@@ -94,6 +94,127 @@ def _trash_via_finder(filepath):
         raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
 
 
+def _compute_time_range(photos_by_id, photo_ids):
+    """Return [min_ts, max_ts] ISO strings for photo_ids, or [None, None]."""
+    timestamps = [
+        photos_by_id[pid]["timestamp"]
+        for pid in photo_ids
+        if pid in photos_by_id and photos_by_id[pid].get("timestamp")
+    ]
+    if not timestamps:
+        return [None, None]
+    return [min(timestamps), max(timestamps)]
+
+
+def _find_merge_target(encounters, detached_range, target_species):
+    """Find an encounter index whose confirmed species matches target_species and
+    whose time range is adjacent to detached_range (no other encounter sits in
+    the gap between them). Returns None if none found.
+    """
+    d_min, d_max = detached_range
+    if d_min is None or d_max is None:
+        return None
+
+    other_ranges = []
+    for i, e in enumerate(encounters):
+        tr = e.get("time_range") or [None, None]
+        if tr[0] is not None and tr[1] is not None:
+            other_ranges.append((i, tr[0], tr[1]))
+
+    for i, e in enumerate(encounters):
+        if not e.get("species_confirmed"):
+            continue
+        if e.get("confirmed_species") != target_species:
+            continue
+        tr = e.get("time_range") or [None, None]
+        if tr[0] is None or tr[1] is None:
+            continue
+        c_min, c_max = tr[0], tr[1]
+        if c_max < d_min:
+            gap_start, gap_end = c_max, d_min
+        elif d_max < c_min:
+            gap_start, gap_end = d_max, c_min
+        else:
+            return i  # overlapping — treat as adjacent
+        intervening = False
+        for j, o_min, o_max in other_ranges:
+            if j == i:
+                continue
+            if o_max > gap_start and o_min < gap_end:
+                intervening = True
+                break
+        if not intervening:
+            return i
+    return None
+
+
+def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
+    """Detach the burst at (enc_idx, burst_idx) from its encounter. If an adjacent
+    encounter already has new_species as its confirmed species, merge the burst
+    into that encounter; otherwise create a new single-burst encounter with
+    new_species confirmed. Mutates results in place.
+    """
+    from pipeline import rebuild_species_predictions
+
+    encounters = results["encounters"]
+    enc = encounters[enc_idx]
+    bursts = enc["bursts"]
+    detached = bursts.pop(burst_idx)
+    detached_ids = detached["photo_ids"]
+
+    photos_by_id = {p["id"]: p for p in results.get("photos", [])}
+    detached_range = _compute_time_range(photos_by_id, detached_ids)
+
+    if len(bursts) == 0:
+        encounters.pop(enc_idx)
+    else:
+        remaining = [pid for pid in enc["photo_ids"] if pid not in set(detached_ids)]
+        enc["photo_ids"] = remaining
+        enc["photo_count"] = len(remaining)
+        enc["burst_count"] = len(bursts)
+        enc["species_predictions"] = rebuild_species_predictions(results, remaining)
+        for b in bursts:
+            b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
+        enc["time_range"] = _compute_time_range(photos_by_id, remaining)
+
+    detached["species_predictions"] = rebuild_species_predictions(results, detached_ids)
+
+    merge_idx = _find_merge_target(encounters, detached_range, new_species)
+    if merge_idx is not None:
+        target = encounters[merge_idx]
+        target["bursts"].append(detached)
+        target["photo_ids"] = list(target["photo_ids"]) + list(detached_ids)
+        target["photo_count"] = len(target["photo_ids"])
+        target["burst_count"] = len(target["bursts"])
+        target["species_predictions"] = rebuild_species_predictions(
+            results, target["photo_ids"]
+        )
+        t_min, t_max = target.get("time_range") or [None, None]
+        d_min, d_max = detached_range
+        mins = [x for x in (t_min, d_min) if x is not None]
+        maxs = [x for x in (t_max, d_max) if x is not None]
+        target["time_range"] = [
+            min(mins) if mins else None,
+            max(maxs) if maxs else None,
+        ]
+    else:
+        encounters.append({
+            "species": enc.get("species"),
+            "confirmed_species": new_species,
+            "species_predictions": detached["species_predictions"],
+            "species_confirmed": True,
+            "photo_count": len(detached_ids),
+            "burst_count": 1,
+            "time_range": detached_range,
+            "photo_ids": list(detached_ids),
+            "bursts": [detached],
+        })
+
+    summary = results.setdefault("summary", {})
+    summary["encounter_count"] = len(encounters)
+    summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1067,7 +1188,10 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews, working copies)
+        # Clean up cached files (thumbnails, previews, working copies).
+        # The preview dir also holds per-size variants named <id>_<size>.jpg,
+        # which must be removed so SQLite id reuse can't surface stale images.
+        import glob as _glob
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
@@ -1078,6 +1202,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 cached = os.path.join(d, f"{pid}.jpg")
                 if os.path.isfile(cached):
                     os.remove(cached)
+            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+                try:
+                    os.remove(variant)
+                except OSError:
+                    pass
 
         trashed = 0
         trash_failed = []
@@ -1321,6 +1450,11 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("Collection not found", 404)
 
         rules = json.loads(row["rules"])
+        # Refuse to mutate smart/system collections like "All Photos" — adding
+        # a photo_ids rule would AND-combine with the sentinel and silently
+        # convert the dynamic default into a static subset.
+        if any(r.get("field") == "all" for r in rules):
+            return json_error("Cannot add photos to this collection", 400)
         # Find or create a photo_ids rule
         ids_rule = None
         for r in rules:
@@ -6021,7 +6155,7 @@ def create_app(db_path, thumb_cache_dir=None):
         if cached:
             photo_id_set = set(photo_ids)
             burst_index = body.get("burst_index")
-            for enc in cached.get("encounters", []):
+            for enc_idx, enc in enumerate(cached.get("encounters", [])):
                 enc_ids = set(enc.get("photo_ids", []))
                 if not photo_id_set.issubset(enc_ids):
                     continue
@@ -6033,6 +6167,20 @@ def create_app(db_path, thumb_cache_dir=None):
                             "species": species,
                             "confirmed": True,
                         }
+                        # Auto-detach if burst's confirmed species differs from its
+                        # encounter — splits it out and merges into an adjacent
+                        # encounter of the same confirmed species when one exists.
+                        enc_species = enc.get("confirmed_species") or (
+                            enc["species"][0] if enc.get("species") else None
+                        )
+                        if (
+                            enc_species is not None
+                            and enc_species != species
+                            and len(enc["bursts"]) > 1
+                        ):
+                            _auto_detach_burst_for_species(
+                                cached, enc_idx, burst_index, species
+                            )
                 else:
                     # Encounter-level confirmation
                     enc["species_confirmed"] = True
@@ -6040,12 +6188,16 @@ def create_app(db_path, thumb_cache_dir=None):
                 break
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        return jsonify({
+        response = {
             "ok": True,
             "species": species,
             "keyword_id": kid,
             "photo_count": len(photo_ids),
-        })
+        }
+        if cached:
+            response["encounters"] = cached.get("encounters", [])
+            response["summary"] = cached.get("summary", {})
+        return jsonify(response)
 
     @app.route("/api/species/search")
     def api_species_search():
@@ -6792,6 +6944,68 @@ def create_app(db_path, thumb_cache_dir=None):
             image_path = os.path.join(folder["path"], photo["filename"])
 
         img = load_image(image_path, max_size=max_size)
+        if img is None:
+            return "Could not load image", 500
+
+        os.makedirs(preview_dir, exist_ok=True)
+        preview_quality = cfg.load().get("preview_quality", 90)
+        img.save(cache_path, format="JPEG", quality=preview_quality)
+        return send_file(cache_path, mimetype="image/jpeg")
+
+    PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
+
+    @app.route("/photos/<int:photo_id>/preview")
+    def serve_photo_preview(photo_id):
+        """Serve a JPEG preview at a chosen max-size, cached per size.
+
+        Query params:
+          size: int — max dimension (longest side). Must be in PREVIEW_SIZE_ALLOWLIST
+                to avoid unbounded cache growth.
+        """
+        import config as cfg
+        from flask import request, send_file
+
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        if size not in PREVIEW_SIZE_ALLOWLIST:
+            return "Unsupported size", 400
+
+        # Confirm the photo still exists before any cache return so that a
+        # deleted photo can't be served from a stale per-size cache (and so
+        # SQLite id reuse can't surface the wrong image).
+        db = _get_db()
+        photo = db.get_photo(photo_id)
+        if not photo:
+            return "Not found", 404
+
+        preview_dir = os.path.join(
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+        )
+        cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+
+        if os.path.exists(cache_path):
+            return send_file(cache_path, mimetype="image/jpeg")
+
+        from image_loader import load_image
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        image_path = None
+        if photo["working_copy_path"]:
+            wc = os.path.join(vireo_dir, photo["working_copy_path"])
+            if os.path.exists(wc):
+                image_path = wc
+
+        if image_path is None:
+            folder = db.conn.execute(
+                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+            ).fetchone()
+            if not folder:
+                return "Not found", 404
+            image_path = os.path.join(folder["path"], photo["filename"])
+
+        img = load_image(image_path, max_size=size)
         if img is None:
             return "Could not load image", 500
 

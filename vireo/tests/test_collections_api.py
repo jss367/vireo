@@ -172,6 +172,30 @@ def test_collection_add_photos(app_and_db):
     assert data["total"] == 2
 
 
+def test_cannot_add_photos_to_all_photos_default(app_and_db):
+    """Add-photos on the 'All Photos' default is rejected so the sentinel rule
+    can't be AND-combined with a photo_ids rule and silently narrowed."""
+    app, db = app_and_db
+    # Ensure defaults exist (including All Photos)
+    db.create_default_collections()
+    client = app.test_client()
+
+    all_photos = next(c for c in db.get_collections() if c["name"] == "All Photos")
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    resp = client.post(
+        f"/api/collections/{all_photos['id']}/add-photos",
+        json={"photo_ids": [pid]},
+    )
+    assert resp.status_code == 400
+    # Rules must be unchanged
+    row = db.conn.execute(
+        "SELECT rules FROM collections WHERE id = ?", (all_photos["id"],)
+    ).fetchone()
+    assert json.loads(row["rules"]) == [{"field": "all"}]
+
+
 def test_collection_add_photos_empty_list(app_and_db):
     """POST /api/collections/<id>/add-photos with empty photo_ids returns 400."""
     app, db = app_and_db

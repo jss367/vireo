@@ -91,6 +91,72 @@ def test_sim_embedding_none():
     assert sim_embedding(None, None) == 0.0
 
 
+def test_sim_embedding_mismatched_dims_returns_zero():
+    """Mismatched embedding dims (from a variant switch leaving stale rows)
+    must not crash the pipeline. Treat as 'no similarity info' = 0.0."""
+    from encounters import sim_embedding
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    assert sim_embedding(emb_768, emb_1024) == 0.0
+    assert sim_embedding(emb_1024, emb_768) == 0.0
+
+
+def test_segment_encounters_survives_mixed_dims():
+    """A run containing both 768-dim and 1024-dim embeddings must segment
+    without raising 'shapes not aligned' from np.dot."""
+    from encounters import segment_encounters
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    photos = [
+        _make_photo(ts_offset_s=0, subj_emb=emb_768, global_emb=emb_768),
+        _make_photo(ts_offset_s=5, subj_emb=emb_1024, global_emb=emb_1024),
+        _make_photo(ts_offset_s=10, subj_emb=emb_768, global_emb=emb_768),
+    ]
+    encounters = segment_encounters(photos)
+    assert isinstance(encounters, list)
+
+
+def test_segment_encounters_mixed_dims_in_long_run():
+    """Regression: when time/species keep compute_s_enc above the hard-cut
+    threshold, mixed-dim photos stay in the same microsegment and later
+    _segment_mean_embedding (np.mean over a ragged list) must not crash."""
+    from encounters import segment_encounters
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    # Tight timestamps + shared species keep S_enc high enough to prevent
+    # a hard cut, so all 5 photos land in one microsegment with mixed dims.
+    species = [("bird", 0.9)]
+    photos = [
+        _make_photo(ts_offset_s=0, subj_emb=emb_768, global_emb=emb_768, species=species),
+        _make_photo(ts_offset_s=1, subj_emb=emb_1024, global_emb=emb_1024, species=species),
+        _make_photo(ts_offset_s=2, subj_emb=emb_768, global_emb=emb_768, species=species),
+        _make_photo(ts_offset_s=3, subj_emb=emb_1024, global_emb=emb_1024, species=species),
+        _make_photo(ts_offset_s=4, subj_emb=emb_768, global_emb=emb_768, species=species),
+    ]
+    encounters = segment_encounters(photos)
+    assert isinstance(encounters, list)
+
+
+def test_segment_mean_embedding_mixed_dims():
+    """_segment_mean_embedding must not raise when photos in a segment hold
+    embeddings of different dims; mean over the majority dim is acceptable."""
+    from encounters import _segment_mean_embedding
+
+    emb_768 = np.ones(768, dtype=np.float32)
+    emb_1024 = np.ones(1024, dtype=np.float32)
+    segment = [
+        {"dino_subject_embedding": emb_768},
+        {"dino_subject_embedding": emb_1024},
+        {"dino_subject_embedding": emb_768},
+    ]
+    mean = _segment_mean_embedding(segment, "dino_subject_embedding")
+    assert mean is not None
+    assert mean.shape in ((768,), (1024,))
+
+
 # -- sim_species --
 
 

@@ -391,6 +391,76 @@ def test_preview_falls_back_to_original(app_and_db, tmp_path):
     assert resp.status_code == 200
 
 
+def test_preview_sized_caches_per_size(app_and_db):
+    """Preview endpoint caches each requested size separately."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    photos = db.get_photos()
+    pid = photos[0]["id"]
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    wc_path = os.path.join(working_dir, f"{pid}.jpg")
+    Image.new("RGB", (4096, 2731), color=(0, 255, 0)).save(wc_path, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=? WHERE id=?",
+        (f"working/{pid}.jpg", pid),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/photos/{pid}/preview?size=1920")
+    assert resp.status_code == 200
+    resp = client.get(f"/photos/{pid}/preview?size=2560")
+    assert resp.status_code == 200
+
+    preview_dir = os.path.join(vireo_dir, "previews")
+    assert os.path.exists(os.path.join(preview_dir, f"{pid}_1920.jpg"))
+    assert os.path.exists(os.path.join(preview_dir, f"{pid}_2560.jpg"))
+
+    # The 2560 variant should actually be larger on disk than the 1920 variant
+    size_1920 = os.path.getsize(os.path.join(preview_dir, f"{pid}_1920.jpg"))
+    size_2560 = os.path.getsize(os.path.join(preview_dir, f"{pid}_2560.jpg"))
+    assert size_2560 > size_1920
+
+
+def test_preview_returns_404_for_deleted_photo_even_with_stale_cache(app_and_db):
+    """Defense against SQLite id reuse: don't serve a cached image for a row
+    that no longer exists.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    pid = db.get_photos()[0]["id"]
+
+    from PIL import Image
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Delete the photo (cascades FK-dependent rows) then simulate a leftover
+    # cache file, e.g. crash-after-commit-before-cleanup.
+    db.delete_photos([pid])
+    stale = os.path.join(preview_dir, f"{pid}_1920.jpg")
+    Image.new("RGB", (10, 10)).save(stale, "JPEG")
+
+    resp = client.get(f"/photos/{pid}/preview?size=1920")
+    assert resp.status_code == 404
+
+
+def test_preview_rejects_unsupported_size(app_and_db):
+    """Preview endpoint rejects sizes outside the allowlist to prevent cache-bombing."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    pid = db.get_photos()[0]["id"]
+    resp = client.get(f"/photos/{pid}/preview?size=9999")
+    assert resp.status_code == 400
+    resp = client.get(f"/photos/{pid}/preview?size=abc")
+    assert resp.status_code == 400
+
+
 def test_original_serves_full_res_working_copy(app_and_db):
     """Original endpoint serves working copy directly when it is full-res."""
     app, db = app_and_db

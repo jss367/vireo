@@ -3832,7 +3832,11 @@ class Database:
             op = rule.get("op", "")
             value = rule.get("value")
 
-            if field == "photo_ids":
+            if field == "all":
+                # Sentinel for defaults like "All Photos" — adds no condition,
+                # so the workspace-folder join alone determines matches.
+                continue
+            elif field == "photo_ids":
                 # Static collection — explicit list of photo IDs
                 ids = value if isinstance(value, list) else []
                 if ids:
@@ -4074,6 +4078,7 @@ class Database:
         existing_names = {c["name"] for c in self.get_collections()}
 
         defaults = [
+            ("All Photos", [{"field": "all"}]),
             (
                 "Needs Classification",
                 [{"field": "has_species", "op": "equals", "value": 0}],
