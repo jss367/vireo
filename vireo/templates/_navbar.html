@@ -1818,6 +1818,8 @@ function openLightbox(photoId, filename, photoList) {
   _lbPhotoW = null;
   _lbPhotoH = null;
   _lbCurrentSrcKey = 'full';
+  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
+  _lbDesiredSrcKey = null;
 
   // Fetch original dimensions (async, non-blocking for image display)
   fetch('/api/photos/' + photoId)
@@ -1968,6 +1970,8 @@ function closeLightbox(e) {
   _lbZoom = 1.0;
   _lbPanX = 0;
   _lbPanY = 0;
+  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
+  _lbDesiredSrcKey = null;
   _lbApplyTransform();
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
