@@ -1891,12 +1891,13 @@ function toggleLightboxZoom(e) {
   var isZoomed = _lbZoom > 1.001;
   if (isZoomed) {
     _lbSetZoom(1.0, null, null);
-  } else if (_lbNativeZoom) {
+  } else {
     // Anchor zoom on click position (or center if no event)
     var rect = img.getBoundingClientRect();
     var anchorX = e && e.clientX ? e.clientX : rect.left + rect.width / 2;
     var anchorY = e && e.clientY ? e.clientY : rect.top + rect.height / 2;
-    _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
+    // If dimensions are unknown, fall back to the max zoom (_lbSetZoom clamps to 4).
+    _lbSetZoom(_lbNativeZoom || 4, anchorX, anchorY);
   }
 }
 
@@ -2449,7 +2450,10 @@ var _lbDesiredSrcKey = null;
 
 function _lbPickSourceKey() {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
-  if (!_lbPhotoW || !_lbPhotoH) return 'full';
+  // If dimensions are unknown, fall back to pre-PR behavior: /full at fit, /original when zoomed.
+  if (!_lbPhotoW || !_lbPhotoH) {
+    return _lbZoom > 1.001 ? 'original' : 'full';
+  }
   var longEdge = Math.max(_lbPhotoW, _lbPhotoH);
   // Displayed long edge in CSS pixels at current zoom.
   // At zoom == _lbNativeZoom, displayed long edge == longEdge.
