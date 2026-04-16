@@ -795,6 +795,38 @@ def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch)
     assert db.preview_cache_total_bytes() == 0
 
 
+def test_storage_clear_previews_resets_preview_cache(client_with_photo):
+    """/api/storage/clear type=previews drops preview_cache rows so
+    Settings "Current usage" doesn't report phantom bytes."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    # Populate the cache
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    resp = client.post("/api/storage/clear", json={"type": "previews"})
+    assert resp.status_code == 200
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_storage_delete_files_syncs_preview_cache(client_with_photo):
+    """/api/storage/delete-files type=previews removes matching
+    preview_cache rows for each sized-preview filename deleted."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    resp = client.post(
+        "/api/storage/delete-files",
+        json={"type": "previews", "files": [f"{photo_id}_1920.jpg"]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
 def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
     """Lazily-adopting a legacy on-disk preview file still runs eviction,
     so with preview_cache_max_mb=0 the adopted file is drained like a

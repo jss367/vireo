@@ -2478,6 +2478,11 @@ def create_app(db_path, thumb_cache_dir=None):
             if os.path.isdir(preview_dir):
                 shutil.rmtree(preview_dir)
                 log.info("Preview cache cleared")
+            # Keep preview_cache table in sync with the filesystem so
+            # Settings "Current usage" and eviction don't see phantoms.
+            db = _get_db()
+            db.conn.execute("DELETE FROM preview_cache")
+            db.conn.commit()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
             thumb_dir = app.config["THUMB_CACHE_DIR"]
@@ -2517,6 +2522,14 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("No files specified")
 
         deleted = 0
+        # Keep preview_cache rows in sync when previews are deleted directly
+        # via this endpoint (stats page). Matches {pid}_{size}.jpg only;
+        # legacy {pid}.jpg files have no tracking row to remove.
+        preview_rows_removed = 0
+        if cache_type == "previews":
+            import re
+            sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+            db = _get_db()
         for fname in filenames:
             # Prevent path traversal
             safe = os.path.basename(fname)
@@ -2524,6 +2537,13 @@ def create_app(db_path, thumb_cache_dir=None):
             if os.path.isfile(fp):
                 os.remove(fp)
                 deleted += 1
+                if cache_type == "previews":
+                    m = sized_pat.match(safe)
+                    if m:
+                        db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
+                        preview_rows_removed += 1
+        if cache_type == "previews" and preview_rows_removed:
+            log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
         log.info("Deleted %d files from %s cache", deleted, cache_type)
         return jsonify({"ok": True, "deleted": deleted})
 
