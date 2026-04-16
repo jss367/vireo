@@ -1686,6 +1686,18 @@ def test_photos_has_file_hash_and_companion_path(tmp_path):
     assert "companion_path" in col_names
 
 
+def test_photos_has_eye_focus_columns(tmp_path):
+    """Photos table has eye_x, eye_y, eye_conf, eye_tenengrad columns."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    cols = {row[1] for row in db.conn.execute("PRAGMA table_info(photos)")}
+    assert "eye_x" in cols
+    assert "eye_y" in cols
+    assert "eye_conf" in cols
+    assert "eye_tenengrad" in cols
+
+
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
     """add_keyword auto-detects taxonomy type when name matches a taxon."""
     from db import Database

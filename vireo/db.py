@@ -394,6 +394,15 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_path TEXT")
 
+        # Eye-focus detection columns (keypoint + windowed tenengrad)
+        try:
+            self.conn.execute("SELECT eye_x FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_x REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_y REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_conf REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_tenengrad REAL")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
