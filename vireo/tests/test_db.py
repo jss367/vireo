@@ -133,6 +133,32 @@ def test_get_photos_filter_by_folder(tmp_path):
     assert all(r['folder_id'] == f2 for r in results)
 
 
+def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
+    """A stale/crafted folder_id for an out-of-workspace root must not expand.
+
+    Tree: A(inactive) -> B(active). Passing A should not pull B in — otherwise
+    a stale request could surface photos from active descendants of a folder
+    that no longer belongs to the current workspace.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    # Detach A from the active workspace; B stays.
+    db.remove_workspace_folder(active_ws, a)
+    db.add_workspace_folder(other_ws, a)
+
+    db.add_photo(folder_id=b, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    # Only A itself comes back (no expansion into B).
+    assert db.get_folder_subtree_ids(a) == [a]
+    # And since A itself isn't in the active workspace, the photo query returns nothing.
+    assert db.get_photos(folder_id=a) == []
+
+
 def test_folder_subtree_does_not_cross_workspace_boundary(tmp_path):
     """Expansion stops at folders removed from the active workspace.
 
