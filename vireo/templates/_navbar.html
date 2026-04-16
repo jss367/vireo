@@ -418,8 +418,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .lightbox-overlay.active { display: flex; }
 .lightbox-img-wrap {
-  max-width: 95vw;
-  max-height: 92vh;
+  width: 95vw;
+  height: 92vh;
   overflow: hidden;
   position: relative;
   display: flex;
@@ -427,28 +427,30 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   justify-content: center;
 }
 .lightbox-img-wrap.zoomed {
-  overflow: auto;
   cursor: grab;
-  align-items: flex-start;
-  justify-content: flex-start;
 }
 .lightbox-img-wrap.zoomed:active {
   cursor: grabbing;
 }
+.lightbox-transform {
+  /* Shared container for img + detection overlay; gets transform applied */
+  position: relative;
+  transform-origin: 0 0;
+  will-change: transform;
+}
 .lightbox-overlay img {
-  max-width: 100%;
+  max-width: 95vw;
   max-height: 92vh;
+  display: block;
   object-fit: contain;
   border-radius: 4px;
   cursor: zoom-in;
+  user-select: none;
+  -webkit-user-drag: none;
 }
+.lightbox-img-wrap.zoomed .lightbox-overlay img,
 .lightbox-img-wrap.zoomed img {
-  max-width: none;
-  max-height: none;
   cursor: grab;
-}
-.lightbox-img-wrap.zoomed:active img {
-  cursor: grabbing;
 }
 .lightbox-zoom-badge {
   position: absolute;
@@ -1663,10 +1665,12 @@ async function createWorkspace() {
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!this.classList.contains('zoomed') && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
-    <img id="lightboxImg" src="" alt="">
-    <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+    <div class="lightbox-transform" id="lightboxTransform">
+      <img id="lightboxImg" src="" alt="">
+      <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+    </div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
@@ -1734,6 +1738,17 @@ async function createWorkspace() {
 var _lightboxPhotoList = [];  // list of {id, filename} for arrow navigation
 var _lightboxCurrentId = null;
 
+var _lbZoom = 1.0;          // current zoom (1.0 = fit)
+var _lbPanX = 0;            // pan translation in CSS pixels
+var _lbPanY = 0;
+var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
+var _lbPhotoW = null;       // original photo width (px)
+var _lbPhotoH = null;       // original photo height (px)
+var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
+var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
+var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
+var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
+
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
 var _lbColorPalette = [
@@ -1795,7 +1810,46 @@ function openLightbox(photoId, filename, photoList) {
   // Clear previous detection overlays
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
+
+  // Reset continuous zoom state for new photo
+  _lbZoom = 1.0;
+  _lbPanX = 0;
+  _lbPanY = 0;
+  _lbNativeZoom = null;
+  _lbPhotoW = null;
+  _lbPhotoH = null;
+  _lbCurrentSrcKey = 'full';
+  _lbFullLongEdge = null;
+  _lbPending1To1 = false;
+  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
+  _lbDesiredSrcKey = null;
+  _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
+
+  // Fetch original dimensions (async, non-blocking for image display)
+  fetch('/api/photos/' + photoId)
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data || _lightboxCurrentId !== photoId) return;
+      _lbPhotoW = data.width || null;
+      _lbPhotoH = data.height || null;
+      _lbRecomputeNativeZoom();
+    })
+    .catch(function() {});
+
   img.src = '/photos/' + photoId + '/full';
+  img.onload = function() {
+    img.onload = null;
+    // Only record the /full tier size if the currently loaded source is still /full.
+    // A quick user zoom can trigger a debounced swap to a higher tier before /full
+    // finishes loading, which would otherwise make us record the swapped source's
+    // dimensions as the /full threshold.
+    if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
+      _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
+      _lbSessionFullLongEdge = _lbFullLongEdge;
+    }
+    _lbRecomputeNativeZoom();
+    _lbApplyTransform();
+  };
   label.textContent = filename || '';
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
@@ -1837,63 +1891,91 @@ function lightboxNav(delta) {
 }
 
 function toggleLightboxZoom(e) {
+  // Fit to 1:1 toggle. Preserved for existing 'z' shortcut and click-to-zoom.
   var wrap = document.getElementById('lightboxWrap');
   var img = document.getElementById('lightboxImg');
-  var badge = document.getElementById('lightboxZoomBadge');
-  var isZoomed = wrap.classList.contains('zoomed');
+  if (!img) return;
 
-  var detOverlay = document.getElementById('lightboxDetections');
+  // If we don't know native zoom yet (e.g. dimensions fetch still pending),
+  // fall back to old two-tier behavior: load original, no continuous control.
+  if (!_lbNativeZoom) {
+    _lbRecomputeNativeZoom();
+  }
+
+  var isZoomed = _lbZoom > 1.001;
   if (isZoomed) {
-    // Zoom out — switch back to preview image
-    wrap.classList.remove('zoomed');
-    badge.style.display = 'none';
-    if (detOverlay) detOverlay.style.display = '';
-    wrap.scrollTop = 0;
-    wrap.scrollLeft = 0;
-    if (_lightboxCurrentId) {
-      img.src = '/photos/' + _lightboxCurrentId + '/full';
-    }
+    _lbSetZoom(1.0, null, null);
+    _lbPending1To1 = false;
   } else {
-    // Zoom to 1:1 — load full-resolution original
-    // Measure click position relative to the image BEFORE changing layout
-    var imgRect = img.getBoundingClientRect();
-    var clickX = imgRect.width ? (e.clientX - imgRect.left) / imgRect.width : 0.5;
-    var clickY = imgRect.height ? (e.clientY - imgRect.top) / imgRect.height : 0.5;
-
-    wrap.classList.add('zoomed');
-    badge.style.display = '';
-    if (detOverlay) detOverlay.style.display = 'none';
-
-    if (_lightboxCurrentId) {
-      img.src = '/photos/' + _lightboxCurrentId + '/original';
+    // Anchor zoom on click position (or center if no event)
+    var rect = img.getBoundingClientRect();
+    var anchorX = e && e.clientX ? e.clientX : rect.left + rect.width / 2;
+    var anchorY = e && e.clientY ? e.clientY : rect.top + rect.height / 2;
+    if (_lbNativeZoom) {
+      _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
+      _lbPending1To1 = false;
+    } else {
+      // Dimensions unknown — fall back to the max zoom (clamps to 4) and flag
+      // the request so we can upgrade to true 1:1 once /original loads and
+      // nativeZoom is learned.
+      _lbSetZoom(4, anchorX, anchorY);
+      _lbPending1To1 = true;
     }
-
-    // Scroll to click position once the full-res image loads
-    img.onload = function() {
-      img.onload = null;
-      var scrollX = (img.naturalWidth * clickX) - (wrap.clientWidth / 2);
-      var scrollY = (img.naturalHeight * clickY) - (wrap.clientHeight / 2);
-      wrap.scrollLeft = Math.max(0, scrollX);
-      wrap.scrollTop = Math.max(0, scrollY);
-    };
   }
 }
 
+// Scroll wheel and trackpad pinch zoom — cursor-anchored
+(function() {
+  document.addEventListener('wheel', function(e) {
+    var overlay = document.getElementById('lightboxOverlay');
+    if (!overlay || !overlay.classList.contains('active')) return;
+    var wrap = document.getElementById('lightboxWrap');
+    if (!wrap) return;
+    // Only react to wheel events over the image wrap
+    if (!wrap.contains(e.target) && e.target !== wrap) return;
+
+    e.preventDefault();
+    // Trackpad pinch: e.ctrlKey === true; zoom factor more sensitive.
+    var scale = e.ctrlKey ? 0.02 : 0.0015;
+    var zoomFactor = Math.exp(-e.deltaY * scale);
+    var newZoom = _lbZoom * zoomFactor;
+    _lbSetZoom(newZoom, e.clientX, e.clientY);
+  }, { passive: false });
+})();
+
+// Viewport resize: recompute nativeZoom while lightbox is open so fit ratio
+// stays accurate after window/devicePixelRatio changes.
+(function() {
+  var resizeTimer = null;
+  window.addEventListener('resize', function() {
+    var overlay = document.getElementById('lightboxOverlay');
+    if (!overlay || !overlay.classList.contains('active')) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      resizeTimer = null;
+      _lbRecomputeNativeZoom();
+      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
+      _lbSetZoom(_lbZoom, null, null);
+    }, 100);
+  });
+})();
+
 // Drag to pan when zoomed; single click (no drag) zooms out
 (function() {
-  var wrap, dragging = false, didDrag = false, startX, startY, scrollStartX, scrollStartY;
-  var DRAG_THRESHOLD = 5; // px of movement before it counts as a drag
+  var dragging = false, didDrag = false, startX, startY, panStartX, panStartY;
+  var DRAG_THRESHOLD = 5;
 
   document.addEventListener('mousedown', function(e) {
-    wrap = document.getElementById('lightboxWrap');
-    if (!wrap || !wrap.classList.contains('zoomed')) return;
+    var wrap = document.getElementById('lightboxWrap');
+    if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+    if (!wrap.contains(e.target) && e.target !== wrap) return;
     dragging = true;
     didDrag = false;
     startX = e.clientX;
     startY = e.clientY;
-    scrollStartX = wrap.scrollLeft;
-    scrollStartY = wrap.scrollTop;
+    panStartX = _lbPanX;
+    panStartY = _lbPanY;
     e.preventDefault();
   });
 
@@ -1904,17 +1986,19 @@ function toggleLightboxZoom(e) {
     if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
       didDrag = true;
     }
-    wrap.scrollLeft = scrollStartX - dx;
-    wrap.scrollTop = scrollStartY - dy;
+    _lbPanX = panStartX + dx;
+    _lbPanY = panStartY + dy;
+    _lbClampPan();
+    _lbApplyTransform();
   });
 
   document.addEventListener('mouseup', function(e) {
     if (!dragging) return;
     dragging = false;
-    // Single click without dragging = zoom out
-    if (!didDrag && wrap && wrap.classList.contains('zoomed')) {
-      toggleLightboxZoom(e);
-      window._lightboxZoomHandled = true;  // Prevent onclick from re-zooming
+    if (!didDrag && _lbZoom > 1.001) {
+      // Single click without dragging = zoom out to fit
+      _lbSetZoom(1.0, null, null);
+      window._lightboxZoomHandled = true;
     }
   });
 })();
@@ -1922,7 +2006,13 @@ function toggleLightboxZoom(e) {
 function closeLightbox(e) {
   if (e && e.target && e.target.tagName === 'IMG') return;
   var wrap = document.getElementById('lightboxWrap');
-  if (wrap) { wrap.classList.remove('zoomed'); wrap.scrollTop = 0; wrap.scrollLeft = 0; }
+  if (wrap) { wrap.classList.remove('zoomed'); }
+  _lbZoom = 1.0;
+  _lbPanX = 0;
+  _lbPanY = 0;
+  if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
+  _lbDesiredSrcKey = null;
+  _lbApplyTransform();
   document.getElementById('lightboxOverlay').classList.remove('active');
   document.getElementById('lightboxImg').src = '';
   document.getElementById('lightboxZoomBadge').style.display = 'none';
@@ -2209,6 +2299,30 @@ document.addEventListener('keydown', function(e) {
     var rect = wrap.getBoundingClientRect();
     toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
     e.preventDefault();
+    return;  // Stop here so a user-remapped zoomKey (e.g. '+') doesn't also trigger step-zoom below.
+  }
+  // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
+  // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
+  // would also fire rate_0 and silently clear the photo's rating.
+  // Skip when focus is in a form field — modals opened from the lightbox (e.g. iNaturalist)
+  // need '-' / '0' as literal input in lat/lon fields.
+  var tag = e.target && e.target.tagName;
+  var editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+    (e.target && e.target.isContentEditable);
+  if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (e.key === '+' || e.key === '=') {
+      _lbSetZoom(_lbZoom * 1.25, null, null);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    } else if (e.key === '-' || e.key === '_') {
+      _lbSetZoom(_lbZoom * 0.8, null, null);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    } else if (e.key === '0') {
+      _lbSetZoom(1.0, null, null);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
   }
 });
 
@@ -2255,6 +2369,231 @@ function formatShortcut(str) {
   return str.split('+').map(function(p) {
     return p.charAt(0).toUpperCase() + p.slice(1);
   }).join('+');
+}
+
+function _lbApplyTransform() {
+  var t = document.getElementById('lightboxTransform');
+  if (!t) return;
+  t.style.transform = 'translate(' + _lbPanX + 'px, ' + _lbPanY + 'px) scale(' + _lbZoom + ')';
+  var badge = document.getElementById('lightboxZoomBadge');
+  if (!badge) return;
+  if (_lbZoom <= 1.001) {
+    badge.style.display = 'none';
+  } else if (_lbNativeZoom) {
+    badge.style.display = '';
+    badge.textContent = Math.round((_lbZoom / _lbNativeZoom) * 100) + '%';
+  } else {
+    badge.style.display = '';
+    badge.textContent = 'zoom';
+  }
+}
+
+function _lbRecomputeNativeZoom() {
+  // Compute zoom value that corresponds to 1:1 (one screen pixel == one image pixel).
+  // We need the displayed size of the image at zoom=1.0 (fit) to compare against native.
+  var img = document.getElementById('lightboxImg');
+  if (!img || !_lbPhotoW || !_lbPhotoH || !img.naturalWidth || !img.naturalHeight) {
+    _lbNativeZoom = null;
+    return;
+  }
+  var fitDisplayedW = img.clientWidth || img.naturalWidth;
+  if (fitDisplayedW <= 0) {
+    _lbNativeZoom = null;
+    return;
+  }
+  // Stored dims from /api/photos are pre-EXIF-orientation (scanner reads raw EXIF
+  // width/height). The loaded image applies orientation. If the aspect ratios disagree,
+  // the stored dims are rotated 90°; swap to match the displayed image.
+  var photoW = _lbPhotoW;
+  var storedAspect = _lbPhotoW / _lbPhotoH;
+  var imgAspect = img.naturalWidth / img.naturalHeight;
+  if (Math.abs(storedAspect - imgAspect) > Math.abs((1 / storedAspect) - imgAspect)) {
+    photoW = _lbPhotoH;
+  }
+  // Guard: very small images (nativeZoom < 1) clamp to 1.0 so fit == 1:1
+  _lbNativeZoom = Math.max(1.0, photoW / fitDisplayedW);
+}
+
+function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
+  // Any zoom mutation cancels a pending "upgrade to 1:1 on original-load" intent.
+  // Callers that still want it (toggleLightboxZoom's fallback path) re-set the flag
+  // after calling us.
+  _lbPending1To1 = false;
+  // Clamp to valid range. Max is 4x native (or 4x fit if no nativeZoom).
+  var maxZoom = _lbNativeZoom ? _lbNativeZoom * 4 : 4;
+  newZoom = Math.max(1.0, Math.min(maxZoom, newZoom));
+  var wrap = document.getElementById('lightboxWrap');
+  var t = document.getElementById('lightboxTransform');
+  if (!wrap || !t) return;
+
+  // The transform container is flex-centered in the wrap, so wrap-local
+  // coordinates are NOT image-local. Use the transform element's own
+  // getBoundingClientRect() — it already bakes in the current translate+scale.
+  // Cursor at clientX has image-local coord (clientX - rect.left) / zoom.
+  // Anchor invariant: that image coord must still land under the cursor after zoom.
+  //   newPanX = _lbPanX + (clientX - rect.left) - imgX * newZoom
+  var rect = t.getBoundingClientRect();
+  var anchorX, anchorY;
+  if (anchorClientX != null && anchorClientY != null) {
+    anchorX = anchorClientX;
+    anchorY = anchorClientY;
+  } else {
+    // Center anchor: use wrap's visual center
+    var wrapRect = wrap.getBoundingClientRect();
+    anchorX = wrapRect.left + wrapRect.width / 2;
+    anchorY = wrapRect.top + wrapRect.height / 2;
+  }
+  var imgX = (anchorX - rect.left) / _lbZoom;
+  var imgY = (anchorY - rect.top) / _lbZoom;
+  _lbPanX = _lbPanX + (anchorX - rect.left) - imgX * newZoom;
+  _lbPanY = _lbPanY + (anchorY - rect.top) - imgY * newZoom;
+  _lbZoom = newZoom;
+
+  if (_lbZoom <= 1.001) {
+    _lbPanX = 0;
+    _lbPanY = 0;
+  }
+
+  _lbClampPan();
+  wrap.classList.toggle('zoomed', _lbZoom > 1.001);
+  _lbApplyTransform();
+  _lbScheduleSourceSwap();
+}
+
+function _lbClampPan() {
+  var wrap = document.getElementById('lightboxWrap');
+  var t = document.getElementById('lightboxTransform');
+  if (!wrap || !t) return;
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  var wrapW = wrap.clientWidth;
+  var wrapH = wrap.clientHeight;
+  // Pre-transform size of the transform container equals img.clientWidth/Height,
+  // because #lightboxDetections is absolutely positioned.
+  var baseW = img.clientWidth;
+  var baseH = img.clientHeight;
+  if (!baseW || !baseH) return;
+  // Effective rendered size after scale
+  var scaledW = baseW * _lbZoom;
+  var scaledH = baseH * _lbZoom;
+  // The transform element's pre-transform top-left is determined by flex centering.
+  // Flex-centered top-left = ((wrapW - baseW) / 2, (wrapH - baseH) / 2)
+  var baseLeft = (wrapW - baseW) / 2;
+  var baseTop = (wrapH - baseH) / 2;
+  // After applying transform, the rendered top-left is baseLeft + _lbPanX,
+  // and the rendered bottom-right is baseLeft + _lbPanX + scaledW.
+  // Clamp so at least minVisible px of image stays inside the wrap, per axis.
+  var minVisible = 80;
+  // X: rendered right >= minVisible; rendered left <= wrapW - minVisible
+  //   panX >= minVisible - baseLeft - scaledW
+  //   panX <= wrapW - minVisible - baseLeft
+  var minPanX = minVisible - baseLeft - scaledW;
+  var maxPanX = wrapW - minVisible - baseLeft;
+  if (scaledW <= wrapW) {
+    // Image fits horizontally; center it
+    _lbPanX = 0;
+  } else {
+    _lbPanX = Math.max(minPanX, Math.min(maxPanX, _lbPanX));
+  }
+  var minPanY = minVisible - baseTop - scaledH;
+  var maxPanY = wrapH - minVisible - baseTop;
+  if (scaledH <= wrapH) {
+    _lbPanY = 0;
+  } else {
+    _lbPanY = Math.max(minPanY, Math.min(maxPanY, _lbPanY));
+  }
+}
+
+var _lbSwapTimer = null;
+var _lbDesiredSrcKey = null;
+
+function _lbPickSourceKey() {
+  // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
+  // Fall back to /full at fit and /original when zoomed whenever we can't compute
+  // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
+  // established — the latter happens briefly when API dims arrive before the
+  // initial image load completes).
+  if (!_lbPhotoW || !_lbPhotoH || !_lbNativeZoom) {
+    return _lbZoom > 1.001 ? 'original' : 'full';
+  }
+  var longEdge = Math.max(_lbPhotoW, _lbPhotoH);
+  // Displayed long edge in CSS pixels at current zoom.
+  // At zoom == _lbNativeZoom, displayed long edge == longEdge.
+  var displayedLong = (_lbNativeZoom && _lbNativeZoom > 0)
+    ? longEdge * (_lbZoom / _lbNativeZoom)
+    : 0;
+  // DPR consideration: high-DPI screens need more pixels for a crisp display.
+  var dpr = window.devicePixelRatio || 1;
+  var needed = displayedLong * dpr;
+  // /full's actual long edge depends on the server's preview_max_size config (default 1920).
+  // Prefer the per-photo measurement; if not yet recorded (user zoomed before /full
+  // loaded), fall back to the last photo's measurement in this session, then 1920.
+  var fullLongEdge = _lbFullLongEdge || _lbSessionFullLongEdge || 1920;
+  if (needed <= fullLongEdge) return 'full';
+  if (needed <= 2560) return '2560';
+  if (needed <= 3840) return '3840';
+  return 'original';
+}
+
+function _lbSrcUrl(photoId, key) {
+  if (key === 'original') return '/photos/' + photoId + '/original';
+  if (key === 'full') return '/photos/' + photoId + '/full';
+  return '/photos/' + photoId + '/preview?size=' + key;
+}
+
+function _lbScheduleSourceSwap() {
+  if (!_lightboxCurrentId) return;
+  var desired = _lbPickSourceKey();
+  _lbDesiredSrcKey = desired;
+  if (desired === _lbCurrentSrcKey) return;
+
+  if (_lbSwapTimer) clearTimeout(_lbSwapTimer);
+  _lbSwapTimer = setTimeout(function() {
+    _lbSwapTimer = null;
+    if (_lbDesiredSrcKey !== desired) return;          // newer request won
+    if (_lbDesiredSrcKey === _lbCurrentSrcKey) return; // already there
+    var photoId = _lightboxCurrentId;
+    var key = _lbDesiredSrcKey;
+    var url = _lbSrcUrl(photoId, key);
+
+    var preloader = new Image();
+    preloader.onload = function() {
+      // Ignore stale: different photo, or desired key changed to something else
+      if (_lightboxCurrentId !== photoId) return;
+      if (_lbDesiredSrcKey !== key) return;
+      var img = document.getElementById('lightboxImg');
+      if (!img) return;
+      // After the new source loads, recompute nativeZoom — the aspect ratio is
+      // nominally identical across source tiers but subpixel rounding can shift
+      // fit dimensions slightly, and if API dims were missing the original's
+      // naturalWidth is now authoritative.
+      img.addEventListener('load', function onSwapLoad() {
+        img.removeEventListener('load', onSwapLoad);
+        if (_lightboxCurrentId !== photoId) return;
+        // A newer swap may have preempted us before this load fired — in that
+        // case img.naturalWidth belongs to a DIFFERENT source than our closure's
+        // `key`, so bail rather than record wrong dims or recalibrate stale state.
+        if (_lbCurrentSrcKey !== key) return;
+        if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
+          _lbPhotoW = img.naturalWidth;
+          _lbPhotoH = img.naturalHeight;
+        }
+        _lbRecomputeNativeZoom();
+        // If the user pressed z/toggle when nativeZoom was unknown, upgrade to true 1:1 now.
+        if (_lbPending1To1 && _lbNativeZoom) {
+          _lbPending1To1 = false;
+          _lbSetZoom(_lbNativeZoom, null, null);
+        }
+        _lbApplyTransform();
+      });
+      img.src = url;
+      _lbCurrentSrcKey = key;
+    };
+    preloader.onerror = function() {
+      // Keep current source on failure
+    };
+    preloader.src = url;
+  }, 150);
 }
 </script>
 
