@@ -976,6 +976,19 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
+    def get_folder_subtree_ids(self, folder_id):
+        """Return [folder_id, ...descendant_ids] using the folders.parent_id tree."""
+        rows = self.conn.execute(
+            """WITH RECURSIVE tree(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id
+               )
+               SELECT id FROM tree""",
+            (folder_id,),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
@@ -1828,8 +1841,10 @@ class Database:
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1896,8 +1911,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1973,8 +1990,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2033,8 +2052,10 @@ class Database:
         join_params = []
         where_params = [ws]
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2178,8 +2199,10 @@ class Database:
         params = [self._ws_id()]
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             params.append(rating_min)

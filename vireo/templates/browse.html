@@ -1195,6 +1195,12 @@ function renderFolderTree(folders) {
     byParent[pid].push(f);
   });
 
+  function rollupCount(f) {
+    var total = f.photo_count || 0;
+    (byParent[f.id] || []).forEach(function(c) { total += rollupCount(c); });
+    return total;
+  }
+
   function buildTree(parentId, depth) {
     var children = byParent[parentId] || [];
     var html = '';
@@ -1207,7 +1213,7 @@ function renderFolderTree(folders) {
       html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '">' +
         indent + toggle +
         '<span>' + escapeHtml(f.name) + '</span>' +
-        '<span class="count">' + f.photo_count + '</span>' +
+        '<span class="count">' + rollupCount(f) + '</span>' +
       '</div>';
       if (hasChildren) {
         html += '<div class="tree-children">' + buildTree(f.id, depth + 1) + '</div>';

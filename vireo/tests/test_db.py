@@ -133,6 +133,85 @@ def test_get_photos_filter_by_folder(tmp_path):
     assert all(r['folder_id'] == f2 for r in results)
 
 
+def test_get_photos_folder_filter_includes_descendants(tmp_path):
+    """get_photos(folder_id=parent) includes photos from descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/photos', name='photos')
+    year = db.add_folder('/photos/2024', name='2024', parent_id=root)
+    leaf = db.add_folder('/photos/2024/01-15', name='01-15', parent_id=year)
+    sibling = db.add_folder('/other', name='other')
+
+    db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=year, filename='mid.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    db.add_photo(folder_id=leaf, filename='deep.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+    db.add_photo(folder_id=sibling, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=4.0)
+
+    assert len(db.get_photos(folder_id=root)) == 3
+    assert len(db.get_photos(folder_id=year)) == 2
+    assert len(db.get_photos(folder_id=leaf)) == 1
+    assert len(db.get_photos(folder_id=sibling)) == 1
+
+
+def test_count_filtered_photos_folder_includes_descendants(tmp_path):
+    """count_filtered_photos(folder_id=parent) counts descendant photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+
+    assert db.count_filtered_photos(folder_id=root) == 2
+    assert db.count_filtered_photos(folder_id=child) == 2
+
+
+def test_browse_summary_folder_includes_descendants(tmp_path):
+    """get_browse_summary(folder_id=parent) counts descendants in filtered_total."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+
+    summary = db.get_browse_summary(folder_id=root)
+    assert summary['filtered_total'] == 2
+
+
+def test_calendar_data_folder_includes_descendants(tmp_path):
+    """get_calendar_data(folder_id=parent) counts descendants."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T00:00:00')
+    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100,
+                 file_mtime=2.0, timestamp='2024-06-15T00:01:00')
+
+    data = db.get_calendar_data(year=2024, folder_id=root)
+    assert data['days'].get('2024-06-15') == 2
+
+
+def test_geolocated_photos_folder_includes_descendants(tmp_path):
+    """get_geolocated_photos(folder_id=parent) includes descendant-folder photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    pid1 = db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg',
+                        file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET latitude = 10.0, longitude = 20.0 WHERE id = ?", (pid1,))
+    db.conn.execute("UPDATE photos SET latitude = 11.0, longitude = 21.0 WHERE id = ?", (pid2,))
+    db.conn.commit()
+
+    photos = db.get_geolocated_photos(folder_id=root)
+    assert len(photos) == 2
+
+
 def test_get_photos_filter_by_rating(tmp_path):
     """get_photos can filter by minimum rating."""
     from db import Database
