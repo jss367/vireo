@@ -21,22 +21,44 @@ def _known_paths_for_workspace(db, workspace_id):
 
 
 def _mapped_roots(db, workspace_id):
-    """Return the workspace's mapped roots — folders whose parent is not also linked.
+    """Return the workspace's mapped roots — linked folders whose ancestor chain
+    contains no other linked folder. Skips folders marked 'missing'.
 
-    Skips folders marked 'missing'.
+    Checking only the immediate parent would over-include when an intermediate
+    folder was unlinked but a deeper descendant is still linked (e.g. /A linked,
+    /A/B unlinked, /A/B/C linked — both /A and /A/B/C would otherwise be roots
+    and the walk would double-count files under /A/B/C).
     """
     rows = db.conn.execute(
-        """SELECT f.id, f.path, f.parent_id, f.status
+        """SELECT f.id, f.path, f.parent_id
            FROM folders f
            JOIN workspace_folders wf ON wf.folder_id = f.id
            WHERE wf.workspace_id = ? AND f.status = 'ok'""",
         (workspace_id,),
     ).fetchall()
     linked_ids = {r["id"] for r in rows}
+    if not linked_ids:
+        return []
+
+    # Load parent_id for every folder — needed to walk arbitrary-depth ancestor
+    # chains where intermediate folders may not be linked.
+    parent_of = {
+        r["id"]: r["parent_id"]
+        for r in db.conn.execute("SELECT id, parent_id FROM folders").fetchall()
+    }
+
+    def has_linked_ancestor(folder_id):
+        parent = parent_of.get(folder_id)
+        while parent is not None:
+            if parent in linked_ids:
+                return True
+            parent = parent_of.get(parent)
+        return False
+
     return [
         {"id": r["id"], "path": r["path"]}
         for r in rows
-        if r["parent_id"] is None or r["parent_id"] not in linked_ids
+        if not has_linked_ancestor(r["id"])
     ]
 
 

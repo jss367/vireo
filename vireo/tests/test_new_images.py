@@ -72,6 +72,47 @@ def test_count_new_images_no_double_counting_with_nested_linked_folders(db_with_
     assert result["per_root"][0]["path"] == str(root)
 
 
+def test_mapped_roots_excludes_folder_with_any_linked_ancestor(db_with_workspace):
+    """A folder is a root only if *no* ancestor at any depth is linked — not
+    just its immediate parent. Without this, a scenario like:
+
+        /A       linked
+        /A/B     unlinked (intermediate)
+        /A/B/C   linked
+
+    would treat both /A and /A/B/C as roots (because /A/B, C's immediate
+    parent, is not linked) and os.walk'ing both would double-count every file
+    under /A/B/C.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+
+    a = tmp_path / "A"
+    b = a / "B"
+    c = b / "C"
+    _touch_image(str(c / "IMG_0001.JPG"))
+
+    # Register the full chain against the workspace, then unlink the
+    # intermediate /A/B so only /A and /A/B/C remain linked.
+    a_id = db.add_folder(str(a), name="A")
+    b_id = db.add_folder(str(b), name="B", parent_id=a_id)
+    db.add_folder(str(c), name="C", parent_id=b_id)
+    db.remove_workspace_folder(ws_id, b_id)
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1, (
+        f"Expected 1 new image (must not double-count across /A and /A/B/C), "
+        f"got {result['new_count']}. per_root={result['per_root']}"
+    )
+    assert len(result["per_root"]) == 1, (
+        f"Only the true root /A should walk; per_root={result['per_root']}"
+    )
+    assert result["per_root"][0]["path"] == str(a), (
+        f"Root path should be /A, got {result['per_root'][0]['path']!r}"
+    )
+
+
 def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
