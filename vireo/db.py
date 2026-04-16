@@ -744,13 +744,22 @@ class Database:
         """Clear cache for every workspace linked to any of the given folder_ids."""
         if not folder_ids:
             return
-        placeholders = ",".join("?" * len(folder_ids))
-        rows = self.conn.execute(
-            f"SELECT DISTINCT workspace_id FROM workspace_folders "
-            f"WHERE folder_id IN ({placeholders})",
-            tuple(folder_ids),
-        ).fetchall()
-        ws_ids = [r["workspace_id"] for r in rows]
+        # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # A scan of a deep tree can auto-register thousands of descendant folders;
+        # a single IN (?, ?, ...) across all of them would raise
+        # ``OperationalError: too many SQL variables``.
+        CHUNK = 500
+        ws_ids = set()
+        folder_ids = list(folder_ids)
+        for i in range(0, len(folder_ids), CHUNK):
+            chunk = folder_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT workspace_id FROM workspace_folders "
+                f"WHERE folder_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            ws_ids.update(r["workspace_id"] for r in rows)
         self._new_images_cache.invalidate_workspaces(ws_ids)
 
     def _photo_in_workspace(self, photo_id):
@@ -780,7 +789,13 @@ class Database:
              json.dumps(ui_state) if ui_state else None),
         )
         self.conn.commit()
-        return cur.lastrowid
+        workspace_id = cur.lastrowid
+        # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
+        # rowid, so a freshly created workspace may collide with the stale cache
+        # entry of a prior workspace that shared this id. Clear any lingering
+        # entry so the new workspace starts clean.
+        self._new_images_cache.invalidate_workspaces([workspace_id])
+        return workspace_id
 
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
@@ -870,6 +885,11 @@ class Database:
         """Delete a workspace and all its scoped data (cascade)."""
         self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
         self.conn.commit()
+        # Drop any cached new-images payload for this workspace. Without this,
+        # if the deleted id is later reused by SQLite for a new workspace,
+        # ``get_new_images_for_workspace`` could serve the prior workspace's
+        # data until TTL expiry.
+        self._new_images_cache.invalidate_workspaces([workspace_id])
 
     def add_workspace_folder(self, workspace_id, folder_id):
         """Link a folder to a workspace."""

@@ -400,3 +400,122 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
     assert db._new_images_cache.get(ws_id) is None, (
         "Cache must be invalidated even when the scan raises"
     )
+
+
+def test_invalidate_new_images_cache_for_folders_handles_thousands_of_ids(
+    db_with_workspace,
+):
+    """A scan of a deep tree can auto-register thousands of descendant folders.
+    Passing them all to ``invalidate_new_images_cache_for_folders`` must not
+    raise ``OperationalError: too many SQL variables``.
+
+    The helper should chunk the ``IN (?, ?, ...)`` query rather than building a
+    single placeholder list whose length exceeds SQLite's
+    ``SQLITE_LIMIT_VARIABLE_NUMBER``. To make this test fast and independent
+    of the host SQLite build (the default cap varies — 999 on old builds,
+    250000 on newer ones), we lower the cap on the connection via
+    ``setlimit`` so a modest list is enough to expose the bug.
+    """
+    import sqlite3
+    db, ws_id, tmp_path = db_with_workspace
+
+    # Lower the variable cap so 2500 ids would blow past it if the helper
+    # did not chunk.
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 500)
+
+    # 2500 unknown folder_ids: SQL simply returns no rows, but must execute
+    # without raising.
+    unknown_ids = list(range(100000, 102500))
+    db.invalidate_new_images_cache_for_folders(unknown_ids)  # must not raise
+
+    # Now build a scenario with a real linked folder mixed in with many unknown
+    # ids. Prime the cache, invalidate, and assert it was cleared.
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    db.get_new_images_for_workspace(ws_id)
+    assert db._new_images_cache.get(ws_id) is not None
+
+    mixed = unknown_ids + [root_id]
+    db.invalidate_new_images_cache_for_folders(mixed)
+    assert db._new_images_cache.get(ws_id) is None, (
+        "Chunked invalidation must still clear the real linked folder's workspace"
+    )
+
+
+def test_delete_workspace_clears_cache(tmp_path):
+    """Deleting a workspace must drop its cached new-images entry immediately.
+    Otherwise, if SQLite later reuses the rowid for a new workspace, stale
+    data leaks across identities until TTL expiry."""
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ws_tmp = db.create_workspace("to-delete")
+
+    # Populate the cache directly (avoids needing a real folder / photo setup).
+    db._new_images_cache.set(
+        ws_tmp, {"new_count": 7, "per_root": [], "sample": []}
+    )
+    assert db._new_images_cache.get(ws_tmp) is not None
+
+    db.delete_workspace(ws_tmp)
+
+    assert db._new_images_cache.get(ws_tmp) is None, (
+        "delete_workspace must invalidate the new-images cache entry"
+    )
+
+
+def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
+    """SQLite's ``INTEGER PRIMARY KEY`` (without AUTOINCREMENT) can reuse a
+    deleted rowid. If a cache entry exists under a rowid at the moment a new
+    workspace is created with that id, the new workspace must NOT inherit it.
+
+    We simulate this by seeding the cache *after* the delete (to mimic a race
+    where an in-flight compute from a prior request wrote a stale entry after
+    the delete's invalidation), then creating a new workspace and asserting
+    its ``create_workspace`` hook cleared the stale entry.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    ws_default = db.ensure_default_workspace()
+    db.set_active_workspace(ws_default)
+
+    ws_a = db.create_workspace("A")
+    stale_payload = {"new_count": 42, "per_root": [], "sample": ["/stale.JPG"]}
+
+    db.delete_workspace(ws_a)
+
+    # Simulate a late write landing in the cache AFTER delete_workspace's
+    # invalidation ran. In production this could happen if an in-flight
+    # ``get_new_images_for_workspace`` for ws_a computed a result and called
+    # ``set`` with a stale generation that happened to match (or if the cache
+    # was repopulated by a reader racing with delete). Passing ``generation``
+    # unconditionally here seeds the entry regardless of the generation
+    # invalidate_workspaces bumped.
+    db._new_images_cache.set(ws_a, stale_payload)
+    assert db._new_images_cache.get(ws_a) == stale_payload
+
+    # Create a new workspace. SQLite typically reuses the highest freed rowid,
+    # so this usually gets ws_a's old id.
+    ws_b = db.create_workspace("B")
+
+    if ws_a == ws_b:
+        # Id was reused — create_workspace's hook must have cleared the stale
+        # entry so the new workspace does NOT inherit the old payload.
+        assert db._new_images_cache.get(ws_b) is None, (
+            f"create_workspace must clear any stale cache entry for the reused "
+            f"id={ws_b}; found {db._new_images_cache.get(ws_b)!r}"
+        )
+    else:  # pragma: no cover — sqlite3 almost always reuses the highest freed rowid
+        # No id reuse; verify the new workspace has no stale cache entry under
+        # its own id (trivially true) and that the original stale entry is
+        # untouched (since it's under a different id now).
+        assert db._new_images_cache.get(ws_b) is None
+
+    # And a full round-trip: fetching new-images for ws_b must not return the
+    # stale payload from ws_a.
+    result = db.get_new_images_for_workspace(ws_b)
+    assert result != stale_payload, (
+        f"New workspace (id={ws_b}) must not inherit deleted workspace's cache "
+        f"(id reuse of {ws_a}? {ws_a == ws_b})"
+    )
