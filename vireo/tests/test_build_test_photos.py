@@ -211,3 +211,26 @@ def test_sample_idempotent_under_reversed_walk_order(tmp_path, monkeypatch):
     assert files_after_second == files_after_first, (
         f"reversed walk order created extra files: {files_after_second}"
     )
+
+
+def test_sample_idempotent_when_dest_is_inside_source(tmp_path):
+    # If the user picks a dest path inside source (e.g.
+    # `--dest <source>/vireo-test-photos`), a naive walk re-ingests prior
+    # outputs on every rerun and silently grows the sampled set. Verify the
+    # walk skips the dest subtree, so a second run produces no new files.
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "a.jpg").write_bytes(b"A")
+    (source / "b.jpg").write_bytes(b"B")
+    dest = source / "vireo-test-photos"
+    counts = {"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 2, "random": 0}
+
+    build_test_photos.sample(source, dest, counts=counts)
+    first = sorted(p.name for p in (dest / "jpegs").iterdir())
+    assert len(first) == 2
+
+    build_test_photos.sample(source, dest, counts=counts)
+    second = sorted(p.name for p in (dest / "jpegs").iterdir())
+    assert second == first, (
+        f"dest-inside-source re-ingested outputs: {second} vs {first}"
+    )

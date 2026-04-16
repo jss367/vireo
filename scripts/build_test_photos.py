@@ -122,7 +122,14 @@ def sample(source, dest, counts=None, dry_run=False):
     }
 
     all_files = []
-    for root, _, filenames in os.walk(source):
+    for root, dirs, filenames in os.walk(source):
+        # If dest lives inside source (e.g. `--dest <source>/vireo-test-photos`),
+        # skip it so a second run doesn't re-ingest its own outputs and grow
+        # the sampled set unboundedly — breaking idempotency.
+        root_path = Path(root).resolve()
+        dirs[:] = [
+            d for d in dirs if (root_path / d).resolve() != dest
+        ]
         for name in filenames:
             p = Path(root) / name
             if classify_ext(p) != "skip":
