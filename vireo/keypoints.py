@@ -12,6 +12,7 @@ Models:
 All models load from ~/.vireo/models/<name>/model.onnx with a sibling
 config.json describing input size, normalization, and keypoint names.
 """
+import json
 import logging
 import os
 import threading
@@ -138,3 +139,131 @@ def decode_simcc(simcc_x, simcc_y, input_size, simcc_split_ratio=2.0):
     x = idx_x / simcc_split_ratio
     y = idx_y / simcc_split_ratio
     return np.stack([x, y, conf], axis=1).astype(np.float32)
+
+
+def decode_heatmaps(heatmaps, input_size):
+    """Decode (1, K, H', W') heatmaps to (K, 3) keypoints in input-image pixels.
+
+    Simple argmax + rescale. SuperAnimal heatmap-head models use this path;
+    RTMPose goes through decode_simcc instead. Subpixel refinement (quadratic
+    fit around argmax) is deferred until real-image tests show the need.
+    """
+    hm = heatmaps[0]  # (K, H', W')
+    K, H, W = hm.shape
+    flat = hm.reshape(K, -1)
+    idx = np.argmax(flat, axis=1)
+    ys = (idx // W).astype(np.float32)
+    xs = (idx % W).astype(np.float32)
+    conf = flat[np.arange(K), idx]
+    xs *= input_size / W
+    ys *= input_size / H
+    return np.stack([xs, ys, conf], axis=1).astype(np.float32)
+
+
+def _load_config(model_name):
+    """Read config.json sibling to model.onnx."""
+    config_path = os.path.join(_model_dir(model_name), "config.json")
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def _load_session(model_name):
+    """Get the cached onnxruntime session for ``model_name``.
+
+    Loads on first use; subsequent calls return the same session. Raises
+    FileNotFoundError if weights are absent — callers should have invoked
+    ensure_keypoint_weights() first.
+    """
+    if model_name in _sessions:
+        return _sessions[model_name]
+    lock = _locks.setdefault(model_name, threading.Lock())
+    with lock:
+        if model_name in _sessions:
+            return _sessions[model_name]
+        import onnxruntime as ort
+
+        onnx_path = os.path.join(_model_dir(model_name), "model.onnx")
+        if not os.path.isfile(onnx_path):
+            raise FileNotFoundError(
+                f"Keypoint model {model_name!r} not found at {onnx_path}. "
+                "Call ensure_keypoint_weights() first."
+            )
+        _sessions[model_name] = ort.InferenceSession(
+            onnx_path, providers=["CPUExecutionProvider"]
+        )
+    return _sessions[model_name]
+
+
+def detect_keypoints(image, bbox, model_name):
+    """Run a keypoint model on the bbox crop; return per-keypoint (x, y, conf).
+
+    Applies aspect-ratio-preserving resize + top-left pad to the model's
+    input size, normalizes per the model config, and maps the detected
+    input-space keypoints back into the original image's pixel space.
+
+    Args:
+        image: PIL.Image (original-resolution RGB).
+        bbox: (x0, y0, x1, y1) in image-pixel space (MegaDetector output).
+        model_name: one of 'rtmpose-animal', 'superanimal-quadruped',
+            'superanimal-bird'.
+
+    Returns:
+        list of dicts ``{"name": str, "x": float, "y": float, "conf": float}``,
+        one entry per keypoint the model produces. Coordinates are in the
+        original image's pixel space.
+    """
+    from PIL import Image
+
+    cfg = _load_config(model_name)
+    input_h = cfg["input_size"][2]
+    input_w = cfg["input_size"][3]
+    mean = np.array(cfg["mean"], dtype=np.float32).reshape(3, 1, 1)
+    std = np.array(cfg["std"], dtype=np.float32).reshape(3, 1, 1)
+    keypoint_names = cfg["keypoints"]
+
+    x0, y0, x1, y1 = bbox
+    crop = image.crop((x0, y0, x1, y1))
+    crop_w, crop_h = crop.size
+    scale = min(input_w / crop_w, input_h / crop_h)
+    new_w = max(1, int(round(crop_w * scale)))
+    new_h = max(1, int(round(crop_h * scale)))
+    resized = crop.resize((new_w, new_h), Image.BILINEAR)
+
+    # Top-left aligned pad. Using a constant pad offset (0, 0) keeps the
+    # inverse transform trivial: input-space coords map directly through
+    # `scale` back to crop-space.
+    padded = Image.new("RGB", (input_w, input_h), color=(0, 0, 0))
+    padded.paste(resized, (0, 0))
+
+    arr = np.array(padded, dtype=np.float32).transpose(2, 0, 1)  # CHW
+    arr = (arr - mean) / std
+    arr = arr[np.newaxis, :, :, :]
+
+    session = _load_session(model_name)
+    outputs = session.run(None, {"pixel_values": arr})
+
+    output_type = cfg.get("output_type", "heatmap")
+    if output_type == "simcc":
+        simcc_x, simcc_y = outputs
+        kps_input_space = decode_simcc(
+            simcc_x,
+            simcc_y,
+            input_size=input_w,
+            simcc_split_ratio=cfg.get("simcc_split_ratio", 2.0),
+        )
+    else:
+        kps_input_space = decode_heatmaps(outputs[0], input_size=input_w)
+
+    result = []
+    for i, name in enumerate(keypoint_names):
+        x_in, y_in, conf = kps_input_space[i]
+        # Inverse-map: input-space → crop-space → image-space.
+        x_img = float(x_in / scale) + x0
+        y_img = float(y_in / scale) + y0
+        result.append({
+            "name": name,
+            "x": float(x_img),
+            "y": float(y_img),
+            "conf": float(conf),
+        })
+    return result
