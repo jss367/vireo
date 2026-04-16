@@ -127,6 +127,11 @@ def sample(source, dest, counts=None, dry_run=False):
             p = Path(root) / name
             if classify_ext(p) != "skip":
                 all_files.append(p)
+    # Sort so downstream category slicing and the copy loop see the same order
+    # on every run. Without this, os.walk's order variance would flip which
+    # same-basename source gets the original name vs. the hashed one, so a
+    # second run would create a third file and break idempotency.
+    all_files.sort()
 
     gps_yes, gps_no, raws, jpegs = [], [], [], []
     for f in all_files:

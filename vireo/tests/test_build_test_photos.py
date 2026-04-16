@@ -168,3 +168,46 @@ def test_sample_is_idempotent(tmp_path):
     build_test_photos.sample(source, dest, counts=counts)
     mtime2 = (dest / "jpegs" / "a.jpg").stat().st_mtime
     assert mtime1 == mtime2
+
+
+def test_sample_idempotent_under_reversed_walk_order(tmp_path, monkeypatch):
+    # os.walk() order isn't guaranteed stable across runs. For same-basename +
+    # identical-content sources, the file that's encountered second gets the
+    # hashed filename. If walk order flips, the *other* source becomes second
+    # and a fresh hashed copy is created — breaking idempotency. Verified fix:
+    # sample() sorts its file list, so the decision is stable regardless of
+    # walk order.
+    import os as real_os
+
+    source = tmp_path / "src"
+    (source / "dir1").mkdir(parents=True)
+    (source / "dir2").mkdir(parents=True)
+    (source / "dir1" / "IMG_0001.jpg").write_bytes(b"SAME")
+    (source / "dir2" / "IMG_0001.jpg").write_bytes(b"SAME")
+    dest = tmp_path / "dest"
+    counts = {"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 2, "random": 0}
+
+    build_test_photos.sample(source, dest, counts=counts)
+    files_after_first = sorted(p.name for p in (dest / "jpegs").iterdir())
+    assert len(files_after_first) == 2
+
+    # Second run: flip os.walk's output order to simulate filesystem order drift.
+    # Must reverse both the sequence of yielded (root, dirs, files) tuples AND
+    # the files within each tuple — otherwise the iteration that builds
+    # `all_files` sees the same order as the first run and the bug is hidden.
+    original_walk = real_os.walk
+
+    def reversed_walk(top, *args, **kwargs):
+        entries = [
+            (root, dirs, list(reversed(files)))
+            for root, dirs, files in original_walk(top, *args, **kwargs)
+        ]
+        yield from reversed(entries)
+
+    monkeypatch.setattr(build_test_photos.os, "walk", reversed_walk)
+    build_test_photos.sample(source, dest, counts=counts)
+
+    files_after_second = sorted(p.name for p in (dest / "jpegs").iterdir())
+    assert files_after_second == files_after_first, (
+        f"reversed walk order created extra files: {files_after_second}"
+    )
