@@ -1,5 +1,7 @@
 """Detect image files present on disk but not yet ingested into a workspace."""
 import os
+import threading
+import time
 from pathlib import Path
 
 from image_loader import SUPPORTED_EXTENSIONS
@@ -73,3 +75,40 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
         per_root.append({"folder_id": root["id"], "path": root_path, "new_count": root_new})
 
     return {"new_count": total, "per_root": per_root, "sample": sample}
+
+
+class NewImagesCache:
+    """In-memory per-workspace cache with a TTL ceiling.
+
+    Thread-safe. Invalidation takes a list of workspace_ids (computed by the
+    caller from the set of folder_ids touched by a scan).
+    """
+
+    def __init__(self, ttl_seconds=300):
+        self._ttl = ttl_seconds
+        self._entries = {}  # workspace_id -> (result_dict, set_at_monotonic)
+        self._lock = threading.Lock()
+
+    def get(self, workspace_id):
+        with self._lock:
+            entry = self._entries.get(workspace_id)
+            if entry is None:
+                return None
+            result, set_at = entry
+            if time.monotonic() - set_at > self._ttl:
+                del self._entries[workspace_id]
+                return None
+            return result
+
+    def set(self, workspace_id, result):
+        with self._lock:
+            self._entries[workspace_id] = (result, time.monotonic())
+
+    def invalidate_workspaces(self, workspace_ids):
+        with self._lock:
+            for wid in workspace_ids:
+                self._entries.pop(wid, None)
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
