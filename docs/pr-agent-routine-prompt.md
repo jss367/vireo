@@ -51,11 +51,12 @@ repo is already cloned at the start of the session; the default branch is
 These three share one flow:
 
 1. Read the PR metadata and every prior review/comment (not just the one in
-   the payload):
+   the payload). `{owner}/{repo}` is a `gh api` placeholder that resolves to
+   the current repo — do not replace it with a literal value:
    ```bash
    gh pr view $PR --json title,body,headRefName,baseRefName,reviews,comments
-   gh api repos/$GITHUB_REPOSITORY/pulls/$PR/comments
-   gh api repos/$GITHUB_REPOSITORY/pulls/$PR/reviews
+   gh api "repos/{owner}/{repo}/pulls/$PR/comments"
+   gh api "repos/{owner}/{repo}/pulls/$PR/reviews"
    gh pr diff $PR
    ```
 2. Check out the PR's head branch:
@@ -127,18 +128,24 @@ For each PR:
 
 1. Fetch metadata and check out the head branch:
    ```bash
-   gh pr view $PR --json headRefName,baseRefName,title,body
+   HEAD=$(gh pr view $PR --json headRefName -q .headRefName)
+   BASE=$(gh pr view $PR --json baseRefName -q .baseRefName)
+   git fetch origin "$BASE" "$HEAD"
    git checkout "$HEAD"
    ```
 2. Merge the base branch:
    ```bash
-   git merge origin/"$BASE"
+   git merge "origin/$BASE"
    ```
 3. Resolve every conflict. Read both sides' context; prefer keeping both
    intentions unless they're genuinely mutually exclusive.
 4. Run the test suite (command above). If tests fail after conflict
    resolution, fix them.
-5. Commit with subject `fix: resolve merge conflicts with main` and push.
+5. Commit and push to the same branch:
+   ```bash
+   git commit -am "fix: resolve merge conflicts with main"
+   git push origin "$HEAD"
+   ```
 
 ## Absolute rules
 
