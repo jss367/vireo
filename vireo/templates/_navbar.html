@@ -3278,6 +3278,11 @@ setInterval(checkMissingFolders, 600000);
 /* ---------- New Images Banner ---------- */
 const NEW_IMAGES_DISMISS_KEY = 'newImagesDismissedWorkspace';
 
+// Dismissal suppresses the banner only while the count remains exactly what
+// the user dismissed. Any change — scan reducing it, or new imports
+// increasing it — re-arms the banner. This avoids the decrease-then-increase
+// trap where dismissing at 20, then scanning to 0, then importing 5 would
+// otherwise leave 5 <= 20 satisfied and keep the banner hidden.
 function _isNewImagesDismissed(wsId, newCount) {
   if (wsId === null || wsId === undefined || wsId === '') return false;
   const raw = sessionStorage.getItem(NEW_IMAGES_DISMISS_KEY);
@@ -3290,7 +3295,7 @@ function _isNewImagesDismissed(wsId, newCount) {
   }
   if (!stored || typeof stored !== 'object') return false;
   if (String(stored.wsId) !== String(wsId)) return false;
-  return newCount <= Number(stored.count);
+  return Number(stored.count) === Number(newCount);
 }
 
 async function checkNewImages() {
@@ -3329,8 +3334,8 @@ function dismissNewImagesBanner() {
 }
 
 // Run on page load and every 60s. Banner dismissal is per-workspace via
-// sessionStorage and re-arms automatically when new_count exceeds the
-// dismissed count (e.g. after importing more images).
+// sessionStorage and re-arms automatically on any count delta (scan
+// reducing it, or new imports increasing it).
 checkNewImages();
 setInterval(checkNewImages, 60000);
 

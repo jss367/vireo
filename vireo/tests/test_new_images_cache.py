@@ -42,3 +42,38 @@ def test_cache_invalidate_workspace_does_not_clear_others():
     cache.invalidate_workspaces([1])
     assert cache.get(1) is None
     assert cache.get(2) == {"new_count": 7}
+
+
+def test_cache_set_with_stale_generation_is_dropped():
+    cache = NewImagesCache(ttl_seconds=60)
+    gen_before = cache.get_generation(workspace_id=1)
+    cache.invalidate_workspaces([1])
+    # Simulate: compute started before invalidate, tries to write with stale gen
+    cache.set(workspace_id=1, result={"new_count": 5}, generation=gen_before)
+    assert cache.get(1) is None, "Stale set must not repopulate after invalidate"
+
+
+def test_cache_set_with_current_generation_stores():
+    cache = NewImagesCache(ttl_seconds=60)
+    gen = cache.get_generation(workspace_id=1)
+    cache.set(workspace_id=1, result={"new_count": 5}, generation=gen)
+    assert cache.get(1) == {"new_count": 5}
+
+
+def test_cache_set_without_generation_stores_unconditionally():
+    cache = NewImagesCache(ttl_seconds=60)
+    cache.set(workspace_id=1, result={"new_count": 5})
+    assert cache.get(1) == {"new_count": 5}
+
+
+def test_cache_invalidate_then_set_with_stale_gen_is_dropped_then_new_set_works():
+    cache = NewImagesCache(ttl_seconds=60)
+    gen1 = cache.get_generation(1)
+    cache.invalidate_workspaces([1])
+    cache.set(workspace_id=1, result={"new_count": 5}, generation=gen1)  # dropped
+    assert cache.get(1) is None
+    # Fresh compute after invalidation gets the new generation and stores fine.
+    gen2 = cache.get_generation(1)
+    assert gen2 != gen1
+    cache.set(workspace_id=1, result={"new_count": 7}, generation=gen2)
+    assert cache.get(1) == {"new_count": 7}

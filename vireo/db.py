@@ -722,13 +722,22 @@ class Database:
         return self._active_workspace_id
 
     def get_new_images_for_workspace(self, workspace_id):
-        """Return new-images result for workspace, using cache when fresh."""
+        """Return new-images result for workspace, using cache when fresh.
+
+        Race-safe: we snapshot the cache generation before the (potentially
+        slow) walk and pass it to ``set``. If an invalidation fires during
+        the walk, the generation advances and the stale result is dropped
+        on write — so the next reader recomputes instead of seeing the
+        pre-invalidation value. The current caller still returns its own
+        best-effort result.
+        """
         import new_images
         cached = self._new_images_cache.get(workspace_id)
         if cached is not None:
             return cached
+        generation = self._new_images_cache.get_generation(workspace_id)
         result = new_images.count_new_images_for_workspace(self, workspace_id)
-        self._new_images_cache.set(workspace_id, result)
+        self._new_images_cache.set(workspace_id, result, generation=generation)
         return result
 
     def invalidate_new_images_cache_for_folders(self, folder_ids):

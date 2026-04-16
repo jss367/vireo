@@ -283,3 +283,24 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
         "Cache for workspace linked only to descendant folder should be cleared "
         "(LIKE query must match auto-registered subfolders)"
     )
+
+
+def test_get_new_images_for_workspace_race_does_not_repopulate_stale(db_with_workspace, monkeypatch):
+    """If invalidation fires during compute, the stale result must not be cached."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    import new_images
+
+    def racing_compute(db_arg, ws_id_arg, **kwargs):
+        # Simulate an invalidation that fires while we're "walking."
+        db_arg.invalidate_new_images_cache_for_folders([root_id])
+        return {"new_count": 999, "per_root": [], "sample": []}  # stale value
+
+    monkeypatch.setattr(new_images, "count_new_images_for_workspace", racing_compute)
+
+    db.get_new_images_for_workspace(ws_id)
+    # Cache must NOT hold the stale value.
+    assert db._new_images_cache.get(ws_id) is None, "Stale compute leaked into cache"

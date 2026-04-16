@@ -88,11 +88,18 @@ class NewImagesCache:
 
     Thread-safe. Invalidation takes a list of workspace_ids (computed by the
     caller from the set of folder_ids touched by a scan).
+
+    A per-workspace generation counter protects against a race between an
+    in-flight compute and a concurrent invalidation: a caller snapshots the
+    generation before starting the walk and passes it to :meth:`set`; if
+    invalidation bumps the generation during the walk, the stale result is
+    silently dropped instead of repopulating the cache.
     """
 
     def __init__(self, ttl_seconds=300):
         self._ttl = ttl_seconds
         self._entries = {}  # workspace_id -> (result_dict, set_at_monotonic)
+        self._generations = {}  # workspace_id -> int
         self._lock = threading.Lock()
 
     def get(self, workspace_id):
@@ -106,18 +113,37 @@ class NewImagesCache:
                 return None
             return result
 
-    def set(self, workspace_id, result):
+    def get_generation(self, workspace_id):
+        """Return the current generation for a workspace (0 if unseen)."""
         with self._lock:
+            return self._generations.get(workspace_id, 0)
+
+    def set(self, workspace_id, result, generation=None):
+        """Store ``result`` for ``workspace_id``.
+
+        If ``generation`` is provided and no longer matches the current
+        generation for the workspace (i.e. an invalidation ran after the
+        caller snapshotted it), the write is silently dropped. Callers that
+        don't care about the race can omit ``generation`` and the write is
+        unconditional.
+        """
+        with self._lock:
+            if generation is not None:
+                current = self._generations.get(workspace_id, 0)
+                if generation != current:
+                    return
             self._entries[workspace_id] = (result, time.monotonic())
 
     def invalidate_workspaces(self, workspace_ids):
         with self._lock:
             for wid in workspace_ids:
                 self._entries.pop(wid, None)
+                self._generations[wid] = self._generations.get(wid, 0) + 1
 
     def clear(self):
         with self._lock:
             self._entries.clear()
+            self._generations.clear()
 
 
 _shared_cache = NewImagesCache()
