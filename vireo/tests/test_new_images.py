@@ -14,10 +14,16 @@ def _touch_image(path):
     Image.new("RGB", (1, 1), "white").save(path, "JPEG")
 
 
-@pytest.fixture
-def db_with_workspace(tmp_path):
+@pytest.fixture(autouse=True)
+def _clear_shared_new_images_cache():
     from new_images import get_shared_cache
     get_shared_cache().clear()
+    yield
+    get_shared_cache().clear()
+
+
+@pytest.fixture
+def db_with_workspace(tmp_path):
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -111,8 +117,6 @@ def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkey
 
 def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
     """If workspaces A and B both link folder F, a scan of F must clear both caches."""
-    from new_images import get_shared_cache
-    get_shared_cache().clear()
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("B")
@@ -160,8 +164,6 @@ def test_scan_job_invalidates_cache(db_with_workspace):
 
 
 def test_two_database_instances_share_cache(tmp_path):
-    from new_images import get_shared_cache
-    get_shared_cache().clear()
     db_a = Database(str(tmp_path / "test.db"))
     ws_id = db_a.ensure_default_workspace()
     db_a.set_active_workspace(ws_id)
@@ -175,4 +177,59 @@ def test_two_database_instances_share_cache(tmp_path):
     db_b = Database(str(tmp_path / "test.db"))
     assert db_b._new_images_cache.get(ws_id) is not None, (
         "Second Database should see cache populated by the first"
+    )
+
+
+def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(tmp_path):
+    """End-to-end coverage of _invalidate_new_images_after_scan:
+
+    - Includes a descendant folder auto-registered with parent_id so the LIKE
+      query must pick it up to invalidate the workspace that only references
+      the descendant.
+    - Uses two Database instances against the same DB file: populate via
+      db_a, invalidate via db_b, assert db_a sees the cleared cache. This
+      locks in the shared-cache contract.
+    """
+    from app import _invalidate_new_images_after_scan
+
+    # db_a populates the cache for a workspace whose only linked folder is a
+    # descendant of `root`.
+    db_a = Database(str(tmp_path / "test.db"))
+    ws_id = db_a.ensure_default_workspace()
+    db_a.set_active_workspace(ws_id)
+
+    root = tmp_path / "shoot"
+    descendant = root / "day1"
+    _touch_image(str(descendant / "IMG_0001.JPG"))
+
+    root_id = db_a.add_folder(str(root), name="shoot")
+    descendant_id = db_a.add_folder(
+        str(descendant), name="day1", parent_id=root_id
+    )
+
+    # Create a second workspace that only links the descendant folder, so
+    # invalidation via the LIKE query (on the root path) must reach it.
+    ws_b = db_a.create_workspace("B")
+    db_a.add_workspace_folder(ws_b, descendant_id)
+
+    # Prime caches for both workspaces via db_a.
+    db_a.get_new_images_for_workspace(ws_id)
+    db_a.get_new_images_for_workspace(ws_b)
+    assert db_a._new_images_cache.get(ws_id) is not None
+    assert db_a._new_images_cache.get(ws_b) is not None
+
+    # Invalidate from a DIFFERENT Database instance to exercise the shared
+    # cache contract end-to-end.
+    db_b = Database(str(tmp_path / "test.db"))
+    _invalidate_new_images_after_scan(db_b, str(root))
+
+    # db_a must observe the cleared caches for both workspaces, including the
+    # one that only references the descendant folder (proves the LIKE picked
+    # it up).
+    assert db_a._new_images_cache.get(ws_id) is None, (
+        "Cache for workspace linked to root should be cleared"
+    )
+    assert db_a._new_images_cache.get(ws_b) is None, (
+        "Cache for workspace linked only to descendant folder should be cleared "
+        "(LIKE query must match auto-registered subfolders)"
     )

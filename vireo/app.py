@@ -224,6 +224,8 @@ def _invalidate_new_images_after_scan(db, root):
     need to invalidate caches for all workspaces that reference any of those
     descendant folders, not just the explicit scan root.
     """
+    # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
+    # over-invalidation that triggers a re-walk. Path separators assume POSIX.
     touched_ids = [r["id"] for r in db.conn.execute(
         "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
         (root, root.rstrip("/") + "/%"),
