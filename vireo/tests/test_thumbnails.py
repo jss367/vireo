@@ -1,10 +1,15 @@
 # vireo/tests/test_thumbnails.py
 import os
 import sys
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from PIL import Image
+
+
+def _make_jpeg(path, w=200, h=150):
+    Image.new("RGB", (w, h), (100, 100, 100)).save(str(path), "JPEG", quality=85)
 
 
 def test_generate_thumbnail_creates_jpeg(tmp_path):
@@ -100,6 +105,38 @@ def test_generate_all_uses_working_copy(tmp_path):
     generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
 
     assert os.path.exists(os.path.join(str(thumb_dir), f"{photo_id}.jpg"))
+
+
+def test_generate_all_routes_through_canonical_helper(tmp_path, monkeypatch):
+    """generate_all calls get_canonical_image_path to resolve the source."""
+    import thumbnails
+    from db import Database
+
+    # Fixture: one photo with no working copy
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    src = folder / "a.jpg"
+    _make_jpeg(src)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    fid = db.add_folder(str(folder))
+    db.add_photo(
+        fid, "a.jpg", ".jpg",
+        file_size=os.path.getsize(src),
+        file_mtime=os.path.getmtime(src),
+        width=200, height=150,
+    )
+
+    mock_helper = MagicMock(return_value=str(src))
+    monkeypatch.setattr(thumbnails, "get_canonical_image_path", mock_helper)
+
+    thumb_dir = vireo_dir / "thumbs"
+    thumbnails.generate_all(db, str(thumb_dir), vireo_dir=str(vireo_dir))
+
+    assert mock_helper.called, \
+        "generate_all should route source-path resolution through get_canonical_image_path"
 
 
 def test_generate_all_creates_missing(tmp_path):

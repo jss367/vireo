@@ -3,7 +3,7 @@
 import logging
 import os
 
-from image_loader import load_image
+from image_loader import get_canonical_image_path, load_image
 
 log = logging.getLogger(__name__)
 
@@ -91,13 +91,12 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
     generated = 0
     failed = 0
     for i, photo in enumerate(needed):
-        # Prefer working copy for source
-        source_path = None
-        if vireo_dir and photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                source_path = wc
-        if source_path is None:
+        # Resolve source via the single canonical-path helper when we
+        # have a vireo_dir; fall back to a raw folder+filename join for
+        # callers that don't pass it.
+        if vireo_dir:
+            source_path = get_canonical_image_path(photo, vireo_dir, folders)
+        else:
             folder_path = folders.get(photo["folder_id"], "")
             source_path = os.path.join(folder_path, photo["filename"])
         if generate_thumbnail(photo["id"], source_path, cache_dir, size=thumb_size, quality=thumb_quality) is not None:

@@ -115,14 +115,21 @@ def get_canonical_image_path(photo, vireo_dir, folders):
     Returns:
         str path (may or may not exist — caller checks)
     """
-    wc_rel = photo.get("working_copy_path")
+    # Support both dict and sqlite3.Row (no .get() on Row).
+    def _pget(key):
+        try:
+            return photo[key]
+        except (KeyError, IndexError):
+            return None
+
+    wc_rel = _pget("working_copy_path")
     if wc_rel:
         wc_abs = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_abs):
             return wc_abs
         log.warning(
             "Canonical path: working copy missing for photo %s at %s; "
-            "falling back to source", photo.get("id"), wc_abs,
+            "falling back to source", _pget("id"), wc_abs,
         )
     folder_path = folders.get(photo["folder_id"], "")
     return os.path.join(folder_path, photo["filename"])
