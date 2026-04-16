@@ -2545,22 +2545,35 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/preview-cache/clear", methods=["POST"])
     def api_preview_cache_clear():
-        """Delete every preview_cache file and row."""
+        """Delete every preview_cache file and row, including legacy and
+        untracked files in the previews directory."""
+        import re
+
         db = _get_db()
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         preview_dir = os.path.join(vireo_dir, "previews")
-        rows = db.conn.execute(
-            "SELECT photo_id, size FROM preview_cache"
-        ).fetchall()
-        for r in rows:
-            path = os.path.join(preview_dir, f"{r['photo_id']}_{r['size']}.jpg")
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
+
+        count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()
+        tracked = count_row["c"]
+
+        # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
+        pattern = re.compile(r"^\d+(_\d+)?\.jpg$")
+        files_removed = 0
+        if os.path.isdir(preview_dir):
+            for fname in os.listdir(preview_dir):
+                if pattern.match(fname):
+                    try:
+                        os.remove(os.path.join(preview_dir, fname))
+                        files_removed += 1
+                    except OSError:
+                        pass
+
         db.conn.execute("DELETE FROM preview_cache")
         db.conn.commit()
-        return jsonify({"cleared": len(rows)})
+
+        return jsonify({"cleared": tracked, "files_removed": files_removed})
 
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
@@ -7122,6 +7135,8 @@ def create_app(db_path, thumb_cache_dir=None):
         This is the single code path behind both /photos/<id>/preview and
         /photos/<id>/full. Callers have already validated size.
         """
+        import io
+
         import config as cfg
         from flask import send_file
 
@@ -7176,15 +7191,27 @@ def create_app(db_path, thumb_cache_dir=None):
         if img is None:
             return "Could not load image", 500
 
-        os.makedirs(preview_dir, exist_ok=True)
         preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
 
-        bytes_ = os.path.getsize(cache_path)
-        db.preview_cache_insert(photo_id, size, bytes_)
-        evict_preview_cache_if_over_quota(db, vireo_dir)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=preview_quality)
+        data = buf.getvalue()
 
-        return send_file(cache_path, mimetype="image/jpeg")
+        # Persist to disk and track in the LRU. Eviction may delete the file
+        # we just wrote (e.g. when preview_cache_max_mb is 0), but that's fine:
+        # we serve the bytes from memory below so disk state doesn't matter.
+        try:
+            os.makedirs(preview_dir, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                f.write(data)
+            db.preview_cache_insert(photo_id, size, len(data))
+            evict_preview_cache_if_over_quota(db, vireo_dir)
+        except OSError as e:
+            logging.getLogger(__name__).warning(
+                "Failed to persist preview cache %s: %s", cache_path, e,
+            )
+
+        return Response(data, mimetype="image/jpeg")
 
     @app.route("/photos/<int:photo_id>/full")
     def serve_full_photo(photo_id):

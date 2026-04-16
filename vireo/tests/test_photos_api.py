@@ -768,12 +768,63 @@ def test_preview_cache_clear_removes_all(client_with_photo):
 
     resp = client.post("/api/preview-cache/clear")
     assert resp.status_code == 200
+    data = resp.get_json()
+    assert "files_removed" in data
 
     assert db.preview_cache_total_bytes() == 0
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
     assert not os.path.exists(
         os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
     )
+
+
+def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch):
+    """With preview_cache_max_mb=0, the preview response body is non-empty
+    even though eviction runs immediately after generation."""
+    import config as cfg
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 100  # real JPEG, not empty
+    # Eviction clears the table + file
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
+    """/api/preview-cache/clear removes orphaned and legacy files, not just tracked rows."""
+    import os
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Simulate: one tracked preview, one untracked sized preview, one legacy /full cache
+    tracked = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    untracked = os.path.join(preview_dir, f"{photo_id}_2560.jpg")  # no row in preview_cache
+    legacy = os.path.join(preview_dir, f"{photo_id}.jpg")
+
+    for p in (tracked, untracked, legacy):
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0fake")
+    db.preview_cache_insert(photo_id, 1920, os.path.getsize(tracked))
+
+    client = app.test_client()
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["cleared"] == 1
+    assert data["files_removed"] == 3  # all three matching files
+
+    # All three files are gone
+    assert not os.path.exists(tracked)
+    assert not os.path.exists(untracked)
+    assert not os.path.exists(legacy)
+    assert db.preview_cache_total_bytes() == 0
 
 
 def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
