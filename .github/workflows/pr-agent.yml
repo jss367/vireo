@@ -279,6 +279,10 @@ jobs:
       && github.event.review.state == 'approved'
       && contains(github.event.pull_request.labels.*.name, 'claude-agent')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Squash-merge approved PR
         env:
@@ -315,6 +319,10 @@ jobs:
           || github.event.comment.author_association == 'COLLABORATOR'
           || github.actor == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Squash-merge approved PR
         env:
@@ -351,6 +359,10 @@ jobs:
       || (github.event_name == 'workflow_run'
           && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Find approved open PRs
         id: approved
