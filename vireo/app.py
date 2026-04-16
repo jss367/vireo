@@ -5621,6 +5621,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 phash_threshold=phash_threshold,
                 cross_bucket_merge=cross_bucket_merge,
                 progress_callback=progress_cb,
+                vireo_dir=os.path.dirname(db_path),
             )
 
             # Store culling results in a temporary cache for the UI
@@ -5637,6 +5638,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "suggested_keepers": result["suggested_keepers"],
                 "suggested_rejects": result["suggested_rejects"],
                 "species_count": len(result["species_groups"]),
+                "photos_missing_phash": result.get("photos_missing_phash", 0),
             }
 
         job_id = runner.start(
