@@ -7029,57 +7029,6 @@ def create_app(db_path, thumb_cache_dir=None):
         buf.seek(0)
         return Response(buf.read(), mimetype="image/jpeg")
 
-    @app.route("/photos/<int:photo_id>/full")
-    def serve_full_photo(photo_id):
-        """Serve a display-sized preview, cached on first view."""
-        import config as cfg
-        from flask import send_file
-
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
-        max_size = cfg.get("preview_max_size") or 1920
-        if max_size == 0:
-            max_size = None  # Full resolution
-        cache_path = os.path.join(preview_dir, f"{photo_id}.jpg")
-
-        # Serve from cache if available
-        if os.path.exists(cache_path):
-            return send_file(cache_path, mimetype="image/jpeg")
-
-        # Generate and cache
-        from image_loader import load_image
-
-        db = _get_db()
-        photo = db.get_photo(photo_id)
-        if not photo:
-            return "Not found", 404
-
-        # Try working copy first, fall back to original
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        image_path = None
-        if photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                image_path = wc
-
-        if image_path is None:
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
-            image_path = os.path.join(folder["path"], photo["filename"])
-
-        img = load_image(image_path, max_size=max_size)
-        if img is None:
-            return "Could not load image", 500
-
-        os.makedirs(preview_dir, exist_ok=True)
-        preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
-        return send_file(cache_path, mimetype="image/jpeg")
-
     PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
 
     def allowed_preview_sizes():
@@ -7099,26 +7048,14 @@ def create_app(db_path, thumb_cache_dir=None):
         """Evict until under preview_cache_max_mb. Implemented in Task 9."""
         return
 
-    @app.route("/photos/<int:photo_id>/preview")
-    def serve_photo_preview(photo_id):
-        """Serve a JPEG preview at a chosen max-size.
+    def _serve_preview(photo_id, size):
+        """Serve a preview at the given size, using the preview_cache LRU.
 
-        Cache is LRU-tracked in the preview_cache table; on-disk files that
-        predate this scheme are adopted lazily on first access.
-
-        Query params:
-          size: int — max dimension (longest side). Must be in
-                allowed_preview_sizes() to avoid unbounded cache growth.
+        This is the single code path behind both /photos/<id>/preview and
+        /photos/<id>/full. Callers have already validated size.
         """
         import config as cfg
-        from flask import request, send_file
-
-        try:
-            size = int(request.args.get("size", "1920"))
-        except ValueError:
-            return "Invalid size", 400
-        if size not in allowed_preview_sizes():
-            return "Unsupported size", 400
+        from flask import send_file
 
         # Confirm the photo still exists before any cache return so that a
         # deleted photo can't be served from a stale per-size cache (and so
@@ -7172,6 +7109,39 @@ def create_app(db_path, thumb_cache_dir=None):
         evict_preview_cache_if_over_quota(db, vireo_dir)
 
         return send_file(cache_path, mimetype="image/jpeg")
+
+    @app.route("/photos/<int:photo_id>/full")
+    def serve_full_photo(photo_id):
+        """Serve a display-sized preview (alias for /preview at preview_max_size)."""
+        import config as cfg
+        from flask import redirect
+
+        size = cfg.get("preview_max_size") or 1920
+        if size == 0:
+            # preview_max_size = 0 historically meant "full" — route to /original
+            return redirect(f"/photos/{photo_id}/original")
+        return _serve_preview(photo_id, int(size))
+
+    @app.route("/photos/<int:photo_id>/preview")
+    def serve_photo_preview(photo_id):
+        """Serve a JPEG preview at a chosen max-size.
+
+        Cache is LRU-tracked in the preview_cache table; on-disk files that
+        predate this scheme are adopted lazily on first access.
+
+        Query params:
+          size: int — max dimension (longest side). Must be in
+                allowed_preview_sizes() to avoid unbounded cache growth.
+        """
+        from flask import request
+
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        if size not in allowed_preview_sizes():
+            return "Unsupported size", 400
+        return _serve_preview(photo_id, size)
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):

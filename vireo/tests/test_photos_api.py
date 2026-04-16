@@ -668,3 +668,19 @@ def test_preview_adopts_existing_file_on_first_access(client_with_photo):
     row = db.preview_cache_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] == 12345
+
+
+def test_full_is_alias_for_preview_at_configured_size(client_with_photo, monkeypatch):
+    """/full returns the same bytes as /preview?size=<preview_max_size>."""
+    import config as cfg
+    # Pin preview_max_size to 1920 for determinism.
+    monkeypatch.setattr(
+        cfg, "get",
+        lambda k: 1920 if k == "preview_max_size" else cfg.DEFAULTS.get(k),
+    )
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    full = client.get(f"/photos/{photo_id}/full").data
+    preview = client.get(f"/photos/{photo_id}/preview?size=1920").data
+    assert full == preview
+    assert len(full) > 0
