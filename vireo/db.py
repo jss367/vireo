@@ -2529,6 +2529,58 @@ class Database:
             raise
         return {"deleted": len(all_ids), "files": files}
 
+    # ------------------------------------------------------------------
+    # preview_cache LRU
+    # ------------------------------------------------------------------
+    def preview_cache_insert(self, photo_id, size, bytes_):
+        """Insert or replace a preview_cache entry. last_access_at = now()."""
+        import time
+        self.conn.execute(
+            "INSERT OR REPLACE INTO preview_cache "
+            "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+            (photo_id, size, bytes_, time.time()),
+        )
+        self.conn.commit()
+
+    def preview_cache_touch(self, photo_id, size):
+        """Update last_access_at for an existing entry. No-op if missing."""
+        import time
+        self.conn.execute(
+            "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
+            (time.time(), photo_id, size),
+        )
+        self.conn.commit()
+
+    def preview_cache_delete(self, photo_id, size):
+        """Delete a preview_cache entry (caller removes the file)."""
+        self.conn.execute(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        )
+        self.conn.commit()
+
+    def preview_cache_total_bytes(self):
+        """Return total bytes tracked in preview_cache."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
+        ).fetchone()
+        return row["total"]
+
+    def preview_cache_oldest_first(self):
+        """Return all rows ordered by last_access_at ascending (oldest first)."""
+        return self.conn.execute(
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
+            "ORDER BY last_access_at ASC"
+        ).fetchall()
+
+    def preview_cache_get(self, photo_id, size):
+        """Return the row for (photo_id, size), or None."""
+        return self.conn.execute(
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
+            "WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        ).fetchone()
+
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
         self.conn.execute(
