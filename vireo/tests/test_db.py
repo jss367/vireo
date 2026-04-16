@@ -2633,6 +2633,136 @@ def test_missing_folder_hidden_from_folder_tree(tmp_path):
     assert tree[0]["name"] == "ok"
 
 
+def test_folder_tree_orphan_parent_becomes_root(tmp_path):
+    """If a folder's parent_id points to a folder not linked to the active
+    workspace, get_folder_tree returns the folder with parent_id=None so the
+    browse sidebar renders it at root instead of hiding it under an unreachable
+    parent bucket."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    # Parent folder exists in the folders table but is NOT linked to the
+    # active workspace (simulated by detaching it after add_folder auto-links).
+    fid_parent = db.add_folder("/photos", name="photos")
+    db.remove_workspace_folder(ws, fid_parent)
+
+    # Child references the unlinked parent.
+    fid_child = db.add_folder("/photos/2024", name="2024", parent_id=fid_parent)
+
+    tree = db.get_folder_tree()
+    assert len(tree) == 1
+    assert tree[0]["id"] == fid_child
+    assert tree[0]["parent_id"] is None
+
+
+def test_folder_tree_linked_parent_preserved(tmp_path):
+    """When the parent is linked to the workspace, parent_id is unchanged."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_parent = db.add_folder("/photos", name="photos")
+    fid_child = db.add_folder("/photos/2024", name="2024", parent_id=fid_parent)
+
+    tree = db.get_folder_tree()
+    child = [f for f in tree if f["id"] == fid_child][0]
+    assert child["parent_id"] == fid_parent
+
+
+def test_folder_tree_walks_past_unlinked_ancestor(tmp_path):
+    """If a folder's immediate parent is not linked but a grandparent is,
+    parent_id is rewritten to the nearest linked ancestor."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_gp = db.add_folder("/photos", name="photos")
+    fid_mid = db.add_folder("/photos/2024", name="2024", parent_id=fid_gp)
+    # Detach the middle folder from the workspace so it acts as a gap.
+    db.remove_workspace_folder(ws, fid_mid)
+    fid_leaf = db.add_folder("/photos/2024/trip", name="trip", parent_id=fid_mid)
+
+    tree = db.get_folder_tree()
+    paths = {f["id"]: f["parent_id"] for f in tree}
+    assert fid_gp in paths
+    assert fid_mid not in paths  # not linked -> not returned
+    assert paths[fid_leaf] == fid_gp
+
+
+def test_folder_tree_walks_past_missing_ancestor(tmp_path):
+    """A folder whose parent is linked but has status!='ok' should be walked
+    past — the missing ancestor is already filtered from the tree, so the
+    child should reparent to the next linked+ok ancestor instead of dangling."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid_gp = db.add_folder("/photos", name="photos")
+    fid_mid = db.add_folder("/photos/2024", name="2024", parent_id=fid_gp)
+    fid_leaf = db.add_folder("/photos/2024/trip", name="trip", parent_id=fid_mid)
+
+    # Mark the middle folder as missing on disk — it stays linked to the
+    # workspace but is filtered out by get_folder_tree's status='ok' clause.
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid_mid,))
+    db.conn.commit()
+
+    tree = db.get_folder_tree()
+    ids = {f["id"] for f in tree}
+    assert fid_mid not in ids
+    leaf_row = [f for f in tree if f["id"] == fid_leaf][0]
+    assert leaf_row["parent_id"] == fid_gp
+
+
+def test_folder_tree_null_parent_stays_null(tmp_path):
+    """A top-level folder (parent_id NULL) stays at root."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/photos", name="photos")
+    tree = db.get_folder_tree()
+    assert len(tree) == 1
+    assert tree[0]["id"] == fid
+    assert tree[0]["parent_id"] is None
+
+
+def test_folder_tree_orphan_resolution_is_workspace_scoped(tmp_path):
+    """The parent_id rewrite considers the ACTIVE workspace's links — the
+    same folder linked to two workspaces can have different effective parents
+    depending on which workspace is active."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+
+    # Build hierarchy in workspace A: parent AND child linked.
+    db.set_active_workspace(ws_a)
+    fid_parent = db.add_folder("/photos", name="photos")
+    fid_child = db.add_folder("/photos/2024", name="2024", parent_id=fid_parent)
+
+    # Link only the child into workspace B (not the parent).
+    db.add_workspace_folder(ws_b, fid_child)
+
+    # In A: parent is linked -> preserved.
+    db.set_active_workspace(ws_a)
+    tree_a = db.get_folder_tree()
+    child_a = [f for f in tree_a if f["id"] == fid_child][0]
+    assert child_a["parent_id"] == fid_parent
+
+    # In B: parent is not linked -> reparented to None.
+    db.set_active_workspace(ws_b)
+    tree_b = db.get_folder_tree()
+    assert len(tree_b) == 1
+    assert tree_b[0]["id"] == fid_child
+    assert tree_b[0]["parent_id"] is None
+
+
 def test_missing_folder_hidden_from_collection(tmp_path):
     """Photos in missing folders don't appear in collection queries."""
     import json
