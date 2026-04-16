@@ -28,6 +28,7 @@ DEFAULT_PAGES = [
     "/move",
     "/highlights",
     "/map",
+    "/logs",
 ]
 
 
