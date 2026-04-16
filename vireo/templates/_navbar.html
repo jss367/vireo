@@ -1836,7 +1836,11 @@ function openLightbox(photoId, filename, photoList) {
   img.src = '/photos/' + photoId + '/full';
   img.onload = function() {
     img.onload = null;
-    if (_lightboxCurrentId === photoId && img.naturalWidth) {
+    // Only record the /full tier size if the currently loaded source is still /full.
+    // A quick user zoom can trigger a debounced swap to a higher tier before /full
+    // finishes loading, which would otherwise make us record the swapped source's
+    // dimensions as the /full threshold.
+    if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
     }
     _lbRecomputeNativeZoom();
