@@ -6,6 +6,8 @@ import os
 import sqlite3
 import uuid
 
+from new_images import get_shared_cache
+
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
@@ -49,6 +51,11 @@ class Database:
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
+        # Preserved for the new-images cache key, which compounds
+        # (db_path, workspace_id) so instances against different SQLite files
+        # don't cross-read each other's cached results (workspace_id=1 is
+        # reused across every database as the default workspace).
+        self._db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -58,6 +65,7 @@ class Database:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self._active_workspace_id = None
+        self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
         # Restore last-used workspace, or fall back to Default
@@ -718,6 +726,49 @@ class Database:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
+    def get_new_images_for_workspace(self, workspace_id):
+        """Return new-images result for workspace, using cache when fresh.
+
+        Race-safe: we snapshot the cache generation before the (potentially
+        slow) walk and pass it to ``set``. If an invalidation fires during
+        the walk, the generation advances and the stale result is dropped
+        on write — so the next reader recomputes instead of seeing the
+        pre-invalidation value. The current caller still returns its own
+        best-effort result.
+        """
+        import new_images
+        cached = self._new_images_cache.get(self._db_path, workspace_id)
+        if cached is not None:
+            return cached
+        generation = self._new_images_cache.get_generation(self._db_path, workspace_id)
+        result = new_images.count_new_images_for_workspace(self, workspace_id)
+        self._new_images_cache.set(
+            self._db_path, workspace_id, result, generation=generation
+        )
+        return result
+
+    def invalidate_new_images_cache_for_folders(self, folder_ids):
+        """Clear cache for every workspace linked to any of the given folder_ids."""
+        if not folder_ids:
+            return
+        # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # A scan of a deep tree can auto-register thousands of descendant folders;
+        # a single IN (?, ?, ...) across all of them would raise
+        # ``OperationalError: too many SQL variables``.
+        CHUNK = 500
+        ws_ids = set()
+        folder_ids = list(folder_ids)
+        for i in range(0, len(folder_ids), CHUNK):
+            chunk = folder_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT workspace_id FROM workspace_folders "
+                f"WHERE folder_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            ws_ids.update(r["workspace_id"] for r in rows)
+        self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
+
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""
         row = self.conn.execute(
@@ -745,7 +796,13 @@ class Database:
              json.dumps(ui_state) if ui_state else None),
         )
         self.conn.commit()
-        return cur.lastrowid
+        workspace_id = cur.lastrowid
+        # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
+        # rowid, so a freshly created workspace may collide with the stale cache
+        # entry of a prior workspace that shared this id. Clear any lingering
+        # entry so the new workspace starts clean.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+        return workspace_id
 
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
@@ -835,6 +892,11 @@ class Database:
         """Delete a workspace and all its scoped data (cascade)."""
         self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
         self.conn.commit()
+        # Drop any cached new-images payload for this workspace. Without this,
+        # if the deleted id is later reused by SQLite for a new workspace,
+        # ``get_new_images_for_workspace`` could serve the prior workspace's
+        # data until TTL expiry.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def add_workspace_folder(self, workspace_id, folder_id):
         """Link a folder to a workspace."""
@@ -843,6 +905,10 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder's untracked files now count toward this workspace's
+        # new-images backlog. Drop any stale cached payload so the next read
+        # recomputes against the updated folder set.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a folder from a workspace."""
@@ -851,6 +917,9 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def get_workspace_folders(self, workspace_id):
         """Return all folders linked to a workspace."""
@@ -925,6 +994,12 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+
+        # Folders changed membership for BOTH workspaces, so each workspace's
+        # new-images backlog needs to be recomputed on the next read.
+        self._new_images_cache.invalidate_workspaces(
+            self._db_path, [source_ws_id, target_ws_id]
+        )
 
         return {
             "folders_moved": len(folder_ids),
@@ -2510,6 +2585,14 @@ class Database:
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
 
+        # Collect affected folder ids BEFORE the delete so we can invalidate the
+        # new-images cache even if the delete raises. In "Remove from Vireo"
+        # mode the on-disk files stay put, so they become eligible for new-image
+        # detection again the moment the photo rows are gone; without an
+        # invalidation here, ``/api/workspaces/active/new-images`` would keep
+        # serving the stale pre-delete ``new_count`` until the TTL expired.
+        affected_folder_ids = list(folder_counts.keys())
+
         try:
             # Delete associated data (non-cascading FKs)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
@@ -2553,6 +2636,12 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            # Always invalidate — even on rollback we may have partially dirtied
+            # state, and on success the removed rows mean untracked on-disk
+            # files should re-surface as "new" on the next read.
+            if affected_folder_ids:
+                self.invalidate_new_images_cache_for_folders(affected_folder_ids)
         return {"deleted": len(all_ids), "files": files}
 
     def update_photo_sharpness(self, photo_id, sharpness):

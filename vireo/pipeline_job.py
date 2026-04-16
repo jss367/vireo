@@ -273,6 +273,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         # Note: stages["scan"]["status"] is NOT set to "running" here. It is
         # flipped to "running" just before each do_scan() call below, so
         # numScan doesn't pulse during the ingest sub-phase.
+        # Collect the scan roots actually fed to do_scan so the finally clause
+        # can invalidate the new-images cache for each one, matching the
+        # try/finally pattern used by api_job_scan / api_job_import_full in
+        # vireo/app.py. scanner.scan commits photo rows incrementally, so even
+        # a mid-scan failure needs invalidation.
+        scanned_roots: list[str] = []
+        thread_db = None
         try:
             import config as cfg
             from scanner import scan as do_scan
@@ -429,6 +436,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 job["progress"]["current"] = 0
                 job["progress"]["total"] = 0
                 _update_stages(runner, job["id"], stages)
+                scanned_roots.append(params.destination)
                 do_scan(
                     params.destination, thread_db,
                     progress_callback=progress_cb,
@@ -446,6 +454,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 job["progress"]["total"] = 0
                 _update_stages(runner, job["id"], stages)
                 for src_folder in sources:
+                    scanned_roots.append(src_folder)
                     do_scan(
                         src_folder, thread_db,
                         progress_callback=progress_cb,
@@ -466,6 +475,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             stages["scan"]["status"] = "failed"
             runner.update_step(job["id"], "scan", status="failed", error=str(e))
         finally:
+            # Invalidate the new-images cache for every root fed to do_scan,
+            # on both success and exception paths. scanner.scan commits photo
+            # rows incrementally, so even a mid-scan failure can leave DB
+            # state that invalidates cached new-image counts. Mirrors the
+            # try/finally in api_job_scan and api_job_import_full.
+            if thread_db is not None and scanned_roots:
+                from new_images import invalidate_new_images_after_scan
+                for scanned_root in scanned_roots:
+                    try:
+                        invalidate_new_images_after_scan(thread_db, scanned_root)
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate new-images cache for %s",
+                            scanned_root,
+                        )
             scan_to_thumb.put(_SENTINEL)
             _update_stages(runner, job["id"], stages)
 

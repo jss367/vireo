@@ -215,6 +215,13 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
 
 
+# The canonical implementation lives in ``new_images.py`` so non-Flask
+# modules (e.g. ``pipeline_job.py``) can import it without pulling in the
+# app module. Kept aliased here under the original private name for
+# backward-compatibility with existing call sites and tests.
+from new_images import invalidate_new_images_after_scan as _invalidate_new_images_after_scan  # noqa: E402
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1798,6 +1805,17 @@ def create_app(db_path, thumb_cache_dir=None):
         existing["nav_order"] = nav_order
         db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
+
+    @app.route("/api/workspaces/active/new-images")
+    def api_workspace_new_images():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
+        payload = db.get_new_images_for_workspace(ws_id)
+        payload = dict(payload)
+        payload["workspace_id"] = ws_id
+        return jsonify(payload)
 
     # -- Prediction API routes --
 
@@ -4248,12 +4266,17 @@ def create_app(db_path, thumb_cache_dir=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            do_scan(
-                root, thread_db, progress_callback=progress_cb, incremental=incremental,
-                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                status_callback=status_cb,
-                vireo_dir=vireo_dir,
-            )
+            try:
+                do_scan(
+                    root, thread_db, progress_callback=progress_cb, incremental=incremental,
+                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                    status_callback=status_cb,
+                    vireo_dir=vireo_dir,
+                )
+            finally:
+                # scanner.scan commits photo rows incrementally, so even a mid-scan
+                # failure can leave DB state that invalidates cached new-image counts.
+                _invalidate_new_images_after_scan(thread_db, root)
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{photo_count} photos")
@@ -4841,7 +4864,12 @@ def create_app(db_path, thumb_cache_dir=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
+            try:
+                do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
+            finally:
+                # scanner.scan commits photo rows incrementally, so even a mid-scan
+                # failure can leave DB state that invalidates cached new-image counts.
+                _invalidate_new_images_after_scan(thread_db, scan_target)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
