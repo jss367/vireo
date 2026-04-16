@@ -377,8 +377,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999,
                 )
+                # Respect the user's preview-time exclusions: photos removed
+                # from this run must not be rescanned or have their metadata
+                # rewritten as a side effect of repair.
+                in_scope_photos = _filter_excluded(coll_photos)
                 broken = _find_broken_metadata_folders(
-                    thread_db, [p["id"] for p in coll_photos],
+                    thread_db, [p["id"] for p in in_scope_photos],
                 )
                 if not broken:
                     stages["scan"]["status"] = "skipped"

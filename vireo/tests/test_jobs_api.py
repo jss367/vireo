@@ -1172,3 +1172,83 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
 
     # Each repaired photo should be handed to generate_thumbnail exactly once.
     assert calls[pid] == 1, dict(calls)
+
+
+def test_pipeline_repair_respects_excluded_photo_ids(
+    app_and_db, monkeypatch,
+):
+    """Photos excluded from the run via ``exclude_photo_ids`` must not
+    trigger a repair scan — the downstream stages would skip them anyway,
+    so rewriting their metadata would be unexpected out-of-scope work."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    # The fixture's bird1.jpg doesn't exist on disk, but that's fine —
+    # we only need to verify the scan stage takes the fast-path skip
+    # instead of firing the repair scan. Force it into broken state so
+    # that without the exclusion filter it WOULD be picked up for repair.
+    bird1 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()["id"]
+    bird2 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird2.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?",
+        (bird1,),
+    )
+    db.conn.commit()
+
+    # If repair ever runs for the excluded photo it would call
+    # extract_metadata; fail loudly if so.
+    import scanner
+    def fail_extract(paths, restricted_tags=None):
+        raise AssertionError(
+            f"extract_metadata must not run for excluded photos: {paths}"
+        )
+    monkeypatch.setattr(scanner, "extract_metadata", fail_extract)
+
+    col_id = db.add_collection(
+        "with_excluded",
+        json.dumps([{"field": "photo_ids", "value": [bird1, bird2]}]),
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "exclude_photo_ids": [bird1],
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        # The scan step should have reported the "Skipped" fast path
+        # because the only broken photo was excluded from the run.
+        # Downstream stages may still fail on the stub fixture files —
+        # that's unrelated and does not affect the scan-stage assertion.
+        scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+        summary = (scan_step.get("summary") or "").lower()
+        assert "skipped" in summary, scan_step
+        assert "repair" not in summary, scan_step
+
+    # Excluded photo's broken metadata is untouched.
+    row = db.conn.execute(
+        "SELECT timestamp, exif_data FROM photos WHERE id=?", (bird1,)
+    ).fetchone()
+    assert row["timestamp"] is None
+    assert row["exif_data"] is None
