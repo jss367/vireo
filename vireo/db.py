@@ -1606,8 +1606,11 @@ class Database:
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path"""
 
-    # Columns for single-photo detail queries (includes exif_data JSON)
-    PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
+    # Columns for single-photo detail queries (includes exif_data JSON +
+    # eye-focus fields consumed by the review lightbox's crosshair overlay)
+    PHOTO_DETAIL_COLS = (
+        PHOTO_COLS + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad"
+    )
 
     def get_photo(self, photo_id, verify_workspace=False):
         """Return a single photo by id, including full metadata.

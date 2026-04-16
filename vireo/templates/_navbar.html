@@ -482,6 +482,51 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   pointer-events: none;
   box-sizing: border-box;
 }
+/* Crosshair over the detected eye keypoint. Scales with the image via
+   position:% — parent .lightbox-transform absorbs the zoom transform. */
+.lb-eye-crosshair {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  margin-top: -11px;
+  pointer-events: none;
+  z-index: 2;
+}
+.lb-eye-crosshair::before,
+.lb-eye-crosshair::after {
+  content: "";
+  position: absolute;
+  background: #ffd166;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+.lb-eye-crosshair::before {
+  left: 50%;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+}
+.lb-eye-crosshair::after {
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  margin-top: -1px;
+}
+.lb-eye-crosshair > span {
+  position: absolute;
+  left: 14px;
+  top: -2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #0A1F2E;
+  background: #ffd166;
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  line-height: 1.3;
+}
 .lb-detection-label {
   position: absolute;
   top: -1px;
@@ -1670,6 +1715,7 @@ async function createWorkspace() {
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
       <div id="lightboxDetections" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></div>
+      <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
   </div>
   <div class="lightbox-filename" id="lightboxFilename"></div>
@@ -1765,6 +1811,38 @@ function _lbGetSpeciesColor(species) {
   return _lbSpeciesColors[species];
 }
 
+function _lbRenderEyeCrosshair(photo) {
+  // Draws a crosshair at the detected eye keypoint on the current lightbox
+  // photo. eye_x / eye_y are stored in original-image pixel space; the
+  // overlay is absolute-positioned inside .lightbox-transform which sits
+  // at the image's natural size, so percentage-of-image is the right unit.
+  var container = document.getElementById('lightboxEye');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!photo || photo.eye_x == null || photo.eye_y == null) {
+    container.style.display = 'none';
+    return;
+  }
+  if (!photo.width || !photo.height) {
+    // Without dimensions we cannot map pixel coords to percentages.
+    container.style.display = 'none';
+    return;
+  }
+  var xPct = (photo.eye_x / photo.width) * 100;
+  var yPct = (photo.eye_y / photo.height) * 100;
+  var marker = document.createElement('div');
+  marker.className = 'lb-eye-crosshair';
+  marker.style.left = xPct.toFixed(3) + '%';
+  marker.style.top = yPct.toFixed(3) + '%';
+  if (photo.eye_conf != null) {
+    var label = document.createElement('span');
+    label.textContent = 'eye ' + Math.round(photo.eye_conf * 100) + '%';
+    marker.appendChild(label);
+  }
+  container.appendChild(marker);
+  container.style.display = 'block';
+}
+
 function _lbLoadDetections(photoId) {
   var container = document.getElementById('lightboxDetections');
   if (!container) return;
@@ -1810,6 +1888,9 @@ function openLightbox(photoId, filename, photoList) {
   // Clear previous detection overlays
   var detContainer = document.getElementById('lightboxDetections');
   if (detContainer) detContainer.innerHTML = '';
+  // Clear previous eye crosshair; re-rendered when /api/photos/<id> resolves.
+  var eyeContainer = document.getElementById('lightboxEye');
+  if (eyeContainer) { eyeContainer.innerHTML = ''; eyeContainer.style.display = 'none'; }
 
   // Reset continuous zoom state for new photo
   _lbZoom = 1.0;
@@ -1833,6 +1914,7 @@ function openLightbox(photoId, filename, photoList) {
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
       _lbRecomputeNativeZoom();
+      _lbRenderEyeCrosshair(data);
     })
     .catch(function() {});
 
