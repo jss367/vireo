@@ -3020,11 +3020,14 @@ class Database:
         is ``'ok'``) — matching the subtree scope of
         :meth:`get_highlights_candidates`.
         """
+        ws = self._ws_id()
         return self.conn.execute(
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
                    SELECT p.id, p.folder_id, p.timestamp
                    FROM photos p
                    JOIN folders f0 ON f0.id = p.folder_id AND f0.status = 'ok'
+                   JOIN workspace_folders wf0
+                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
                    WHERE p.quality_score IS NOT NULL
                    UNION ALL
                    SELECT a.photo_id, f.parent_id, a.timestamp
@@ -3042,7 +3045,7 @@ class Database:
                  AND f.status = 'ok'
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (self._ws_id(),),
+            (ws, ws),
         ).fetchall()
 
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')

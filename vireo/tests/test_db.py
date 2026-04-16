@@ -2839,6 +2839,32 @@ def test_get_folders_with_quality_data_rolls_up_subtree(tmp_path):
     assert by_name["c"]["photo_count"] == 1
 
 
+def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
+    """When a descendant belongs to another workspace, its scored photos are excluded."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Parent lives in the active (Default) workspace; child is moved to a second workspace.
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    # Move the child folder to the other workspace only.
+    db.remove_workspace_folder(active_ws, child)
+    db.add_workspace_folder(other_ws, child)
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    # Parent should NOT inherit the child's scored photo, since the child is
+    # no longer in the active workspace. get_highlights_candidates would
+    # return 0 candidates for the parent, so the dropdown count must match.
+    assert "p" not in by_name
+    assert db.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
+
+
 def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
     """A parent folder does not count photos in descendant folders marked 'missing'."""
     from db import Database
