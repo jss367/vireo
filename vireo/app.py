@@ -1817,7 +1817,7 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
-    @app.route("/api/workspace/new-images")
+    @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()
         ws_id = db._active_workspace_id

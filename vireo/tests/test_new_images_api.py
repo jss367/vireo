@@ -47,7 +47,7 @@ def test_api_new_images_reports_unscanned_files(app_and_db):
     db.add_folder(str(root), name="shoot")
 
     client = app.test_client()
-    resp = client.get("/api/workspace/new-images")
+    resp = client.get("/api/workspaces/active/new-images")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["new_count"] == 1
@@ -63,5 +63,5 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
                  file_size=1, file_mtime=0.0)
 
     client = app.test_client()
-    resp = client.get("/api/workspace/new-images")
+    resp = client.get("/api/workspaces/active/new-images")
     assert resp.get_json()["new_count"] == 0
