@@ -1746,6 +1746,8 @@ var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
+var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
+var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
@@ -1818,6 +1820,7 @@ function openLightbox(photoId, filename, photoList) {
   _lbPhotoH = null;
   _lbCurrentSrcKey = 'full';
   _lbFullLongEdge = null;
+  _lbPending1To1 = false;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
@@ -1842,6 +1845,7 @@ function openLightbox(photoId, filename, photoList) {
     // dimensions as the /full threshold.
     if (_lightboxCurrentId === photoId && _lbCurrentSrcKey === 'full' && img.naturalWidth) {
       _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
+      _lbSessionFullLongEdge = _lbFullLongEdge;
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
@@ -1901,13 +1905,22 @@ function toggleLightboxZoom(e) {
   var isZoomed = _lbZoom > 1.001;
   if (isZoomed) {
     _lbSetZoom(1.0, null, null);
+    _lbPending1To1 = false;
   } else {
     // Anchor zoom on click position (or center if no event)
     var rect = img.getBoundingClientRect();
     var anchorX = e && e.clientX ? e.clientX : rect.left + rect.width / 2;
     var anchorY = e && e.clientY ? e.clientY : rect.top + rect.height / 2;
-    // If dimensions are unknown, fall back to the max zoom (_lbSetZoom clamps to 4).
-    _lbSetZoom(_lbNativeZoom || 4, anchorX, anchorY);
+    if (_lbNativeZoom) {
+      _lbSetZoom(_lbNativeZoom, anchorX, anchorY);
+      _lbPending1To1 = false;
+    } else {
+      // Dimensions unknown — fall back to the max zoom (clamps to 4) and flag
+      // the request so we can upgrade to true 1:1 once /original loads and
+      // nativeZoom is learned.
+      _lbSetZoom(4, anchorX, anchorY);
+      _lbPending1To1 = true;
+    }
   }
 }
 
@@ -2509,8 +2522,9 @@ function _lbPickSourceKey() {
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
   // /full's actual long edge depends on the server's preview_max_size config (default 1920).
-  // Use the measured value from the loaded image if available; fall back to the default.
-  var fullLongEdge = _lbFullLongEdge || 1920;
+  // Prefer the per-photo measurement; if not yet recorded (user zoomed before /full
+  // loaded), fall back to the last photo's measurement in this session, then 1920.
+  var fullLongEdge = _lbFullLongEdge || _lbSessionFullLongEdge || 1920;
   if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
@@ -2561,6 +2575,11 @@ function _lbScheduleSourceSwap() {
           _lbPhotoH = img.naturalHeight;
         }
         _lbRecomputeNativeZoom();
+        // If the user pressed z/toggle when nativeZoom was unknown, upgrade to true 1:1 now.
+        if (_lbPending1To1 && _lbNativeZoom) {
+          _lbPending1To1 = false;
+          _lbSetZoom(_lbNativeZoom, null, null);
+        }
         _lbApplyTransform();
       });
       img.src = url;
