@@ -669,3 +669,49 @@ def test_analyze_for_culling_missing_phash_zero_when_all_hashed(tmp_path):
     db, _ = _setup_culling_db(tmp_path, with_embeddings=False)
     result = analyze_for_culling(db)
     assert result["photos_missing_phash"] == 0
+
+
+def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_path):
+    """If the working-copy JPEG can't be decoded, the backfill should still
+    try the original source file instead of giving up."""
+    from culling import analyze_for_culling
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    vireo_dir = tmp_path
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="photos")
+
+    # Valid JPEG at the source path — can be opened.
+    fname = "bird.jpg"
+    Image.new("RGB", (100, 100), color=(20, 140, 90)).save(
+        os.path.join(folder_path, fname)
+    )
+
+    # Working-copy path points to a file that exists but is junk bytes —
+    # _load_standard will return None.
+    wc_rel = "working/broken.jpg"
+    wc_abs = os.path.join(vireo_dir, wc_rel)
+    os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
+    with open(wc_abs, "wb") as f:
+        f.write(b"not a real jpeg")
+
+    pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+    db.conn.commit()
+
+    result = analyze_for_culling(db, vireo_dir=str(vireo_dir))
+    assert result["photos_missing_phash"] == 0
+    row = db.conn.execute("SELECT phash FROM photos WHERE id = ?", (pid,)).fetchone()
+    assert row["phash"], "phash should fall back to the valid source JPEG"

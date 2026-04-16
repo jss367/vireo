@@ -142,11 +142,14 @@ def analyze_for_culling(
             if not row:
                 continue
             try:
+                img = None
                 if vireo_dir:
                     img = load_working_image(
                         dict(row), vireo_dir, max_size=None, folders=folders_map
                     )
-                else:
+                if img is None:
+                    # Working copy absent/corrupt, or vireo_dir not provided —
+                    # try the original source (handles RAW via rawpy).
                     folder_path = folders_map.get(row["folder_id"], "")
                     img = load_image(os.path.join(folder_path, row["filename"]))
                 if img is None:
