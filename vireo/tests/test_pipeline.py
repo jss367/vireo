@@ -550,3 +550,103 @@ def test_load_photo_features_no_variant_configured_keeps_embeddings(tmp_path):
     photos = load_photo_features(db)  # no config
     assert len(photos) == 1
     assert photos[0]["dino_subject_embedding"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Eye-focus detection stage
+# ---------------------------------------------------------------------------
+
+def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
+    """Create one photo that passes gate 1 + has a mask + has a detection.
+
+    Returns (db, photo_id). Caller controls whether weights exist (gate 2)
+    via monkeypatching keypoints.MODELS_DIR.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id  # auto-created Default workspace
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "mammal.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        timestamp="2026-04-16T10:00:00",
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Vulpes vulpes",
+        confidence=0.92,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={
+            "kingdom": "Animalia",
+            "phylum": "Chordata",
+            "class": taxonomy_class,
+            "order": "Carnivora",
+            "family": "Canidae",
+            "genus": "Vulpes",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+    return db, pid
+
+
+def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
+    """Gate 2: no weights on disk → stage processes the photo as a no-op."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    empty_models_dir = tmp_path / "empty_models"
+    empty_models_dir.mkdir()
+    monkeypatch.setattr(kp, "MODELS_DIR", str(empty_models_dir))
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
+def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypatch):
+    """When config disables eye detection, the stage does not enumerate photos."""
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    # Any call through to list_photos_for_eye_keypoint_stage would be a bug —
+    # the disabled flag must short-circuit before the DB helper.
+    called = {"listed": False}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy():
+        called["listed"] = True
+        return orig()
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": False})
+
+    assert called["listed"] is False
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)

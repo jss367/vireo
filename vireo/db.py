@@ -2674,6 +2674,75 @@ class Database:
             })
         return result
 
+    def list_photos_for_eye_keypoint_stage(self):
+        """Return photos eligible for the eye-focus keypoint stage.
+
+        Eligibility:
+          * photo is in the active workspace (via workspace_folders)
+          * mask_path is set (SAM2 produced a subject mask)
+          * has at least one non-synthetic detection (excludes full-image
+            rows that exist only to anchor predictions)
+          * has at least one prediction on that detection
+          * has not already been processed — eye_tenengrad IS NULL keeps
+            the stage idempotent across reruns
+
+        Returns one row per photo, using the highest-confidence prediction
+        on the highest-confidence real detection. Each row is a dict with
+        the fields the eye stage needs to run without further DB calls:
+        id, folder_id, filename, width, height, mask_path,
+        box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
+        scientific_name, species.
+        """
+        ws_id = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT p.id, p.folder_id, p.filename, p.width, p.height,
+                      p.mask_path,
+                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.detector_confidence,
+                      pr.confidence AS species_conf,
+                      pr.taxonomy_class,
+                      pr.scientific_name,
+                      pr.species
+               FROM photos p
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN detections d
+                 ON d.photo_id = p.id
+                AND d.workspace_id = ?
+                AND d.detector_model != 'full-image'
+               JOIN predictions pr ON pr.detection_id = d.id
+               WHERE p.mask_path IS NOT NULL
+                 AND p.eye_tenengrad IS NULL
+               ORDER BY p.id,
+                        d.detector_confidence DESC,
+                        pr.confidence DESC""",
+            (ws_id, ws_id),
+        ).fetchall()
+
+        seen = set()
+        result = []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            result.append({
+                "id": r["id"],
+                "folder_id": r["folder_id"],
+                "filename": r["filename"],
+                "width": r["width"],
+                "height": r["height"],
+                "mask_path": r["mask_path"],
+                "box_x": r["box_x"],
+                "box_y": r["box_y"],
+                "box_w": r["box_w"],
+                "box_h": r["box_h"],
+                "species_conf": r["species_conf"],
+                "taxonomy_class": r["taxonomy_class"],
+                "scientific_name": r["scientific_name"],
+                "species": r["species"],
+            })
+        return result
+
     def update_photo_embeddings(
         self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
         variant=None,
