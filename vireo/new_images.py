@@ -61,6 +61,12 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
         root_new = 0
         for dirpath, _dirnames, filenames in os.walk(root_path):
             for name in filenames:
+                # Mirror ``vireo/scanner.py``: skip dotfiles (e.g. macOS
+                # AppleDouble sidecars ``._IMG_0001.JPG``) so we don't count
+                # files the scanner will never ingest, which would otherwise
+                # produce a stuck "new images" banner.
+                if name.startswith("."):
+                    continue
                 ext = Path(name).suffix.lower()
                 if ext not in SUPPORTED_EXTENSIONS:
                     continue

@@ -180,6 +180,56 @@ def test_two_database_instances_share_cache(tmp_path):
     )
 
 
+def test_count_new_images_skips_dotfiles(db_with_workspace):
+    """Dotfiles (e.g. macOS AppleDouble ``._IMG_0001.JPG`` sidecars) must not be
+    counted as new, since the scanner never ingests them."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.JPG"))
+    # AppleDouble sidecar next to the real file. Use _touch_image so the
+    # suffix matches SUPPORTED_EXTENSIONS; the filter must still reject it
+    # because of the leading dot.
+    _touch_image(str(root / "._IMG_0001.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1, (
+        f"Expected 1 new image (dotfile skipped), got {result['new_count']}. "
+        f"sample={result['sample']}"
+    )
+    assert all(not os.path.basename(s).startswith(".") for s in result["sample"])
+
+
+def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
+    """Caller-supplied root with a trailing slash must still match folders stored
+    by the scanner as ``str(Path(...))`` (no trailing slash)."""
+    from app import _invalidate_new_images_after_scan
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.JPG"))
+    # Folder stored in canonical form (no trailing slash), matching what the
+    # scanner writes via str(Path(...)).
+    db.add_folder(str(root), name="shoot")
+
+    # Prime the cache.
+    db.get_new_images_for_workspace(ws_id)
+    assert db._new_images_cache.get(ws_id) is not None
+
+    # Invalidate with a trailing slash. Must still clear the cache.
+    _invalidate_new_images_after_scan(db, str(root) + "/")
+
+    assert db._new_images_cache.get(ws_id) is None, (
+        "Trailing-slash root must be normalized so path = ? matches the "
+        "canonical form stored in the folders table"
+    )
+
+
 def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(tmp_path):
     """End-to-end coverage of _invalidate_new_images_after_scan:
 

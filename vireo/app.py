@@ -224,6 +224,12 @@ def _invalidate_new_images_after_scan(db, root):
     need to invalidate caches for all workspaces that reference any of those
     descendant folders, not just the explicit scan root.
     """
+    # Canonicalize the root to match what the scanner stores. The scanner
+    # passes folder paths through ``str(Path(...))`` which (like normpath)
+    # strips a trailing slash and collapses duplicate separators. Without
+    # this, a caller-supplied trailing slash like ``/Volumes/shoot/`` would
+    # fail to match the stored ``/Volumes/shoot`` in the ``path = ?`` arm.
+    root = os.path.normpath(root)
     # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
     # over-invalidation that triggers a re-walk. Path separators assume POSIX.
     touched_ids = [r["id"] for r in db.conn.execute(
