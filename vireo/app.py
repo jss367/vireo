@@ -5621,7 +5621,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 phash_threshold=phash_threshold,
                 cross_bucket_merge=cross_bucket_merge,
                 progress_callback=progress_cb,
-                vireo_dir=os.path.dirname(db_path),
+                vireo_dir=os.path.dirname(app.config["THUMB_CACHE_DIR"]),
             )
 
             # Store culling results in a temporary cache for the UI
