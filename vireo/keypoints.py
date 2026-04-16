@@ -27,9 +27,37 @@ _sessions = {}
 _locks = {}
 _download_locks = {}
 
+# Per-model download state for the pipeline page card. Values:
+#   "idle"         — never requested, or previous download was acknowledged.
+#   "downloading"  — a background thread is actively fetching.
+#   "failed"       — most recent attempt raised; weights not on disk.
+_download_state = {}
+
 
 def _model_dir(model_name):
     return os.path.join(MODELS_DIR, model_name)
+
+
+def weights_status(model_name):
+    """Return the current download/readiness state for ``model_name``.
+
+    Priority order:
+        1. Files on disk → "ready"
+        2. Background thread in flight → "downloading"
+        3. Previous failure without files on disk → "failed"
+        4. Otherwise → "missing"
+    """
+    target = _model_dir(model_name)
+    onnx_path = os.path.join(target, "model.onnx")
+    config_path = os.path.join(target, "config.json")
+    if os.path.isfile(onnx_path) and os.path.isfile(config_path):
+        return "ready"
+    state = _download_state.get(model_name, "idle")
+    if state == "downloading":
+        return "downloading"
+    if state == "failed":
+        return "failed"
+    return "missing"
 
 
 def ensure_keypoint_weights(model_name, progress_callback=None):
