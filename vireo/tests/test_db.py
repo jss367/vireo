@@ -2731,6 +2731,23 @@ def test_get_highlights_candidates(tmp_path):
     assert all("species" in dict(r) for r in results)
 
 
+def test_get_highlights_candidates_includes_descendants(tmp_path):
+    """get_highlights_candidates(folder_id=parent) includes photos from descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    p1 = db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=child, filename='deep.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    assert len(results) == 2
+
+
 def test_get_highlights_candidates_excludes_rejected(tmp_path):
     """Flagged-rejected photos are excluded."""
     from db import Database

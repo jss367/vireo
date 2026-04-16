@@ -2966,9 +2966,10 @@ class Database:
     def get_highlights_candidates(self, folder_id, min_quality=0.0):
         """Return photos eligible for highlights selection.
 
-        Returns photos in the given folder that have a quality_score >= min_quality
-        and are not user-rejected. Includes the photo's species keyword (or NULL)
-        and DINO embeddings for MMR diversity.
+        Returns photos in the given folder (and its descendant folders) that
+        have a quality_score >= min_quality and are not user-rejected. Includes
+        the photo's species keyword (or NULL) and DINO embeddings for MMR
+        diversity.
 
         Species is derived from photo_keywords joined to keywords where
         is_species = 1, which covers both accepted predictions (accept_prediction
@@ -2976,8 +2977,10 @@ class Database:
 
         Ordered by quality_score DESC.
         """
+        subtree = self.get_folder_subtree_ids(folder_id)
+        placeholders = ",".join("?" for _ in subtree)
         rows = self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.extension,
+            f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
@@ -2997,13 +3000,13 @@ class Database:
                        WHERE k.is_species = 1
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
-               WHERE p.folder_id = ?
+               WHERE p.folder_id IN ({placeholders})
                  AND wf.workspace_id = ?
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (folder_id, self._ws_id(), min_quality),
+            (*subtree, self._ws_id(), min_quality),
         ).fetchall()
         return rows
 
