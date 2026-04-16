@@ -1041,14 +1041,48 @@ class Database:
         return folder_id
 
     def get_folder_tree(self):
-        """Return folders for the active workspace."""
+        """Return folders for the active workspace.
+
+        ``parent_id`` is rewritten to the nearest ancestor that is also linked
+        to the active workspace AND has ``status='ok'``. If no such ancestor
+        exists, ``parent_id`` is NULL. This keeps the returned set a
+        well-formed tree: callers that group by ``parent_id`` (notably the
+        browse-page folder sidebar) never leave a linked folder dangling under
+        an ancestor that was filtered out of the result.
+        """
+        ws = self._ws_id()
         return self.conn.execute(
-            """SELECT f.id, f.path, f.name, f.parent_id, f.photo_count
+            """WITH RECURSIVE
+               visible(id) AS (
+                   SELECT f.id FROM folders f
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE wf.workspace_id = ? AND f.status = 'ok'
+               ),
+               walk(start_id, current_id) AS (
+                   SELECT v.id, f.parent_id
+                   FROM visible v
+                   JOIN folders f ON f.id = v.id
+                   UNION ALL
+                   SELECT w.start_id, f.parent_id
+                   FROM walk w
+                   JOIN folders f ON f.id = w.current_id
+                   WHERE w.current_id IS NOT NULL
+                     AND w.current_id NOT IN (SELECT id FROM visible)
+               ),
+               effective AS (
+                   SELECT start_id, current_id AS parent_id
+                   FROM walk
+                   WHERE current_id IS NULL
+                      OR current_id IN (SELECT id FROM visible)
+               )
+               SELECT f.id, f.path, f.name,
+                      e.parent_id AS parent_id,
+                      f.photo_count
                FROM folders f
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status = 'ok'
+               JOIN visible v ON v.id = f.id
+               JOIN effective e ON e.start_id = f.id
                ORDER BY f.path""",
-            (self._ws_id(),),
+            (ws,),
         ).fetchall()
 
     def get_folder_subtree_ids(self, folder_id):
