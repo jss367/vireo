@@ -215,30 +215,11 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
 
 
-def _invalidate_new_images_after_scan(db, root):
-    """Invalidate the new-images cache for every workspace linked to any folder
-    touched by a scan of ``root``.
-
-    Uses a LIKE query because ``scanner.scan`` auto-registers subfolders as
-    their own ``folders`` rows (see ``vireo/db.py`` ``add_folder``), so we
-    need to invalidate caches for all workspaces that reference any of those
-    descendant folders, not just the explicit scan root.
-    """
-    # Canonicalize the root to match what the scanner stores. The scanner
-    # passes folder paths through ``str(Path(...))`` which (like normpath)
-    # strips a trailing slash and collapses duplicate separators. Without
-    # this, a caller-supplied trailing slash like ``/Volumes/shoot/`` would
-    # fail to match the stored ``/Volumes/shoot`` in the ``path = ?`` arm.
-    root = os.path.normpath(root)
-    # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
-    # over-invalidation that triggers a re-walk. The descendant pattern uses
-    # os.sep so it matches what the scanner stores via str(Path(...)) on both
-    # POSIX and Windows.
-    touched_ids = [r["id"] for r in db.conn.execute(
-        "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
-        (root, root.rstrip("/\\") + os.sep + "%"),
-    ).fetchall()]
-    db.invalidate_new_images_cache_for_folders(touched_ids)
+# The canonical implementation lives in ``new_images.py`` so non-Flask
+# modules (e.g. ``pipeline_job.py``) can import it without pulling in the
+# app module. Kept aliased here under the original private name for
+# backward-compatibility with existing call sites and tests.
+from new_images import invalidate_new_images_after_scan as _invalidate_new_images_after_scan  # noqa: E402
 
 
 def create_app(db_path, thumb_cache_dir=None):

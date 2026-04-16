@@ -3276,7 +3276,23 @@ checkMissingFolders();
 setInterval(checkMissingFolders, 600000);
 
 /* ---------- New Images Banner ---------- */
-const NEW_IMAGES_DISMISS_KEY = 'newImagesDismissedWorkspace';
+// Per-workspace dismissal: one sessionStorage key per workspace id so that
+// switching workspaces doesn't clobber other workspaces' dismissal state.
+// Storage value is just the dismissed count (string).
+//
+// Manual trace scenarios (keep in sync with the re-arm semantics below):
+//   - Dismiss in A at count=20 -> key `newImagesDismissed_ws_1 = "20"`.
+//     Switch to B -> B's dismissal read from its own key (absent/different).
+//     Switch back to A with count=20 -> still dismissed. Correct.
+//   - Dismiss in A at 20, dismiss in B at 5 -> two independent keys. Correct.
+//   - Dismiss in A at 20, A's count rises to 30 -> 30 !== 20 -> banner shows.
+//   - Dismiss in A at 20, scan clears it to 0, then 5 new imports -> 5 !== 20
+//     -> banner shows. Correct (no decrease-then-increase trap).
+const NEW_IMAGES_DISMISS_PREFIX = 'newImagesDismissed_ws_';
+
+function _newImagesDismissKey(wsId) {
+  return NEW_IMAGES_DISMISS_PREFIX + String(wsId);
+}
 
 // Dismissal suppresses the banner only while the count remains exactly what
 // the user dismissed. Any change — scan reducing it, or new imports
@@ -3285,17 +3301,11 @@ const NEW_IMAGES_DISMISS_KEY = 'newImagesDismissedWorkspace';
 // otherwise leave 5 <= 20 satisfied and keep the banner hidden.
 function _isNewImagesDismissed(wsId, newCount) {
   if (wsId === null || wsId === undefined || wsId === '') return false;
-  const raw = sessionStorage.getItem(NEW_IMAGES_DISMISS_KEY);
+  const raw = sessionStorage.getItem(_newImagesDismissKey(wsId));
   if (!raw) return false;
-  let stored;
-  try {
-    stored = JSON.parse(raw);
-  } catch (e) {
-    return false;
-  }
-  if (!stored || typeof stored !== 'object') return false;
-  if (String(stored.wsId) !== String(wsId)) return false;
-  return Number(stored.count) === Number(newCount);
+  const stored = Number(raw);
+  if (!Number.isFinite(stored)) return false;
+  return stored === Number(newCount);
 }
 
 async function checkNewImages() {
@@ -3326,10 +3336,9 @@ function dismissNewImagesBanner() {
   const count = Number(banner.dataset.count || 0);
   banner.style.display = 'none';
   if (wsId !== '') {
-    sessionStorage.setItem(
-      NEW_IMAGES_DISMISS_KEY,
-      JSON.stringify({ wsId: wsId, count: count })
-    );
+    // Store the dismissed count under a key scoped to this workspace id so
+    // dismissing in workspace B doesn't overwrite A's entry.
+    sessionStorage.setItem(_newImagesDismissKey(wsId), String(count));
   }
 }
 

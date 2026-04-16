@@ -402,6 +402,87 @@ def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
+    """The pipeline_job scanner stage (the third scan path alongside
+    api_job_scan and api_job_import_full) must invalidate the new-images
+    cache. Prior to this fix, a pipeline run from templates/pipeline.html
+    would scan photos without clearing the banner's "N new images" count,
+    so the banner stayed stale until TTL.
+
+    Runs the full pipeline job with classify / extract-masks / regroup
+    skipped so the test completes quickly; asserts the cache for the active
+    workspace was cleared by the time the job returns.
+    """
+    import app as app_module  # ensures _invalidate_new_images_after_scan is wired up
+    import config as cfg
+    from PIL import Image
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    Image.new("RGB", (100, 100), "red").save(str(photo_dir / "a.jpg"))
+    Image.new("RGB", (100, 100), "red").save(str(photo_dir / "b.jpg"))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Register the source folder against the workspace so
+    # count_new_images_for_workspace has something to enumerate.
+    db.add_folder(str(photo_dir), name="photos")
+
+    # Prime the cache: two files present, none ingested yet -> new_count=2.
+    primed = db.get_new_images_for_workspace(ws_id)
+    assert primed["new_count"] == 2
+    assert db._new_images_cache.get(ws_id) is not None
+
+    # Minimal FakeRunner inline so we don't couple this test to
+    # tests/test_pipeline_job.py's helper class.
+    class _Runner:
+        def push_event(self, *a, **k): pass
+        def set_steps(self, *a, **k): pass
+        def update_step(self, *a, **k): pass
+        def is_cancelled(self, *a, **k): return False
+
+    job = {
+        "id": "test-pipeline-invalidates",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": "2026-01-01T00:00:00",
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+    }
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    run_pipeline_job(job, _Runner(), db_path, ws_id, params)
+
+    # After the scan, the cache must be cleared so the next banner fetch
+    # recomputes against the updated photos table.
+    assert db._new_images_cache.get(ws_id) is None, (
+        "pipeline_job scanner_stage must invalidate the new-images cache "
+        "for roots fed to do_scan (try/finally mirrors api_job_scan)"
+    )
+    # Sanity-check that the helper app.py exposes still resolves to the
+    # same canonical implementation used by pipeline_job.
+    import new_images as new_images_mod
+    assert app_module._invalidate_new_images_after_scan is (
+        new_images_mod.invalidate_new_images_after_scan
+    )
+
+
 def test_invalidate_new_images_cache_for_folders_handles_thousands_of_ids(
     db_with_workspace,
 ):
