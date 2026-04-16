@@ -80,16 +80,18 @@ Default `reject_eye_focus = 0.35` (mirrors the existing `reject_focus` threshold
 
 ## Database Schema
 
-Add four nullable columns to `photos`:
+Add four nullable columns to `photos`. These mirror the persistence pattern of `subject_tenengrad` — raw per-photo values that scoring consumes at query time:
 
-| Column            | Type    | Meaning                                                          |
-|-------------------|---------|------------------------------------------------------------------|
-| `eye_x`           | REAL    | x coord of best eye in image pixels                              |
-| `eye_y`           | REAL    | y coord of best eye in image pixels                              |
-| `eye_conf`        | REAL    | keypoint confidence of the best eye, ∈ [0, 1]                   |
-| `eye_focus_score` | REAL    | normalized focus score around the best eye, ∈ [0, 1]            |
+| Column          | Type | Meaning                                                                              |
+|-----------------|------|--------------------------------------------------------------------------------------|
+| `eye_x`         | REAL | x coord of best eye in image pixels                                                  |
+| `eye_y`         | REAL | y coord of best eye in image pixels                                                  |
+| `eye_conf`      | REAL | keypoint confidence of the best eye, ∈ [0, 1]                                        |
+| `eye_tenengrad` | REAL | raw multi-scale Tenengrad measured in the window around the best eye (parallel to `subject_tenengrad`) |
 
-All null when any gate fails. A single "best eye" row per photo rather than storing both eyes separately — the max-over-eyes decision is made at computation time, and we keep only the winner.
+**What is *not* persisted:** `eye_focus_score` (the per-encounter percentile-normalized version). Computed in-memory at scoring time, same way `focus_score` and `quality_composite` are computed today — Vireo does not persist normalized scores.
+
+All four columns null when any gate fails. A single "best eye" row per photo rather than storing both eyes separately — the max-over-eyes decision is made at computation time, and we keep only the winner.
 
 Migration: `ALTER TABLE photos ADD COLUMN ...` for each of the four. Safe on existing SQLite because all are nullable with implicit null default.
 
@@ -108,9 +110,9 @@ New stage in `vireo/pipeline.py` between the existing masking stage and the qual
 3. Decode heatmaps to `(x, y, conf)` keypoints (argmax + subpixel refinement, standard MMPose / DLC decoding; ~30 lines of numpy).
 4. Translate eye coords from crop-space back to image-pixel space.
 5. Apply the three-gate policy.
-6. If gated through, compute per-eye tenengrad (raw values), pick the winner, persist `(eye_x, eye_y, eye_conf)`.
+6. If gated through, compute per-eye tenengrad (raw values), pick the winner, persist `(eye_x, eye_y, eye_conf, eye_tenengrad)` — the raw tenengrad of the winning eye.
 
-Normalization into `eye_focus_score ∈ [0, 1]` happens in the next stage (scoring), where per-encounter statistics are available. This matches how `subject_focus` is computed today.
+Normalization into `eye_focus_score ∈ [0, 1]` happens in the scoring stage, where per-encounter statistics are available. This matches how `focus_score` is derived from the persisted `subject_tenengrad` today: the raw value is the DB column, the normalized score is ephemeral.
 
 **Replay:** existing pipeline replay machinery. The stage should be re-runnable independently when model weights appear (e.g., user downloads SuperAnimal weights after first pipeline run), without forcing a full re-score.
 
