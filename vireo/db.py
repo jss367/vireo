@@ -6,6 +6,8 @@ import os
 import sqlite3
 import uuid
 
+from new_images import NewImagesCache
+
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
@@ -58,6 +60,7 @@ class Database:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self._active_workspace_id = None
+        self._new_images_cache = NewImagesCache()
         self._create_tables()
         self.ensure_default_workspace()
         # Restore last-used workspace, or fall back to Default
@@ -717,6 +720,29 @@ class Database:
         if self._active_workspace_id is None:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
+
+    def get_new_images_for_workspace(self, workspace_id):
+        """Return new-images result for workspace, using cache when fresh."""
+        import new_images
+        cached = self._new_images_cache.get(workspace_id)
+        if cached is not None:
+            return cached
+        result = new_images.count_new_images_for_workspace(self, workspace_id)
+        self._new_images_cache.set(workspace_id, result)
+        return result
+
+    def invalidate_new_images_cache_for_folders(self, folder_ids):
+        """Clear cache for every workspace linked to any of the given folder_ids."""
+        if not folder_ids:
+            return
+        placeholders = ",".join("?" * len(folder_ids))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT workspace_id FROM workspace_folders "
+            f"WHERE folder_id IN ({placeholders})",
+            tuple(folder_ids),
+        ).fetchall()
+        ws_ids = [r["workspace_id"] for r in rows]
+        self._new_images_cache.invalidate_workspaces(ws_ids)
 
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""

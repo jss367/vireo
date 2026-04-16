@@ -83,3 +83,25 @@ def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
 
     assert result["new_count"] == 1  # day2's IMG_0001.JPG is the only new one
     assert any("day2" in s for s in result["sample"])
+
+
+def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkeypatch):
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG_0001.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    calls = [0]
+    import new_images
+    real = new_images.count_new_images_for_workspace
+
+    def counting_wrapper(*args, **kwargs):
+        calls[0] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(new_images, "count_new_images_for_workspace", counting_wrapper)
+
+    r1 = db.get_new_images_for_workspace(ws_id)
+    r2 = db.get_new_images_for_workspace(ws_id)
+    assert r1 == r2
+    assert calls[0] == 1  # second call served from cache
