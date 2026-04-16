@@ -215,6 +215,80 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
 
 
+def _migrate_legacy_preview_cache(app):
+    """One-shot migration of pre-refactor /full cache files.
+
+    The old /full endpoint wrote previews to ~/.vireo/previews/{id}.jpg
+    (no size suffix). The new pyramid uses {id}_{size}.jpg and tracks
+    every entry in preview_cache. Upgraded installs have legacy files
+    that are invisible to accounting and eviction — they sit on disk
+    indefinitely unless the user hits Clear Cache.
+
+    Rename each {id}.jpg to {id}_<preview_max_size>.jpg and insert a
+    preview_cache row so the LRU and reporting reflect reality. Runs
+    once per process start; a no-op when there are no legacy files.
+
+    If preview_max_size=0 (meaning "full") we can't assign a size tier,
+    so legacy files are left in place for Clear Cache to remove later.
+    """
+    import re
+
+    import config as cfg
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    if not os.path.isdir(preview_dir):
+        return
+
+    legacy_pat = re.compile(r"^(\d+)\.jpg$")
+    try:
+        legacy_files = [f for f in os.listdir(preview_dir) if legacy_pat.match(f)]
+    except OSError:
+        return
+    if not legacy_files:
+        return
+
+    target_size = cfg.load().get("preview_max_size") or 1920
+    if target_size == 0:
+        log.info(
+            "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
+            len(legacy_files),
+        )
+        return
+
+    db = Database(app.config["DB_PATH"])
+    try:
+        migrated = 0
+        for fname in legacy_files:
+            m = legacy_pat.match(fname)
+            photo_id = int(m.group(1))
+            src = os.path.join(preview_dir, fname)
+            dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+            if os.path.exists(dst):
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+                continue
+            try:
+                os.rename(src, dst)
+                st = os.stat(dst)
+                db.preview_cache_insert(photo_id, target_size, st.st_size)
+                migrated += 1
+            except OSError as e:
+                log.warning("Failed to migrate legacy preview %s: %s", src, e)
+        if migrated:
+            log.info(
+                "Migrated %d legacy preview cache files to size %d",
+                migrated, target_size,
+            )
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -229,6 +303,8 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
         "~/.vireo/thumbnails"
     )
+
+    _migrate_legacy_preview_cache(app)
 
     # Request timing middleware — logs slow requests and user actions
     @app.before_request

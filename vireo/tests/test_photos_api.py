@@ -795,6 +795,60 @@ def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch)
     assert db.preview_cache_total_bytes() == 0
 
 
+def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
+    """Pre-refactor /full cache files ({id}.jpg) get renamed to
+    {id}_{preview_max_size}.jpg and inserted into preview_cache on
+    app startup so they're visible to accounting and eviction."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    # Set up a photo and a pre-existing legacy preview file.
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    legacy = preview_dir / f"{pid}.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 2048)
+
+    # Creating the app triggers the migration.
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Legacy file renamed, new sized file exists, row inserted.
+    assert not legacy.exists()
+    new_path = preview_dir / f"{pid}_1920.jpg"
+    assert new_path.exists()
+    row = db.preview_cache_get(pid, 1920)
+    assert row is not None
+    assert row["bytes"] == os.path.getsize(new_path)
+
+
 def test_storage_clear_previews_resets_preview_cache(client_with_photo):
     """/api/storage/clear type=previews drops preview_cache rows so
     Settings "Current usage" doesn't report phantom bytes."""
