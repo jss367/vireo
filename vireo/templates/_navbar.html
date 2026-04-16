@@ -2281,7 +2281,12 @@ document.addEventListener('keydown', function(e) {
   // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
   // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
   // would also fire rate_0 and silently clear the photo's rating.
-  if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+  // Skip when focus is in a form field — modals opened from the lightbox (e.g. iNaturalist)
+  // need '-' / '0' as literal input in lat/lon fields.
+  var tag = e.target && e.target.tagName;
+  var editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+    (e.target && e.target.isContentEditable);
+  if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey) {
     if (e.key === '+' || e.key === '=') {
       _lbSetZoom(_lbZoom * 1.25, null, null);
       e.preventDefault();
@@ -2515,19 +2520,20 @@ function _lbScheduleSourceSwap() {
       if (_lbDesiredSrcKey !== key) return;
       var img = document.getElementById('lightboxImg');
       if (!img) return;
-      // If API dimensions were missing and we just loaded the original, learn the
-      // native size from the loaded image so nativeZoom becomes accurate.
-      if (!_lbPhotoW && key === 'original') {
-        img.addEventListener('load', function learnDims() {
-          img.removeEventListener('load', learnDims);
-          if (!_lbPhotoW && img.naturalWidth && _lightboxCurrentId === photoId) {
-            _lbPhotoW = img.naturalWidth;
-            _lbPhotoH = img.naturalHeight;
-            _lbRecomputeNativeZoom();
-            _lbApplyTransform();
-          }
-        });
-      }
+      // After the new source loads, recompute nativeZoom — the aspect ratio is
+      // nominally identical across source tiers but subpixel rounding can shift
+      // fit dimensions slightly, and if API dims were missing the original's
+      // naturalWidth is now authoritative.
+      img.addEventListener('load', function onSwapLoad() {
+        img.removeEventListener('load', onSwapLoad);
+        if (_lightboxCurrentId !== photoId) return;
+        if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
+          _lbPhotoW = img.naturalWidth;
+          _lbPhotoH = img.naturalHeight;
+        }
+        _lbRecomputeNativeZoom();
+        _lbApplyTransform();
+      });
       img.src = url;
       _lbCurrentSrcKey = key;
     };
