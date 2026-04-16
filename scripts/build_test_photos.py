@@ -69,10 +69,28 @@ def has_gps(path):
 
 
 def find_duplicates(files):
-    """Return a list of (hash, [paths]) groups where len(paths) > 1."""
-    groups = defaultdict(list)
+    """Return a list of (hash, [paths]) groups where len(paths) > 1.
+
+    Hashes only files that share a size with at least one other file, so this
+    stays fast across full libraries (tens of thousands of photos) while still
+    surfacing duplicate pairs that would otherwise be missed by a leading-prefix
+    scan.
+    """
+    by_size = defaultdict(list)
     for f in files:
-        groups[content_hash(f)].append(f)
+        try:
+            by_size[f.stat().st_size].append(f)
+        except OSError:
+            continue
+    groups = defaultdict(list)
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        for f in same_size:
+            try:
+                groups[content_hash(f)].append(f)
+            except OSError:
+                continue
     return [(h, paths) for h, paths in groups.items() if len(paths) > 1]
 
 
@@ -165,8 +183,12 @@ def sample(source, dest, counts=None, dry_run=False):
             elif gps is False:
                 gps_no.append(f)
 
-    burst = find_burst(all_files[:500])[:5]
-    dups = find_duplicates(all_files[:500])
+    # Scan the full set (not a leading 500-file slice) so burst runs and
+    # duplicate pairs later in a large library aren't silently dropped —
+    # otherwise `duplicates=0` can appear even when the library has obvious
+    # dup pairs, and the burst pick becomes unrepresentative.
+    burst = find_burst(all_files)[:5]
+    dups = find_duplicates(all_files)
     dup_pair = dups[0][1][:2] if dups else []
 
     picks = {

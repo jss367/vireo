@@ -246,6 +246,28 @@ def test_sample_rejects_source_equals_dest(tmp_path):
         )
 
 
+def test_sample_finds_duplicates_beyond_first_500_files(tmp_path):
+    # A leading-prefix scan (all_files[:500]) would silently miss duplicate
+    # pairs that sort after the first 500 files in a large library, so the
+    # "duplicates" category would report 0 picks even when the library has
+    # obvious dup pairs. Seed a library with 520 unique files plus one dup
+    # pair that sorts last and confirm it's still picked up.
+    source = tmp_path / "src"
+    source.mkdir()
+    for i in range(520):
+        (source / f"a{i:04d}.jpg").write_bytes(f"unique{i}".encode())
+    # Pair sorts after all the a-prefixed files.
+    (source / "z_dup_1.jpg").write_bytes(b"DUPLICATE")
+    (source / "z_dup_2.jpg").write_bytes(b"DUPLICATE")
+    dest = tmp_path / "dest"
+    result = build_test_photos.sample(
+        source,
+        dest,
+        counts={"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 0, "random": 0},
+    )
+    assert result["duplicates"] == 2, f"expected 2 dup picks, got {result}"
+
+
 def test_sample_idempotent_when_dest_is_inside_source(tmp_path):
     # If the user picks a dest path inside source (e.g.
     # `--dest <source>/vireo-test-photos`), a naive walk re-ingests prior
