@@ -273,6 +273,21 @@
         <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
       </div>
     </div>
+    <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
+      <div class="setting-label" style="width:100%;">
+        Preview cache quota
+        <small>Maximum disk space for cached previews (MB). Oldest entries are evicted first. Set to 0 to disable caching.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%;">
+        <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="2048"
+               style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
+               onchange="saveConfig()">
+        <span style="font-size:13px;color:var(--text-dim);">MB</span>
+        <span id="previewCacheStatus" style="font-size:12px;color:var(--text-dim);margin-left:auto;">Loading...</span>
+        <button id="clearPreviewCacheBtn" onclick="clearPreviewCache()"
+                style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clear cache</button>
+      </div>
+    </div>
     <div class="setting-row">
       <div class="setting-label">
         Default browse thumbnail
@@ -861,6 +876,7 @@ loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
 loadThemePicker();
+loadPreviewCacheStatus();
 
 function toggleSection(header) {
   header.classList.toggle('open');
@@ -980,6 +996,7 @@ async function loadConfig() {
     var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
     document.getElementById('cfgPreviewQuality').value = pq;
     document.getElementById('cfgPreviewQualityVal').textContent = pq;
+    document.getElementById('cfgPreviewCacheMaxMb').value = cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 2048;
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
@@ -1133,6 +1150,7 @@ function saveConfig() {
           thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
           thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
           preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
+          preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
           browse_card_fields: getSelectedCardFields(),
           detector_confidence: parseInt(document.getElementById('cfgDetectorConf').value, 10) / 100,
@@ -1171,6 +1189,7 @@ function saveConfig() {
           },
         }),
       });
+      if (typeof loadPreviewCacheStatus === 'function') loadPreviewCacheStatus();
     } catch(e) {}
   }, 500);
 }
@@ -1995,6 +2014,32 @@ async function precomputeEmbeddings(modelId, labelsFile) {
       }
     });
   } catch(e) {}
+}
+
+/* ---------- Preview Cache ---------- */
+async function loadPreviewCacheStatus() {
+  var statusEl = document.getElementById('previewCacheStatus');
+  if (!statusEl) return;
+  try {
+    var d = await safeFetch('/api/preview-cache', {}, { toast: false });
+    var usedMb = (d.total_size / 1024 / 1024).toFixed(1);
+    var quotaMb = (d.quota_bytes / 1024 / 1024).toFixed(0);
+    var fileWord = d.count === 1 ? 'file' : 'files';
+    statusEl.textContent = 'Current: ' + usedMb + ' / ' + quotaMb + ' MB (' + d.count + ' ' + fileWord + ')';
+  } catch(e) {
+    statusEl.textContent = 'Failed to load';
+  }
+}
+
+async function clearPreviewCache() {
+  if (!confirm('Clear all cached preview images? They will regenerate on demand from the originals.')) return;
+  var btn = document.getElementById('clearPreviewCacheBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await safeFetch('/api/preview-cache/clear', { method: 'POST' });
+  } catch(e) {}
+  if (btn) btn.disabled = false;
+  loadPreviewCacheStatus();
 }
 
 /* ---------- Embedding Cache ---------- */

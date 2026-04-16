@@ -66,6 +66,17 @@ def test_logs_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_settings_page_has_preview_cache_field(app_and_db):
+    """Settings page renders the preview_cache_max_mb input and cache controls."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    assert resp.status_code == 200
+    assert b'preview_cache_max_mb' in resp.data
+    assert b'cfgPreviewCacheMaxMb' in resp.data
+    assert b'clearPreviewCache' in resp.data
+
+
 def test_encounter_species_confirm(app_and_db):
     """POST /api/encounters/species tags photos with species keyword."""
     app, db = app_and_db
