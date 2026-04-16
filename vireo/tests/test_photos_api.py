@@ -684,3 +684,61 @@ def test_full_is_alias_for_preview_at_configured_size(client_with_photo, monkeyp
     preview = client.get(f"/photos/{photo_id}/preview?size=1920").data
     assert full == preview
     assert len(full) > 0
+
+
+def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
+    """When writes push cache over quota, oldest-accessed entries are evicted."""
+    import os
+    import time
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    # Custom fixture with TWO photos because we need to race two writes.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Quota of 0 MB → eviction should clear the cache after each write.
+    cfg.save({**cfg.DEFAULTS, "preview_cache_max_mb": 0})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src1 = photos_dir / "a.jpg"
+    src2 = photos_dir / "b.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src1), "JPEG")
+    Image.new("RGB", (800, 600), (40, 180, 90)).save(str(src2), "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid1 = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=os.path.getsize(src1), file_mtime=os.path.getmtime(src1),
+        width=800, height=600,
+    )
+    pid2 = db.add_photo(
+        folder_id=fid, filename="b.jpg", extension=".jpg",
+        file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
+        width=800, height=600,
+    )
+
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    client = app.test_client()
+
+    client.get(f"/photos/{pid1}/preview?size=1920")
+    time.sleep(0.05)
+    client.get(f"/photos/{pid2}/preview?size=1920")
+
+    # Quota is 0 MB so after each write eviction drains everything.
+    assert db.preview_cache_total_bytes() == 0
+    preview_dir = vireo_dir / "previews"
+    assert not (preview_dir / f"{pid1}_1920.jpg").exists()
+    assert not (preview_dir / f"{pid2}_1920.jpg").exists()

@@ -7045,8 +7045,32 @@ def create_app(db_path, thumb_cache_dir=None):
         return fixed | {int(pm)}
 
     def evict_preview_cache_if_over_quota(db, vireo_dir):
-        """Evict until under preview_cache_max_mb. Implemented in Task 9."""
-        return
+        """Evict oldest preview_cache entries until under preview_cache_max_mb.
+
+        Walks rows in ascending last_access_at order. Removes the file and
+        the row; stops as soon as total <= quota. Self-healing: if the file
+        is already missing we still delete the row so we don't chase ghosts.
+        """
+        import config as cfg
+        quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
+        max_bytes = int(quota_mb) * 1024 * 1024
+        total = db.preview_cache_total_bytes()
+        if total <= max_bytes:
+            return
+
+        preview_dir = os.path.join(vireo_dir, "previews")
+        for row in db.preview_cache_oldest_first():
+            if total <= max_bytes:
+                break
+            path = os.path.join(
+                preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
+            )
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            db.preview_cache_delete(row["photo_id"], row["size"])
+            total -= row["bytes"]
 
     def _serve_preview(photo_id, size):
         """Serve a preview at the given size, using the preview_cache LRU.
@@ -7083,6 +7107,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 (photo_id, size, st.st_size, st.st_mtime),
             )
             db.conn.commit()
+            # The file was just accessed by this request — update last_access_at
+            # to now so a freshly-adopted entry doesn't rank as ancient in the
+            # LRU (and get evicted on the very next cache write).
+            db.preview_cache_touch(photo_id, size)
             return send_file(cache_path, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
