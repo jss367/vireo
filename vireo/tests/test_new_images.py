@@ -825,3 +825,91 @@ def test_delete_photos_invalidates_cache(db_with_workspace):
         f"Expected a.JPG to re-surface as new after delete_photos removed "
         f"its row; got new_count={r2['new_count']}. per_root={r2['per_root']}"
     )
+
+
+def test_add_workspace_folder_invalidates_cache(tmp_path):
+    """Linking a folder to a workspace must clear the workspace's cached
+    new-images payload. Otherwise the banner keeps showing the pre-link
+    ``new_count`` (e.g. ``0``) until TTL expiry even though the newly-linked
+    folder's untracked files are now in scope.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("B")
+
+    # Add a folder under workspace B only. ``add_folder`` auto-links to the
+    # active workspace, so set ws_b active first.
+    db.set_active_workspace(ws_b)
+    root = tmp_path / "unattached"
+    _touch_image(str(root / "IMG.JPG"))
+    folder_id = db.add_folder(str(root), name="unattached")
+
+    # Prime the cache for ws_a — it has no linked folders yet, so new_count=0.
+    db.set_active_workspace(ws_a)
+    r1 = db.get_new_images_for_workspace(ws_a)
+    assert r1["new_count"] == 0
+    assert db._new_images_cache.get(db._db_path, ws_a) is not None
+
+    # Link the folder to ws_a. This must invalidate ws_a's cache so the
+    # banner reflects the newly-visible untracked file.
+    db.add_workspace_folder(ws_a, folder_id)
+
+    assert db._new_images_cache.get(db._db_path, ws_a) is None, (
+        "add_workspace_folder must invalidate the workspace's new-images cache"
+    )
+
+
+def test_remove_workspace_folder_invalidates_cache(db_with_workspace):
+    """Unlinking a folder from a workspace must clear the cached new-images
+    payload so the banner stops crediting the removed folder's untracked
+    files to this workspace.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    folder_id = db.add_folder(str(root), name="shoot")
+
+    # Prime the cache: one untracked file in this workspace.
+    r1 = db.get_new_images_for_workspace(ws_id)
+    assert r1["new_count"] == 1
+    assert db._new_images_cache.get(db._db_path, ws_id) is not None
+
+    db.remove_workspace_folder(ws_id, folder_id)
+
+    assert db._new_images_cache.get(db._db_path, ws_id) is None, (
+        "remove_workspace_folder must invalidate the workspace's "
+        "new-images cache"
+    )
+
+
+def test_move_folders_to_workspace_invalidates_both_workspaces(tmp_path):
+    """``move_folders_to_workspace`` changes folder membership for BOTH the
+    source and target workspaces, so each workspace's cached new-images
+    payload must be dropped.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("B")
+
+    # Add a folder to ws_a (auto-linked via add_folder).
+    db.set_active_workspace(ws_a)
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    folder_id = db.add_folder(str(root), name="shoot")
+
+    # Prime both caches.
+    db.get_new_images_for_workspace(ws_a)
+    db.get_new_images_for_workspace(ws_b)
+    assert db._new_images_cache.get(db._db_path, ws_a) is not None
+    assert db._new_images_cache.get(db._db_path, ws_b) is not None
+
+    # Move folder from ws_a to ws_b.
+    result = db.move_folders_to_workspace(ws_a, ws_b, [folder_id])
+    assert result["folders_moved"] == 1
+
+    assert db._new_images_cache.get(db._db_path, ws_a) is None, (
+        "move_folders_to_workspace must invalidate the source workspace's cache"
+    )
+    assert db._new_images_cache.get(db._db_path, ws_b) is None, (
+        "move_folders_to_workspace must invalidate the target workspace's cache"
+    )

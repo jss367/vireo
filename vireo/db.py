@@ -905,6 +905,10 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder's untracked files now count toward this workspace's
+        # new-images backlog. Drop any stale cached payload so the next read
+        # recomputes against the updated folder set.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a folder from a workspace."""
@@ -913,6 +917,9 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def get_workspace_folders(self, workspace_id):
         """Return all folders linked to a workspace."""
@@ -987,6 +994,12 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+
+        # Folders changed membership for BOTH workspaces, so each workspace's
+        # new-images backlog needs to be recomputed on the next read.
+        self._new_images_cache.invalidate_workspaces(
+            self._db_path, [source_ws_id, target_ws_id]
+        )
 
         return {
             "folders_moved": len(folder_ids),
