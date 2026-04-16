@@ -105,3 +105,31 @@ def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkey
     r2 = db.get_new_images_for_workspace(ws_id)
     assert r1 == r2
     assert calls[0] == 1  # second call served from cache
+
+
+def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
+    """If workspaces A and B both link folder F, a scan of F must clear both caches."""
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("B")
+
+    # Link the same folder into both workspaces.
+    db.set_active_workspace(ws_a)
+    root = tmp_path / "shared"
+    _touch_image(str(root / "IMG.JPG"))
+    root_id = db.add_folder(str(root), name="shared")
+    db.set_active_workspace(ws_b)
+    db.add_workspace_folder(ws_b, root_id)
+
+    # Prime both caches.
+    db.set_active_workspace(ws_a)
+    db.get_new_images_for_workspace(ws_a)
+    db.get_new_images_for_workspace(ws_b)
+    assert db._new_images_cache.get(ws_a) is not None
+    assert db._new_images_cache.get(ws_b) is not None
+
+    # Scan completes for folder root_id.
+    db.invalidate_new_images_cache_for_folders([root_id])
+
+    assert db._new_images_cache.get(ws_a) is None
+    assert db._new_images_cache.get(ws_b) is None
