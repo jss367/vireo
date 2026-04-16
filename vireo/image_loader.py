@@ -97,6 +97,37 @@ def _load_standard(path, max_size):
         return None
 
 
+def get_canonical_image_path(photo, vireo_dir, folders):
+    """Return the canonical image path for a photo — the root of the pyramid.
+
+    Preference order:
+      1. working copy JPEG (if photo.working_copy_path is set and file exists)
+      2. source file (folder.path + '/' + photo.filename)
+
+    If working_copy_path is set but the file is missing, logs a warning and
+    falls back to source. Callers should still handle missing source files.
+
+    Args:
+        photo: dict with working_copy_path, folder_id, filename
+        vireo_dir: path to ~/.vireo/
+        folders: {folder_id: folder_path} mapping
+
+    Returns:
+        str path (may or may not exist — caller checks)
+    """
+    wc_rel = photo.get("working_copy_path")
+    if wc_rel:
+        wc_abs = os.path.join(vireo_dir, wc_rel)
+        if os.path.exists(wc_abs):
+            return wc_abs
+        log.warning(
+            "Canonical path: working copy missing for photo %s at %s; "
+            "falling back to source", photo.get("id"), wc_abs,
+        )
+    folder_path = folders.get(photo["folder_id"], "")
+    return os.path.join(folder_path, photo["filename"])
+
+
 def load_working_image(photo, vireo_dir, max_size=1024, folders=None):
     """Load a photo's working image — the fast path for all pixel operations.
 

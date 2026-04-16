@@ -342,3 +342,49 @@ def test_load_working_image_returns_none_when_no_working_copy_no_folders(tmp_pat
     img = load_working_image(photo, str(tmp_path), max_size=1024)
 
     assert img is None
+
+
+# ── get_canonical_image_path tests ──────────────────────────────────────────
+
+
+def test_get_canonical_image_path_prefers_working_copy(tmp_path):
+    """When working_copy_path is set and file exists, returns working copy path."""
+    from image_loader import get_canonical_image_path
+
+    vireo_dir = tmp_path / "vireo"
+    (vireo_dir / "working").mkdir(parents=True)
+    wc = vireo_dir / "working" / "42.jpg"
+    wc.write_bytes(b"fake")
+
+    photo = {"working_copy_path": "working/42.jpg", "folder_id": 1, "filename": "src.jpg"}
+    folders = {1: "/some/folder"}
+
+    result = get_canonical_image_path(photo, str(vireo_dir), folders)
+    assert result == str(wc)
+
+
+def test_get_canonical_image_path_falls_back_to_source(tmp_path):
+    """When no working_copy_path, returns folder/filename."""
+    from image_loader import get_canonical_image_path
+
+    photo = {"working_copy_path": None, "folder_id": 1, "filename": "src.jpg"}
+    folders = {1: "/some/folder"}
+
+    result = get_canonical_image_path(photo, str(tmp_path), folders)
+    assert result == "/some/folder/src.jpg"
+
+
+def test_get_canonical_image_path_wc_missing_falls_back(tmp_path, caplog):
+    """When working_copy_path is set but file missing, warn and fall back to source."""
+    import logging
+
+    from image_loader import get_canonical_image_path
+
+    photo = {"working_copy_path": "working/99.jpg", "folder_id": 1, "filename": "src.jpg"}
+    folders = {1: "/some/folder"}
+
+    with caplog.at_level(logging.WARNING):
+        result = get_canonical_image_path(photo, str(tmp_path), folders)
+
+    assert result == "/some/folder/src.jpg"
+    assert any("working copy missing" in r.message.lower() for r in caplog.records)
