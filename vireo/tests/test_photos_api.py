@@ -774,3 +774,19 @@ def test_preview_cache_clear_removes_all(client_with_photo):
     assert not os.path.exists(
         os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
     )
+
+
+def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
+    """POSTing a smaller preview_cache_max_mb evicts down to the new quota."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    # Populate cache
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    # Shrink quota to 0 via the config endpoint (same path the UI uses)
+    resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
+    assert resp.status_code == 200
+
+    assert db.preview_cache_total_bytes() == 0

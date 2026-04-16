@@ -2282,6 +2282,11 @@ def create_app(db_path, thumb_cache_dir=None):
         elif "HF_TOKEN" in os.environ:
             del os.environ["HF_TOKEN"]
         cfg.save(current)
+        # If the user shrunk the preview cache quota, evict immediately to the
+        # new size rather than waiting for the next cache write. No-op when
+        # already under quota, so always safe to call.
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
         return jsonify({"ok": True})
 
     @app.route("/api/darktable/status")
