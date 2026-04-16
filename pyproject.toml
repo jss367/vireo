@@ -40,6 +40,11 @@ export = [
     "mmcv>=2.1",
     "mmpose>=1.3",
     "mmdeploy>=1.3",
+    # SuperAnimal-Quadruped / SuperAnimal-Bird: dlclibrary loads DLC 3.x
+    # PyTorch weights; deeplabcut is pulled for its heatmap decoder utilities
+    # referenced by the export wrapper's validation path.
+    "dlclibrary>=0.0.6",
+    "deeplabcut>=3.0",
 ]
 dev = [
     "pytest>=9.0",

@@ -47,6 +47,8 @@ ALL_MODELS = [
     "sam2-base-plus",
     "sam2-large",
     "rtmpose-animal",
+    "superanimal-quadruped",
+    "superanimal-bird",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1123,6 +1125,174 @@ def export_rtmpose_animal(output_dir, opset, validate=False):
 
 
 # ---------------------------------------------------------------------------
+# SuperAnimal (DeepLabCut 3.x) — production animal keypoint models
+# ---------------------------------------------------------------------------
+#
+# DLC 3.x publishes SuperAnimal-Quadruped and SuperAnimal-Bird under
+# PyTorch state dicts on HuggingFace. dlclibrary.load_superanimal_model
+# returns a torch.nn.Module whose forward produces per-keypoint heatmaps
+# at 1/4 spatial resolution; the ONNX graph exports the raw forward and
+# decoding happens at inference time via keypoints.decode_heatmaps.
+
+# Keypoint orders below come from the DLC model cards. Left/right eye
+# indices are what the eye-focus pipeline stage actually reads; the rest
+# are included so the config.json documents the full model output and the
+# UI could later label them without re-deriving the order.
+_SUPERANIMAL_QUADRUPED_KEYPOINTS = [
+    "nose", "upper_jaw", "lower_jaw", "mouth_end_right", "mouth_end_left",
+    "right_eye", "right_earbase", "right_earend", "right_antler_base",
+    "right_antler_end",
+    "left_eye", "left_earbase", "left_earend", "left_antler_base",
+    "left_antler_end",
+    "neck_base", "neck_end", "throat_base", "throat_end",
+    "back_base", "back_end", "back_middle", "tail_base", "tail_end",
+    "front_left_thai", "front_left_knee", "front_left_paw",
+    "front_right_thai", "front_right_knee", "front_right_paw",
+    "back_left_paw", "back_left_thai", "back_left_knee",
+    "back_right_thai", "back_right_knee", "back_right_paw",
+    "belly_bottom", "body_middle_right", "body_middle_left",
+]
+_SUPERANIMAL_BIRD_KEYPOINTS = [
+    "beak_tip", "left_eye", "right_eye", "crown", "nape",
+    "left_shoulder", "right_shoulder", "left_wing_tip", "right_wing_tip",
+    "back", "tail_base", "tail_tip",
+    "left_leg", "right_leg",
+    "left_foot", "right_foot",
+]
+
+
+class _SuperAnimalWrapper:
+    """Wrap a DLC pose model so ONNX export sees (B,3,H,W) → (B,K,H',W').
+
+    DLC's stock forward can return dataclasses / nested dicts depending on
+    the DLC version; torch.onnx.export needs plain tensors. This wrapper
+    exposes only the heatmap tensor, making the export graph clean and the
+    ONNX output shape predictable for keypoints.decode_heatmaps.
+    """
+
+    def __init__(self, model):
+        import torch.nn as nn
+        if not isinstance(model, nn.Module):
+            raise TypeError(
+                "expected torch.nn.Module from dlclibrary, got "
+                f"{type(model).__name__}"
+            )
+        self.model = model.eval()
+
+    def __call__(self, x):
+        out = self.model(x)
+        # DLC's output structure varies by release; we defensively pull the
+        # heatmap tensor wherever it shows up. Raises early if this layout
+        # changes so a silent wrong-tensor export never lands.
+        if hasattr(out, "heatmap"):
+            return out.heatmap
+        if isinstance(out, dict) and "heatmap" in out:
+            return out["heatmap"]
+        if isinstance(out, (list, tuple)):
+            return out[0]
+        import torch
+        if isinstance(out, torch.Tensor):
+            return out
+        raise RuntimeError(
+            f"Unrecognized DLC model output: {type(out).__name__}. "
+            "Update _SuperAnimalWrapper to match the new DLC forward."
+        )
+
+
+def _export_superanimal_variant(
+    dlc_name, model_id, keypoint_names, output_dir, opset, validate=False,
+):
+    """Shared export path for SuperAnimal-Quadruped and SuperAnimal-Bird.
+
+    Args:
+        dlc_name: the model name accepted by
+            ``dlclibrary.load_superanimal_model`` (e.g. 'superanimal_quadruped').
+        model_id: the Vireo-side id used for directory naming (e.g.
+            'superanimal-quadruped').
+        keypoint_names: ordered list of keypoint names matching the model's
+            output channels.
+    """
+    import torch
+    from dlclibrary import load_superanimal_model
+
+    log.info("Exporting %s...", model_id)
+
+    torch_model = load_superanimal_model(dlc_name)
+    wrapped = _SuperAnimalWrapper(torch_model)
+
+    # 256×256 keeps parity with RTMPose so the pipeline stage's aspect-
+    # preserving resize + top-left pad produces the same crop geometry
+    # regardless of which keypoint model is routed.
+    input_h, input_w = 256, 256
+    dummy = torch.zeros(1, 3, input_h, input_w, dtype=torch.float32)
+
+    out_dir = _ensure_dir(os.path.join(output_dir, model_id))
+    onnx_path = os.path.join(out_dir, "model.onnx")
+
+    torch.onnx.export(
+        lambda x: wrapped(x),
+        dummy,
+        onnx_path,
+        opset_version=opset,
+        do_constant_folding=True,
+        input_names=["pixel_values"],
+        output_names=["heatmaps"],
+        # Fixed batch of 1 keeps the graph simple; the pipeline stage runs
+        # one crop at a time anyway. If batched export is ever needed,
+        # re-add dynamic_axes={"pixel_values": {0: "batch"}} here.
+    )
+
+    config = {
+        "input_size": [1, 3, input_h, input_w],
+        # ImageNet mean/std — DLC SuperAnimal models were fine-tuned from
+        # ImageNet-pretrained backbones and expect the standard normalization.
+        "mean": [123.675, 116.28, 103.53],
+        "std": [58.395, 57.12, 57.375],
+        "keypoints": keypoint_names,
+        "output_type": "heatmap",
+    }
+    _save_json(os.path.join(out_dir, "config.json"), config)
+
+    if validate:
+        # Compare decoded keypoints between PyTorch and ONNX Runtime on the
+        # dummy input — ±1-pixel tolerance is the plan's bar. Real-image
+        # validation lives in tests/e2e/.
+        import onnxruntime as ort
+        sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        with torch.no_grad():
+            torch_hm = wrapped(dummy).numpy()
+        onnx_hm = sess.run(None, {"pixel_values": dummy.numpy()})[0]
+        import numpy as np
+        max_diff = float(np.abs(torch_hm - onnx_hm).max())
+        log.info("  %s ONNX vs PyTorch heatmap max abs diff: %.6f", model_id, max_diff)
+        if max_diff > 1e-3:
+            raise RuntimeError(
+                f"{model_id} ONNX/PyTorch disagreement too large: {max_diff}"
+            )
+
+    log.info("  %s export complete: %s", model_id, out_dir)
+    return onnx_path
+
+
+def export_superanimal_quadruped(output_dir, opset, validate=False):
+    return _export_superanimal_variant(
+        "superanimal_quadruped",
+        "superanimal-quadruped",
+        _SUPERANIMAL_QUADRUPED_KEYPOINTS,
+        output_dir, opset, validate,
+    )
+
+
+def export_superanimal_bird(output_dir, opset, validate=False):
+    return _export_superanimal_variant(
+        "superanimal_bird",
+        "superanimal-bird",
+        _SUPERANIMAL_BIRD_KEYPOINTS,
+        output_dir, opset, validate,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Export dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1140,6 +1310,8 @@ _EXPORT_FUNCTIONS = {
     "sam2-base-plus": export_sam2_base_plus,
     "sam2-large": export_sam2_large,
     "rtmpose-animal": export_rtmpose_animal,
+    "superanimal-quadruped": export_superanimal_quadruped,
+    "superanimal-bird": export_superanimal_bird,
 }
 
 
@@ -1256,6 +1428,8 @@ Available models:
   sam2-base-plus            SAM2 Hiera Base+
   sam2-large                SAM2 Hiera Large
   rtmpose-animal            RTMPose-s AP-10K (animal keypoints, eye-focus spike)
+  superanimal-quadruped     DLC SuperAnimal-Quadruped (39 kp, mammal routing)
+  superanimal-bird          DLC SuperAnimal-Bird (16 kp, bird routing)
 
 Examples:
   %(prog)s --model bioclip-vit-b-16
