@@ -572,6 +572,36 @@ def test_pipeline_job_scan_invalidates_cache(tmp_path, monkeypatch):
     )
 
 
+def test_audit_import_untracked_invalidates_cache(db_with_workspace):
+    """audit.import_untracked() calls scanner.scan internally (once per unique
+    parent directory of the untracked paths). Each scan must invalidate the
+    new-images cache for workspaces that reference the scanned folder so the
+    banner updates immediately rather than waiting for TTL expiry.
+
+    Mirrors the try/finally pattern in pipeline_job.scanner_stage and the
+    api_job_scan / api_job_import_full handlers.
+    """
+    from audit import import_untracked
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    img_path = root / "IMG_0001.JPG"
+    _touch_image(str(img_path))
+    db.add_folder(str(root), name="shoot")
+
+    # Prime the cache: one file present, none ingested -> new_count=1.
+    primed = db.get_new_images_for_workspace(ws_id)
+    assert primed["new_count"] == 1
+    assert db._new_images_cache.get(ws_id) is not None
+
+    import_untracked(db, [str(img_path)])
+
+    assert db._new_images_cache.get(ws_id) is None, (
+        "audit.import_untracked must invalidate the new-images cache for "
+        "every scanned parent directory (try/finally mirrors pipeline_job)"
+    )
+
+
 def test_invalidate_new_images_cache_for_folders_handles_thousands_of_ids(
     db_with_workspace,
 ):
