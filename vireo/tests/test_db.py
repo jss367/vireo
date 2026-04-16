@@ -2748,6 +2748,28 @@ def test_get_highlights_candidates_includes_descendants(tmp_path):
     assert len(results) == 2
 
 
+def test_get_highlights_candidates_skips_missing_descendants(tmp_path):
+    """Photos in descendant folders marked 'missing' are excluded (match count_filtered_photos)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
+    missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
+    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+                          file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
+    db.conn.commit()
+
+    candidates = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    assert len(candidates) == 1
+    assert candidates[0]["filename"] == 'a.jpg'
+    # Consistent with count_filtered_photos
+    assert db.count_filtered_photos(folder_id=root) == 1
+
+
 def test_get_highlights_candidates_excludes_rejected(tmp_path):
     """Flagged-rejected photos are excluded."""
     from db import Database

@@ -2988,6 +2988,7 @@ class Database:
                       bp.species
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                LEFT JOIN (
                    SELECT photo_id, name AS species FROM (
                        SELECT pk.photo_id, k.name,
