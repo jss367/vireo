@@ -420,8 +420,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # timestamp and exif_data are NULL). Photos with genuinely
                 # missing timestamps (screenshots, exports) will have
                 # exif_data set after one extraction attempt.
+                # Also flag rows where a RAW file has absurdly small
+                # dimensions (<1000px) — that's the embedded JPEG thumb
+                # leaking through when ExifTool's File group was missing
+                # on the original scan.
+                dims_suspect = (
+                    existing["extension"] in RAW_EXTENSIONS
+                    and existing["width"] is not None
+                    and existing["width"] < 1000
+                )
                 metadata_missing = (
-                    existing["timestamp"] is None
+                    (existing["timestamp"] is None or dims_suspect)
                     and existing["id"] not in exif_extracted
                 )
 

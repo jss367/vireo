@@ -78,6 +78,39 @@ def _looks_like_missing_external_data(err):
     )
 
 
+_RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+
+
+def _find_broken_metadata_folders(db, photo_ids):
+    """Find folders containing photos with broken metadata in the given scope.
+
+    A photo is considered broken if its EXIF extraction never produced a
+    usable result — ``timestamp IS NULL`` or (for RAW files) dimensions
+    under 1000px, which indicates the embedded JPEG thumbnail leaked
+    through instead of the true sensor size.
+
+    Returns a list of ``(folder_path, broken_count)`` tuples sorted by
+    path, or ``[]`` when nothing needs repair.
+    """
+    if not photo_ids:
+        return []
+    raw_list = ",".join(f"'{e}'" for e in _RAW_EXTENSIONS)
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"""SELECT f.path, COUNT(*) AS n
+            FROM photos p
+            JOIN folders f ON p.folder_id = f.id
+            WHERE p.id IN ({placeholders})
+              AND (p.timestamp IS NULL
+                   OR (p.extension IN ({raw_list})
+                       AND p.width IS NOT NULL AND p.width < 1000))
+            GROUP BY f.id
+            ORDER BY f.path""",
+        tuple(photo_ids),
+    ).fetchall()
+    return [(r["path"], r["n"]) for r in rows]
+
+
 def _update_stages(runner, job_id, stages):
     """Push a stages progress update."""
     runner.push_event(job_id, "progress", {
@@ -263,13 +296,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     def scanner_stage():
         nonlocal collection_id
 
-        if skip_scan:
-            stages["scan"]["status"] = "skipped"
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary="Skipped (using collection)")
-            _update_stages(runner, job["id"], stages)
-            scan_to_thumb.put(_SENTINEL)
-            return
         # Note: stages["scan"]["status"] is NOT set to "running" here. It is
         # flipped to "running" just before each do_scan() call below, so
         # numScan doesn't pulse during the ingest sub-phase.
@@ -319,6 +345,80 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "eta_seconds": eta,
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
+
+            # Collection mode: no scan targets, but check whether any
+            # photos in the collection have broken metadata (NULL timestamp
+            # or RAW thumbnail-sized dimensions) that would poison
+            # downstream stages. If so, run a targeted repair scan on just
+            # the affected folders. This is the self-healing path — when
+            # nothing's broken, we keep the historical "Skipped" summary.
+            if skip_scan:
+                coll_photos = thread_db.get_collection_photos(
+                    collection_id, per_page=999999,
+                )
+                broken = _find_broken_metadata_folders(
+                    thread_db, [p["id"] for p in coll_photos],
+                )
+                if not broken:
+                    stages["scan"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "scan", status="completed",
+                        summary="Skipped (using collection)",
+                    )
+                    _update_stages(runner, job["id"], stages)
+                    scan_to_thumb.put(_SENTINEL)
+                    return
+
+                total_broken = sum(n for _, n in broken)
+                stages["scan"]["label"] = (
+                    f"Repair metadata ({total_broken} photos)"
+                )
+                stages["scan"]["status"] = "running"
+                runner.update_step(
+                    job["id"], "scan", status="running",
+                    summary=(f"Repairing {total_broken} photos in "
+                             f"{len(broken)} folder"
+                             f"{'s' if len(broken) != 1 else ''}"),
+                )
+                _update_stages(runner, job["id"], stages)
+
+                unreachable = 0
+                for folder_path, _ in broken:
+                    if not os.path.isdir(folder_path):
+                        log.warning(
+                            "Repair scan skipped for missing folder: %s",
+                            folder_path,
+                        )
+                        unreachable += 1
+                        continue
+                    try:
+                        do_scan(
+                            folder_path, thread_db,
+                            progress_callback=progress_cb,
+                            incremental=True,
+                            extract_full_metadata=pipeline_cfg.get(
+                                "extract_full_metadata", True,
+                            ),
+                            photo_callback=photo_cb,
+                            status_callback=status_cb,
+                            restrict_dirs=[folder_path],
+                        )
+                    except (OSError, RuntimeError) as e:
+                        log.warning(
+                            "Repair scan failed for %s: %s", folder_path, e,
+                        )
+                        unreachable += 1
+
+                summary = f"{total_broken} photos repaired"
+                if unreachable:
+                    summary += (f", {unreachable} folder"
+                                f"{'s' if unreachable != 1 else ''} unreachable")
+                stages["scan"]["status"] = "completed"
+                runner.update_step(
+                    job["id"], "scan", status="completed", summary=summary,
+                )
+                scan_to_thumb.put(_SENTINEL)
+                return
 
             # Determine source folder(s)
             sources = params.sources or ([params.source] if params.source else [])
