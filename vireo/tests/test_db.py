@@ -2820,6 +2820,46 @@ def test_get_folders_with_quality_data(tmp_path):
     assert folders[0]["photo_count"] > 0
 
 
+def test_get_folders_with_quality_data_rolls_up_subtree(tmp_path):
+    """Parent folder's photo_count reflects scored photos in descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    # Scored photo lives only in the child
+    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    # Both the parent and the child appear; each counts the single scored photo
+    by_name = {f["name"]: f for f in folders}
+    assert by_name["p"]["photo_count"] == 1
+    assert by_name["c"]["photo_count"] == 1
+
+
+def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
+    """A parent folder does not count photos in descendant folders marked 'missing'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
+    missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
+    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+                          file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    assert by_name["p"]["photo_count"] == 1  # only the ok-child photo
+    assert "gone" not in by_name
+
+
 def test_color_labels_table_exists(tmp_path):
     """photo_color_labels table is created on init."""
     from db import Database

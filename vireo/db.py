@@ -3012,21 +3012,34 @@ class Database:
         return rows
 
     def get_folders_with_quality_data(self):
-        """Return folders that have at least one photo with a quality_score.
+        """Return folders with at least one scored photo in their subtree.
 
         Used to populate the folder dropdown on the highlights page.
-        Returns id, path, name, and count of scored photos, ordered by most recent photo first.
+        ``photo_count`` is the count of scored photos across the folder and
+        all of its descendant folders (restricted to folders whose ``status``
+        is ``'ok'``) — matching the subtree scope of
+        :meth:`get_highlights_candidates`.
         """
         return self.conn.execute(
-            """SELECT f.id, f.path, f.name,
-                      COUNT(p.id) as photo_count,
-                      MAX(p.timestamp) as latest_photo
+            """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
+                   SELECT p.id, p.folder_id, p.timestamp
+                   FROM photos p
+                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status = 'ok'
+                   WHERE p.quality_score IS NOT NULL
+                   UNION ALL
+                   SELECT a.photo_id, f.parent_id, a.timestamp
+                   FROM ancestors a
+                   JOIN folders f ON f.id = a.folder_id
+                   WHERE f.parent_id IS NOT NULL
+               )
+               SELECT f.id, f.path, f.name,
+                      COUNT(a.photo_id) as photo_count,
+                      MAX(a.timestamp) as latest_photo
                FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               JOIN photos p ON p.folder_id = f.id
+               JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
                  AND f.status = 'ok'
-                 AND p.quality_score IS NOT NULL
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
             (self._ws_id(),),
