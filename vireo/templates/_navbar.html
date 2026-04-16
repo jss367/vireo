@@ -3277,38 +3277,36 @@ setInterval(checkMissingFolders, 600000);
 
 /* ---------- New Images Banner ---------- */
 const NEW_IMAGES_DISMISS_KEY = 'newImagesDismissedWorkspace';
-let _newImagesActiveWs = null;
 
-async function _getActiveWsIdForBanner() {
-  if (_newImagesActiveWs !== null) return _newImagesActiveWs;
+function _isNewImagesDismissed(wsId, newCount) {
+  if (wsId === null || wsId === undefined || wsId === '') return false;
+  const raw = sessionStorage.getItem(NEW_IMAGES_DISMISS_KEY);
+  if (!raw) return false;
+  let stored;
   try {
-    const resp = await fetch('/api/workspaces/active');
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    _newImagesActiveWs = (data && data.id != null) ? String(data.id) : '';
-    return _newImagesActiveWs;
+    stored = JSON.parse(raw);
   } catch (e) {
-    return null;
+    return false;
   }
-}
-
-function _isNewImagesDismissed(wsId) {
-  const dismissed = sessionStorage.getItem(NEW_IMAGES_DISMISS_KEY) || '';
-  return wsId !== null && wsId !== '' && dismissed === String(wsId);
+  if (!stored || typeof stored !== 'object') return false;
+  if (String(stored.wsId) !== String(wsId)) return false;
+  return newCount <= Number(stored.count);
 }
 
 async function checkNewImages() {
   try {
-    const wsId = await _getActiveWsIdForBanner();
     const resp = await fetch('/api/workspaces/active/new-images');
     if (!resp.ok) return;
     const data = await resp.json();
     const banner = document.getElementById('newImagesBanner');
     const msg = document.getElementById('newImagesMsg');
     if (!banner || !msg) return;
-    if (data.new_count > 0 && !_isNewImagesDismissed(wsId)) {
+    const wsId = (data && data.workspace_id != null) ? String(data.workspace_id) : '';
+    if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count)) {
       const s = data.new_count === 1 ? '' : 's';
       msg.textContent = `${data.new_count} new image${s} detected in your registered folders.`;
+      banner.dataset.count = String(data.new_count);
+      banner.dataset.ws = wsId;
       banner.style.display = 'flex';
     } else {
       banner.style.display = 'none';
@@ -3316,18 +3314,23 @@ async function checkNewImages() {
   } catch (e) { /* ignore */ }
 }
 
-async function dismissNewImagesBanner() {
+function dismissNewImagesBanner() {
   const banner = document.getElementById('newImagesBanner');
-  if (banner) banner.style.display = 'none';
-  const wsId = await _getActiveWsIdForBanner();
-  if (wsId !== null && wsId !== '') {
-    sessionStorage.setItem(NEW_IMAGES_DISMISS_KEY, String(wsId));
+  if (!banner) return;
+  const wsId = banner.dataset.ws || '';
+  const count = Number(banner.dataset.count || 0);
+  banner.style.display = 'none';
+  if (wsId !== '') {
+    sessionStorage.setItem(
+      NEW_IMAGES_DISMISS_KEY,
+      JSON.stringify({ wsId: wsId, count: count })
+    );
   }
 }
 
 // Run on page load and every 60s. Banner dismissal is per-workspace via
-// sessionStorage; a workspace switch triggers a full page reload, which
-// re-reads the dismissal key against the new active workspace id.
+// sessionStorage and re-arms automatically when new_count exceeds the
+// dismissed count (e.g. after importing more images).
 checkNewImages();
 setInterval(checkNewImages, 60000);
 

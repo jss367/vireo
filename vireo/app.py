@@ -1822,8 +1822,11 @@ def create_app(db_path, thumb_cache_dir=None):
         db = _get_db()
         ws_id = db._active_workspace_id
         if ws_id is None:
-            return jsonify({"new_count": 0, "per_root": [], "sample": []})
-        return jsonify(db.get_new_images_for_workspace(ws_id))
+            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
+        payload = db.get_new_images_for_workspace(ws_id)
+        payload = dict(payload)
+        payload["workspace_id"] = ws_id
+        return jsonify(payload)
 
     # -- Prediction API routes --
 

@@ -52,6 +52,7 @@ def test_api_new_images_reports_unscanned_files(app_and_db):
     data = resp.get_json()
     assert data["new_count"] == 1
     assert len(data["per_root"]) == 1
+    assert data["workspace_id"] == ws_id
 
 
 def test_api_new_images_zero_when_fully_ingested(app_and_db):
@@ -64,4 +65,25 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
 
     client = app.test_client()
     resp = client.get("/api/workspaces/active/new-images")
-    assert resp.get_json()["new_count"] == 0
+    data = resp.get_json()
+    assert data["new_count"] == 0
+    assert data["workspace_id"] == ws_id
+
+
+def test_api_new_images_returns_null_workspace_when_none_active(app_and_db, monkeypatch):
+    app, db, ws_id, tmp_path = app_and_db
+    # Each request creates its own Database via _get_db(), which auto-restores
+    # the last-used workspace. To simulate "no active workspace", patch
+    # set_active_workspace to a no-op so the per-request db starts with
+    # _active_workspace_id = None.
+    from db import Database
+    monkeypatch.setattr(Database, "set_active_workspace",
+                        lambda self, ws_id: None)
+
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["workspace_id"] is None
+    assert data["new_count"] == 0
+    assert data["per_root"] == []
