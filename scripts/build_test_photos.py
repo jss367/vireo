@@ -115,6 +115,11 @@ def sample(source, dest, counts=None, dry_run=False):
     Returns a dict summarizing what was copied.
     """
     source = Path(source).expanduser().resolve()
+    # os.walk on a missing path yields no entries, so without this guard a typo
+    # in --source looks like a successful run with all-zero counts and an empty
+    # dataset — which quietly invalidates every downstream user-first test.
+    if not source.is_dir():
+        sys.exit(f"source does not exist or is not a directory: {source}")
     dest = _safe_dest(dest)
 
     # dest == source would make every category subdir a child of the walk root,

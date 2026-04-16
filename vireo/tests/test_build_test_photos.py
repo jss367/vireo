@@ -213,6 +213,24 @@ def test_sample_idempotent_under_reversed_walk_order(tmp_path, monkeypatch):
     )
 
 
+def test_sample_rejects_missing_source(tmp_path):
+    # A typo in --source would otherwise produce an empty dataset with all-zero
+    # counts and silently invalidate downstream tests. Fail loudly instead.
+    missing = tmp_path / "does-not-exist"
+    dest = tmp_path / "dest"
+    with pytest.raises(SystemExit, match="source does not exist"):
+        build_test_photos.sample(missing, dest)
+
+
+def test_sample_rejects_source_that_is_a_file(tmp_path):
+    # is_dir() also covers the case where --source points at a regular file.
+    not_a_dir = tmp_path / "a.jpg"
+    not_a_dir.write_bytes(b"A")
+    dest = tmp_path / "dest"
+    with pytest.raises(SystemExit, match="source does not exist"):
+        build_test_photos.sample(not_a_dir, dest)
+
+
 def test_sample_rejects_source_equals_dest(tmp_path):
     # If dest is the source directory itself, the walk-filter can't exclude
     # category subdirs (they become children of the walk root) and a rerun
