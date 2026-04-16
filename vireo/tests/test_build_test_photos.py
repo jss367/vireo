@@ -117,6 +117,26 @@ def test_sample_copies_and_writes_manifest(tmp_path):
     assert "jpegs" in content
 
 
+def test_sample_disambiguates_same_basename_different_content(tmp_path):
+    # Two different files with the same basename (common when libraries have
+    # repeated IMG_0001.jpg names across folders) must both land in dest.
+    source = tmp_path / "src"
+    (source / "dir1").mkdir(parents=True)
+    (source / "dir2").mkdir(parents=True)
+    (source / "dir1" / "IMG_0001.jpg").write_bytes(b"AAA")
+    (source / "dir2" / "IMG_0001.jpg").write_bytes(b"BBB")
+    dest = tmp_path / "dest"
+    build_test_photos.sample(
+        source,
+        dest,
+        counts={"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 2, "random": 0},
+    )
+    copied = list((dest / "jpegs").iterdir())
+    assert len(copied) == 2, f"expected 2 files, got {[p.name for p in copied]}"
+    contents = sorted(p.read_bytes() for p in copied)
+    assert contents == [b"AAA", b"BBB"]
+
+
 def test_sample_is_idempotent(tmp_path):
     source = tmp_path / "src"
     source.mkdir()

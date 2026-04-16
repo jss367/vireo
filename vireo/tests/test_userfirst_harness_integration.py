@@ -108,6 +108,28 @@ def test_sweep_flags_missing_static_asset(test_profile, monkeypatch):
         template.write_text(original)
 
 
+def test_report_is_written_when_session_body_raises(test_profile):
+    """Even if the `with` body crashes, findings.json + report.md must be on
+    disk — otherwise the exact failures we most want to diagnose vanish.
+    """
+    profile, _ = test_profile
+    from testing.userfirst.harness import vireo_session
+    from testing.userfirst.report import Finding
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with vireo_session(name="crash-test") as session:
+            session.report.add(Finding.bug("recorded before the crash"))
+            raise RuntimeError("boom")
+
+    runs = list((profile / "runs").iterdir())
+    assert len(runs) == 1
+    findings = json.loads((runs[0] / "findings.json").read_text())
+    assert findings["name"] == "crash-test"
+    messages = [f["message"] for f in findings["findings"]]
+    assert any("recorded before the crash" in m for m in messages)
+    assert (runs[0] / "report.md").exists()
+
+
 def test_prune_runs_enforces_cap(test_profile):
     profile, _ = test_profile
     from testing.userfirst.harness import vireo_session

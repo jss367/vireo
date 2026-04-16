@@ -165,6 +165,14 @@ def sample(source, dest, counts=None, dry_run=False):
             copied[category] = []
             for src in files:
                 tgt = cat_dir / src.name
+                # If something's already at the base name, only treat it as the
+                # same file when the contents actually match — otherwise two
+                # distinct sources with the same basename (e.g. repeated
+                # IMG_0001.jpg) would collapse into one destination and be
+                # miscounted in the manifest. Disambiguate with a content-hash
+                # suffix so each source gets its own deterministic target.
+                if tgt.exists() and content_hash(tgt) != content_hash(src):
+                    tgt = cat_dir / f"{src.stem}-{content_hash(src)[:8]}{src.suffix}"
                 if tgt.exists():
                     copied[category].append(tgt)
                     continue

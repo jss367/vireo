@@ -228,6 +228,7 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
     started = time.time()
 
     browser = pw = ctx = page = None
+    report = None
     try:
         _wait_for_health(base_url, timeout=startup_timeout)
 
@@ -240,11 +241,15 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
         report = Report(name=name)
         session = VireoSession(base_url, page, report, run_dir)
         yield session
-
-        report.duration_s = time.time() - started
-        report.write_json(run_dir / "findings.json")
-        report.write_markdown(run_dir / "report.md")
     finally:
+        # Persist the report even when the session body raises — otherwise
+        # findings and screenshots from a crashed scenario are silently lost.
+        if report is not None:
+            report.duration_s = time.time() - started
+            with contextlib.suppress(Exception):
+                report.write_json(run_dir / "findings.json")
+            with contextlib.suppress(Exception):
+                report.write_markdown(run_dir / "report.md")
         for close in (
             lambda: ctx and ctx.close(),
             lambda: browser and browser.close(),
