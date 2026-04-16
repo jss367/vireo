@@ -1745,6 +1745,7 @@ var _lbNativeZoom = null;   // zoom value corresponding to 1:1 for current photo
 var _lbPhotoW = null;       // original photo width (px)
 var _lbPhotoH = null;       // original photo height (px)
 var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
+var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
@@ -1816,6 +1817,7 @@ function openLightbox(photoId, filename, photoList) {
   _lbPhotoW = null;
   _lbPhotoH = null;
   _lbCurrentSrcKey = 'full';
+  _lbFullLongEdge = null;
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
   _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
@@ -1834,6 +1836,9 @@ function openLightbox(photoId, filename, photoList) {
   img.src = '/photos/' + photoId + '/full';
   img.onload = function() {
     img.onload = null;
+    if (_lightboxCurrentId === photoId && img.naturalWidth) {
+      _lbFullLongEdge = Math.max(img.naturalWidth, img.naturalHeight);
+    }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
   };
@@ -2370,7 +2375,7 @@ function _lbRecomputeNativeZoom() {
   // Compute zoom value that corresponds to 1:1 (one screen pixel == one image pixel).
   // We need the displayed size of the image at zoom=1.0 (fit) to compare against native.
   var img = document.getElementById('lightboxImg');
-  if (!img || !_lbPhotoW || !img.naturalWidth) {
+  if (!img || !_lbPhotoW || !_lbPhotoH || !img.naturalWidth || !img.naturalHeight) {
     _lbNativeZoom = null;
     return;
   }
@@ -2379,8 +2384,17 @@ function _lbRecomputeNativeZoom() {
     _lbNativeZoom = null;
     return;
   }
+  // Stored dims from /api/photos are pre-EXIF-orientation (scanner reads raw EXIF
+  // width/height). The loaded image applies orientation. If the aspect ratios disagree,
+  // the stored dims are rotated 90°; swap to match the displayed image.
+  var photoW = _lbPhotoW;
+  var storedAspect = _lbPhotoW / _lbPhotoH;
+  var imgAspect = img.naturalWidth / img.naturalHeight;
+  if (Math.abs(storedAspect - imgAspect) > Math.abs((1 / storedAspect) - imgAspect)) {
+    photoW = _lbPhotoH;
+  }
   // Guard: very small images (nativeZoom < 1) clamp to 1.0 so fit == 1:1
-  _lbNativeZoom = Math.max(1.0, _lbPhotoW / fitDisplayedW);
+  _lbNativeZoom = Math.max(1.0, photoW / fitDisplayedW);
 }
 
 function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
@@ -2490,7 +2504,10 @@ function _lbPickSourceKey() {
   // DPR consideration: high-DPI screens need more pixels for a crisp display.
   var dpr = window.devicePixelRatio || 1;
   var needed = displayedLong * dpr;
-  if (needed <= 1920) return 'full';
+  // /full's actual long edge depends on the server's preview_max_size config (default 1920).
+  // Use the measured value from the loaded image if available; fall back to the default.
+  var fullLongEdge = _lbFullLongEdge || 1920;
+  if (needed <= fullLongEdge) return 'full';
   if (needed <= 2560) return '2560';
   if (needed <= 3840) return '3840';
   return 'original';
