@@ -139,6 +139,26 @@ def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
     assert db._new_images_cache.get(ws_b) is None
 
 
+def test_scan_job_invalidates_cache(db_with_workspace):
+    """After a successful scan, the cached new_count must be re-computed on next read."""
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "a.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    # Prime cache with current state (1 new).
+    r1 = db.get_new_images_for_workspace(ws_id)
+    assert r1["new_count"] == 1
+
+    # Simulate a scan by inserting the photo row and invalidating.
+    db.add_photo(folder_id=root_id, filename="a.JPG", extension=".JPG",
+                 file_size=1, file_mtime=0.0)
+    db.invalidate_new_images_cache_for_folders([root_id])
+
+    r2 = db.get_new_images_for_workspace(ws_id)
+    assert r2["new_count"] == 0
+
+
 def test_two_database_instances_share_cache(tmp_path):
     from new_images import get_shared_cache
     get_shared_cache().clear()

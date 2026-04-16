@@ -215,6 +215,22 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
     summary["burst_count"] = sum(e.get("burst_count", 0) for e in encounters)
 
 
+def _invalidate_new_images_after_scan(db, root):
+    """Invalidate the new-images cache for every workspace linked to any folder
+    touched by a scan of ``root``.
+
+    Uses a LIKE query because ``scanner.scan`` auto-registers subfolders as
+    their own ``folders`` rows (see ``vireo/db.py`` ``add_folder``), so we
+    need to invalidate caches for all workspaces that reference any of those
+    descendant folders, not just the explicit scan root.
+    """
+    touched_ids = [r["id"] for r in db.conn.execute(
+        "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
+        (root, root.rstrip("/") + "/%"),
+    ).fetchall()]
+    db.invalidate_new_images_cache_for_folders(touched_ids)
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -4257,6 +4273,7 @@ def create_app(db_path, thumb_cache_dir=None):
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{photo_count} photos")
+            _invalidate_new_images_after_scan(thread_db, root)
             runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
@@ -4845,6 +4862,7 @@ def create_app(db_path, thumb_cache_dir=None):
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
+            _invalidate_new_images_after_scan(thread_db, scan_target)
 
             # Phase 3: Generate thumbnails
             runner.update_step(job["id"], "thumbnails", status="running")
