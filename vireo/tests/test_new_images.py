@@ -719,3 +719,45 @@ def test_create_workspace_clears_stale_cache_on_id_reuse(tmp_path):
         f"New workspace (id={ws_b}) must not inherit deleted workspace's cache "
         f"(id reuse of {ws_a}? {ws_a == ws_b})"
     )
+
+
+def test_delete_photos_invalidates_cache(db_with_workspace):
+    """Deleting photos must invalidate the new-images cache.
+
+    In "Remove from Vireo" mode the on-disk files stay put; the photo rows
+    go away. Those files immediately become eligible for new-image detection
+    again. Without an invalidation, ``/api/workspaces/active/new-images``
+    keeps serving the cached pre-delete ``new_count`` for up to the TTL.
+    """
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "a.JPG"))
+    _touch_image(str(root / "b.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    # Ingest both so they're not "new".
+    a_id = db.add_photo(
+        folder_id=root_id, filename="a.JPG", extension=".JPG",
+        file_size=1, file_mtime=0.0,
+    )
+    db.add_photo(
+        folder_id=root_id, filename="b.JPG", extension=".JPG",
+        file_size=1, file_mtime=0.0,
+    )
+
+    # Prime the cache: nothing should be new yet.
+    r1 = db.get_new_images_for_workspace(ws_id)
+    assert r1["new_count"] == 0
+    assert db._new_images_cache.get(ws_id) is not None
+
+    # Remove a.JPG's photo row but leave the file on disk (mimics
+    # "Remove from Vireo" semantics — delete_photos does not touch files).
+    db.delete_photos([a_id])
+
+    # a.JPG on disk is now untracked: it should re-appear as "new" on the
+    # next read. If the cache was not invalidated, this would still be 0.
+    r2 = db.get_new_images_for_workspace(ws_id)
+    assert r2["new_count"] == 1, (
+        f"Expected a.JPG to re-surface as new after delete_photos removed "
+        f"its row; got new_count={r2['new_count']}. per_root={r2['per_root']}"
+    )

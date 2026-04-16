@@ -2527,6 +2527,14 @@ class Database:
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
 
+        # Collect affected folder ids BEFORE the delete so we can invalidate the
+        # new-images cache even if the delete raises. In "Remove from Vireo"
+        # mode the on-disk files stay put, so they become eligible for new-image
+        # detection again the moment the photo rows are gone; without an
+        # invalidation here, ``/api/workspaces/active/new-images`` would keep
+        # serving the stale pre-delete ``new_count`` until the TTL expired.
+        affected_folder_ids = list(folder_counts.keys())
+
         try:
             # Delete associated data (non-cascading FKs)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
@@ -2570,6 +2578,12 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            # Always invalidate — even on rollback we may have partially dirtied
+            # state, and on success the removed rows mean untracked on-disk
+            # files should re-surface as "new" on the next read.
+            if affected_folder_ids:
+                self.invalidate_new_images_cache_for_folders(affected_folder_ids)
         return {"deleted": len(all_ids), "files": files}
 
     def update_photo_sharpness(self, photo_id, sharpness):
