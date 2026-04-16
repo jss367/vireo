@@ -230,6 +230,54 @@ def test_invalidate_new_images_after_scan_normalizes_trailing_slash(tmp_path):
     )
 
 
+def test_invalidate_new_images_after_scan_preserves_dotdot_segments(tmp_path):
+    """Caller-supplied root with ``..`` segments must still match folders stored
+    by the scanner as ``str(Path(...))`` — which preserves ``..`` segments.
+
+    Using ``os.path.normpath`` here would resolve ``..`` to a non-matching
+    canonical path, leaving the cache stale after a successful scan launched
+    against a path like ``/data/shoot/../trip``."""
+    from pathlib import Path
+
+    from app import _invalidate_new_images_after_scan
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    # Build a path containing `..`. Mirror what the scanner would do: store
+    # the folder via str(Path(...)) so the `..` segment survives in
+    # folders.path.
+    dotdot_path = tmp_path / "x" / ".." / "y"
+    # Create the resolved directory on disk with a real image so
+    # count_new_images_for_workspace can walk it (it needs os.path.isdir to
+    # pass).
+    (tmp_path / "y").mkdir()
+    _touch_image(str(tmp_path / "y" / "IMG_0001.JPG"))
+
+    stored = str(Path(dotdot_path))
+    assert ".." in stored, (
+        f"Test precondition: str(Path(...)) must preserve `..` — got {stored!r}. "
+        "If your platform's pathlib collapses `..`, this test is moot."
+    )
+    db.add_folder(stored, name="y")
+
+    # Prime the cache.
+    db.get_new_images_for_workspace(ws_id)
+    assert db._new_images_cache.get(ws_id) is not None
+
+    # Invalidate using the same `..`-bearing path. Canonicalization inside
+    # the helper must use str(Path(...)) (which keeps `..`) rather than
+    # os.path.normpath (which would resolve `..` and produce a mismatch).
+    _invalidate_new_images_after_scan(db, stored)
+
+    assert db._new_images_cache.get(ws_id) is None, (
+        "Root containing `..` must match the canonical form stored by the "
+        "scanner (which also preserves `..` via str(Path(...))). Using "
+        "os.path.normpath here would resolve `..` and leave the cache stale."
+    )
+
+
 def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(tmp_path):
     """End-to-end coverage of _invalidate_new_images_after_scan:
 

@@ -170,12 +170,12 @@ def invalidate_new_images_after_scan(db, root):
     Lives in this module (not ``app.py``) so non-Flask code paths such as
     ``pipeline_job.py`` can import it without pulling in the app module.
     """
-    # Canonicalize the root to match what the scanner stores. The scanner
-    # passes folder paths through ``str(Path(...))`` which (like normpath)
-    # strips a trailing slash and collapses duplicate separators. Without
-    # this, a caller-supplied trailing slash like ``/Volumes/shoot/`` would
-    # fail to match the stored ``/Volumes/shoot`` in the ``path = ?`` arm.
-    root = os.path.normpath(root)
+    # Canonicalize the root to match what the scanner stores. scanner.scan passes
+    # folder paths through str(Path(...)), which strips trailing slashes but
+    # preserves `..` segments. Using os.path.normpath here would resolve `..` and
+    # produce a mismatch against the stored path, leaving the cache stale after a
+    # successful scan.
+    root = str(Path(root))
     # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
     # over-invalidation that triggers a re-walk. The descendant pattern uses
     # os.sep so it matches what the scanner stores via str(Path(...)) on both
