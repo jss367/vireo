@@ -1817,6 +1817,14 @@ def create_app(db_path, thumb_cache_dir=None):
         db.update_workspace(db._active_workspace_id, config_overrides=existing)
         return jsonify({"ok": True, "nav_order": nav_order})
 
+    @app.route("/api/workspace/new-images")
+    def api_workspace_new_images():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"new_count": 0, "per_root": [], "sample": []})
+        return jsonify(db.get_new_images_for_workspace(ws_id))
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
