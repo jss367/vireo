@@ -1818,6 +1818,7 @@ function openLightbox(photoId, filename, photoList) {
   _lbCurrentSrcKey = 'full';
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbApplyTransform();  // Clear any lingering translate/scale from prior photo before the new one renders.
 
   // Fetch original dimensions (async, non-blocking for image display)
   fetch('/api/photos/' + photoId)
@@ -1918,6 +1919,23 @@ function toggleLightboxZoom(e) {
     var newZoom = _lbZoom * zoomFactor;
     _lbSetZoom(newZoom, e.clientX, e.clientY);
   }, { passive: false });
+})();
+
+// Viewport resize: recompute nativeZoom while lightbox is open so fit ratio
+// stays accurate after window/devicePixelRatio changes.
+(function() {
+  var resizeTimer = null;
+  window.addEventListener('resize', function() {
+    var overlay = document.getElementById('lightboxOverlay');
+    if (!overlay || !overlay.classList.contains('active')) return;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      resizeTimer = null;
+      _lbRecomputeNativeZoom();
+      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
+      _lbSetZoom(_lbZoom, null, null);
+    }, 100);
+  });
 })();
 
 // Drag to pan when zoomed; single click (no drag) zooms out
