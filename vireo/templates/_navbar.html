@@ -2415,6 +2415,10 @@ function _lbRecomputeNativeZoom() {
 }
 
 function _lbSetZoom(newZoom, anchorClientX, anchorClientY) {
+  // Any zoom mutation cancels a pending "upgrade to 1:1 on original-load" intent.
+  // Callers that still want it (toggleLightboxZoom's fallback path) re-set the flag
+  // after calling us.
+  _lbPending1To1 = false;
   // Clamp to valid range. Max is 4x native (or 4x fit if no nativeZoom).
   var maxZoom = _lbNativeZoom ? _lbNativeZoom * 4 : 4;
   newZoom = Math.max(1.0, Math.min(maxZoom, newZoom));
