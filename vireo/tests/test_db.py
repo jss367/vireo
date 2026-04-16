@@ -133,6 +133,140 @@ def test_get_photos_filter_by_folder(tmp_path):
     assert all(r['folder_id'] == f2 for r in results)
 
 
+def test_folder_subtree_does_not_expand_when_root_is_inactive(tmp_path):
+    """A stale/crafted folder_id for an out-of-workspace root must not expand.
+
+    Tree: A(inactive) -> B(active). Passing A should not pull B in — otherwise
+    a stale request could surface photos from active descendants of a folder
+    that no longer belongs to the current workspace.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    # Detach A from the active workspace; B stays.
+    db.remove_workspace_folder(active_ws, a)
+    db.add_workspace_folder(other_ws, a)
+
+    db.add_photo(folder_id=b, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    # Only A itself comes back (no expansion into B).
+    assert db.get_folder_subtree_ids(a) == [a]
+    # And since A itself isn't in the active workspace, the photo query returns nothing.
+    assert db.get_photos(folder_id=a) == []
+
+
+def test_folder_subtree_does_not_cross_workspace_boundary(tmp_path):
+    """Expansion stops at folders removed from the active workspace.
+
+    Tree: A (active) -> B (not active) -> C (active). Filtering by A should
+    NOT include C even though C is in the active workspace, because the
+    intermediate B is detached from A in the active workspace's tree.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    c = db.add_folder('/a/b/c', name='c', parent_id=b)
+    # Move B out of the active workspace; A and C stay.
+    db.remove_workspace_folder(active_ws, b)
+    db.add_workspace_folder(other_ws, b)
+
+    db.add_photo(folder_id=a, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=c, filename='c.jpg', extension='.jpg',
+                 file_size=100, file_mtime=2.0)
+
+    assert db.get_folder_subtree_ids(a) == [a]
+    results = db.get_photos(folder_id=a)
+    assert len(results) == 1
+    assert results[0]['filename'] == 'a.jpg'
+
+
+def test_get_photos_folder_filter_includes_descendants(tmp_path):
+    """get_photos(folder_id=parent) includes photos from descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/photos', name='photos')
+    year = db.add_folder('/photos/2024', name='2024', parent_id=root)
+    leaf = db.add_folder('/photos/2024/01-15', name='01-15', parent_id=year)
+    sibling = db.add_folder('/other', name='other')
+
+    db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=year, filename='mid.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+    db.add_photo(folder_id=leaf, filename='deep.jpg', extension='.jpg', file_size=100, file_mtime=3.0)
+    db.add_photo(folder_id=sibling, filename='other.jpg', extension='.jpg', file_size=100, file_mtime=4.0)
+
+    assert len(db.get_photos(folder_id=root)) == 3
+    assert len(db.get_photos(folder_id=year)) == 2
+    assert len(db.get_photos(folder_id=leaf)) == 1
+    assert len(db.get_photos(folder_id=sibling)) == 1
+
+
+def test_count_filtered_photos_folder_includes_descendants(tmp_path):
+    """count_filtered_photos(folder_id=parent) counts descendant photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+
+    assert db.count_filtered_photos(folder_id=root) == 2
+    assert db.count_filtered_photos(folder_id=child) == 2
+
+
+def test_browse_summary_folder_includes_descendants(tmp_path):
+    """get_browse_summary(folder_id=parent) counts descendants in filtered_total."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg', file_size=100, file_mtime=2.0)
+
+    summary = db.get_browse_summary(folder_id=root)
+    assert summary['filtered_total'] == 2
+
+
+def test_calendar_data_folder_includes_descendants(tmp_path):
+    """get_calendar_data(folder_id=parent) counts descendants."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg', file_size=100,
+                 file_mtime=1.0, timestamp='2024-06-15T00:00:00')
+    db.add_photo(folder_id=child, filename='y.jpg', extension='.jpg', file_size=100,
+                 file_mtime=2.0, timestamp='2024-06-15T00:01:00')
+
+    data = db.get_calendar_data(year=2024, folder_id=root)
+    assert data['days'].get('2024-06-15') == 2
+
+
+def test_geolocated_photos_folder_includes_descendants(tmp_path):
+    """get_geolocated_photos(folder_id=parent) includes descendant-folder photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    pid1 = db.add_photo(folder_id=child, filename='x.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    pid2 = db.add_photo(folder_id=root, filename='y.jpg', extension='.jpg',
+                        file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET latitude = 10.0, longitude = 20.0 WHERE id = ?", (pid1,))
+    db.conn.execute("UPDATE photos SET latitude = 11.0, longitude = 21.0 WHERE id = ?", (pid2,))
+    db.conn.commit()
+
+    photos = db.get_geolocated_photos(folder_id=root)
+    assert len(photos) == 2
+
+
 def test_get_photos_filter_by_rating(tmp_path):
     """get_photos can filter by minimum rating."""
     from db import Database
@@ -2652,6 +2786,45 @@ def test_get_highlights_candidates(tmp_path):
     assert all("species" in dict(r) for r in results)
 
 
+def test_get_highlights_candidates_includes_descendants(tmp_path):
+    """get_highlights_candidates(folder_id=parent) includes photos from descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    p1 = db.add_photo(folder_id=root, filename='top.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=child, filename='deep.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    assert len(results) == 2
+
+
+def test_get_highlights_candidates_skips_missing_descendants(tmp_path):
+    """Photos in descendant folders marked 'missing' are excluded (match count_filtered_photos)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
+    missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
+    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+                          file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
+    db.conn.commit()
+
+    candidates = db.get_highlights_candidates(folder_id=root, min_quality=0.0)
+    assert len(candidates) == 1
+    assert candidates[0]["filename"] == 'a.jpg'
+    # Consistent with count_filtered_photos
+    assert db.count_filtered_photos(folder_id=root) == 1
+
+
 def test_get_highlights_candidates_excludes_rejected(tmp_path):
     """Flagged-rejected photos are excluded."""
     from db import Database
@@ -2700,6 +2873,104 @@ def test_get_folders_with_quality_data(tmp_path):
     assert len(folders) == 1
     assert folders[0]["name"] == "scored"
     assert folders[0]["photo_count"] > 0
+
+
+def test_get_folders_with_quality_data_rolls_up_subtree(tmp_path):
+    """Parent folder's photo_count reflects scored photos in descendant folders."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    # Scored photo lives only in the child
+    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    # Both the parent and the child appear; each counts the single scored photo
+    by_name = {f["name"]: f for f in folders}
+    assert by_name["p"]["photo_count"] == 1
+    assert by_name["c"]["photo_count"] == 1
+
+
+def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
+    """When a descendant belongs to another workspace, its scored photos are excluded."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Parent lives in the active (Default) workspace; child is moved to a second workspace.
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    root = db.add_folder('/p', name='p')
+    child = db.add_folder('/p/c', name='c', parent_id=root)
+    pid = db.add_photo(folder_id=child, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    # Move the child folder to the other workspace only.
+    db.remove_workspace_folder(active_ws, child)
+    db.add_workspace_folder(other_ws, child)
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    # Parent should NOT inherit the child's scored photo, since the child is
+    # no longer in the active workspace. get_highlights_candidates would
+    # return 0 candidates for the parent, so the dropdown count must match.
+    assert "p" not in by_name
+    assert db.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
+
+
+def test_get_folders_with_quality_data_stops_at_inactive_ancestor(tmp_path):
+    """Rollup cannot propagate across an inactive intermediate folder.
+
+    Tree: A(active) -> B(inactive) -> C(active with scored photo). A must
+    NOT show a rolled-up count sourced from C, since get_folder_subtree_ids
+    stops at B and get_highlights_candidates(A) returns nothing.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    c = db.add_folder('/a/b/c', name='c', parent_id=b)
+    pid = db.add_photo(folder_id=c, filename='x.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    # Detach B from the active workspace.
+    db.remove_workspace_folder(active_ws, b)
+    db.add_workspace_folder(other_ws, b)
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    # C still shows up (its own photo counts).
+    assert by_name["c"]["photo_count"] == 1
+    # A must NOT inherit C's count through the inactive B.
+    assert "a" not in by_name
+    # Sanity: candidate API agrees.
+    assert db.get_highlights_candidates(folder_id=a, min_quality=0.0) == []
+
+
+def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
+    """A parent folder does not count photos in descendant folders marked 'missing'."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    root = db.add_folder('/p', name='p')
+    ok_child = db.add_folder('/p/ok', name='ok', parent_id=root)
+    missing_child = db.add_folder('/p/gone', name='gone', parent_id=root)
+    p_ok = db.add_photo(folder_id=ok_child, filename='a.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    p_gone = db.add_photo(folder_id=missing_child, filename='b.jpg', extension='.jpg',
+                          file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p_ok, p_gone))
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (missing_child,))
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    assert by_name["p"]["photo_count"] == 1  # only the ok-child photo
+    assert "gone" not in by_name
 
 
 def test_color_labels_table_exists(tmp_path):

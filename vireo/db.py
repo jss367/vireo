@@ -976,6 +976,34 @@ class Database:
             (self._ws_id(),),
         ).fetchall()
 
+    def get_folder_subtree_ids(self, folder_id):
+        """Return [folder_id, ...descendant_ids] restricted to the active workspace.
+
+        The root is always included as-is so callers' own workspace filter on
+        photos still applies. Descendants are walked through
+        ``folders.parent_id`` only when both the parent (the current node)
+        AND the child are linked to the active workspace, so branches that
+        pass through detached folders never propagate. In particular, a stale
+        or crafted ``folder_id`` for a folder that is no longer in the active
+        workspace will not expand into its active descendants.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """WITH RECURSIVE tree(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT f.id FROM folders f
+                   JOIN tree t ON f.parent_id = t.id
+                   JOIN workspace_folders wf_t
+                     ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
+                   JOIN workspace_folders wf_f
+                     ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
+               )
+               SELECT id FROM tree""",
+            (folder_id, ws, ws),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
@@ -1828,8 +1856,10 @@ class Database:
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1896,8 +1926,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1973,8 +2005,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2033,8 +2067,10 @@ class Database:
         join_params = []
         where_params = [ws]
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2178,8 +2214,10 @@ class Database:
         params = [self._ws_id()]
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             params.append(rating_min)
@@ -2943,9 +2981,10 @@ class Database:
     def get_highlights_candidates(self, folder_id, min_quality=0.0):
         """Return photos eligible for highlights selection.
 
-        Returns photos in the given folder that have a quality_score >= min_quality
-        and are not user-rejected. Includes the photo's species keyword (or NULL)
-        and DINO embeddings for MMR diversity.
+        Returns photos in the given folder (and its descendant folders) that
+        have a quality_score >= min_quality and are not user-rejected. Includes
+        the photo's species keyword (or NULL) and DINO embeddings for MMR
+        diversity.
 
         Species is derived from photo_keywords joined to keywords where
         is_species = 1, which covers both accepted predictions (accept_prediction
@@ -2953,8 +2992,10 @@ class Database:
 
         Ordered by quality_score DESC.
         """
+        subtree = self.get_folder_subtree_ids(folder_id)
+        placeholders = ",".join("?" for _ in subtree)
         rows = self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.extension,
+            f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
@@ -2962,6 +3003,7 @@ class Database:
                       bp.species
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                LEFT JOIN (
                    SELECT photo_id, name AS species FROM (
                        SELECT pk.photo_id, k.name,
@@ -2974,35 +3016,57 @@ class Database:
                        WHERE k.is_species = 1
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
-               WHERE p.folder_id = ?
+               WHERE p.folder_id IN ({placeholders})
                  AND wf.workspace_id = ?
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (folder_id, self._ws_id(), min_quality),
+            (*subtree, self._ws_id(), min_quality),
         ).fetchall()
         return rows
 
     def get_folders_with_quality_data(self):
-        """Return folders that have at least one photo with a quality_score.
+        """Return folders with at least one scored photo in their subtree.
 
         Used to populate the folder dropdown on the highlights page.
-        Returns id, path, name, and count of scored photos, ordered by most recent photo first.
+        ``photo_count`` is the count of scored photos across the folder and
+        all of its descendant folders (restricted to folders whose ``status``
+        is ``'ok'``) — matching the subtree scope of
+        :meth:`get_highlights_candidates`.
         """
+        ws = self._ws_id()
+        # The recursive step also joins workspace_folders on the current
+        # folder: propagation stops at any ancestor that is not in the active
+        # workspace, which matches get_folder_subtree_ids and keeps the
+        # dropdown counts aligned with get_highlights_candidates.
         return self.conn.execute(
-            """SELECT f.id, f.path, f.name,
-                      COUNT(p.id) as photo_count,
-                      MAX(p.timestamp) as latest_photo
+            """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
+                   SELECT p.id, p.folder_id, p.timestamp
+                   FROM photos p
+                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status = 'ok'
+                   JOIN workspace_folders wf0
+                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
+                   WHERE p.quality_score IS NOT NULL
+                   UNION ALL
+                   SELECT a.photo_id, f.parent_id, a.timestamp
+                   FROM ancestors a
+                   JOIN folders f ON f.id = a.folder_id
+                   JOIN workspace_folders wf_step
+                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
+                   WHERE f.parent_id IS NOT NULL
+               )
+               SELECT f.id, f.path, f.name,
+                      COUNT(a.photo_id) as photo_count,
+                      MAX(a.timestamp) as latest_photo
                FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               JOIN photos p ON p.folder_id = f.id
+               JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
                  AND f.status = 'ok'
-                 AND p.quality_score IS NOT NULL
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (self._ws_id(),),
+            (ws, ws, ws),
         ).fetchall()
 
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
