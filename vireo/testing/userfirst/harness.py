@@ -215,7 +215,10 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
     run_dir.mkdir(parents=True)
 
     port = _free_port()
-    base_url = f"http://localhost:{port}"
+    # Flask binds to 127.0.0.1 (see app.py); using the literal IPv4 address
+    # instead of `localhost` avoids environments where `localhost` resolves to
+    # IPv6 (`::1`) first and the health probe/navigation hits the wrong stack.
+    base_url = f"http://127.0.0.1:{port}"
     log_file = run_dir / "app.log"
 
     # Subprocess gets a fake HOME inside the profile so all ~/.vireo/* paths
