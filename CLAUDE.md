@@ -91,4 +91,11 @@ Automated review cycle managed by `.github/workflows/pr-agent.yml`.
 
 ### Key files
 
-- `.github/workflows/pr-agent.yml` — Workflow with all jobs
+- `.github/workflows/pr-agent.yml` — Event forwarder + pure-bash merge jobs
+- `.github/actions/fire-routine/action.yml` — Composite action that POSTs to the routine `/fire` endpoint
+- `docs/pr-agent-routine.md` — Setup guide for the Claude Code routine that does the LLM work
+- `docs/pr-agent-routine-prompt.md` — The routine's prompt (paste into claude.ai/code/routines)
+
+### Architecture
+
+LLM work runs in a Claude Code routine (billed against the Code subscription, not the Anthropic API). The GHA workflow only classifies events and fires the routine with a text payload. Three merge jobs remain pure bash. See `docs/pr-agent-routine.md`.

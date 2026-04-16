@@ -22,6 +22,21 @@ def test_browse_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_help_static_assets_served(app_and_db):
+    """The help modal's JS, JSON, and vendored Fuse library must be served.
+
+    The shared navbar includes <script src="/static/help.js"> and
+    <script src="/static/vendor/fuse.min.js">, and help.js fetches
+    /static/help.json at runtime. If any of these 404, F1 and the
+    navbar ? icon silently do nothing.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    for path in ('/static/help.js', '/static/help.json', '/static/vendor/fuse.min.js'):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"{path} returned {resp.status_code}"
+
+
 def test_api_folders(app_and_db):
     """GET /api/folders returns folder tree."""
     app, _ = app_and_db

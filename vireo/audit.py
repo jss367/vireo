@@ -192,9 +192,22 @@ def import_untracked(db, paths):
         db: Database instance
         paths: list of file paths to import
     """
+    from new_images import invalidate_new_images_after_scan
     from scanner import scan
 
     # Group by parent directory
     dirs = set(os.path.dirname(p) for p in paths)
     for d in dirs:
-        scan(d, db, incremental=True)
+        try:
+            scan(d, db, incremental=True)
+        finally:
+            # scanner.scan commits photo rows incrementally, so even a
+            # mid-scan failure can leave DB state that invalidates cached
+            # new-image counts. Mirrors the try/finally in pipeline_job
+            # and the api_job_scan / api_job_import_full handlers.
+            try:
+                invalidate_new_images_after_scan(db, d)
+            except Exception:
+                log.exception(
+                    "Failed to invalidate new-images cache for %s", d
+                )

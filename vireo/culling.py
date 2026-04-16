@@ -9,11 +9,12 @@ The culling pipeline:
 """
 
 import logging
+import os
 from datetime import datetime
 
 import imagehash
 import numpy as np
-from PIL import Image
+from image_loader import load_image, load_working_image
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ def analyze_for_culling(
     phash_threshold=None,
     cross_bucket_merge=False,
     progress_callback=None,
+    vireo_dir=None,
 ):
     """Run full culling analysis on a set of photos.
 
@@ -39,6 +41,9 @@ def analyze_for_culling(
         phash_threshold: max Hamming distance for "same scene" (None = read from config)
         cross_bucket_merge: whether to merge time buckets by pHash similarity
         progress_callback: optional callable(message) for status updates
+        vireo_dir: path to ~/.vireo/ — when provided, missing pHashes are
+            backfilled from the working-copy JPEG (required for RAW formats
+            PIL can't open directly). When None, the source file is used.
 
     Returns:
         dict with:
@@ -46,6 +51,7 @@ def analyze_for_culling(
             total_photos: int
             suggested_keepers: int
             suggested_rejects: int
+            photos_missing_phash: count of photos that couldn't be hashed
     """
     import config as cfg
     user_cfg = cfg.load()
@@ -64,7 +70,13 @@ def analyze_for_culling(
 
     photo_ids = [p["id"] for p in photos]
     if not photo_ids:
-        return {"species_groups": [], "total_photos": 0, "suggested_keepers": 0, "suggested_rejects": 0}
+        return {
+            "species_groups": [],
+            "total_photos": 0,
+            "suggested_keepers": 0,
+            "suggested_rejects": 0,
+            "photos_missing_phash": 0,
+        }
 
     # Load predictions (highest confidence per photo via detections)
     predictions = {}
@@ -118,29 +130,38 @@ def analyze_for_culling(
     if missing_phash:
         if progress_callback:
             progress_callback("Computing scene hashes...")
+        folders_map = {
+            r["id"]: r["path"]
+            for r in db.conn.execute("SELECT id, path FROM folders").fetchall()
+        }
         for pid in missing_phash:
             row = db.conn.execute(
-                "SELECT folder_id, filename FROM photos WHERE id = ?", (pid,)
+                "SELECT folder_id, filename, working_copy_path FROM photos WHERE id = ?",
+                (pid,),
             ).fetchone()
             if not row:
                 continue
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id = ?", (row["folder_id"],)
-            ).fetchone()
-            if not folder:
-                continue
-            import os
-            image_path = os.path.join(folder["path"], row["filename"])
             try:
-                with Image.open(image_path) as img:
-                    h = imagehash.phash(img)
-                    phashes[pid] = h
-                    db.conn.execute(
-                        "UPDATE photos SET phash = ? WHERE id = ?",
-                        (str(h), pid),
+                img = None
+                if vireo_dir:
+                    img = load_working_image(
+                        dict(row), vireo_dir, max_size=None, folders=folders_map
                     )
+                if img is None:
+                    # Working copy absent/corrupt, or vireo_dir not provided —
+                    # try the original source (handles RAW via rawpy).
+                    folder_path = folders_map.get(row["folder_id"], "")
+                    img = load_image(os.path.join(folder_path, row["filename"]))
+                if img is None:
+                    continue
+                h = imagehash.phash(img)
+                phashes[pid] = h
+                db.conn.execute(
+                    "UPDATE photos SET phash = ? WHERE id = ?",
+                    (str(h), pid),
+                )
             except Exception:
-                log.debug("Could not compute pHash for photo %d", pid)
+                log.debug("Could not compute pHash for photo %d", pid, exc_info=True)
         db.conn.commit()
 
     # Classify extensions as RAW or non-RAW
@@ -225,11 +246,14 @@ def analyze_for_culling(
         total_keepers += sp_keepers
         total_rejects += sp_rejects
 
+    photos_missing_phash = sum(1 for pid in photo_ids if pid not in phashes)
+
     return {
         "species_groups": species_groups,
         "total_photos": len(photo_ids),
         "suggested_keepers": total_keepers,
         "suggested_rejects": total_rejects,
+        "photos_missing_phash": photos_missing_phash,
     }
 
 

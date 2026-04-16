@@ -6,6 +6,8 @@ import os
 import sqlite3
 import uuid
 
+from new_images import get_shared_cache
+
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
@@ -49,6 +51,11 @@ class Database:
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
+        # Preserved for the new-images cache key, which compounds
+        # (db_path, workspace_id) so instances against different SQLite files
+        # don't cross-read each other's cached results (workspace_id=1 is
+        # reused across every database as the default workspace).
+        self._db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -58,6 +65,7 @@ class Database:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self._active_workspace_id = None
+        self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
         # Restore last-used workspace, or fall back to Default
@@ -730,6 +738,49 @@ class Database:
             raise RuntimeError("No active workspace set")
         return self._active_workspace_id
 
+    def get_new_images_for_workspace(self, workspace_id):
+        """Return new-images result for workspace, using cache when fresh.
+
+        Race-safe: we snapshot the cache generation before the (potentially
+        slow) walk and pass it to ``set``. If an invalidation fires during
+        the walk, the generation advances and the stale result is dropped
+        on write — so the next reader recomputes instead of seeing the
+        pre-invalidation value. The current caller still returns its own
+        best-effort result.
+        """
+        import new_images
+        cached = self._new_images_cache.get(self._db_path, workspace_id)
+        if cached is not None:
+            return cached
+        generation = self._new_images_cache.get_generation(self._db_path, workspace_id)
+        result = new_images.count_new_images_for_workspace(self, workspace_id)
+        self._new_images_cache.set(
+            self._db_path, workspace_id, result, generation=generation
+        )
+        return result
+
+    def invalidate_new_images_cache_for_folders(self, folder_ids):
+        """Clear cache for every workspace linked to any of the given folder_ids."""
+        if not folder_ids:
+            return
+        # Chunk to stay well under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # A scan of a deep tree can auto-register thousands of descendant folders;
+        # a single IN (?, ?, ...) across all of them would raise
+        # ``OperationalError: too many SQL variables``.
+        CHUNK = 500
+        ws_ids = set()
+        folder_ids = list(folder_ids)
+        for i in range(0, len(folder_ids), CHUNK):
+            chunk = folder_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"SELECT DISTINCT workspace_id FROM workspace_folders "
+                f"WHERE folder_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            ws_ids.update(r["workspace_id"] for r in rows)
+        self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
+
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""
         row = self.conn.execute(
@@ -757,7 +808,13 @@ class Database:
              json.dumps(ui_state) if ui_state else None),
         )
         self.conn.commit()
-        return cur.lastrowid
+        workspace_id = cur.lastrowid
+        # SQLite INTEGER PRIMARY KEY (without AUTOINCREMENT) can reuse a deleted
+        # rowid, so a freshly created workspace may collide with the stale cache
+        # entry of a prior workspace that shared this id. Clear any lingering
+        # entry so the new workspace starts clean.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
+        return workspace_id
 
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
@@ -847,6 +904,11 @@ class Database:
         """Delete a workspace and all its scoped data (cascade)."""
         self.conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
         self.conn.commit()
+        # Drop any cached new-images payload for this workspace. Without this,
+        # if the deleted id is later reused by SQLite for a new workspace,
+        # ``get_new_images_for_workspace`` could serve the prior workspace's
+        # data until TTL expiry.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def add_workspace_folder(self, workspace_id, folder_id):
         """Link a folder to a workspace."""
@@ -855,6 +917,10 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder's untracked files now count toward this workspace's
+        # new-images backlog. Drop any stale cached payload so the next read
+        # recomputes against the updated folder set.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def remove_workspace_folder(self, workspace_id, folder_id):
         """Unlink a folder from a workspace."""
@@ -863,6 +929,9 @@ class Database:
             (workspace_id, folder_id),
         )
         self.conn.commit()
+        # The folder no longer contributes to this workspace's new-images
+        # backlog. Drop the cached payload so the banner reflects the change.
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def get_workspace_folders(self, workspace_id):
         """Return all folders linked to a workspace."""
@@ -938,6 +1007,12 @@ class Database:
             self.conn.rollback()
             raise
 
+        # Folders changed membership for BOTH workspaces, so each workspace's
+        # new-images backlog needs to be recomputed on the next read.
+        self._new_images_cache.invalidate_workspaces(
+            self._db_path, [source_ws_id, target_ws_id]
+        )
+
         return {
             "folders_moved": len(folder_ids),
             "detections_moved": detections_moved,
@@ -987,6 +1062,34 @@ class Database:
                ORDER BY f.path""",
             (self._ws_id(),),
         ).fetchall()
+
+    def get_folder_subtree_ids(self, folder_id):
+        """Return [folder_id, ...descendant_ids] restricted to the active workspace.
+
+        The root is always included as-is so callers' own workspace filter on
+        photos still applies. Descendants are walked through
+        ``folders.parent_id`` only when both the parent (the current node)
+        AND the child are linked to the active workspace, so branches that
+        pass through detached folders never propagate. In particular, a stale
+        or crafted ``folder_id`` for a folder that is no longer in the active
+        workspace will not expand into its active descendants.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """WITH RECURSIVE tree(id) AS (
+                   SELECT ?
+                   UNION ALL
+                   SELECT f.id FROM folders f
+                   JOIN tree t ON f.parent_id = t.id
+                   JOIN workspace_folders wf_t
+                     ON wf_t.folder_id = t.id AND wf_t.workspace_id = ?
+                   JOIN workspace_folders wf_f
+                     ON wf_f.folder_id = f.id AND wf_f.workspace_id = ?
+               )
+               SELECT id FROM tree""",
+            (folder_id, ws, ws),
+        ).fetchall()
+        return [r["id"] for r in rows]
 
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
@@ -1840,8 +1943,10 @@ class Database:
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1908,8 +2013,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -1985,8 +2092,10 @@ class Database:
         join_params = []
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2045,8 +2154,10 @@ class Database:
         join_params = []
         where_params = [ws]
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            where_params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            where_params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -2190,8 +2301,10 @@ class Database:
         params = [self._ws_id()]
 
         if folder_id is not None:
-            conditions.append("p.folder_id = ?")
-            params.append(folder_id)
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"p.folder_id IN ({placeholders})")
+            params.extend(subtree)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             params.append(rating_min)
@@ -2484,6 +2597,14 @@ class Database:
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
 
+        # Collect affected folder ids BEFORE the delete so we can invalidate the
+        # new-images cache even if the delete raises. In "Remove from Vireo"
+        # mode the on-disk files stay put, so they become eligible for new-image
+        # detection again the moment the photo rows are gone; without an
+        # invalidation here, ``/api/workspaces/active/new-images`` would keep
+        # serving the stale pre-delete ``new_count`` until the TTL expired.
+        affected_folder_ids = list(folder_counts.keys())
+
         try:
             # Delete associated data (non-cascading FKs)
             self.conn.execute(f"DELETE FROM photo_keywords WHERE photo_id IN ({ph})", all_ids)
@@ -2527,6 +2648,12 @@ class Database:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            # Always invalidate — even on rollback we may have partially dirtied
+            # state, and on success the removed rows mean untracked on-disk
+            # files should re-surface as "new" on the next read.
+            if affected_folder_ids:
+                self.invalidate_new_images_cache_for_folders(affected_folder_ids)
         return {"deleted": len(all_ids), "files": files}
 
     # ------------------------------------------------------------------
@@ -3007,9 +3134,10 @@ class Database:
     def get_highlights_candidates(self, folder_id, min_quality=0.0):
         """Return photos eligible for highlights selection.
 
-        Returns photos in the given folder that have a quality_score >= min_quality
-        and are not user-rejected. Includes the photo's species keyword (or NULL)
-        and DINO embeddings for MMR diversity.
+        Returns photos in the given folder (and its descendant folders) that
+        have a quality_score >= min_quality and are not user-rejected. Includes
+        the photo's species keyword (or NULL) and DINO embeddings for MMR
+        diversity.
 
         Species is derived from photo_keywords joined to keywords where
         is_species = 1, which covers both accepted predictions (accept_prediction
@@ -3017,8 +3145,10 @@ class Database:
 
         Ordered by quality_score DESC.
         """
+        subtree = self.get_folder_subtree_ids(folder_id)
+        placeholders = ",".join("?" for _ in subtree)
         rows = self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.extension,
+            f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
                       p.thumb_path, p.quality_score, p.subject_sharpness,
                       p.subject_size, p.sharpness, p.phash_crop,
@@ -3026,6 +3156,7 @@ class Database:
                       bp.species
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
                LEFT JOIN (
                    SELECT photo_id, name AS species FROM (
                        SELECT pk.photo_id, k.name,
@@ -3038,35 +3169,57 @@ class Database:
                        WHERE k.is_species = 1
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
-               WHERE p.folder_id = ?
+               WHERE p.folder_id IN ({placeholders})
                  AND wf.workspace_id = ?
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (folder_id, self._ws_id(), min_quality),
+            (*subtree, self._ws_id(), min_quality),
         ).fetchall()
         return rows
 
     def get_folders_with_quality_data(self):
-        """Return folders that have at least one photo with a quality_score.
+        """Return folders with at least one scored photo in their subtree.
 
         Used to populate the folder dropdown on the highlights page.
-        Returns id, path, name, and count of scored photos, ordered by most recent photo first.
+        ``photo_count`` is the count of scored photos across the folder and
+        all of its descendant folders (restricted to folders whose ``status``
+        is ``'ok'``) — matching the subtree scope of
+        :meth:`get_highlights_candidates`.
         """
+        ws = self._ws_id()
+        # The recursive step also joins workspace_folders on the current
+        # folder: propagation stops at any ancestor that is not in the active
+        # workspace, which matches get_folder_subtree_ids and keeps the
+        # dropdown counts aligned with get_highlights_candidates.
         return self.conn.execute(
-            """SELECT f.id, f.path, f.name,
-                      COUNT(p.id) as photo_count,
-                      MAX(p.timestamp) as latest_photo
+            """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
+                   SELECT p.id, p.folder_id, p.timestamp
+                   FROM photos p
+                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status = 'ok'
+                   JOIN workspace_folders wf0
+                     ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
+                   WHERE p.quality_score IS NOT NULL
+                   UNION ALL
+                   SELECT a.photo_id, f.parent_id, a.timestamp
+                   FROM ancestors a
+                   JOIN folders f ON f.id = a.folder_id
+                   JOIN workspace_folders wf_step
+                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
+                   WHERE f.parent_id IS NOT NULL
+               )
+               SELECT f.id, f.path, f.name,
+                      COUNT(a.photo_id) as photo_count,
+                      MAX(a.timestamp) as latest_photo
                FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               JOIN photos p ON p.folder_id = f.id
+               JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
                  AND f.status = 'ok'
-                 AND p.quality_score IS NOT NULL
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (self._ws_id(),),
+            (ws, ws, ws),
         ).fetchall()
 
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')

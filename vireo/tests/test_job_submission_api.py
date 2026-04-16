@@ -28,6 +28,62 @@ def test_job_cull_returns_job_id(app_and_db):
     assert data["job_id"].startswith("cull-")
 
 
+def test_job_cull_passes_thumb_cache_parent_as_vireo_dir(tmp_path, monkeypatch):
+    """api_job_cull must derive vireo_dir from THUMB_CACHE_DIR's parent,
+    matching scan/classify — not from db_path's parent. Users who pass a
+    custom --thumb-dir on a filesystem separate from the DB must still
+    have culling find their working copies in the right place."""
+    import config as cfg
+    import culling as culling_module
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # DB and thumbnails live under DIFFERENT parents — the bug case.
+    db_dir = tmp_path / "db_root"
+    db_dir.mkdir()
+    db_path = str(db_dir / "app.db")
+
+    thumb_parent = tmp_path / "thumb_root"
+    thumb_parent.mkdir()
+    thumb_dir = str(thumb_parent / "thumbnails")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+
+    captured = {}
+
+    def spy(db, **kwargs):
+        captured.update(kwargs)
+        return {
+            "species_groups": [],
+            "total_photos": 0,
+            "suggested_keepers": 0,
+            "suggested_rejects": 0,
+            "photos_missing_phash": 0,
+        }
+
+    monkeypatch.setattr(culling_module, "analyze_for_culling", spy)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/cull", json={})
+    assert resp.status_code == 200
+
+    deadline = time.time() + 5.0
+    while "vireo_dir" not in captured and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert "vireo_dir" in captured, "analyze_for_culling was never called"
+    assert captured["vireo_dir"] == str(thumb_parent), (
+        f"expected {thumb_parent!r}, got {captured['vireo_dir']!r}"
+    )
+
+
 def test_job_classify_requires_collection_id(app_and_db):
     """POST /api/jobs/classify with empty json returns 400 with 'collection_id' in error."""
     app, _ = app_and_db
