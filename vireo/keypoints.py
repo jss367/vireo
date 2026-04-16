@@ -14,6 +14,7 @@ config.json describing input size, normalization, and keypoint names.
 """
 import logging
 import os
+import threading
 
 import numpy as np
 
@@ -24,6 +25,90 @@ MODELS_DIR = os.path.expanduser("~/.vireo/models")
 _sessions = {}
 _locks = {}
 _download_locks = {}
+
+
+def _model_dir(model_name):
+    return os.path.join(MODELS_DIR, model_name)
+
+
+def ensure_keypoint_weights(model_name, progress_callback=None):
+    """Ensure ONNX weights for ``model_name`` are present on disk.
+
+    Returns the path to ``model.onnx`` if both that file and ``config.json``
+    already exist under ``MODELS_DIR/<model_name>/``. Otherwise downloads
+    both from the ``jss367/vireo-onnx-models`` HuggingFace repo.
+
+    Args:
+        model_name: one of 'rtmpose-animal', 'superanimal-quadruped',
+            'superanimal-bird'.
+        progress_callback: optional callable(phase: str, current: int, total: int)
+            invoked before download and after completion.
+
+    Raises:
+        RuntimeError: if the download fails; callers should abort or surface
+            the error to the user rather than silently running without weights.
+    """
+    target = _model_dir(model_name)
+    onnx_path = os.path.join(target, "model.onnx")
+    config_path = os.path.join(target, "config.json")
+
+    if os.path.isfile(onnx_path) and os.path.isfile(config_path):
+        return onnx_path
+
+    # Serialize concurrent first-run downloads per-model so two parallel jobs
+    # don't both fetch the same weights. Locks are created lazily; the outer
+    # setdefault is itself thread-safe for the dict insert.
+    lock = _download_locks.setdefault(model_name, threading.Lock())
+    with lock:
+        if os.path.isfile(onnx_path) and os.path.isfile(config_path):
+            return onnx_path
+
+        os.makedirs(target, exist_ok=True)
+        if progress_callback:
+            progress_callback(
+                f"Downloading {model_name} (first run only)...", 0, 1
+            )
+        log.info("%s weights missing — downloading from Hugging Face", model_name)
+
+        try:
+            import shutil
+
+            import huggingface_hub
+            from models import ONNX_REPO
+
+            for filename, final_path in (
+                ("model.onnx", onnx_path),
+                ("config.json", config_path),
+            ):
+                cached = huggingface_hub.hf_hub_download(
+                    repo_id=ONNX_REPO,
+                    filename=filename,
+                    subfolder=model_name,
+                )
+                # hf_hub_download returns its cache path; copy into the
+                # model dir so the inference code can find it consistently.
+                tmp = final_path + ".download"
+                shutil.copy2(cached, tmp)
+                os.replace(tmp, final_path)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to download {model_name} weights: {e}. "
+                "Check your network connection and retry, or download manually "
+                "from the pipeline models page."
+            ) from e
+
+        if not (os.path.isfile(onnx_path) and os.path.isfile(config_path)):
+            raise RuntimeError(
+                f"{model_name} download completed but files are missing "
+                f"under {target}."
+            )
+
+        size_mb = round(os.path.getsize(onnx_path) / 1024 / 1024, 1)
+        log.info("%s weights downloaded (%s MB)", model_name, size_mb)
+        if progress_callback:
+            progress_callback(f"{model_name} ready ({size_mb} MB)", 1, 1)
+
+    return onnx_path
 
 
 def decode_simcc(simcc_x, simcc_y, input_size, simcc_split_ratio=2.0):
