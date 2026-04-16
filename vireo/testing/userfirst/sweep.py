@@ -9,6 +9,7 @@ class of bug that code review can't see.
 DEFAULT_PAGES = [
     "/",
     "/welcome",
+    "/dashboard",
     "/browse",
     "/review",
     "/lightroom",

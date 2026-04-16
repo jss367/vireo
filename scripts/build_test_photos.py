@@ -117,6 +117,12 @@ def sample(source, dest, counts=None, dry_run=False):
     source = Path(source).expanduser().resolve()
     dest = _safe_dest(dest)
 
+    # dest == source would make every category subdir a child of the walk root,
+    # so the dirs[:]-filter below would never exclude them and a rerun would
+    # re-ingest its own outputs into the real source library. Reject up front.
+    if dest == source:
+        sys.exit(f"refusing to use source as destination: {dest}")
+
     counts = counts or {
         "gps_yes": 10, "gps_no": 10, "raws": 10, "jpegs": 10, "random": 50,
     }

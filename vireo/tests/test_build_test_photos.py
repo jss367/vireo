@@ -213,6 +213,21 @@ def test_sample_idempotent_under_reversed_walk_order(tmp_path, monkeypatch):
     )
 
 
+def test_sample_rejects_source_equals_dest(tmp_path):
+    # If dest is the source directory itself, the walk-filter can't exclude
+    # category subdirs (they become children of the walk root) and a rerun
+    # would re-ingest its own outputs into the real source library.
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "a.jpg").write_bytes(b"A")
+    with pytest.raises(SystemExit, match="source as destination"):
+        build_test_photos.sample(
+            source,
+            source,
+            counts={"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 1, "random": 0},
+        )
+
+
 def test_sample_idempotent_when_dest_is_inside_source(tmp_path):
     # If the user picks a dest path inside source (e.g.
     # `--dest <source>/vireo-test-photos`), a naive walk re-ingests prior
