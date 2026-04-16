@@ -154,3 +154,102 @@ def test_deep_merge_preserves_pipeline(tmp_path):
     assert loaded["pipeline"]["burst_time_gap"] == 3.0
     # Top-level defaults preserved
     assert loaded["photos_per_page"] == 50
+
+
+def test_eye_focus_defaults_exist():
+    """Config DEFAULTS includes eye-focus detection tunables."""
+    from config import DEFAULTS
+
+    p = DEFAULTS["pipeline"]
+    assert p["eye_detect_enabled"] is True
+    assert p["eye_classifier_conf_gate"] == 0.50
+    assert p["eye_detection_conf_gate"] == 0.50
+    assert p["eye_window_k"] == 0.08
+    assert p["reject_eye_focus"] == 0.35
+
+
+def test_eye_focus_config_round_trips_through_settings_api(tmp_path, monkeypatch):
+    """Posting eye-focus settings via /api/config persists and reloads.
+
+    Verifies the full wiring from settings.html → /api/config → config.json →
+    cfg.load() → get_effective_config → score_encounter sees the new keys.
+    """
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    from app import create_app
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    app = create_app(db_path, str(thumb_dir))
+    client = app.test_client()
+
+    # Post a pipeline block that sets a non-default reject_eye_focus.
+    r = client.post(
+        "/api/config",
+        data=_json.dumps({
+            "pipeline": {
+                "eye_detect_enabled": False,
+                "eye_classifier_conf_gate": 0.72,
+                "eye_detection_conf_gate": 0.61,
+                "eye_window_k": 0.12,
+                "reject_eye_focus": 0.55,
+            },
+        }),
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 200
+
+    loaded = cfg.load()
+    p = loaded["pipeline"]
+    assert p["eye_detect_enabled"] is False
+    assert p["eye_classifier_conf_gate"] == 0.72
+    assert p["eye_detection_conf_gate"] == 0.61
+    assert p["eye_window_k"] == 0.12
+    assert p["reject_eye_focus"] == 0.55
+
+
+def test_reject_eye_focus_flows_from_config_to_scoring(tmp_path, monkeypatch):
+    """A reject_eye_focus value from effective config reaches score_encounter.
+
+    End-to-end: config.json → cfg.load() → db.get_effective_config() → dict
+    passed as score_encounter(config=...). Sets the threshold high enough
+    that a sharp eye still gets rejected, proving the value took effect.
+    """
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    with open(cfg.CONFIG_PATH, "w") as f:
+        _json.dump({"pipeline": {"reject_eye_focus": 0.99}}, f)
+
+    from db import Database
+    from scoring import score_encounter
+
+    db = Database(str(tmp_path / "vireo.db"))
+    effective = db.get_effective_config(cfg.load())
+    pipeline_cfg = effective.get("pipeline", {})
+
+    photo = {
+        "subject_tenengrad": 50000,
+        "eye_tenengrad": 50000,  # "sharp" eye — yet rule still fires at 0.99
+        "bg_tenengrad": 50,
+        "subject_clip_high": 0.0,
+        "subject_clip_low": 0.0,
+        "subject_y_median": 115,
+        "crop_complete": 0.95,
+        "bg_separation": 10.0,
+        "subject_size": 0.15,
+        "mask_path": "/masks/1.png",
+    }
+    enc = {"photos": [photo]}
+    score_encounter(enc, config=pipeline_cfg)
+
+    assert any(
+        "eye_soft" in r for r in photo.get("reject_reasons", [])
+    ), (
+        "reject_eye_focus from config.json was not applied by score_encounter; "
+        f"reasons={photo.get('reject_reasons')}"
+    )
