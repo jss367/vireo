@@ -16,6 +16,7 @@ from testing.userfirst.profile import (
     resolve_photos_root,
     resolve_profile,
     validate_db_folders,
+    validate_profile_tree,
 )
 
 
@@ -104,3 +105,46 @@ def test_profile_paths_structure(tmp_path):
     assert paths["labels"] == tmp_path / "labels"
     assert paths["config"] == tmp_path / "config.json"
     assert paths["runs"] == tmp_path / "runs"
+
+
+def test_validate_profile_tree_noop_when_profile_missing(tmp_path):
+    validate_profile_tree(tmp_path / "does-not-exist")
+
+
+def test_validate_profile_tree_allows_internal_symlinks(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    target = profile / "real"
+    target.mkdir()
+    (profile / "link").symlink_to(target)
+    validate_profile_tree(profile)
+
+
+def test_validate_profile_tree_rejects_file_symlink_escape(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    outside = tmp_path / "outside.db"
+    outside.write_text("real data")
+    (profile / "vireo.db").symlink_to(outside)
+    with pytest.raises(UnsafeProfileError, match="escapes"):
+        validate_profile_tree(profile)
+
+
+def test_validate_profile_tree_rejects_dir_symlink_escape(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (profile / "thumbnails").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(UnsafeProfileError, match="escapes"):
+        validate_profile_tree(profile)
+
+
+def test_validate_profile_tree_rejects_nested_symlink_escape(tmp_path):
+    profile = tmp_path / "profile"
+    (profile / "runs").mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (profile / "runs" / "leak").symlink_to(outside)
+    with pytest.raises(UnsafeProfileError, match="escapes"):
+        validate_profile_tree(profile)

@@ -18,6 +18,7 @@ from .profile import (
     resolve_photos_root,
     resolve_profile,
     validate_db_folders,
+    validate_profile_tree,
 )
 from .report import Finding, Report
 
@@ -201,6 +202,10 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
       - `playwright` installed with Chromium browsers
     """
     profile = resolve_profile()
+    # Reject any pre-existing symlink inside the profile that points outside
+    # it (e.g. `<profile>/vireo.db -> ~/.vireo/vireo.db`) before creating any
+    # subdirectories — otherwise the mkdir below would write through the link.
+    validate_profile_tree(profile)
     photos_root = resolve_photos_root()
     paths = profile_paths(profile)
 
@@ -266,5 +271,10 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                # Reap the killed child so it doesn't linger as a zombie —
+                # repeated timeouts across sessions would otherwise leak
+                # defunct processes.
+                with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+                    proc.wait(timeout=5)
         log_fh.close()
         _prune_runs(paths["runs"], keep=keep_runs)

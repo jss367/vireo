@@ -68,6 +68,33 @@ def profile_paths(profile_dir):
     }
 
 
+def validate_profile_tree(profile_dir):
+    """Reject any entry under `profile_dir` that symlinks outside it.
+
+    `resolve_profile()` only checks the profile directory path itself. Without
+    this walk, a child like `<profile>/vireo.db -> ~/.vireo/vireo.db` would
+    still pass the outer guard and let the harness read/write real data via
+    the symlink. Every symlink in the tree must resolve to a target inside
+    the profile, or the harness refuses to start.
+    """
+    profile = Path(profile_dir).resolve()
+    if not profile.exists():
+        return
+    for root, dirs, files in os.walk(profile, followlinks=False):
+        root_path = Path(root)
+        for name in list(dirs) + list(files):
+            entry = root_path / name
+            if not entry.is_symlink():
+                continue
+            target = Path(os.path.realpath(entry))
+            try:
+                target.relative_to(profile)
+            except ValueError as err:
+                raise UnsafeProfileError(
+                    f"symlink inside profile escapes it: {entry} -> {target}"
+                ) from err
+
+
 def validate_db_folders(db_path, photos_root):
     """Ensure every folder in the DB lives under `photos_root`.
 
