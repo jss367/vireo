@@ -316,6 +316,59 @@ def _migrate_legacy_preview_cache(app):
             pass
 
 
+def _enforce_preview_cache_quota_at_startup(app):
+    """Run one eviction pass at startup so migration / prior runs can't
+    leave the app over quota indefinitely.
+
+    Imports the module-level helper defined inside ``create_app`` by
+    reusing the same logic inline — we don't have access to the closure
+    here, so we replicate the small eviction loop against a fresh
+    Database instance.
+    """
+    import config as cfg
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
+    max_bytes = int(quota_mb) * 1024 * 1024
+
+    db = Database(app.config["DB_PATH"])
+    try:
+        total = db.preview_cache_total_bytes()
+        if total <= max_bytes:
+            return
+        to_delete = []
+        for row in db.preview_cache_oldest_first():
+            if total <= max_bytes:
+                break
+            path = os.path.join(
+                preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
+            )
+            removed = True
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning("Startup eviction: failed to unlink %s: %s", path, e)
+                removed = False
+            if removed:
+                to_delete.append((row["photo_id"], row["size"]))
+                total -= row["bytes"]
+        if to_delete:
+            db.conn.executemany(
+                "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+                to_delete,
+            )
+            db.conn.commit()
+            log.info("Startup eviction removed %d preview_cache entries", len(to_delete))
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -332,6 +385,7 @@ def create_app(db_path, thumb_cache_dir=None):
     )
 
     _migrate_legacy_preview_cache(app)
+    _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions
     @app.before_request
@@ -7254,19 +7308,25 @@ def create_app(db_path, thumb_cache_dir=None):
             path = os.path.join(
                 preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
             )
+            removed = True
             try:
                 os.remove(path)
             except FileNotFoundError:
+                # File already missing — row is a ghost, remove it.
                 pass
             except OSError as e:
-                # Self-healing: log and continue so one bad file doesn't
-                # abort the whole eviction pass.
+                # Unlink failed for a non-missing reason (locked file,
+                # permission). Leave the row so future passes can retry;
+                # otherwise the bytes leak from accounting and eviction
+                # stops targeting them.
                 import logging
                 logging.getLogger(__name__).warning(
                     "Failed to remove preview cache file %s: %s", path, e,
                 )
-            to_delete.append((row["photo_id"], row["size"]))
-            total -= row["bytes"]
+                removed = False
+            if removed:
+                to_delete.append((row["photo_id"], row["size"]))
+                total -= row["bytes"]
 
         if to_delete:
             db.conn.executemany(

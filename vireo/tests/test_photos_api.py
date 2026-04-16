@@ -849,6 +849,91 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     assert row["bytes"] == os.path.getsize(new_path)
 
 
+def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
+    """If os.remove raises OSError (not FileNotFoundError), the preview_cache
+    row is kept so future passes can retry instead of leaking bytes."""
+    import os
+
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    # Simulate a permission error on unlink.
+    real_remove = os.remove
+
+    def flaky_remove(path, *args, **kwargs):
+        if path.endswith(f"{photo_id}_1920.jpg"):
+            raise PermissionError("simulated")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+
+    # Trigger eviction via a config save. The unlink will fail, so the
+    # row should remain so a subsequent pass can retry.
+    resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
+    assert resp.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+
+def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
+    """If legacy migration inserts rows that exceed the quota, startup
+    eviction drains them without waiting for a later cache write."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({
+        **cfg.DEFAULTS,
+        "preview_max_size": 1920,
+        "preview_cache_max_mb": 0,  # quota of 0 drains everything
+    })
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    legacy = preview_dir / f"{pid}.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
+
+    # Creating the app runs migration (inserts row) then eviction (drains).
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    assert db.preview_cache_total_bytes() == 0
+    assert not legacy.exists()
+    assert not (preview_dir / f"{pid}_1920.jpg").exists()
+
+
 def test_legacy_migration_skips_orphaned_photo_ids(tmp_path, monkeypatch):
     """Legacy {id}.jpg where id is no longer in photos table is unlinked,
     not inserted (which would fail the FK constraint)."""
