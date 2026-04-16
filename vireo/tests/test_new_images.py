@@ -368,3 +368,35 @@ def test_get_new_images_for_workspace_race_does_not_repopulate_stale(db_with_wor
     db.get_new_images_for_workspace(ws_id)
     # Cache must NOT hold the stale value.
     assert db._new_images_cache.get(ws_id) is None, "Stale compute leaked into cache"
+
+
+def test_scan_handler_invalidates_cache_when_scan_raises(tmp_path, monkeypatch):
+    """If do_scan raises partway through, invalidation must still run because
+    scanner.scan commits photo rows incrementally. The try/finally in the scan
+    handlers at vireo/app.py guarantees this."""
+    import app as app_module
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    # Prime the cache.
+    db.get_new_images_for_workspace(ws_id)
+    assert db._new_images_cache.get(ws_id) is not None
+
+    # Simulate the try/finally pattern used in api_job_scan / api_job_import_full:
+    # do_scan raises, invalidation still runs in finally.
+    try:
+        try:
+            raise RuntimeError("simulated mid-scan failure")
+        finally:
+            app_module._invalidate_new_images_after_scan(db, str(root))
+    except RuntimeError:
+        pass
+
+    assert db._new_images_cache.get(ws_id) is None, (
+        "Cache must be invalidated even when the scan raises"
+    )

@@ -4285,16 +4285,20 @@ def create_app(db_path, thumb_cache_dir=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            do_scan(
-                root, thread_db, progress_callback=progress_cb, incremental=incremental,
-                extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                status_callback=status_cb,
-                vireo_dir=vireo_dir,
-            )
+            try:
+                do_scan(
+                    root, thread_db, progress_callback=progress_cb, incremental=incremental,
+                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                    status_callback=status_cb,
+                    vireo_dir=vireo_dir,
+                )
+            finally:
+                # scanner.scan commits photo rows incrementally, so even a mid-scan
+                # failure can leave DB state that invalidates cached new-image counts.
+                _invalidate_new_images_after_scan(thread_db, root)
             photo_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{photo_count} photos")
-            _invalidate_new_images_after_scan(thread_db, root)
             runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
@@ -4879,11 +4883,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
+            try:
+                do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
+            finally:
+                # scanner.scan commits photo rows incrementally, so even a mid-scan
+                # failure can leave DB state that invalidates cached new-image counts.
+                _invalidate_new_images_after_scan(thread_db, scan_target)
             scan_count = job["progress"].get("total", 0)
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{scan_count} photos")
-            _invalidate_new_images_after_scan(thread_db, scan_target)
 
             # Phase 3: Generate thumbnails
             runner.update_step(job["id"], "thumbnails", status="running")
