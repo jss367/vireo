@@ -680,7 +680,8 @@ def test_find_broken_metadata_folders_returns_empty_when_healthy(app_and_db):
 
 
 def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db):
-    """_find_broken_metadata_folders flags a photo whose timestamp is NULL."""
+    """_find_broken_metadata_folders flags a photo whose timestamp is NULL
+    and returns its file path so the repair path can restrict the scan."""
     from pipeline_job import _find_broken_metadata_folders
     _, db = app_and_db
 
@@ -698,7 +699,7 @@ def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db):
     folder_path = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (row["folder_id"],)
     ).fetchone()["path"]
-    assert result == [(folder_path, 1)]
+    assert result == [(folder_path, [os.path.join(folder_path, "bird1.jpg")])]
 
 
 def test_find_broken_metadata_folders_detects_raw_thumb_dims(app_and_db):
@@ -721,7 +722,9 @@ def test_find_broken_metadata_folders_detects_raw_thumb_dims(app_and_db):
     ).fetchall()]
     result = _find_broken_metadata_folders(db, photo_ids)
     assert len(result) == 1
-    assert result[0][1] == 1
+    # One file in the folder — bird1.jpg with the fake .nef extension.
+    assert len(result[0][1]) == 1
+    assert result[0][1][0].endswith("bird1.jpg")
 
 
 def test_find_broken_metadata_folders_ignores_out_of_scope(app_and_db):
@@ -742,6 +745,31 @@ def test_find_broken_metadata_folders_ignores_out_of_scope(app_and_db):
     assert _find_broken_metadata_folders(db, [bird2]) == []
 
 
+def test_find_broken_metadata_folders_excludes_exif_extracted(app_and_db):
+    """A row whose timestamp is NULL but exif_data is populated is NOT
+    returned. Such rows represent photos where ExifTool already ran and
+    the source file genuinely has no DateTimeOriginal (e.g. screenshots).
+    The scanner's exif_extracted guard would skip them on re-scan anyway,
+    so flagging them as repairable would cause the repair path to fire
+    forever without doing useful work."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data='{\"File\":{}}' "
+        "WHERE id=?", (row["id"],)
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    assert _find_broken_metadata_folders(db, photo_ids) == []
+
+
 def test_find_broken_metadata_folders_groups_by_folder(app_and_db):
     """Multiple broken photos in the same folder are returned as one
     folder entry with a count."""
@@ -760,8 +788,10 @@ def test_find_broken_metadata_folders_groups_by_folder(app_and_db):
     ).fetchall()]
     result = _find_broken_metadata_folders(db, photo_ids)
     assert len(result) == 1
-    assert result[0][0] == '/photos/2024'
-    assert result[0][1] == 2
+    folder, paths = result[0]
+    assert folder == '/photos/2024'
+    assert len(paths) == 2
+    assert sorted(os.path.basename(p) for p in paths) == ['bird1.jpg', 'bird3.jpg']
 
 
 def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
@@ -883,6 +913,83 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
     assert row["timestamp"] == "2024-06-15T10:00:00"
     assert row["width"] == 640
     assert row["height"] == 480
+
+
+def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, monkeypatch):
+    """When the repair path scans a folder to fix broken metadata, new
+    files that were added to that folder but never scanned do NOT get
+    ingested as a side effect. The repair must touch only the specific
+    photos flagged as broken."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    # Create a real folder with two files — one in the DB (broken), one
+    # untracked. The repair run should touch the broken one and leave
+    # the untracked one alone.
+    photos_root = tmp_path / "real_photos"
+    photos_root.mkdir()
+    tracked = photos_root / "tracked.jpg"
+    untracked = photos_root / "untracked.jpg"
+    Image.new("RGB", (640, 480), color="red").save(str(tracked), "JPEG")
+    Image.new("RGB", (640, 480), color="blue").save(str(untracked), "JPEG")
+
+    fid = db.add_folder(str(photos_root), name="real_photos")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="tracked.jpg", extension=".jpg",
+        file_size=tracked.stat().st_size,
+        file_mtime=tracked.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    import scanner
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
+                    "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    col_id = db.add_collection(
+        "broken_tracked",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+    # Tracked photo repaired: timestamp populated.
+    tracked_row = db.conn.execute(
+        "SELECT timestamp FROM photos WHERE filename='tracked.jpg'"
+    ).fetchone()
+    assert tracked_row["timestamp"] == "2024-06-15T10:00:00"
+    # Untracked file NOT ingested.
+    untracked_row = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE filename='untracked.jpg'"
+    ).fetchone()
+    assert untracked_row["n"] == 0
 
 
 def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):

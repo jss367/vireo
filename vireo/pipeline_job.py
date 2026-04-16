@@ -84,31 +84,42 @@ _RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf
 def _find_broken_metadata_folders(db, photo_ids):
     """Find folders containing photos with broken metadata in the given scope.
 
-    A photo is considered broken if its EXIF extraction never produced a
-    usable result — ``timestamp IS NULL`` or (for RAW files) dimensions
-    under 1000px, which indicates the embedded JPEG thumbnail leaked
-    through instead of the true sensor size.
+    A photo is considered broken if EXIF extraction never produced usable
+    output (``exif_data IS NULL``) and either ``timestamp IS NULL`` or,
+    for RAW files, dimensions under 1000px — the latter indicates the
+    embedded JPEG thumbnail leaked through instead of the true sensor
+    size. The ``exif_data IS NULL`` clause mirrors the scanner's
+    ``exif_extracted`` guard: once ExifTool has stored output for a
+    photo, the scanner won't retry regardless of signal, so flagging
+    such rows here would cause the repair path to fire on every pipeline
+    run without accomplishing anything.
 
-    Returns a list of ``(folder_path, broken_count)`` tuples sorted by
-    path, or ``[]`` when nothing needs repair.
+    Returns a list of ``(folder_path, file_paths)`` tuples where
+    ``file_paths`` is a list of absolute image paths in that folder.
+    Empty list when nothing needs repair.
     """
     if not photo_ids:
         return []
     raw_list = ",".join(f"'{e}'" for e in _RAW_EXTENSIONS)
     placeholders = ",".join("?" for _ in photo_ids)
     rows = db.conn.execute(
-        f"""SELECT f.path, COUNT(*) AS n
+        f"""SELECT f.path AS folder_path, p.filename
             FROM photos p
             JOIN folders f ON p.folder_id = f.id
             WHERE p.id IN ({placeholders})
+              AND p.exif_data IS NULL
               AND (p.timestamp IS NULL
                    OR (p.extension IN ({raw_list})
                        AND p.width IS NOT NULL AND p.width < 1000))
-            GROUP BY f.id
-            ORDER BY f.path""",
+            ORDER BY f.path, p.filename""",
         tuple(photo_ids),
     ).fetchall()
-    return [(r["path"], r["n"]) for r in rows]
+    by_folder: dict[str, list[str]] = {}
+    for r in rows:
+        by_folder.setdefault(r["folder_path"], []).append(
+            os.path.join(r["folder_path"], r["filename"])
+        )
+    return [(fp, paths) for fp, paths in by_folder.items()]
 
 
 def _update_stages(runner, job_id, stages):
@@ -369,7 +380,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     scan_to_thumb.put(_SENTINEL)
                     return
 
-                total_broken = sum(n for _, n in broken)
+                total_broken = sum(len(paths) for _, paths in broken)
                 stages["scan"]["label"] = (
                     f"Repair metadata ({total_broken} photos)"
                 )
@@ -383,7 +394,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 _update_stages(runner, job["id"], stages)
 
                 unreachable = 0
-                for folder_path, _ in broken:
+                for folder_path, file_paths in broken:
                     if not os.path.isdir(folder_path):
                         log.warning(
                             "Repair scan skipped for missing folder: %s",
@@ -392,6 +403,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         unreachable += 1
                         continue
                     try:
+                        # restrict_files limits discovery to the known
+                        # broken photos in this folder. Without it, new
+                        # untracked files in the same folder would get
+                        # ingested as a side effect of the repair.
                         do_scan(
                             folder_path, thread_db,
                             progress_callback=progress_cb,
@@ -402,6 +417,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             photo_callback=photo_cb,
                             status_callback=status_cb,
                             restrict_dirs=[folder_path],
+                            restrict_files=set(file_paths),
                         )
                     except (OSError, RuntimeError) as e:
                         log.warning(

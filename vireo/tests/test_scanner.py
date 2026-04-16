@@ -1104,6 +1104,54 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     assert all(image_path not in batch for batch in called_with)
 
 
+def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
+    """When scan is called with restrict_files, files in restrict_dirs
+    that are not in the list are left untouched — even if they're brand
+    new and not yet in the DB. This prevents the pipeline's repair path
+    from ingesting new files as a side effect of fixing broken metadata."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    existing_file = os.path.join(root, "existing.jpg")
+    Image.new("RGB", (640, 480), color="green").save(existing_file, "JPEG")
+
+    db = Database(str(tmp_path / "test.db"))
+
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    # Seed the DB with only the existing file, then force broken state.
+    scanner.scan(root, db)
+    pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='existing.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    # NOW add an untracked file to the same folder (after initial scan).
+    new_file = os.path.join(root, "new_untracked.jpg")
+    Image.new("RGB", (640, 480), color="blue").save(new_file, "JPEG")
+
+    # Second scan with restrict_files constrained to the existing file only.
+    scanner.scan(
+        root, db,
+        incremental=True,
+        restrict_dirs=[root],
+        restrict_files={existing_file},
+    )
+
+    # new_untracked.jpg should NOT have been ingested.
+    filenames = [p["filename"] for p in db.get_photos(per_page=999999)]
+    assert "new_untracked.jpg" not in filenames
+    assert "existing.jpg" in filenames
+
+
 def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch):
     """Incremental scan does NOT re-process a row when exif_data is
     populated, even if the row otherwise looks broken. The guard prevents

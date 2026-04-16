@@ -43,16 +43,25 @@ action. Runs with no broken data are unchanged.
 A photo needs metadata re-extraction if:
 
 ```sql
-p.timestamp IS NULL
-OR (p.extension IN ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf')
-    AND p.width IS NOT NULL
-    AND p.width < 1000)
+p.exif_data IS NULL
+AND (p.timestamp IS NULL
+     OR (p.extension IN ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf')
+         AND p.width IS NOT NULL
+         AND p.width < 1000))
 ```
+
+The `exif_data IS NULL` clause mirrors the scanner's `exif_extracted`
+guard: once ExifTool has stored output for a photo, the scanner won't
+retry regardless of signal, so flagging such rows here would cause the
+repair path to fire on every pipeline run without accomplishing anything
+— and the normal fast-path "Skipped (using collection)" summary would
+never return.
 
 The RAW-dimension clause is defense in depth. On ws4 it adds zero new
 detections (every dim-suspect row is also `timestamp IS NULL`), but it
 catches future failure modes where ExifTool partially succeeds —
-timestamp populated, dimensions still 160×120.
+timestamp populated, dimensions still 160×120 — provided exif_data is
+still NULL.
 
 Cross-tab from ws4 confirms the buckets:
 
@@ -71,15 +80,18 @@ The repair lives inside `scanner_stage()` in `pipeline_job.py`, replacing
 the current `if skip_scan: return` early-exit. Flow in collection mode:
 
 1. Pipeline receives `collection_id`; resolve to photo ID set.
-2. New helper `_find_broken_metadata_folders(db, photo_ids)` runs one
-   indexed SQL query against the detection rule, groups by `folder_id`,
-   returns `[(folder_path, broken_count), ...]`.
+2. Helper `_find_broken_metadata_folders(db, photo_ids)` runs one
+   indexed SQL query against the detection rule, groups by folder,
+   returns `[(folder_path, [file_paths...]), ...]` — folders mapped to
+   the absolute paths of their broken photos.
 3. If empty, scan stage reports "Skipped (using collection)" exactly as
    today — no behavior change.
 4. If non-empty, scan stage runs `do_scan(folder_path, incremental=True,
-   restrict_dirs=[folder_path])` per affected folder. Scanner's existing
-   incremental logic re-extracts metadata for broken photos and skips
-   healthy ones in the same folder.
+   restrict_dirs=[folder_path], restrict_files=set(paths))` per affected
+   folder. The `restrict_files` argument limits discovery to the known
+   broken photos — new untracked files in the same folder are NOT
+   ingested as a side effect of repair. Scanner's incremental logic
+   then re-extracts metadata for those files.
 5. Control passes to the rest of the pipeline (thumbnails, classify,
    encounters, ...) with fresh data.
 
@@ -263,9 +275,31 @@ After running pipeline against the same collection used previously:
 
 ## Files touched
 
-- `vireo/scanner.py` — 5-line heuristic extension in `metadata_missing`.
-- `vireo/pipeline_job.py` — new helper + replacement of `skip_scan`
-  early-return block.
-- `vireo/db.py` — `get_collection_photo_ids` helper if not already present.
-- `vireo/tests/test_scanner.py` — 4 new tests.
-- `vireo/tests/test_jobs_api.py` — 3 new tests.
+- `vireo/scanner.py` — dims-suspect clause in `metadata_missing`; new
+  `restrict_files` parameter on `scan()` so the repair path can limit
+  discovery to known-broken files (prevents untracked-file ingestion as
+  a side effect of repair).
+- `vireo/pipeline_job.py` — `_find_broken_metadata_folders` helper (returns
+  folders mapped to broken file paths) + replacement of `skip_scan`
+  early-return block, passing `restrict_files=set(paths)` into `do_scan`.
+- `vireo/tests/test_scanner.py` — tests for dims-suspect detection,
+  exif_extracted guard, restrict_files honoring.
+- `vireo/tests/test_jobs_api.py` — unit tests for the helper + integration
+  tests for healthy/broken/unreachable-folder/untracked-file paths.
+
+## Review refinements
+
+Two adjustments made after initial review:
+
+1. **Detection excludes `exif_data IS NOT NULL` rows.** Without this,
+   photos whose source file genuinely has no EXIF timestamp (the
+   scanner's `exif_extracted` guard skips them on re-scan) would stay
+   in the detection set forever, and collection runs would repeatedly
+   enter the repair path instead of returning to the fast-path skip.
+2. **Repair honors `restrict_files`.** The scanner's `restrict_dirs`
+   mode still enumerates every supported file in the listed folders
+   and ingests new ones. For the repair use case that's wrong — a
+   user who adds a new photo to a folder and then runs pipeline
+   against an older collection would see the new photo silently
+   ingested as a side effect. `restrict_files` limits discovery to
+   the specific broken files.
