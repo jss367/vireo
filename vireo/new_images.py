@@ -106,12 +106,19 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
 
 
 class NewImagesCache:
-    """In-memory per-workspace cache with a TTL ceiling.
+    """In-memory per-``(db_path, workspace_id)`` cache with a TTL ceiling.
 
-    Thread-safe. Invalidation takes a list of workspace_ids (computed by the
-    caller from the set of folder_ids touched by a scan).
+    Thread-safe. Keyed by the compound ``(db_path, workspace_id)`` so that two
+    :class:`Database` instances pointed at different SQLite files cannot read
+    each other's cached results — ``workspace_id=1`` (the default workspace)
+    is reused across databases, and without the db_path scope tests or
+    multi-database embeddings would cross-contaminate.
 
-    A per-workspace generation counter protects against a race between an
+    Invalidation takes a list of workspace_ids (computed by the caller from
+    the set of folder_ids touched by a scan) plus the originating ``db_path``;
+    only entries and generations for that db are affected.
+
+    A per-key generation counter protects against a race between an
     in-flight compute and a concurrent invalidation: a caller snapshots the
     generation before starting the walk and passes it to :meth:`set`; if
     invalidation bumps the generation during the walk, the stale result is
@@ -120,47 +127,53 @@ class NewImagesCache:
 
     def __init__(self, ttl_seconds=300):
         self._ttl = ttl_seconds
-        self._entries = {}  # workspace_id -> (result_dict, set_at_monotonic)
-        self._generations = {}  # workspace_id -> int
+        # key=(db_path, workspace_id) -> (result_dict, set_at_monotonic)
+        self._entries = {}
+        # key=(db_path, workspace_id) -> int
+        self._generations = {}
         self._lock = threading.Lock()
 
-    def get(self, workspace_id):
+    def get(self, db_path, workspace_id):
+        key = (db_path, workspace_id)
         with self._lock:
-            entry = self._entries.get(workspace_id)
+            entry = self._entries.get(key)
             if entry is None:
                 return None
             result, set_at = entry
             if time.monotonic() - set_at > self._ttl:
-                del self._entries[workspace_id]
+                del self._entries[key]
                 return None
             return result
 
-    def get_generation(self, workspace_id):
-        """Return the current generation for a workspace (0 if unseen)."""
+    def get_generation(self, db_path, workspace_id):
+        """Return the current generation for ``(db_path, workspace_id)`` (0 if unseen)."""
+        key = (db_path, workspace_id)
         with self._lock:
-            return self._generations.get(workspace_id, 0)
+            return self._generations.get(key, 0)
 
-    def set(self, workspace_id, result, generation=None):
-        """Store ``result`` for ``workspace_id``.
+    def set(self, db_path, workspace_id, result, generation=None):
+        """Store ``result`` for ``(db_path, workspace_id)``.
 
         If ``generation`` is provided and no longer matches the current
-        generation for the workspace (i.e. an invalidation ran after the
+        generation for the key (i.e. an invalidation ran after the
         caller snapshotted it), the write is silently dropped. Callers that
         don't care about the race can omit ``generation`` and the write is
         unconditional.
         """
+        key = (db_path, workspace_id)
         with self._lock:
             if generation is not None:
-                current = self._generations.get(workspace_id, 0)
+                current = self._generations.get(key, 0)
                 if generation != current:
                     return
-            self._entries[workspace_id] = (result, time.monotonic())
+            self._entries[key] = (result, time.monotonic())
 
-    def invalidate_workspaces(self, workspace_ids):
+    def invalidate_workspaces(self, db_path, workspace_ids):
         with self._lock:
             for wid in workspace_ids:
-                self._entries.pop(wid, None)
-                self._generations[wid] = self._generations.get(wid, 0) + 1
+                key = (db_path, wid)
+                self._entries.pop(key, None)
+                self._generations[key] = self._generations.get(key, 0) + 1
 
     def clear(self):
         with self._lock:

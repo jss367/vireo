@@ -51,6 +51,11 @@ class Database:
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
             os.makedirs(db_dir, exist_ok=True)
+        # Preserved for the new-images cache key, which compounds
+        # (db_path, workspace_id) so instances against different SQLite files
+        # don't cross-read each other's cached results (workspace_id=1 is
+        # reused across every database as the default workspace).
+        self._db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -732,12 +737,14 @@ class Database:
         best-effort result.
         """
         import new_images
-        cached = self._new_images_cache.get(workspace_id)
+        cached = self._new_images_cache.get(self._db_path, workspace_id)
         if cached is not None:
             return cached
-        generation = self._new_images_cache.get_generation(workspace_id)
+        generation = self._new_images_cache.get_generation(self._db_path, workspace_id)
         result = new_images.count_new_images_for_workspace(self, workspace_id)
-        self._new_images_cache.set(workspace_id, result, generation=generation)
+        self._new_images_cache.set(
+            self._db_path, workspace_id, result, generation=generation
+        )
         return result
 
     def invalidate_new_images_cache_for_folders(self, folder_ids):
@@ -760,7 +767,7 @@ class Database:
                 tuple(chunk),
             ).fetchall()
             ws_ids.update(r["workspace_id"] for r in rows)
-        self._new_images_cache.invalidate_workspaces(ws_ids)
+        self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
 
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""
@@ -794,7 +801,7 @@ class Database:
         # rowid, so a freshly created workspace may collide with the stale cache
         # entry of a prior workspace that shared this id. Clear any lingering
         # entry so the new workspace starts clean.
-        self._new_images_cache.invalidate_workspaces([workspace_id])
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
         return workspace_id
 
     def get_workspace(self, workspace_id):
@@ -889,7 +896,7 @@ class Database:
         # if the deleted id is later reused by SQLite for a new workspace,
         # ``get_new_images_for_workspace`` could serve the prior workspace's
         # data until TTL expiry.
-        self._new_images_cache.invalidate_workspaces([workspace_id])
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def add_workspace_folder(self, workspace_id, folder_id):
         """Link a folder to a workspace."""

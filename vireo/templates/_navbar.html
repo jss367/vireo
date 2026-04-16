@@ -3285,9 +3285,14 @@ setInterval(checkMissingFolders, 600000);
 //     Switch to B -> B's dismissal read from its own key (absent/different).
 //     Switch back to A with count=20 -> still dismissed. Correct.
 //   - Dismiss in A at 20, dismiss in B at 5 -> two independent keys. Correct.
-//   - Dismiss in A at 20, A's count rises to 30 -> 30 !== 20 -> banner shows.
-//   - Dismiss in A at 20, scan clears it to 0, then 5 new imports -> 5 !== 20
-//     -> banner shows. Correct (no decrease-then-increase trap).
+//   - Dismiss in A at 20, count stays at 20 -> banner hidden (dismissal still
+//     active). Correct.
+//   - Dismiss in A at 20, A's count rises to 25 -> 25 !== 20 -> banner shows
+//     (count mismatch). Correct.
+//   - Dismiss in A at 20, scan clears it to 0, then 20 new imports arrive ->
+//     banner shows. Correct: the 0 observation clears the dismissal (see
+//     checkNewImages), so the subsequent 20 is treated as fresh news rather
+//     than being suppressed by the old "20 === 20" exact match.
 const NEW_IMAGES_DISMISS_PREFIX = 'newImagesDismissed_ws_';
 
 function _newImagesDismissKey(wsId) {
@@ -3295,10 +3300,10 @@ function _newImagesDismissKey(wsId) {
 }
 
 // Dismissal suppresses the banner only while the count remains exactly what
-// the user dismissed. Any change — scan reducing it, or new imports
-// increasing it — re-arms the banner. This avoids the decrease-then-increase
-// trap where dismissing at 20, then scanning to 0, then importing 5 would
-// otherwise leave 5 <= 20 satisfied and keep the banner hidden.
+// the user dismissed. A rising/falling count to a *different* non-zero value
+// re-arms the banner via the exact-match check below. The zero-count reset
+// lives in checkNewImages (not here) because it needs to write to storage,
+// not just read it.
 function _isNewImagesDismissed(wsId, newCount) {
   if (wsId === null || wsId === undefined || wsId === '') return false;
   const raw = sessionStorage.getItem(_newImagesDismissKey(wsId));
@@ -3317,6 +3322,17 @@ async function checkNewImages() {
     const msg = document.getElementById('newImagesMsg');
     if (!banner || !msg) return;
     const wsId = (data && data.workspace_id != null) ? String(data.workspace_id) : '';
+
+    // Count dropping to zero means the user resolved the backlog (e.g. ran a
+    // scan / import). Clear any prior dismissal so a future non-zero count is
+    // treated as fresh news — without this, the exact-match suppression
+    // would keep "20 === 20" active through the round-trip dismiss-20 ->
+    // scan-to-0 -> import-20-again, leaving the banner hidden when it
+    // should show.
+    if (data.new_count === 0 && wsId !== '') {
+      sessionStorage.removeItem(_newImagesDismissKey(wsId));
+    }
+
     if (data.new_count > 0 && wsId !== '' && !_isNewImagesDismissed(wsId, data.new_count)) {
       const s = data.new_count === 1 ? '' : 's';
       msg.textContent = `${data.new_count} new image${s} detected in your registered folders.`;
