@@ -2894,6 +2894,38 @@ def test_get_folders_with_quality_data_scopes_to_active_workspace(tmp_path):
     assert db.get_highlights_candidates(folder_id=root, min_quality=0.0) == []
 
 
+def test_get_folders_with_quality_data_stops_at_inactive_ancestor(tmp_path):
+    """Rollup cannot propagate across an inactive intermediate folder.
+
+    Tree: A(active) -> B(inactive) -> C(active with scored photo). A must
+    NOT show a rolled-up count sourced from C, since get_folder_subtree_ids
+    stops at B and get_highlights_candidates(A) returns nothing.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    c = db.add_folder('/a/b/c', name='c', parent_id=b)
+    pid = db.add_photo(folder_id=c, filename='x.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (pid,))
+    # Detach B from the active workspace.
+    db.remove_workspace_folder(active_ws, b)
+    db.add_workspace_folder(other_ws, b)
+    db.conn.commit()
+
+    folders = db.get_folders_with_quality_data()
+    by_name = {f["name"]: f for f in folders}
+    # C still shows up (its own photo counts).
+    assert by_name["c"]["photo_count"] == 1
+    # A must NOT inherit C's count through the inactive B.
+    assert "a" not in by_name
+    # Sanity: candidate API agrees.
+    assert db.get_highlights_candidates(folder_id=a, min_quality=0.0) == []
+
+
 def test_get_folders_with_quality_data_skips_missing_descendants(tmp_path):
     """A parent folder does not count photos in descendant folders marked 'missing'."""
     from db import Database

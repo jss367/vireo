@@ -3033,6 +3033,10 @@ class Database:
         :meth:`get_highlights_candidates`.
         """
         ws = self._ws_id()
+        # The recursive step also joins workspace_folders on the current
+        # folder: propagation stops at any ancestor that is not in the active
+        # workspace, which matches get_folder_subtree_ids and keeps the
+        # dropdown counts aligned with get_highlights_candidates.
         return self.conn.execute(
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
                    SELECT p.id, p.folder_id, p.timestamp
@@ -3045,6 +3049,8 @@ class Database:
                    SELECT a.photo_id, f.parent_id, a.timestamp
                    FROM ancestors a
                    JOIN folders f ON f.id = a.folder_id
+                   JOIN workspace_folders wf_step
+                     ON wf_step.folder_id = f.id AND wf_step.workspace_id = ?
                    WHERE f.parent_id IS NOT NULL
                )
                SELECT f.id, f.path, f.name,
@@ -3057,7 +3063,7 @@ class Database:
                  AND f.status = 'ok'
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
-            (ws, ws),
+            (ws, ws, ws),
         ).fetchall()
 
     VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
