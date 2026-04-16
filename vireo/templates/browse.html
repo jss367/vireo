@@ -898,7 +898,7 @@ body {
     <!-- Photo Detail (shown when a photo is selected) -->
     <div class="detail-content" id="detailContent">
       <button class="detail-close" onclick="closeDetail()">&times;</button>
-      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent)">
+      <img class="detail-preview" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
       <div class="detail-filename" id="detailFilename"></div>
 
       <div class="detail-section">
@@ -1932,7 +1932,7 @@ document.getElementById('grid').addEventListener('dblclick', function(e) {
   if (!card) return;
   var id = parseInt(card.dataset.id, 10);
   var filename = card.dataset.filename || '';
-  openLightbox(id, filename);
+  openLightbox(id, filename, photos);
 });
 
 /* ---------- Infinite Scroll ---------- */
