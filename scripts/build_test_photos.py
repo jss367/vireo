@@ -1,0 +1,263 @@
+"""Sample a small test photo set from the user's real library.
+
+Usage:
+    python scripts/build_test_photos.py --source /path/to/real/photos \\
+        --dest ~/vireo-test-photos
+
+Writes ~100 photos into `dest` with a mix intended to exercise the 9 first-cut
+user-first scenarios: GPS/no-GPS for map, burst for cull, duplicates for
+resolver, mix of RAW/JPEG, variety for pagination.
+
+Only ever *reads* the source and only ever *writes* under the destination.
+Idempotent: re-running skips files already present.
+"""
+import argparse
+import hashlib
+import os
+import shutil
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf", ".rw2"}
+JPEG_EXTS = {".jpg", ".jpeg"}
+IMAGE_EXTS = RAW_EXTS | JPEG_EXTS | {".tif", ".tiff", ".png"}
+
+
+def classify_ext(path):
+    ext = path.suffix.lower()
+    if ext in RAW_EXTS:
+        return "raw"
+    if ext in JPEG_EXTS:
+        return "jpeg"
+    return "other" if ext in IMAGE_EXTS else "skip"
+
+
+def content_hash(path, chunk_size=65536):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def has_gps(path):
+    """Best-effort GPS-EXIF check. Returns None when we can't tell."""
+    try:
+        from PIL import ExifTags, Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return False
+            # GPSInfo tag is 34853
+            gps_tag = next(
+                (k for k, v in ExifTags.TAGS.items() if v == "GPSInfo"), 34853
+            )
+            gps = exif.get_ifd(gps_tag) if hasattr(exif, "get_ifd") else exif.get(gps_tag)
+            if not gps:
+                return False
+            return 2 in gps and 4 in gps
+    except Exception:
+        return None
+
+
+def find_duplicates(files):
+    """Return a list of (hash, [paths]) groups where len(paths) > 1.
+
+    Hashes only files that share a size with at least one other file, so this
+    stays fast across full libraries (tens of thousands of photos) while still
+    surfacing duplicate pairs that would otherwise be missed by a leading-prefix
+    scan.
+    """
+    by_size = defaultdict(list)
+    for f in files:
+        try:
+            by_size[f.stat().st_size].append(f)
+        except OSError:
+            continue
+    groups = defaultdict(list)
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        for f in same_size:
+            try:
+                groups[content_hash(f)].append(f)
+            except OSError:
+                continue
+    return [(h, paths) for h, paths in groups.items() if len(paths) > 1]
+
+
+def find_burst(files, window_seconds=2):
+    """Return the longest run of files whose mtimes are within `window_seconds`."""
+    sorted_files = sorted(files, key=lambda p: p.stat().st_mtime)
+    best_run = []
+    current = []
+    last_mtime = None
+    for f in sorted_files:
+        m = f.stat().st_mtime
+        if last_mtime is not None and m - last_mtime <= window_seconds:
+            current.append(f)
+        else:
+            current = [f]
+        if len(current) > len(best_run):
+            best_run = current[:]
+        last_mtime = m
+    return best_run
+
+
+def _safe_dest(dest):
+    """Validate destination is not inside ~/.vireo/ or $HOME."""
+    dest = Path(dest).expanduser().resolve()
+    home = Path.home().resolve()
+    if dest == home:
+        sys.exit(f"refusing to write to $HOME: {dest}")
+    real_vireo = (home / ".vireo").resolve()
+    try:
+        dest.relative_to(real_vireo)
+        sys.exit(f"refusing to write under ~/.vireo/: {dest}")
+    except ValueError:
+        pass
+    return dest
+
+
+def sample(source, dest, counts=None, dry_run=False):
+    """Walk `source`, pick a representative subset, copy to `dest`.
+
+    Returns a dict summarizing what was copied.
+    """
+    source = Path(source).expanduser().resolve()
+    # os.walk on a missing path yields no entries, so without this guard a typo
+    # in --source looks like a successful run with all-zero counts and an empty
+    # dataset — which quietly invalidates every downstream user-first test.
+    if not source.is_dir():
+        sys.exit(f"source does not exist or is not a directory: {source}")
+    dest = _safe_dest(dest)
+
+    # dest == source would make every category subdir a child of the walk root,
+    # so the dirs[:]-filter below would never exclude them and a rerun would
+    # re-ingest its own outputs into the real source library. Reject up front.
+    if dest == source:
+        sys.exit(f"refusing to use source as destination: {dest}")
+
+    counts = counts or {
+        "gps_yes": 10, "gps_no": 10, "raws": 10, "jpegs": 10, "random": 50,
+    }
+
+    all_files = []
+    for root, dirs, filenames in os.walk(source):
+        # If dest lives inside source (e.g. `--dest <source>/vireo-test-photos`),
+        # skip it so a second run doesn't re-ingest its own outputs and grow
+        # the sampled set unboundedly — breaking idempotency.
+        root_path = Path(root).resolve()
+        dirs[:] = [
+            d for d in dirs if (root_path / d).resolve() != dest
+        ]
+        for name in filenames:
+            p = Path(root) / name
+            if classify_ext(p) != "skip":
+                all_files.append(p)
+    # Sort so downstream category slicing and the copy loop see the same order
+    # on every run. Without this, os.walk's order variance would flip which
+    # same-basename source gets the original name vs. the hashed one, so a
+    # second run would create a third file and break idempotency.
+    all_files.sort()
+
+    gps_yes, gps_no, raws, jpegs = [], [], [], []
+    for f in all_files:
+        cls = classify_ext(f)
+        if cls == "raw":
+            raws.append(f)
+        elif cls == "jpeg":
+            jpegs.append(f)
+        if cls == "jpeg":
+            gps = has_gps(f)
+            if gps is True:
+                gps_yes.append(f)
+            elif gps is False:
+                gps_no.append(f)
+
+    # Scan the full set (not a leading 500-file slice) so burst runs and
+    # duplicate pairs later in a large library aren't silently dropped —
+    # otherwise `duplicates=0` can appear even when the library has obvious
+    # dup pairs, and the burst pick becomes unrepresentative.
+    burst = find_burst(all_files)[:5]
+    dups = find_duplicates(all_files)
+    dup_pair = dups[0][1][:2] if dups else []
+
+    picks = {
+        "gps_yes": gps_yes[: counts["gps_yes"]],
+        "gps_no": gps_no[: counts["gps_no"]],
+        "raws": raws[: counts["raws"]],
+        "jpegs": jpegs[: counts["jpegs"]],
+        "burst": burst,
+        "duplicates": dup_pair,
+        "random": all_files[: counts["random"]],
+    }
+
+    copied = {}
+    if not dry_run:
+        dest.mkdir(parents=True, exist_ok=True)
+        for category, files in picks.items():
+            cat_dir = dest / category
+            cat_dir.mkdir(exist_ok=True)
+            copied[category] = []
+            # Track basenames already claimed by another source in this run so
+            # two sources with the same name never collapse into one physical
+            # file — including when contents are identical (which is exactly
+            # what the "duplicates" scenario needs: two real files on disk).
+            claimed = set()
+            for src in files:
+                tgt = cat_dir / src.name
+                src_path_hash = hashlib.md5(str(src).encode()).hexdigest()[:8]
+                disambiguated = cat_dir / f"{src.stem}-{src_path_hash}{src.suffix}"
+                if tgt in claimed:
+                    # Another source already took this basename this run.
+                    tgt = disambiguated
+                elif tgt.exists() and content_hash(tgt) != content_hash(src):
+                    # A prior run wrote a different source to this basename.
+                    tgt = disambiguated
+                if tgt.exists():
+                    copied[category].append(tgt)
+                    claimed.add(tgt)
+                    continue
+                shutil.copy2(src, tgt)
+                copied[category].append(tgt)
+                claimed.add(tgt)
+
+        manifest = dest / "MANIFEST.md"
+        lines = [
+            f"# Vireo test photo set — built {datetime.now().isoformat()}",
+            f"Source: `{source}`",
+            "",
+        ]
+        for category, files in copied.items():
+            lines.append(f"## {category} ({len(files)} files)")
+            for f in files:
+                lines.append(f"- {f.relative_to(dest)}")
+            lines.append("")
+        manifest.write_text("\n".join(lines))
+
+    return {k: len(v) for k, v in picks.items()}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--source", required=True, help="Real photo library root")
+    p.add_argument("--dest", default="~/vireo-test-photos", help="Destination directory")
+    p.add_argument("--dry-run", action="store_true", help="Report picks without copying")
+    args = p.parse_args()
+    result = sample(args.source, args.dest, dry_run=args.dry_run)
+    print("Picks:")
+    for k, v in result.items():
+        print(f"  {k}: {v}")
+
+
+if __name__ == "__main__":
+    main()
