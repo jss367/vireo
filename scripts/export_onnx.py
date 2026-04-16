@@ -46,6 +46,7 @@ ALL_MODELS = [
     "sam2-small",
     "sam2-base-plus",
     "sam2-large",
+    "rtmpose-animal",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1029,100 @@ def export_sam2_large(output_dir, opset, validate=False):
 
 
 # ---------------------------------------------------------------------------
+# RTMPose-animal (MMPose, AP-10K keypoints) — eye-focus detection spike
+# ---------------------------------------------------------------------------
+
+def export_rtmpose_animal(output_dir, opset, validate=False):
+    """Export RTMPose-s trained on AP-10K to ONNX via mmdeploy.
+
+    RTMPose-s is a top-down animal pose estimator. AP-10K provides 17
+    keypoints including left_eye (idx 0) and right_eye (idx 1), which are
+    what the eye-focus pipeline stage consumes. The simcc head emits two
+    1-D classification maps per keypoint; Vireo's keypoints.decode_simcc
+    handles the argmax + rescale.
+
+    Input:  (1, 3, 256, 256) float32, normalized with AP-10K stats.
+    Output: simcc_x (1, 17, 512), simcc_y (1, 17, 512) float32.
+    """
+    from mmdeploy.apis import torch2onnx
+
+    model_id = "rtmpose-animal"
+    log.info("Exporting %s...", model_id)
+
+    # Official RTMPose-s AP-10K config + checkpoint (MMPose v1.x).
+    config = (
+        "https://raw.githubusercontent.com/open-mmlab/mmpose/main/"
+        "configs/animal_2d_keypoint/rtmpose/ap10k/"
+        "rtmpose-s_8xb64-210e_ap10k-256x256.py"
+    )
+    checkpoint = (
+        "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
+        "rtmpose-s_simcc-ap10k_pt-aic-coco_210e-256x256-7a041aa1_20230206.pth"
+    )
+
+    out_dir = _ensure_dir(os.path.join(output_dir, model_id))
+    onnx_path = os.path.join(out_dir, "model.onnx")
+
+    deploy_cfg = {
+        "onnx_config": {
+            "type": "onnx",
+            "export_params": True,
+            "keep_initializers_as_inputs": False,
+            "opset_version": opset,
+            "save_file": "model.onnx",
+            "input_names": ["pixel_values"],
+            "output_names": ["simcc_x", "simcc_y"],
+            "input_shape": [256, 256],
+        },
+        "codebase_config": {"type": "mmpose", "task": "PoseDetection"},
+        "backend_config": {"type": "onnxruntime"},
+    }
+
+    # mmdeploy's torch2onnx wants a sample image for shape inference.
+    import urllib.request
+    sample_path = os.path.join(out_dir, "_sample.jpg")
+    urllib.request.urlretrieve(
+        "https://raw.githubusercontent.com/open-mmlab/mmpose/main/tests/data/"
+        "ap10k/000000000017.jpg",
+        sample_path,
+    )
+
+    try:
+        torch2onnx(
+            sample_path,
+            out_dir,
+            "model",
+            deploy_cfg=deploy_cfg,
+            model_cfg=config,
+            model_checkpoint=checkpoint,
+            device="cpu",
+        )
+    finally:
+        if os.path.exists(sample_path):
+            os.remove(sample_path)
+
+    config_out = {
+        "input_size": [1, 3, 256, 256],
+        "mean": [123.675, 116.28, 103.53],
+        "std": [58.395, 57.12, 57.375],
+        # AP-10K keypoint order. Eye indices (0, 1) are what Vireo reads.
+        "keypoints": [
+            "left_eye", "right_eye", "nose", "neck", "root_of_tail",
+            "left_shoulder", "left_elbow", "left_front_paw",
+            "right_shoulder", "right_elbow", "right_front_paw",
+            "left_hip", "left_knee", "left_back_paw",
+            "right_hip", "right_knee", "right_back_paw",
+        ],
+        "output_type": "simcc",
+        "simcc_split_ratio": 2.0,
+    }
+    _save_json(os.path.join(out_dir, "config.json"), config_out)
+
+    log.info("  %s export complete: %s", model_id, out_dir)
+    return onnx_path
+
+
+# ---------------------------------------------------------------------------
 # Export dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1044,6 +1139,7 @@ _EXPORT_FUNCTIONS = {
     "sam2-small": export_sam2_small,
     "sam2-base-plus": export_sam2_base_plus,
     "sam2-large": export_sam2_large,
+    "rtmpose-animal": export_rtmpose_animal,
 }
 
 
@@ -1159,6 +1255,7 @@ Available models:
   sam2-small                SAM2 Hiera Small
   sam2-base-plus            SAM2 Hiera Base+
   sam2-large                SAM2 Hiera Large
+  rtmpose-animal            RTMPose-s AP-10K (animal keypoints, eye-focus spike)
 
 Examples:
   %(prog)s --model bioclip-vit-b-16

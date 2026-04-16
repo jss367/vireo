@@ -33,6 +33,13 @@ export = [
     "sam2>=1.0",
     "open_clip_torch>=2.0",
     "onnxscript>=0.1",
+    # RTMPose-animal / SuperAnimal keypoint model export (eye-focus detection).
+    # mmpose 1.x depends on mmengine; mmdeploy performs the torch -> ONNX
+    # conversion with simcc-aware graph surgery.
+    "mmengine>=0.10",
+    "mmcv>=2.1",
+    "mmpose>=1.3",
+    "mmdeploy>=1.3",
 ]
 dev = [
     "pytest>=9.0",
