@@ -62,3 +62,24 @@ def test_count_new_images_no_double_counting_with_nested_linked_folders(db_with_
     # Only the top-level root should appear in per_root.
     assert len(result["per_root"]) == 1
     assert result["per_root"][0]["path"] == str(root)
+
+
+def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "day1" / "IMG_0001.JPG"))
+    _touch_image(str(root / "day2" / "IMG_0001.JPG"))
+    root_id = db.add_folder(str(root), name="shoot")
+
+    # Ingest only day1's IMG_0001.JPG.
+    day1_id = db.add_folder(str(root / "day1"), name="day1", parent_id=root_id)
+    db.add_photo(
+        folder_id=day1_id, filename="IMG_0001.JPG", extension=".JPG",
+        file_size=1, file_mtime=0.0,
+    )
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(db, ws_id)
+
+    assert result["new_count"] == 1  # day2's IMG_0001.JPG is the only new one
+    assert any("day2" in s for s in result["sample"])
