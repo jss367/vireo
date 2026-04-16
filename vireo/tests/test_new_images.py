@@ -16,6 +16,8 @@ def _touch_image(path):
 
 @pytest.fixture
 def db_with_workspace(tmp_path):
+    from new_images import get_shared_cache
+    get_shared_cache().clear()
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
@@ -109,6 +111,8 @@ def test_db_get_new_images_for_workspace_caches_result(db_with_workspace, monkey
 
 def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
     """If workspaces A and B both link folder F, a scan of F must clear both caches."""
+    from new_images import get_shared_cache
+    get_shared_cache().clear()
     db = Database(str(tmp_path / "test.db"))
     ws_a = db.ensure_default_workspace()
     ws_b = db.create_workspace("B")
@@ -133,3 +137,22 @@ def test_invalidate_cache_for_shared_folder_across_workspaces(tmp_path):
 
     assert db._new_images_cache.get(ws_a) is None
     assert db._new_images_cache.get(ws_b) is None
+
+
+def test_two_database_instances_share_cache(tmp_path):
+    from new_images import get_shared_cache
+    get_shared_cache().clear()
+    db_a = Database(str(tmp_path / "test.db"))
+    ws_id = db_a.ensure_default_workspace()
+    db_a.set_active_workspace(ws_id)
+    root = tmp_path / "shoot"
+    os.makedirs(root, exist_ok=True)
+    Image.new("RGB", (1, 1), "white").save(str(root / "a.JPG"), "JPEG")
+    db_a.add_folder(str(root), name="shoot")
+    db_a.get_new_images_for_workspace(ws_id)  # populates shared cache
+
+    # A second Database instance (simulating a different thread / request)
+    db_b = Database(str(tmp_path / "test.db"))
+    assert db_b._new_images_cache.get(ws_id) is not None, (
+        "Second Database should see cache populated by the first"
+    )

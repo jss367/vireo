@@ -112,3 +112,15 @@ class NewImagesCache:
     def clear(self):
         with self._lock:
             self._entries.clear()
+
+
+_shared_cache = NewImagesCache()
+
+
+def get_shared_cache():
+    """Return the process-wide shared NewImagesCache.
+
+    Per-thread and per-request Database instances all reference the same
+    cache so invalidation from scan workers is visible to API readers.
+    """
+    return _shared_cache

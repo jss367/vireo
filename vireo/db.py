@@ -6,7 +6,7 @@ import os
 import sqlite3
 import uuid
 
-from new_images import NewImagesCache
+from new_images import get_shared_cache
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class Database:
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
         self._active_workspace_id = None
-        self._new_images_cache = NewImagesCache()
+        self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
         # Restore last-used workspace, or fall back to Default
