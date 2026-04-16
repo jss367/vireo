@@ -231,10 +231,12 @@ def _invalidate_new_images_after_scan(db, root):
     # fail to match the stored ``/Volumes/shoot`` in the ``path = ?`` arm.
     root = os.path.normpath(root)
     # LIKE wildcards (%, _) in `root` are not escaped. Worst case is a harmless
-    # over-invalidation that triggers a re-walk. Path separators assume POSIX.
+    # over-invalidation that triggers a re-walk. The descendant pattern uses
+    # os.sep so it matches what the scanner stores via str(Path(...)) on both
+    # POSIX and Windows.
     touched_ids = [r["id"] for r in db.conn.execute(
         "SELECT id FROM folders WHERE path = ? OR path LIKE ?",
-        (root, root.rstrip("/") + "/%"),
+        (root, root.rstrip("/\\") + os.sep + "%"),
     ).fetchall()]
     db.invalidate_new_images_cache_for_folders(touched_ids)
 

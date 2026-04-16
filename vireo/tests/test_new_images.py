@@ -285,6 +285,70 @@ def test_invalidate_new_images_after_scan_clears_shared_cache_across_instances(t
     )
 
 
+class _CapturingConn:
+    """Proxy that forwards every attr to the real sqlite3 connection but
+    captures parameters of ``folders``/``LIKE`` queries for assertions.
+
+    Needed because ``sqlite3.Connection.execute`` is a read-only built-in
+    attribute and cannot be monkeypatched directly.
+    """
+
+    def __init__(self, real_conn, captured):
+        self._real = real_conn
+        self._captured = captured
+
+    def execute(self, sql, params=()):
+        if "folders" in sql and "LIKE" in sql:
+            self._captured["params"] = params
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_invalidate_new_images_after_scan_uses_os_sep(db_with_workspace):
+    """The descendant LIKE pattern must end in ``os.sep + '%'`` so it matches
+    folder paths stored by the scanner via ``str(Path(...))`` — which uses
+    ``\\`` on Windows and ``/`` on POSIX."""
+    from app import _invalidate_new_images_after_scan
+
+    db, ws_id, tmp_path = db_with_workspace
+    captured = {}
+    db.conn = _CapturingConn(db.conn, captured)
+
+    _invalidate_new_images_after_scan(db, str(tmp_path / "root"))
+
+    assert "params" in captured, "Expected LIKE query on folders to fire"
+    assert captured["params"][1].endswith(os.sep + "%"), (
+        f"Descendant LIKE pattern must end with os.sep + %, "
+        f"got {captured['params'][1]!r}"
+    )
+
+
+def test_invalidate_new_images_after_scan_windows_separator(db_with_workspace, monkeypatch):
+    """Simulate Windows: the scanner stores folder paths with backslashes via
+    ``str(Path(...))``, so the LIKE descendant pattern must also use
+    backslashes. Verified here by monkeypatching ``os.sep`` to ``\\``."""
+    import app as app_module
+    from app import _invalidate_new_images_after_scan
+
+    db, ws_id, tmp_path = db_with_workspace
+    captured = {}
+    db.conn = _CapturingConn(db.conn, captured)
+
+    # Patch os.sep on the ``os`` module the helper resolves through so it sees
+    # the Windows separator during this call.
+    monkeypatch.setattr(app_module.os, "sep", "\\")
+    # os.path.normpath on POSIX won't rewrite ``C:\shoot``; pass a path that
+    # normpath leaves alone so we can assert on the trailing separator.
+    _invalidate_new_images_after_scan(db, "C:\\shoot")
+
+    assert "params" in captured, "Expected LIKE query on folders to fire"
+    assert captured["params"][1].endswith("\\%"), (
+        f"Windows pattern must end with \\%, got {captured['params'][1]!r}"
+    )
+
+
 def test_get_new_images_for_workspace_race_does_not_repopulate_stale(db_with_workspace, monkeypatch):
     """If invalidation fires during compute, the stale result must not be cached."""
     db, ws_id, tmp_path = db_with_workspace
