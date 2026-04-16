@@ -1043,3 +1043,91 @@ def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
         # files; that's expected and unrelated to the repair logic.
         scan_step = next(s for s in data["steps"] if s["id"] == "scan")
         assert scan_step["status"] == "completed"
+
+
+def test_pipeline_repair_does_not_double_process_thumbnails(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Repaired photos must only be processed once by the thumbnail stage.
+    The collection-replay loop in thumbnail_stage() already covers every
+    photo in the collection, so the scan-queue callback must not also
+    enqueue repaired files — doing so would generate the thumbnail twice
+    and inflate the thumbnail totals beyond the collection size."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    photos_root = tmp_path / "real_photos"
+    photos_root.mkdir()
+    image_file = photos_root / "broken.jpg"
+    Image.new("RGB", (640, 480), color="red").save(str(image_file), "JPEG")
+
+    fid = db.add_folder(str(photos_root), name="real_photos")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="broken.jpg", extension=".jpg",
+        file_size=image_file.stat().st_size,
+        file_mtime=image_file.stat().st_mtime,
+        timestamp=None, width=160, height=120,
+    )
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', timestamp=NULL, "
+        "exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    import scanner
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
+                    "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    # Count generate_thumbnail invocations per photo_id. If the P2 bug
+    # existed the repaired photo would be generated twice (once from the
+    # scan queue, once from the collection replay).
+    from collections import Counter
+    calls = Counter()
+
+    import thumbnails
+    real_generate = thumbnails.generate_thumbnail
+    def counting_generate(photo_id, *args, **kwargs):
+        calls[photo_id] += 1
+        return real_generate(photo_id, *args, **kwargs)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", counting_generate)
+
+    col_id = db.add_collection(
+        "broken_thumb", json.dumps([{"field": "photo_ids", "value": [pid]}])
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        assert data["status"] == "completed", data
+
+        thumb_step = next(s for s in data["steps"] if s["id"] == "thumbnails")
+        # Progress total must match the collection size, not double it.
+        progress = thumb_step.get("progress") or {}
+        assert progress.get("total") == 1, thumb_step
+
+    # Each repaired photo should be handed to generate_thumbnail exactly once.
+    assert calls[pid] == 1, dict(calls)

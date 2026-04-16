@@ -393,6 +393,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 )
                 _update_stages(runner, job["id"], stages)
 
+                # Display-only callback for the repair path: updates the
+                # scan step's current_file indicator but does NOT enqueue
+                # into scan_to_thumb. In collection mode thumbnail_stage
+                # already replays the full collection against the thumb
+                # cache, so enqueueing here would double-process every
+                # repaired photo and inflate the thumbnail totals.
+                def repair_photo_cb(photo_id, path):
+                    runner.update_step(
+                        job["id"], "scan",
+                        current_file=os.path.basename(path),
+                    )
+
                 unreachable = 0
                 for folder_path, file_paths in broken:
                     if not os.path.isdir(folder_path):
@@ -414,7 +426,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             extract_full_metadata=pipeline_cfg.get(
                                 "extract_full_metadata", True,
                             ),
-                            photo_callback=photo_cb,
+                            photo_callback=repair_photo_cb,
                             status_callback=status_cb,
                             restrict_dirs=[folder_path],
                             restrict_files=set(file_paths),
