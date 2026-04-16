@@ -795,6 +795,38 @@ def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch)
     assert db.preview_cache_total_bytes() == 0
 
 
+def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
+    """Lazily-adopting a legacy on-disk preview file still runs eviction,
+    so with preview_cache_max_mb=0 the adopted file is drained like a
+    freshly generated one."""
+    import os
+
+    import config as cfg
+
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Pre-seed a legacy on-disk preview with no preview_cache row.
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    with open(cache_path, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 100  # served from memory
+    # Quota is 0, so eviction drained the row and file after adoption.
+    assert db.preview_cache_total_bytes() == 0
+    assert not os.path.exists(cache_path)
+
+
 def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
     """/api/preview-cache/clear removes orphaned and legacy files, not just tracked rows."""
     import os

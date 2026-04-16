@@ -7171,10 +7171,15 @@ def create_app(db_path, thumb_cache_dir=None):
         # preview_cache_insert uses time.time() for last_access_at, so the
         # adopted entry is ranked as freshly-accessed in the LRU in a single
         # commit (instead of insert-with-mtime-then-touch-to-now).
+        # Read bytes into memory before evicting: eviction may delete the
+        # file we just adopted (e.g. preview_cache_max_mb=0), but we can
+        # still serve the response from memory — mirrors the miss path.
         if os.path.exists(cache_path):
-            st = os.stat(cache_path)
-            db.preview_cache_insert(photo_id, size, st.st_size)
-            return send_file(cache_path, mimetype="image/jpeg")
+            with open(cache_path, "rb") as f:
+                data = f.read()
+            db.preview_cache_insert(photo_id, size, len(data))
+            evict_preview_cache_if_over_quota(db, vireo_dir)
+            return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
         from image_loader import get_canonical_image_path, load_image
