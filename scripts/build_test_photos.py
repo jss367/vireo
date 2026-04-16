@@ -163,21 +163,28 @@ def sample(source, dest, counts=None, dry_run=False):
             cat_dir = dest / category
             cat_dir.mkdir(exist_ok=True)
             copied[category] = []
+            # Track basenames already claimed by another source in this run so
+            # two sources with the same name never collapse into one physical
+            # file — including when contents are identical (which is exactly
+            # what the "duplicates" scenario needs: two real files on disk).
+            claimed = set()
             for src in files:
                 tgt = cat_dir / src.name
-                # If something's already at the base name, only treat it as the
-                # same file when the contents actually match — otherwise two
-                # distinct sources with the same basename (e.g. repeated
-                # IMG_0001.jpg) would collapse into one destination and be
-                # miscounted in the manifest. Disambiguate with a content-hash
-                # suffix so each source gets its own deterministic target.
-                if tgt.exists() and content_hash(tgt) != content_hash(src):
-                    tgt = cat_dir / f"{src.stem}-{content_hash(src)[:8]}{src.suffix}"
+                src_path_hash = hashlib.md5(str(src).encode()).hexdigest()[:8]
+                disambiguated = cat_dir / f"{src.stem}-{src_path_hash}{src.suffix}"
+                if tgt in claimed:
+                    # Another source already took this basename this run.
+                    tgt = disambiguated
+                elif tgt.exists() and content_hash(tgt) != content_hash(src):
+                    # A prior run wrote a different source to this basename.
+                    tgt = disambiguated
                 if tgt.exists():
                     copied[category].append(tgt)
+                    claimed.add(tgt)
                     continue
                 shutil.copy2(src, tgt)
                 copied[category].append(tgt)
+                claimed.add(tgt)
 
         manifest = dest / "MANIFEST.md"
         lines = [

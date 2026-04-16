@@ -137,6 +137,26 @@ def test_sample_disambiguates_same_basename_different_content(tmp_path):
     assert contents == [b"AAA", b"BBB"]
 
 
+def test_sample_disambiguates_same_basename_identical_content(tmp_path):
+    # Two source paths with the same basename AND identical bytes must still
+    # land as two distinct files on disk — otherwise the duplicates category
+    # can't actually populate the duplicate-detection scenarios it exists for.
+    source = tmp_path / "src"
+    (source / "dir1").mkdir(parents=True)
+    (source / "dir2").mkdir(parents=True)
+    (source / "dir1" / "IMG_0001.jpg").write_bytes(b"SAME")
+    (source / "dir2" / "IMG_0001.jpg").write_bytes(b"SAME")
+    dest = tmp_path / "dest"
+    build_test_photos.sample(
+        source,
+        dest,
+        counts={"gps_yes": 0, "gps_no": 0, "raws": 0, "jpegs": 2, "random": 0},
+    )
+    copied = list((dest / "jpegs").iterdir())
+    assert len(copied) == 2, f"expected 2 files, got {[p.name for p in copied]}"
+    assert all(p.read_bytes() == b"SAME" for p in copied)
+
+
 def test_sample_is_idempotent(tmp_path):
     source = tmp_path / "src"
     source.mkdir()
