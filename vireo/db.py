@@ -267,6 +267,15 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            CREATE TABLE IF NOT EXISTS preview_cache (
+                photo_id INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                bytes INTEGER NOT NULL,
+                last_access_at REAL NOT NULL,
+                PRIMARY KEY (photo_id, size),
+                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -276,6 +285,9 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
             ON photo_color_labels(workspace_id);
+
+            CREATE INDEX IF NOT EXISTS preview_cache_last_access
+            ON preview_cache(last_access_at);
         """
         )
         # Migrations for existing databases

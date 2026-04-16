@@ -2980,3 +2980,23 @@ def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
         "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
     ).fetchone()
     assert row["dino_embedding_variant"] == "vit-l14"
+
+
+def test_preview_cache_table_exists(tmp_path):
+    """Database creates preview_cache table on init."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='preview_cache'"
+    ).fetchone()
+    assert row is not None
+
+    # Verify schema columns
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(preview_cache)").fetchall()}
+    assert cols == {"photo_id", "size", "bytes", "last_access_at"}
+
+    # Verify index
+    idx = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='preview_cache_last_access'"
+    ).fetchone()
+    assert idx is not None
