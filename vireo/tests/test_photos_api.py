@@ -615,3 +615,56 @@ def test_crop_preview_falls_back_to_original(app_and_db, tmp_path):
     resp = client.get(f"/photos/{pid}/crop")
     assert resp.status_code == 200
     assert resp.content_type == "image/jpeg"
+
+
+# ---- Preview cache (LRU) tests ----
+
+
+def test_preview_cache_miss_creates_row(client_with_photo):
+    """First request to a size inserts a preview_cache row."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] > 0
+
+
+def test_preview_cache_hit_updates_last_access(client_with_photo):
+    """Second request touches last_access_at."""
+    import time
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    row1 = db.preview_cache_get(photo_id, 1920)
+    time.sleep(0.05)
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    row2 = db.preview_cache_get(photo_id, 1920)
+    assert row2["last_access_at"] > row1["last_access_at"]
+
+
+def test_preview_adopts_existing_file_on_first_access(client_with_photo):
+    """A cached file left over from the old scheme is adopted into the LRU."""
+    import os
+    import time
+    app, db, photo_id = client_with_photo
+    # Create a cache file manually without a DB row
+    preview_dir = os.path.join(
+        os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+    )
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    with open(cache_path, "wb") as f:
+        f.write(b"x" * 12345)
+    # Backdate mtime
+    past = time.time() - 3600
+    os.utime(cache_path, (past, past))
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] == 12345

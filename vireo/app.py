@@ -7082,13 +7082,33 @@ def create_app(db_path, thumb_cache_dir=None):
 
     PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
 
+    def allowed_preview_sizes():
+        """Allowlist for /photos/<id>/preview?size=N.
+
+        Includes the fixed tier plus the user-configured preview_max_size
+        so /full can delegate here.
+        """
+        import config as cfg
+        fixed = {1920, 2560, 3840}
+        pm = cfg.get("preview_max_size") or 1920
+        if pm == 0:
+            return fixed  # 0 = "full" — handled by /original path
+        return fixed | {int(pm)}
+
+    def evict_preview_cache_if_over_quota(db, vireo_dir):
+        """Evict until under preview_cache_max_mb. Implemented in Task 9."""
+        return
+
     @app.route("/photos/<int:photo_id>/preview")
     def serve_photo_preview(photo_id):
-        """Serve a JPEG preview at a chosen max-size, cached per size.
+        """Serve a JPEG preview at a chosen max-size.
+
+        Cache is LRU-tracked in the preview_cache table; on-disk files that
+        predate this scheme are adopted lazily on first access.
 
         Query params:
-          size: int — max dimension (longest side). Must be in PREVIEW_SIZE_ALLOWLIST
-                to avoid unbounded cache growth.
+          size: int — max dimension (longest side). Must be in
+                allowed_preview_sizes() to avoid unbounded cache growth.
         """
         import config as cfg
         from flask import request, send_file
@@ -7097,7 +7117,7 @@ def create_app(db_path, thumb_cache_dir=None):
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
-        if size not in PREVIEW_SIZE_ALLOWLIST:
+        if size not in allowed_preview_sizes():
             return "Unsupported size", 400
 
         # Confirm the photo still exists before any cache return so that a
@@ -7108,38 +7128,49 @@ def create_app(db_path, thumb_cache_dir=None):
         if not photo:
             return "Not found", 404
 
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
 
-        if os.path.exists(cache_path):
+        # Cache hit (tracked): touch and serve.
+        if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
+            db.preview_cache_touch(photo_id, size)
             return send_file(cache_path, mimetype="image/jpeg")
 
-        from image_loader import load_image
+        # Cache hit (on-disk but untracked): lazy adoption.
+        if os.path.exists(cache_path):
+            st = os.stat(cache_path)
+            db.conn.execute(
+                "INSERT OR REPLACE INTO preview_cache "
+                "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+                (photo_id, size, st.st_size, st.st_mtime),
+            )
+            db.conn.commit()
+            return send_file(cache_path, mimetype="image/jpeg")
 
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        image_path = None
-        if photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                image_path = wc
+        # Cache miss: generate, insert, evict-if-over-quota, serve.
+        from image_loader import get_canonical_image_path, load_image
 
-        if image_path is None:
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
-            image_path = os.path.join(folder["path"], photo["filename"])
+        folder_row = db.conn.execute(
+            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder_row:
+            return "Not found", 404
+        folders = {folder_row["id"]: folder_row["path"]}
 
-        img = load_image(image_path, max_size=size)
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        img = load_image(canonical, max_size=size)
         if img is None:
             return "Could not load image", 500
 
         os.makedirs(preview_dir, exist_ok=True)
         preview_quality = cfg.load().get("preview_quality", 90)
         img.save(cache_path, format="JPEG", quality=preview_quality)
+
+        bytes_ = os.path.getsize(cache_path)
+        db.preview_cache_insert(photo_id, size, bytes_)
+        evict_preview_cache_if_over_quota(db, vireo_dir)
+
         return send_file(cache_path, mimetype="image/jpeg")
 
     @app.route("/photos/<int:photo_id>/original")
