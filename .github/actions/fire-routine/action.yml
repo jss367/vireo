@@ -1,0 +1,57 @@
+name: Fire Claude Code routine
+description: POST to the PR fix agent routine's /fire endpoint with a text payload.
+
+inputs:
+  url:
+    description: Routine /fire URL (from claude.ai/code/routines)
+    required: true
+  token:
+    description: Routine bearer token
+    required: true
+  payload:
+    description: Plain-text payload sent as the `text` field
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: POST to routine
+      shell: bash
+      env:
+        ROUTINE_URL: ${{ inputs.url }}
+        ROUTINE_TOKEN: ${{ inputs.token }}
+        ROUTINE_PAYLOAD: ${{ inputs.payload }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${ROUTINE_URL}" || -z "${ROUTINE_TOKEN}" ]]; then
+          echo "::error::CLAUDE_ROUTINE_URL or CLAUDE_ROUTINE_TOKEN secret is missing."
+          exit 1
+        fi
+
+        # Build JSON safely — jq quotes the payload so embedded newlines,
+        # quotes, backticks etc. survive without shell interpolation hazards.
+        body=$(jq -n --arg text "${ROUTINE_PAYLOAD}" '{text: $text}')
+
+        response=$(mktemp)
+        status=$(curl -sS -o "${response}" -w '%{http_code}' \
+          -X POST "${ROUTINE_URL}" \
+          -H "Authorization: Bearer ${ROUTINE_TOKEN}" \
+          -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "Content-Type: application/json" \
+          -d "${body}")
+
+        echo "Routine response (HTTP ${status}):"
+        cat "${response}"
+        echo
+
+        if [[ "${status}" -lt 200 || "${status}" -ge 300 ]]; then
+          echo "::error::Routine fire failed with status ${status}"
+          exit 1
+        fi
+
+        session_url=$(jq -r '.claude_code_session_url // empty' < "${response}")
+        if [[ -n "${session_url}" ]]; then
+          echo "::notice::Routine session: ${session_url}"
+        fi
