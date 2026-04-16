@@ -2277,6 +2277,7 @@ document.addEventListener('keydown', function(e) {
     var rect = wrap.getBoundingClientRect();
     toggleLightboxZoom({clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2, stopPropagation: function(){}});
     e.preventDefault();
+    return;  // Stop here so a user-remapped zoomKey (e.g. '+') doesn't also trigger step-zoom below.
   }
   // Continuous zoom keyboard shortcuts. stopImmediatePropagation prevents these keys
   // from reaching the browse-page rating handler — otherwise pressing '0' to zoom-to-fit
