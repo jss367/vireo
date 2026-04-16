@@ -2473,8 +2473,11 @@ var _lbDesiredSrcKey = null;
 
 function _lbPickSourceKey() {
   // Returns 'full' | '2560' | '3840' | 'original' based on current display needs.
-  // If dimensions are unknown, fall back to pre-PR behavior: /full at fit, /original when zoomed.
-  if (!_lbPhotoW || !_lbPhotoH) {
+  // Fall back to /full at fit and /original when zoomed whenever we can't compute
+  // a proper displayed-long-edge (photo dims missing, or nativeZoom not yet
+  // established — the latter happens briefly when API dims arrive before the
+  // initial image load completes).
+  if (!_lbPhotoW || !_lbPhotoH || !_lbNativeZoom) {
     return _lbZoom > 1.001 ? 'original' : 'full';
   }
   var longEdge = Math.max(_lbPhotoW, _lbPhotoH);
@@ -2527,6 +2530,10 @@ function _lbScheduleSourceSwap() {
       img.addEventListener('load', function onSwapLoad() {
         img.removeEventListener('load', onSwapLoad);
         if (_lightboxCurrentId !== photoId) return;
+        // A newer swap may have preempted us before this load fired — in that
+        // case img.naturalWidth belongs to a DIFFERENT source than our closure's
+        // `key`, so bail rather than record wrong dims or recalibrate stale state.
+        if (_lbCurrentSrcKey !== key) return;
         if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
           _lbPhotoW = img.naturalWidth;
           _lbPhotoH = img.naturalHeight;
