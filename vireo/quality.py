@@ -289,6 +289,43 @@ def compute_noise_estimate(image, mask):
     return round(float(np.var(ring_values)), 2)
 
 
+def compute_eye_tenengrad(image, eye_xy, bbox, k=0.08):
+    """Multi-scale Tenengrad in a small window around an eye keypoint.
+
+    Window side length = ``k * min(bbox_w, bbox_h)``, minimum 8 px, clamped
+    to the image bounds. Reuses _multiscale_tenengrad so the raw scale of
+    this value is directly comparable to subject_tenengrad (same operator,
+    different region).
+
+    Args:
+        image: PIL.Image (original resolution).
+        eye_xy: (x, y) eye keypoint in image-pixel space.
+        bbox: (x0, y0, x1, y1) MegaDetector bbox, image-pixel space. Only
+            used to choose the window size proportional to the subject —
+            not for clamping the window (image bounds handle that).
+        k: window side as fraction of min(bbox_w, bbox_h). Default 0.08.
+
+    Returns:
+        float — raw multi-scale Tenengrad in the window, 0.0 if the window
+        is empty after clamping to image bounds.
+    """
+    x, y = eye_xy
+    x0, y0, x1, y1 = bbox
+    side = max(8, int(round(k * min(x1 - x0, y1 - y0))))
+    half = side // 2
+    img_w, img_h = image.size
+    wx0 = max(0, int(x - half))
+    wy0 = max(0, int(y - half))
+    wx1 = min(img_w, int(x + half))
+    wy1 = min(img_h, int(y + half))
+    if wx1 <= wx0 or wy1 <= wy0:
+        return 0.0
+    window = image.crop((wx0, wy0, wx1, wy1))
+    gray = _to_grayscale_array(window)
+    mask = np.ones_like(gray, dtype=bool)
+    return round(_multiscale_tenengrad(gray, mask), 2)
+
+
 def compute_all_quality_features(image, mask):
     """Compute all quality features for a photo in one call.
 
