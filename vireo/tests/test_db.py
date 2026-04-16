@@ -1698,6 +1698,61 @@ def test_photos_has_eye_focus_columns(tmp_path):
     assert "eye_tenengrad" in cols
 
 
+def test_update_photo_eye_fields_roundtrip(tmp_path):
+    """update_photo_pipeline_features persists eye_* fields."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="eye.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+    )
+    db.update_photo_pipeline_features(
+        pid,
+        eye_x=123.4,
+        eye_y=56.7,
+        eye_conf=0.82,
+        eye_tenengrad=18450.2,
+    )
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (123.4, 56.7, 0.82, 18450.2)
+
+
+def test_update_photo_eye_fields_accept_null(tmp_path):
+    """update_photo_pipeline_features accepts explicit None for eye_* fields."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="eye.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+    )
+    # First set some values
+    db.update_photo_pipeline_features(
+        pid, eye_x=1.0, eye_y=2.0, eye_conf=0.5, eye_tenengrad=9.0
+    )
+    # Then clear them
+    db.update_photo_pipeline_features(
+        pid, eye_x=None, eye_y=None, eye_conf=None, eye_tenengrad=None
+    )
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
     """add_keyword auto-detects taxonomy type when name matches a taxon."""
     from db import Database

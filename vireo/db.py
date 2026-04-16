@@ -2577,6 +2577,10 @@ class Database:
         subject_y_median=_UNSET,
         phash_crop=_UNSET,
         noise_estimate=_UNSET,
+        eye_x=_UNSET,
+        eye_y=_UNSET,
+        eye_conf=_UNSET,
+        eye_tenengrad=_UNSET,
     ):
         """Update pipeline feature columns for a photo.
 
@@ -2593,6 +2597,10 @@ class Database:
             "subject_y_median": subject_y_median,
             "phash_crop": phash_crop,
             "noise_estimate": noise_estimate,
+            "eye_x": eye_x,
+            "eye_y": eye_y,
+            "eye_conf": eye_conf,
+            "eye_tenengrad": eye_tenengrad,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
