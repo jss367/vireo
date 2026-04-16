@@ -790,3 +790,57 @@ def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
     assert resp.status_code == 200
 
     assert db.preview_cache_total_bytes() == 0
+
+
+def test_full_respects_workspace_preview_max_size_override(client_with_photo):
+    """/full uses the workspace-effective preview_max_size, not just global.
+
+    Set a workspace override to 2560 and confirm /full serves the same bytes
+    as /preview?size=2560 (the handler must read get_effective_config, not
+    plain cfg.get).
+    """
+    app, db, photo_id = client_with_photo
+    # Write a workspace override for preview_max_size.
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 2560},
+    )
+    client = app.test_client()
+    full = client.get(f"/photos/{photo_id}/full")
+    preview = client.get(f"/photos/{photo_id}/preview?size=2560")
+    assert full.status_code == 200
+    assert preview.status_code == 200
+    assert full.data == preview.data
+    # Sanity: a row at size=2560 was created (not 1920).
+    assert db.preview_cache_get(photo_id, 2560) is not None
+
+
+def test_zero_byte_cache_file_is_regenerated(client_with_photo):
+    """An interrupted write leaves a 0-byte cache file; serve regenerates it.
+
+    Simulates a prior crashed write by dropping an empty file at the cache
+    path and asserting the next GET produces a real (non-empty) preview
+    and leaves a populated file on disk.
+    """
+    import os
+    app, db, photo_id = client_with_photo
+    preview_dir = os.path.join(
+        os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+    )
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    # Drop a zero-byte file in place as if a prior write was interrupted.
+    with open(cache_path, "wb"):
+        pass
+    assert os.path.getsize(cache_path) == 0
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 0
+    # File was regenerated with real bytes.
+    assert os.path.getsize(cache_path) > 0
+    # And tracked in the cache.
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] > 0

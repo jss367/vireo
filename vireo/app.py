@@ -7053,17 +7053,17 @@ def create_app(db_path, thumb_cache_dir=None):
         buf.seek(0)
         return Response(buf.read(), mimetype="image/jpeg")
 
-    PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
-
     def allowed_preview_sizes():
         """Allowlist for /photos/<id>/preview?size=N.
 
         Includes the fixed tier plus the user-configured preview_max_size
-        so /full can delegate here.
+        so /full can delegate here. Reads workspace-effective config so
+        a per-workspace preview_max_size override is honored.
         """
         import config as cfg
+        effective = _get_db().get_effective_config(cfg.load())
         fixed = {1920, 2560, 3840}
-        pm = cfg.get("preview_max_size") or 1920
+        pm = effective.get("preview_max_size") or 1920
         if pm == 0:
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
@@ -7071,9 +7071,14 @@ def create_app(db_path, thumb_cache_dir=None):
     def evict_preview_cache_if_over_quota(db, vireo_dir):
         """Evict oldest preview_cache entries until under preview_cache_max_mb.
 
-        Walks rows in ascending last_access_at order. Removes the file and
-        the row; stops as soon as total <= quota. Self-healing: if the file
-        is already missing we still delete the row so we don't chase ghosts.
+        Walks rows in ascending last_access_at order. Removes files and
+        rows; stops as soon as total <= quota. Self-healing: if a file
+        is already missing we still delete the row so we don't chase
+        ghosts; if unlink fails for any other OS reason we log and
+        continue so one bad file doesn't abort the whole eviction pass.
+
+        Deletes are batched into one transaction at the end to avoid
+        hundreds of fsyncs when the quota is shrunk dramatically.
         """
         import config as cfg
         quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
@@ -7083,6 +7088,7 @@ def create_app(db_path, thumb_cache_dir=None):
             return
 
         preview_dir = os.path.join(vireo_dir, "previews")
+        to_delete = []  # list of (photo_id, size)
         for row in db.preview_cache_oldest_first():
             if total <= max_bytes:
                 break
@@ -7093,8 +7099,22 @@ def create_app(db_path, thumb_cache_dir=None):
                 os.remove(path)
             except FileNotFoundError:
                 pass
-            db.preview_cache_delete(row["photo_id"], row["size"])
+            except OSError as e:
+                # Self-healing: log and continue so one bad file doesn't
+                # abort the whole eviction pass.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to remove preview cache file %s: %s", path, e,
+                )
+            to_delete.append((row["photo_id"], row["size"]))
             total -= row["bytes"]
+
+        if to_delete:
+            db.conn.executemany(
+                "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+                to_delete,
+            )
+            db.conn.commit()
 
     def _serve_preview(photo_id, size):
         """Serve a preview at the given size, using the preview_cache LRU.
@@ -7117,24 +7137,28 @@ def create_app(db_path, thumb_cache_dir=None):
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
 
+        # Reject corrupt zero-byte cache files (prior write interrupted).
+        # Treat them as a miss so the regeneration path below produces a
+        # real preview.
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) == 0:
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+            db.preview_cache_delete(photo_id, size)  # no-op if no row
+
         # Cache hit (tracked): touch and serve.
         if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
             db.preview_cache_touch(photo_id, size)
             return send_file(cache_path, mimetype="image/jpeg")
 
         # Cache hit (on-disk but untracked): lazy adoption.
+        # preview_cache_insert uses time.time() for last_access_at, so the
+        # adopted entry is ranked as freshly-accessed in the LRU in a single
+        # commit (instead of insert-with-mtime-then-touch-to-now).
         if os.path.exists(cache_path):
             st = os.stat(cache_path)
-            db.conn.execute(
-                "INSERT OR REPLACE INTO preview_cache "
-                "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
-                (photo_id, size, st.st_size, st.st_mtime),
-            )
-            db.conn.commit()
-            # The file was just accessed by this request — update last_access_at
-            # to now so a freshly-adopted entry doesn't rank as ancient in the
-            # LRU (and get evicted on the very next cache write).
-            db.preview_cache_touch(photo_id, size)
+            db.preview_cache_insert(photo_id, size, st.st_size)
             return send_file(cache_path, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
@@ -7164,15 +7188,22 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/photos/<int:photo_id>/full")
     def serve_full_photo(photo_id):
-        """Serve a display-sized preview (alias for /preview at preview_max_size)."""
+        """Serve a display-sized preview (alias for /preview at preview_max_size).
+
+        Reads workspace-effective config so a per-workspace preview_max_size
+        override is honored. preview_max_size == 0 historically meant "full"
+        — we route to /original rather than generate a preview. Using a
+        separate read/fallback (instead of `cfg.get(...) or 1920`) keeps
+        the 0 sentinel reachable.
+        """
         import config as cfg
         from flask import redirect
 
-        size = cfg.get("preview_max_size") or 1920
-        if size == 0:
-            # preview_max_size = 0 historically meant "full" — route to /original
+        effective = _get_db().get_effective_config(cfg.load())
+        pm = effective.get("preview_max_size")
+        if pm == 0:
             return redirect(f"/photos/{photo_id}/original")
-        return _serve_preview(photo_id, int(size))
+        return _serve_preview(photo_id, int(pm or 1920))
 
     @app.route("/photos/<int:photo_id>/preview")
     def serve_photo_preview(photo_id):
