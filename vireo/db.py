@@ -977,15 +977,27 @@ class Database:
         ).fetchall()
 
     def get_folder_subtree_ids(self, folder_id):
-        """Return [folder_id, ...descendant_ids] using the folders.parent_id tree."""
+        """Return [folder_id, ...descendant_ids] restricted to the active workspace.
+
+        The root is always included as-is. Descendants are walked through
+        ``folders.parent_id`` but only via intermediate folders that are linked
+        to the active workspace, so branches that pass through folders removed
+        from the active workspace do not propagate. This matches the browse
+        tree (which only shows active-workspace folders) and ensures that
+        folder-scoped filters don't reach across workspaces through the shared
+        global folder hierarchy.
+        """
         rows = self.conn.execute(
             """WITH RECURSIVE tree(id) AS (
                    SELECT ?
                    UNION ALL
-                   SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id
+                   SELECT f.id FROM folders f
+                   JOIN tree t ON f.parent_id = t.id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = f.id AND wf.workspace_id = ?
                )
                SELECT id FROM tree""",
-            (folder_id,),
+            (folder_id, self._ws_id()),
         ).fetchall()
         return [r["id"] for r in rows]
 

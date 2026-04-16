@@ -133,6 +133,35 @@ def test_get_photos_filter_by_folder(tmp_path):
     assert all(r['folder_id'] == f2 for r in results)
 
 
+def test_folder_subtree_does_not_cross_workspace_boundary(tmp_path):
+    """Expansion stops at folders removed from the active workspace.
+
+    Tree: A (active) -> B (not active) -> C (active). Filtering by A should
+    NOT include C even though C is in the active workspace, because the
+    intermediate B is detached from A in the active workspace's tree.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    a = db.add_folder('/a', name='a')
+    b = db.add_folder('/a/b', name='b', parent_id=a)
+    c = db.add_folder('/a/b/c', name='c', parent_id=b)
+    # Move B out of the active workspace; A and C stay.
+    db.remove_workspace_folder(active_ws, b)
+    db.add_workspace_folder(other_ws, b)
+
+    db.add_photo(folder_id=a, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=c, filename='c.jpg', extension='.jpg',
+                 file_size=100, file_mtime=2.0)
+
+    assert db.get_folder_subtree_ids(a) == [a]
+    results = db.get_photos(folder_id=a)
+    assert len(results) == 1
+    assert results[0]['filename'] == 'a.jpg'
+
+
 def test_get_photos_folder_filter_includes_descendants(tmp_path):
     """get_photos(folder_id=parent) includes photos from descendant folders."""
     from db import Database
