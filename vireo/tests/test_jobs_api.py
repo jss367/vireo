@@ -679,11 +679,16 @@ def test_find_broken_metadata_folders_returns_empty_when_healthy(app_and_db):
     assert _find_broken_metadata_folders(db, photo_ids) == []
 
 
-def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db):
+def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db, monkeypatch):
     """_find_broken_metadata_folders flags a photo whose timestamp is NULL
     and returns its file path so the repair path can restrict the scan."""
+    import pipeline_job
     from pipeline_job import _find_broken_metadata_folders
     _, db = app_and_db
+
+    # Fixture rows point at synthetic /photos paths that don't exist on
+    # disk; treat all DB rows as present for the SQL/grouping assertions.
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
 
     # Break one photo's timestamp.
     row = db.conn.execute(
@@ -702,11 +707,14 @@ def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db):
     assert result == [(folder_path, [os.path.join(folder_path, "bird1.jpg")])]
 
 
-def test_find_broken_metadata_folders_detects_raw_thumb_dims(app_and_db):
+def test_find_broken_metadata_folders_detects_raw_thumb_dims(app_and_db, monkeypatch):
     """_find_broken_metadata_folders flags a RAW photo with sub-1000px
     width (the embedded-thumbnail bug) even when timestamp is populated."""
+    import pipeline_job
     from pipeline_job import _find_broken_metadata_folders
     _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
 
     row = db.conn.execute(
         "SELECT id, folder_id FROM photos WHERE filename='bird1.jpg'"
@@ -770,11 +778,14 @@ def test_find_broken_metadata_folders_excludes_exif_extracted(app_and_db):
     assert _find_broken_metadata_folders(db, photo_ids) == []
 
 
-def test_find_broken_metadata_folders_groups_by_folder(app_and_db):
+def test_find_broken_metadata_folders_groups_by_folder(app_and_db, monkeypatch):
     """Multiple broken photos in the same folder are returned as one
     folder entry with a count."""
+    import pipeline_job
     from pipeline_job import _find_broken_metadata_folders
     _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
 
     # Break both photos in folder '/photos/2024' (bird1 and bird3).
     db.conn.execute(
@@ -794,11 +805,48 @@ def test_find_broken_metadata_folders_groups_by_folder(app_and_db):
     assert sorted(os.path.basename(p) for p in paths) == ['bird1.jpg', 'bird3.jpg']
 
 
-def test_find_broken_metadata_folders_chunks_large_id_lists(app_and_db):
-    """Passing more photo_ids than SQLite's default variable cap (999) must
-    not raise 'too many SQL variables'. The helper chunks internally."""
+def test_find_broken_metadata_folders_filters_missing_files(app_and_db, tmp_path):
+    """Rows whose file no longer exists on disk are filtered out. The
+    scanner can only repair files it rediscovers via Path.iterdir(), so
+    a missing-file row would stay broken forever and keep the collection
+    stuck in repair mode on every pipeline run."""
     from pipeline_job import _find_broken_metadata_folders
     _, db = app_and_db
+
+    # Real folder with one real file (broken) and one DB row pointing at
+    # a deleted file (also broken-looking in the DB).
+    real_dir = tmp_path / "photos"
+    real_dir.mkdir()
+    present = real_dir / "present.jpg"
+    Image.new("RGB", (640, 480)).save(str(present), "JPEG")
+
+    fid = db.add_folder(str(real_dir), name="photos")
+    p_present = db.add_photo(
+        folder_id=fid, filename="present.jpg", extension=".jpg",
+        file_size=present.stat().st_size, file_mtime=present.stat().st_mtime,
+        timestamp=None,
+    )
+    p_missing = db.add_photo(
+        folder_id=fid, filename="ghost.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp=None,
+    )
+    db.conn.commit()
+
+    result = _find_broken_metadata_folders(db, [p_present, p_missing])
+    assert len(result) == 1
+    folder, paths = result[0]
+    assert folder == str(real_dir)
+    assert paths == [str(present)]
+
+
+def test_find_broken_metadata_folders_chunks_large_id_lists(app_and_db, monkeypatch):
+    """Passing more photo_ids than SQLite's default variable cap (999) must
+    not raise 'too many SQL variables'. The helper chunks internally."""
+    import pipeline_job
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
 
     folder_id = db.conn.execute(
         "SELECT id FROM folders WHERE path='/photos/2024'"
@@ -1034,10 +1082,12 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
 
 
 def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
-    """A pipeline run where a broken photo's folder no longer exists on
-    disk handles the missing folder gracefully — the scan stage records
-    the unreachable folder in its summary and doesn't crash. (Downstream
-    stages may still fail because files are missing; that's unrelated.)"""
+    """A pipeline run where a broken photo's underlying file no longer
+    exists on disk handles the missing file gracefully — the broken row
+    is filtered out of the repair scope (since the scanner couldn't
+    repair it anyway), and the scan stage falls through to the normal
+    'Skipped (using collection)' fast path instead of looping forever
+    in repair mode."""
     import json
 
     from db import Database
@@ -1078,12 +1128,14 @@ def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
                 break
             time.sleep(0.1)
 
-        # The scan step should have completed (not errored) even though
-        # the folder was unreachable. The pipeline's overall status may
-        # be "failed" due to later stages depending on the same missing
-        # files; that's expected and unrelated to the repair logic.
+        # The scan step should have completed without error. With the
+        # broken row's file missing on disk, the repair-target filter
+        # drops it and the scan stage falls through to "Skipped (using
+        # collection)" — this is exactly the behavior we want to keep
+        # the collection from getting stuck in repair mode forever.
         scan_step = next(s for s in data["steps"] if s["id"] == "scan")
         assert scan_step["status"] == "completed"
+        assert scan_step.get("summary") == "Skipped (using collection)"
 
 
 def test_pipeline_repair_does_not_double_process_thumbnails(

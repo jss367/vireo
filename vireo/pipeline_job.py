@@ -94,6 +94,12 @@ def _find_broken_metadata_folders(db, photo_ids):
     such rows here would cause the repair path to fire on every pipeline
     run without accomplishing anything.
 
+    Rows whose file no longer exists on disk are filtered out: the
+    scanner only repairs files it can rediscover via ``Path.iterdir()``,
+    so a missing-file row would stay broken forever and keep the
+    collection stuck in repair mode on every run instead of returning to
+    the fast-path "Skipped (using collection)" summary.
+
     IDs are queried in chunks of at most 900 to stay safely under
     SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
     typically 999 in production builds). Without chunking, large
@@ -126,9 +132,10 @@ def _find_broken_metadata_folders(db, photo_ids):
             tuple(chunk),
         ).fetchall()
         for r in rows:
-            by_folder.setdefault(r["folder_path"], []).append(
-                os.path.join(r["folder_path"], r["filename"])
-            )
+            full_path = os.path.join(r["folder_path"], r["filename"])
+            if not os.path.isfile(full_path):
+                continue
+            by_folder.setdefault(r["folder_path"], []).append(full_path)
     return [(fp, paths) for fp, paths in by_folder.items()]
 
 
