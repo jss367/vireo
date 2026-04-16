@@ -587,3 +587,131 @@ def test_analyze_for_culling_progress_callback(tmp_path):
     analyze_for_culling(db, progress_callback=lambda msg: messages.append(msg))
     # Should have called with pHash backfill message
     assert any("hash" in m.lower() for m in messages)
+
+
+def test_analyze_for_culling_backfills_phash_from_working_copy(tmp_path):
+    """When the source file can't be opened (e.g. RAW), the phash backfill
+    should use the working-copy JPEG if available."""
+    from culling import analyze_for_culling
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    vireo_dir = tmp_path
+    folder_path = str(tmp_path / "raws")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="raws")
+
+    # Simulate a RAW: register the photo with a .NEF extension, but don't
+    # write a real NEF — PIL can't open it. The working copy IS available.
+    fname = "bird.NEF"
+    with open(os.path.join(folder_path, fname), "wb") as f:
+        f.write(b"not a real raw file")
+
+    wc_rel = "working/bird.jpg"
+    wc_abs = os.path.join(vireo_dir, wc_rel)
+    os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
+    Image.new("RGB", (100, 100), color=(50, 120, 80)).save(wc_abs)
+
+    pid = db.add_photo(fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+    db.conn.commit()
+
+    analyze_for_culling(db, vireo_dir=str(vireo_dir))
+
+    row = db.conn.execute("SELECT phash FROM photos WHERE id = ?", (pid,)).fetchone()
+    assert row["phash"], "phash should be backfilled from working-copy JPEG"
+
+
+def test_analyze_for_culling_reports_missing_phash_count(tmp_path):
+    """Photos that can't be hashed (no working copy, unreadable original)
+    should be counted in result['photos_missing_phash']."""
+    from culling import analyze_for_culling
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    folder_path = str(tmp_path / "raws")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="raws")
+
+    # Unreadable "RAW": junk bytes, no working copy
+    fname = "broken.NEF"
+    with open(os.path.join(folder_path, fname), "wb") as f:
+        f.write(b"not a real raw file")
+
+    pid = db.add_photo(fid, fname, ".NEF", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+    db.conn.commit()
+
+    result = analyze_for_culling(db, vireo_dir=str(tmp_path))
+    assert result["photos_missing_phash"] == 1
+
+
+def test_analyze_for_culling_missing_phash_zero_when_all_hashed(tmp_path):
+    """When every photo gets a phash, the missing count is zero."""
+    from culling import analyze_for_culling
+
+    db, _ = _setup_culling_db(tmp_path, with_embeddings=False)
+    result = analyze_for_culling(db)
+    assert result["photos_missing_phash"] == 0
+
+
+def test_analyze_for_culling_falls_back_to_source_when_working_copy_corrupt(tmp_path):
+    """If the working-copy JPEG can't be decoded, the backfill should still
+    try the original source file instead of giving up."""
+    from culling import analyze_for_culling
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    vireo_dir = tmp_path
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    fid = db.add_folder(folder_path, name="photos")
+
+    # Valid JPEG at the source path — can be opened.
+    fname = "bird.jpg"
+    Image.new("RGB", (100, 100), color=(20, 140, 90)).save(
+        os.path.join(folder_path, fname)
+    )
+
+    # Working-copy path points to a file that exists but is junk bytes —
+    # _load_standard will return None.
+    wc_rel = "working/broken.jpg"
+    wc_abs = os.path.join(vireo_dir, wc_rel)
+    os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
+    with open(wc_abs, "wb") as f:
+        f.write(b"not a real jpeg")
+
+    pid = db.add_photo(fid, fname, ".jpg", 1000, 1.0, timestamp="2024-01-01T10:00:00")
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = ? WHERE id = ?", (wc_rel, pid)
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
+    db.conn.commit()
+
+    result = analyze_for_culling(db, vireo_dir=str(vireo_dir))
+    assert result["photos_missing_phash"] == 0
+    row = db.conn.execute("SELECT phash FROM photos WHERE id = ?", (pid,)).fetchone()
+    assert row["phash"], "phash should fall back to the valid source JPEG"

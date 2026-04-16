@@ -599,6 +599,16 @@ function renderCulling() {
     '<div class="summary-stat"><div class="num" style="color:var(--danger);">' + cullData.suggested_rejects + '</div><div class="label">Reject Candidates</div></div>' +
     '<div class="summary-stat"><div class="num">' + cullData.species_groups.length + '</div><div class="label">Species</div></div>' +
   '</div>';
+  var missing = cullData.photos_missing_phash || 0;
+  if (missing > 0) {
+    summaryHtml += '<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--danger);' +
+      'border-radius:6px;background:rgba(255,100,100,0.08);color:var(--text);font-size:14px;">' +
+      '\u26A0 ' + missing + ' photo' + (missing === 1 ? '' : 's') + ' couldn\'t be hashed. ' +
+      'Scene grouping will treat each as unique, so time-window and pHash thresholds ' +
+      'won\'t merge them. Usually means the working-copy JPEG is missing — ' +
+      're-run thumbnail/working-copy extraction, then re-analyze.' +
+      '</div>';
+  }
   document.getElementById('cullSummary').innerHTML = summaryHtml;
   document.getElementById('cullSummary').style.display = '';
   document.getElementById('applyBtn').style.display = '';
