@@ -794,6 +794,47 @@ def test_find_broken_metadata_folders_groups_by_folder(app_and_db):
     assert sorted(os.path.basename(p) for p in paths) == ['bird1.jpg', 'bird3.jpg']
 
 
+def test_find_broken_metadata_folders_chunks_large_id_lists(app_and_db):
+    """Passing more photo_ids than SQLite's default variable cap (999) must
+    not raise 'too many SQL variables'. The helper chunks internally."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path='/photos/2024'"
+    ).fetchone()["id"]
+    # Bulk-insert 1200 photos, all with populated timestamps (none broken).
+    db.conn.executemany(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, "
+        "file_mtime, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (folder_id, f"bulk_{i}.jpg", ".jpg", 1000, float(i),
+             "2024-01-01T00:00:00")
+            for i in range(1200)
+        ],
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    assert len(photo_ids) > 999
+    # Must not raise OperationalError: too many SQL variables.
+    assert _find_broken_metadata_folders(db, photo_ids) == []
+
+    # Break one of the bulk rows and confirm it's still found across chunks.
+    target = db.conn.execute(
+        "SELECT id, folder_id FROM photos WHERE filename='bulk_1100.jpg'"
+    ).fetchone()
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL WHERE id=?", (target["id"],)
+    )
+    db.conn.commit()
+    result = _find_broken_metadata_folders(db, photo_ids)
+    assert len(result) == 1
+    assert any(p.endswith("bulk_1100.jpg") for p in result[0][1])
+
+
 def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
     """A pipeline run against a collection of healthy photos reports the
     scan stage as skipped — preserving existing behavior when nothing's

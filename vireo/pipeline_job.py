@@ -94,6 +94,12 @@ def _find_broken_metadata_folders(db, photo_ids):
     such rows here would cause the repair path to fire on every pipeline
     run without accomplishing anything.
 
+    IDs are queried in chunks of at most 900 to stay safely under
+    SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
+    typically 999 in production builds). Without chunking, large
+    collections would hit ``OperationalError: too many SQL variables``
+    and abort the scan stage.
+
     Returns a list of ``(folder_path, file_paths)`` tuples where
     ``file_paths`` is a list of absolute image paths in that folder.
     Empty list when nothing needs repair.
@@ -101,24 +107,28 @@ def _find_broken_metadata_folders(db, photo_ids):
     if not photo_ids:
         return []
     raw_list = ",".join(f"'{e}'" for e in _RAW_EXTENSIONS)
-    placeholders = ",".join("?" for _ in photo_ids)
-    rows = db.conn.execute(
-        f"""SELECT f.path AS folder_path, p.filename
-            FROM photos p
-            JOIN folders f ON p.folder_id = f.id
-            WHERE p.id IN ({placeholders})
-              AND p.exif_data IS NULL
-              AND (p.timestamp IS NULL
-                   OR (p.extension IN ({raw_list})
-                       AND p.width IS NOT NULL AND p.width < 1000))
-            ORDER BY f.path, p.filename""",
-        tuple(photo_ids),
-    ).fetchall()
+    ids = list(photo_ids)
+    _CHUNK = 900
     by_folder: dict[str, list[str]] = {}
-    for r in rows:
-        by_folder.setdefault(r["folder_path"], []).append(
-            os.path.join(r["folder_path"], r["filename"])
-        )
+    for i in range(0, len(ids), _CHUNK):
+        chunk = ids[i : i + _CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"""SELECT f.path AS folder_path, p.filename
+                FROM photos p
+                JOIN folders f ON p.folder_id = f.id
+                WHERE p.id IN ({placeholders})
+                  AND p.exif_data IS NULL
+                  AND (p.timestamp IS NULL
+                       OR (p.extension IN ({raw_list})
+                           AND p.width IS NOT NULL AND p.width < 1000))
+                ORDER BY f.path, p.filename""",
+            tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            by_folder.setdefault(r["folder_path"], []).append(
+                os.path.join(r["folder_path"], r["filename"])
+            )
     return [(fp, paths) for fp, paths in by_folder.items()]
 
 
