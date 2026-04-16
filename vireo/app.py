@@ -248,22 +248,40 @@ def _migrate_legacy_preview_cache(app):
     if not legacy_files:
         return
 
-    target_size = cfg.load().get("preview_max_size") or 1920
-    if target_size == 0:
+    # Read preview_max_size explicitly so a configured 0 ("full res")
+    # stays 0 and the tier-assignment guard below is reachable.
+    raw_size = cfg.load().get("preview_max_size")
+    if raw_size == 0:
         log.info(
             "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
             len(legacy_files),
         )
         return
+    target_size = int(raw_size or 1920)
 
     db = Database(app.config["DB_PATH"])
     try:
         migrated = 0
+        orphaned = 0
         for fname in legacy_files:
             m = legacy_pat.match(fname)
             photo_id = int(m.group(1))
             src = os.path.join(preview_dir, fname)
             dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+            # Skip orphans: if the photo was deleted, inserting into
+            # preview_cache would raise a FK error and rolling back the
+            # already-performed os.rename is ugly. Unlink the orphan so
+            # disk doesn't keep pointing at vanished photos.
+            photo_row = db.conn.execute(
+                "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+            ).fetchone()
+            if photo_row is None:
+                try:
+                    os.remove(src)
+                    orphaned += 1
+                except OSError:
+                    pass
+                continue
             if os.path.exists(dst):
                 try:
                     os.remove(src)
@@ -282,6 +300,8 @@ def _migrate_legacy_preview_cache(app):
                 "Migrated %d legacy preview cache files to size %d",
                 migrated, target_size,
             )
+        if orphaned:
+            log.info("Removed %d orphaned legacy preview files", orphaned)
     finally:
         try:
             db.conn.close()

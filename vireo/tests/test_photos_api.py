@@ -849,6 +849,65 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     assert row["bytes"] == os.path.getsize(new_path)
 
 
+def test_legacy_migration_skips_orphaned_photo_ids(tmp_path, monkeypatch):
+    """Legacy {id}.jpg where id is no longer in photos table is unlinked,
+    not inserted (which would fail the FK constraint)."""
+
+    import config as cfg
+    from app import create_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    # Drop a legacy file for a photo id that won't exist in the DB.
+    orphan = preview_dir / "99999.jpg"
+    with open(orphan, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0orphan")
+
+    # Must not raise. The orphan file should be removed so disk doesn't
+    # keep pointing at a vanished photo.
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert not orphan.exists()
+    assert not (preview_dir / "99999_1920.jpg").exists()
+
+
+def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch):
+    """When preview_max_size=0 (full-res), legacy files are left alone —
+    they can't be assigned to a size tier."""
+
+    import config as cfg
+    from app import create_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 0})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    legacy = preview_dir / "42.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0leave-me")
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # File stays exactly where it was; no renamed version was produced.
+    assert legacy.exists()
+    assert not (preview_dir / "42_1920.jpg").exists()
+
+
 def test_storage_clear_previews_resets_preview_cache(client_with_photo):
     """/api/storage/clear type=previews drops preview_cache rows so
     Settings "Current usage" doesn't report phantom bytes."""
