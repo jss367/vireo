@@ -742,3 +742,35 @@ def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
     preview_dir = vireo_dir / "previews"
     assert not (preview_dir / f"{pid1}_1920.jpg").exists()
     assert not (preview_dir / f"{pid2}_1920.jpg").exists()
+
+
+def test_preview_cache_endpoint_uses_db(client_with_photo):
+    """/api/preview-cache returns totals from preview_cache table, not filesystem."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    resp = client.get("/api/preview-cache")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 1
+    assert data["total_size"] > 0
+    assert "quota_bytes" in data
+
+
+def test_preview_cache_clear_removes_all(client_with_photo):
+    """POST /api/preview-cache/clear empties the table and files."""
+    import os
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+
+    assert db.preview_cache_total_bytes() == 0
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    )

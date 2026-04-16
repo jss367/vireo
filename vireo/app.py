@@ -2524,19 +2524,38 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/preview-cache")
     def api_preview_cache():
-        """Return info about the preview image cache."""
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
-        count = 0
-        total_size = 0
-        if os.path.isdir(preview_dir):
-            for f in os.listdir(preview_dir):
-                fp = os.path.join(preview_dir, f)
-                if os.path.isfile(fp):
-                    count += 1
-                    total_size += os.path.getsize(fp)
-        return jsonify({"count": count, "total_size": total_size})
+        """Return counts and totals from the preview_cache table, plus quota."""
+        import config as cfg
+        db = _get_db()
+        count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()
+        total = db.preview_cache_total_bytes()
+        quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
+        return jsonify({
+            "count": count_row["c"],
+            "total_size": total,
+            "quota_bytes": int(quota_mb) * 1024 * 1024,
+        })
+
+    @app.route("/api/preview-cache/clear", methods=["POST"])
+    def api_preview_cache_clear():
+        """Delete every preview_cache file and row."""
+        db = _get_db()
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
+        rows = db.conn.execute(
+            "SELECT photo_id, size FROM preview_cache"
+        ).fetchall()
+        for r in rows:
+            path = os.path.join(preview_dir, f"{r['photo_id']}_{r['size']}.jpg")
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        db.conn.execute("DELETE FROM preview_cache")
+        db.conn.commit()
+        return jsonify({"cleared": len(rows)})
 
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
