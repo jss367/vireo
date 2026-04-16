@@ -661,3 +661,646 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
     with app.test_client() as c:
         resp = c.post(f"/api/jobs/{job_id}/cancel")
         assert resp.status_code == 404
+
+
+# --- Pipeline metadata auto-repair tests ---
+
+def test_find_broken_metadata_folders_returns_empty_when_healthy(app_and_db):
+    """_find_broken_metadata_folders returns [] when all photos have good
+    metadata."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    # The fixture's 3 photos all have populated timestamps and .jpg ext,
+    # so none should match the detection rule.
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    assert _find_broken_metadata_folders(db, photo_ids) == []
+
+
+def test_find_broken_metadata_folders_detects_null_timestamp(app_and_db, monkeypatch):
+    """_find_broken_metadata_folders flags a photo whose timestamp is NULL
+    and returns its file path so the repair path can restrict the scan."""
+    import pipeline_job
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    # Fixture rows point at synthetic /photos paths that don't exist on
+    # disk; treat all DB rows as present for the SQL/grouping assertions.
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
+
+    # Break one photo's timestamp.
+    row = db.conn.execute(
+        "SELECT id, folder_id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()
+    db.conn.execute("UPDATE photos SET timestamp=NULL WHERE id=?", (row["id"],))
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    result = _find_broken_metadata_folders(db, photo_ids)
+    folder_path = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (row["folder_id"],)
+    ).fetchone()["path"]
+    assert result == [(folder_path, [os.path.join(folder_path, "bird1.jpg")])]
+
+
+def test_find_broken_metadata_folders_detects_raw_thumb_dims(app_and_db, monkeypatch):
+    """_find_broken_metadata_folders flags a RAW photo with sub-1000px
+    width (the embedded-thumbnail bug) even when timestamp is populated."""
+    import pipeline_job
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
+
+    row = db.conn.execute(
+        "SELECT id, folder_id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', width=160, height=120 "
+        "WHERE id=?", (row["id"],)
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    result = _find_broken_metadata_folders(db, photo_ids)
+    assert len(result) == 1
+    # One file in the folder — bird1.jpg with the fake .nef extension.
+    assert len(result[0][1]) == 1
+    assert result[0][1][0].endswith("bird1.jpg")
+
+
+def test_find_broken_metadata_folders_ignores_out_of_scope(app_and_db):
+    """Broken photos outside the passed photo_ids list are not returned."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    # Break bird1, but only pass bird2's id in scope.
+    bird1 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()["id"]
+    bird2 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird2.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute("UPDATE photos SET timestamp=NULL WHERE id=?", (bird1,))
+    db.conn.commit()
+
+    assert _find_broken_metadata_folders(db, [bird2]) == []
+
+
+def test_find_broken_metadata_folders_excludes_exif_extracted(app_and_db):
+    """A row whose timestamp is NULL but exif_data is populated is NOT
+    returned. Such rows represent photos where ExifTool already ran and
+    the source file genuinely has no DateTimeOriginal (e.g. screenshots).
+    The scanner's exif_extracted guard would skip them on re-scan anyway,
+    so flagging them as repairable would cause the repair path to fire
+    forever without doing useful work."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data='{\"File\":{}}' "
+        "WHERE id=?", (row["id"],)
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    assert _find_broken_metadata_folders(db, photo_ids) == []
+
+
+def test_find_broken_metadata_folders_groups_by_folder(app_and_db, monkeypatch):
+    """Multiple broken photos in the same folder are returned as one
+    folder entry with a count."""
+    import pipeline_job
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
+
+    # Break both photos in folder '/photos/2024' (bird1 and bird3).
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL "
+        "WHERE filename IN ('bird1.jpg', 'bird3.jpg')"
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    result = _find_broken_metadata_folders(db, photo_ids)
+    assert len(result) == 1
+    folder, paths = result[0]
+    assert folder == '/photos/2024'
+    assert len(paths) == 2
+    assert sorted(os.path.basename(p) for p in paths) == ['bird1.jpg', 'bird3.jpg']
+
+
+def test_find_broken_metadata_folders_filters_missing_files(app_and_db, tmp_path):
+    """Rows whose file no longer exists on disk are filtered out. The
+    scanner can only repair files it rediscovers via Path.iterdir(), so
+    a missing-file row would stay broken forever and keep the collection
+    stuck in repair mode on every pipeline run."""
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    # Real folder with one real file (broken) and one DB row pointing at
+    # a deleted file (also broken-looking in the DB).
+    real_dir = tmp_path / "photos"
+    real_dir.mkdir()
+    present = real_dir / "present.jpg"
+    Image.new("RGB", (640, 480)).save(str(present), "JPEG")
+
+    fid = db.add_folder(str(real_dir), name="photos")
+    p_present = db.add_photo(
+        folder_id=fid, filename="present.jpg", extension=".jpg",
+        file_size=present.stat().st_size, file_mtime=present.stat().st_mtime,
+        timestamp=None,
+    )
+    p_missing = db.add_photo(
+        folder_id=fid, filename="ghost.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp=None,
+    )
+    db.conn.commit()
+
+    result = _find_broken_metadata_folders(db, [p_present, p_missing])
+    assert len(result) == 1
+    folder, paths = result[0]
+    assert folder == str(real_dir)
+    assert paths == [str(present)]
+
+
+def test_find_broken_metadata_folders_chunks_large_id_lists(app_and_db, monkeypatch):
+    """Passing more photo_ids than SQLite's default variable cap (999) must
+    not raise 'too many SQL variables'. The helper chunks internally."""
+    import pipeline_job
+    from pipeline_job import _find_broken_metadata_folders
+    _, db = app_and_db
+
+    monkeypatch.setattr(pipeline_job.os.path, "isfile", lambda _p: True)
+
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path='/photos/2024'"
+    ).fetchone()["id"]
+    # Bulk-insert 1200 photos, all with populated timestamps (none broken).
+    db.conn.executemany(
+        "INSERT INTO photos (folder_id, filename, extension, file_size, "
+        "file_mtime, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (folder_id, f"bulk_{i}.jpg", ".jpg", 1000, float(i),
+             "2024-01-01T00:00:00")
+            for i in range(1200)
+        ],
+    )
+    db.conn.commit()
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    assert len(photo_ids) > 999
+    # Must not raise OperationalError: too many SQL variables.
+    assert _find_broken_metadata_folders(db, photo_ids) == []
+
+    # Break one of the bulk rows and confirm it's still found across chunks.
+    target = db.conn.execute(
+        "SELECT id, folder_id FROM photos WHERE filename='bulk_1100.jpg'"
+    ).fetchone()
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL WHERE id=?", (target["id"],)
+    )
+    db.conn.commit()
+    result = _find_broken_metadata_folders(db, photo_ids)
+    assert len(result) == 1
+    assert any(p.endswith("bulk_1100.jpg") for p in result[0][1])
+
+
+def test_pipeline_with_healthy_collection_skips_scan(app_and_db):
+    """A pipeline run against a collection of healthy photos reports the
+    scan stage as skipped — preserving existing behavior when nothing's
+    broken. The downstream thumbnail stage will fail because the fixture
+    files don't exist on disk; we only care about the scan step."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    photo_ids = [p["id"] for p in db.conn.execute(
+        "SELECT id FROM photos"
+    ).fetchall()]
+    col_id = db.add_collection(
+        "healthy", json.dumps([{"field": "photo_ids", "value": photo_ids}])
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+        assert scan_step.get("summary") == "Skipped (using collection)"
+
+
+def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, monkeypatch):
+    """A pipeline run against a collection with broken-metadata photos
+    triggers a targeted repair scan before downstream stages. Broken
+    rows end with populated timestamp and corrected dimensions."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    # Create a real image file on disk and register a new folder+photo
+    # pointing at it. The fixture's /photos/... folders don't exist on
+    # disk, so we need our own.
+    photos_root = tmp_path / "real_photos"
+    photos_root.mkdir()
+    image_file = photos_root / "broken.jpg"
+    Image.new("RGB", (640, 480), color="red").save(str(image_file), "JPEG")
+
+    fid = db.add_folder(str(photos_root), name="real_photos")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="broken.jpg", extension=".jpg",
+        file_size=image_file.stat().st_size,
+        file_mtime=image_file.stat().st_mtime,
+        timestamp=None, width=160, height=120,
+    )
+    # Force broken RAW-thumbnail state so the detection rule fires.
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', timestamp=NULL, "
+        "exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    # Mock ExifTool so the test doesn't depend on the binary.
+    import scanner
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
+                    "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    col_id = db.add_collection(
+        "broken", json.dumps([{"field": "photo_ids", "value": [pid]}])
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        assert data["status"] == "completed", data
+        scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+        # Scan stage should have run (not been skipped) because of repair.
+        assert "repair" in (scan_step.get("summary") or "").lower()
+
+    # Verify the broken row now has correct metadata.
+    row = db.conn.execute(
+        "SELECT timestamp, width, height FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["timestamp"] == "2024-06-15T10:00:00"
+    assert row["width"] == 640
+    assert row["height"] == 480
+
+
+def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, monkeypatch):
+    """When the repair path scans a folder to fix broken metadata, new
+    files that were added to that folder but never scanned do NOT get
+    ingested as a side effect. The repair must touch only the specific
+    photos flagged as broken."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    # Create a real folder with two files — one in the DB (broken), one
+    # untracked. The repair run should touch the broken one and leave
+    # the untracked one alone.
+    photos_root = tmp_path / "real_photos"
+    photos_root.mkdir()
+    tracked = photos_root / "tracked.jpg"
+    untracked = photos_root / "untracked.jpg"
+    Image.new("RGB", (640, 480), color="red").save(str(tracked), "JPEG")
+    Image.new("RGB", (640, 480), color="blue").save(str(untracked), "JPEG")
+
+    fid = db.add_folder(str(photos_root), name="real_photos")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="tracked.jpg", extension=".jpg",
+        file_size=tracked.stat().st_size,
+        file_mtime=tracked.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    import scanner
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
+                    "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    col_id = db.add_collection(
+        "broken_tracked",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+    # Tracked photo repaired: timestamp populated.
+    tracked_row = db.conn.execute(
+        "SELECT timestamp FROM photos WHERE filename='tracked.jpg'"
+    ).fetchone()
+    assert tracked_row["timestamp"] == "2024-06-15T10:00:00"
+    # Untracked file NOT ingested.
+    untracked_row = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photos WHERE filename='untracked.jpg'"
+    ).fetchone()
+    assert untracked_row["n"] == 0
+
+
+def test_pipeline_with_broken_collection_handles_unreachable_folder(app_and_db):
+    """A pipeline run where a broken photo's underlying file no longer
+    exists on disk handles the missing file gracefully — the broken row
+    is filtered out of the repair scope (since the scanner couldn't
+    repair it anyway), and the scan stage falls through to the normal
+    'Skipped (using collection)' fast path instead of looping forever
+    in repair mode."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    bird1 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?",
+        (bird1,),
+    )
+    db.conn.commit()
+
+    col_id = db.add_collection(
+        "broken_unreachable",
+        json.dumps([{"field": "photo_ids", "value": [bird1]}]),
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        # The scan step should have completed without error. With the
+        # broken row's file missing on disk, the repair-target filter
+        # drops it and the scan stage falls through to "Skipped (using
+        # collection)" — this is exactly the behavior we want to keep
+        # the collection from getting stuck in repair mode forever.
+        scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+        assert scan_step["status"] == "completed"
+        assert scan_step.get("summary") == "Skipped (using collection)"
+
+
+def test_pipeline_repair_does_not_double_process_thumbnails(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Repaired photos must only be processed once by the thumbnail stage.
+    The collection-replay loop in thumbnail_stage() already covers every
+    photo in the collection, so the scan-queue callback must not also
+    enqueue repaired files — doing so would generate the thumbnail twice
+    and inflate the thumbnail totals beyond the collection size."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    photos_root = tmp_path / "real_photos"
+    photos_root.mkdir()
+    image_file = photos_root / "broken.jpg"
+    Image.new("RGB", (640, 480), color="red").save(str(image_file), "JPEG")
+
+    fid = db.add_folder(str(photos_root), name="real_photos")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="broken.jpg", extension=".jpg",
+        file_size=image_file.stat().st_size,
+        file_mtime=image_file.stat().st_mtime,
+        timestamp=None, width=160, height=120,
+    )
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', timestamp=NULL, "
+        "exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    import scanner
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
+                    "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    # Count generate_thumbnail invocations per photo_id. If the P2 bug
+    # existed the repaired photo would be generated twice (once from the
+    # scan queue, once from the collection replay).
+    from collections import Counter
+    calls = Counter()
+
+    import thumbnails
+    real_generate = thumbnails.generate_thumbnail
+    def counting_generate(photo_id, *args, **kwargs):
+        calls[photo_id] += 1
+        return real_generate(photo_id, *args, **kwargs)
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", counting_generate)
+
+    col_id = db.add_collection(
+        "broken_thumb", json.dumps([{"field": "photo_ids", "value": [pid]}])
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        assert data["status"] == "completed", data
+
+        thumb_step = next(s for s in data["steps"] if s["id"] == "thumbnails")
+        # Progress total must match the collection size, not double it.
+        progress = thumb_step.get("progress") or {}
+        assert progress.get("total") == 1, thumb_step
+
+    # Each repaired photo should be handed to generate_thumbnail exactly once.
+    assert calls[pid] == 1, dict(calls)
+
+
+def test_pipeline_repair_respects_excluded_photo_ids(
+    app_and_db, monkeypatch,
+):
+    """Photos excluded from the run via ``exclude_photo_ids`` must not
+    trigger a repair scan — the downstream stages would skip them anyway,
+    so rewriting their metadata would be unexpected out-of-scope work."""
+    import json
+
+    from db import Database
+
+    app, _ = app_and_db
+    db_path = app.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(db._active_workspace_id)
+
+    # The fixture's bird1.jpg doesn't exist on disk, but that's fine —
+    # we only need to verify the scan stage takes the fast-path skip
+    # instead of firing the repair scan. Force it into broken state so
+    # that without the exclusion filter it WOULD be picked up for repair.
+    bird1 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird1.jpg'"
+    ).fetchone()["id"]
+    bird2 = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='bird2.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?",
+        (bird1,),
+    )
+    db.conn.commit()
+
+    # If repair ever runs for the excluded photo it would call
+    # extract_metadata; fail loudly if so.
+    import scanner
+    def fail_extract(paths, restricted_tags=None):
+        raise AssertionError(
+            f"extract_metadata must not run for excluded photos: {paths}"
+        )
+    monkeypatch.setattr(scanner, "extract_metadata", fail_extract)
+
+    col_id = db.add_collection(
+        "with_excluded",
+        json.dumps([{"field": "photo_ids", "value": [bird1, bird2]}]),
+    )
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "exclude_photo_ids": [bird1],
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+            "skip_classify": True,
+        })
+        assert resp.status_code == 200
+        job_id = resp.get_json()["job_id"]
+
+        for _ in range(100):
+            resp = client.get(f"/api/jobs/{job_id}")
+            data = resp.get_json()
+            if data["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        # The scan step should have reported the "Skipped" fast path
+        # because the only broken photo was excluded from the run.
+        # Downstream stages may still fail on the stub fixture files —
+        # that's unrelated and does not affect the scan-stage assertion.
+        scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+        summary = (scan_step.get("summary") or "").lower()
+        assert "skipped" in summary, scan_step
+        assert "repair" not in summary, scan_step
+
+    # Excluded photo's broken metadata is untouched.
+    row = db.conn.execute(
+        "SELECT timestamp, exif_data FROM photos WHERE id=?", (bird1,)
+    ).fetchone()
+    assert row["timestamp"] is None
+    assert row["exif_data"] is None

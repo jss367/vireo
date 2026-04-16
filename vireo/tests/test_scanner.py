@@ -969,3 +969,219 @@ def test_extract_timestamp_subsec_long():
     exif = {"DateTimeOriginal": "2024:06:15 14:30:00", "SubSecTimeOriginal": "12345678"}
     ts = _extract_timestamp(exif)
     assert ts == "2024-06-15T14:30:00.123456"
+
+
+# --- Incremental rescan metadata_missing heuristic tests ---
+
+def _setup_scanned_photo(tmp_path, pil_size=(640, 480)):
+    """Create a JPEG, run a fresh scan, return (db, photo_id, image_path)."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    image_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", pil_size, color="green").save(image_path, "JPEG")
+
+    db = Database(str(tmp_path / "test.db"))
+    # Mock ExifTool so the first scan populates exif_data with real
+    # dimensions, independent of whether exiftool is installed.
+    def fake_extract(paths, restricted_tags=None):
+        return {
+            p: {"File": {"ImageWidth": pil_size[0], "ImageHeight": pil_size[1]},
+                "EXIF": {}, "Composite": {}}
+            for p in paths
+        }
+    import metadata
+    original = metadata.extract_metadata
+    metadata.extract_metadata = fake_extract
+    scanner.extract_metadata = fake_extract
+    try:
+        scanner.scan(root, db)
+    finally:
+        metadata.extract_metadata = original
+        scanner.extract_metadata = original
+
+    row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='photo.jpg'"
+    ).fetchone()
+    return db, root, image_path, row["id"]
+
+
+def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch):
+    """Incremental scan re-processes a photo whose timestamp is NULL
+    and exif_data is NULL (existing behavior — regression guard)."""
+    import scanner
+
+    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
+
+    # Simulate broken state: timestamp lost, dims wrong, exif_data cleared.
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, width=100, height=100, "
+        "exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    scanner.scan(root, db, incremental=True)
+
+    row = db.conn.execute(
+        "SELECT width, height, exif_data FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["width"] == 640  # repopulated from fake ExifTool
+    assert row["height"] == 480
+    assert row["exif_data"] is not None
+
+
+def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypatch):
+    """Incremental scan re-processes a row where extension is RAW and
+    width < 1000 (the 160x120 embedded-thumb bug), even when timestamp
+    is populated — provided exif_data is NULL so the guard doesn't block."""
+    import scanner
+
+    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
+
+    # Simulate broken state: fake RAW extension with thumbnail dims and
+    # populated timestamp. exif_data=NULL so the exif_extracted guard
+    # doesn't block re-extraction.
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', width=160, height=120, "
+        "timestamp='2020-01-01T12:00:00', exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    scanner.scan(root, db, incremental=True)
+
+    row = db.conn.execute(
+        "SELECT width, height, exif_data FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["width"] == 640
+    assert row["height"] == 480
+    assert row["exif_data"] is not None
+
+
+def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch):
+    """Incremental scan does NOT re-process a non-RAW row with suspicious
+    small dimensions. The dims heuristic is RAW-specific so JPEGs, PNGs,
+    etc. that are legitimately tiny aren't re-extracted repeatedly."""
+    import scanner
+
+    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
+
+    # Simulate small-dims on a non-RAW extension; timestamp populated so
+    # the NULL-timestamp branch doesn't fire either.
+    db.conn.execute(
+        "UPDATE photos SET extension='.jpg', width=160, height=120, "
+        "timestamp='2020-01-01T12:00:00', exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    called_with = []
+    def fake_extract(paths, restricted_tags=None):
+        called_with.append(list(paths))
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    scanner.scan(root, db, incremental=True)
+
+    # width stays at the synthetic broken value because we didn't reprocess.
+    row = db.conn.execute(
+        "SELECT width, height FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["width"] == 160
+    assert row["height"] == 120
+    # And extract_metadata was never called with this file.
+    assert all(image_path not in batch for batch in called_with)
+
+
+def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
+    """When scan is called with restrict_files, files in restrict_dirs
+    that are not in the list are left untouched — even if they're brand
+    new and not yet in the DB. This prevents the pipeline's repair path
+    from ingesting new files as a side effect of fixing broken metadata."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    existing_file = os.path.join(root, "existing.jpg")
+    Image.new("RGB", (640, 480), color="green").save(existing_file, "JPEG")
+
+    db = Database(str(tmp_path / "test.db"))
+
+    def fake_extract(paths, restricted_tags=None):
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    # Seed the DB with only the existing file, then force broken state.
+    scanner.scan(root, db)
+    pid = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='existing.jpg'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE photos SET timestamp=NULL, exif_data=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    # NOW add an untracked file to the same folder (after initial scan).
+    new_file = os.path.join(root, "new_untracked.jpg")
+    Image.new("RGB", (640, 480), color="blue").save(new_file, "JPEG")
+
+    # Second scan with restrict_files constrained to the existing file only.
+    scanner.scan(
+        root, db,
+        incremental=True,
+        restrict_dirs=[root],
+        restrict_files={existing_file},
+    )
+
+    # new_untracked.jpg should NOT have been ingested.
+    filenames = [p["filename"] for p in db.get_photos(per_page=999999)]
+    assert "new_untracked.jpg" not in filenames
+    assert "existing.jpg" in filenames
+
+
+def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch):
+    """Incremental scan does NOT re-process a row when exif_data is
+    populated, even if the row otherwise looks broken. The guard prevents
+    retry loops on photos where ExifTool has already produced output
+    (e.g. files with genuinely missing EXIF timestamps)."""
+    import scanner
+
+    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
+
+    # Broken-looking state, but exif_data is populated (ExifTool already
+    # ran once). Scanner must skip this row.
+    db.conn.execute(
+        "UPDATE photos SET extension='.nef', width=160, height=120, "
+        "timestamp='2020-01-01T12:00:00', "
+        "exif_data='{\"File\":{}}' WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    called_with = []
+    def fake_extract(paths, restricted_tags=None):
+        called_with.append(list(paths))
+        return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
+                    "EXIF": {}, "Composite": {}} for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    scanner.scan(root, db, incremental=True)
+
+    row = db.conn.execute(
+        "SELECT width, height FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["width"] == 160
+    assert row["height"] == 120
+    assert all(image_path not in batch for batch in called_with)

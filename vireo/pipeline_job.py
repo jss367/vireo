@@ -78,6 +78,67 @@ def _looks_like_missing_external_data(err):
     )
 
 
+_RAW_EXTENSIONS = (".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf")
+
+
+def _find_broken_metadata_folders(db, photo_ids):
+    """Find folders containing photos with broken metadata in the given scope.
+
+    A photo is considered broken if EXIF extraction never produced usable
+    output (``exif_data IS NULL``) and either ``timestamp IS NULL`` or,
+    for RAW files, dimensions under 1000px — the latter indicates the
+    embedded JPEG thumbnail leaked through instead of the true sensor
+    size. The ``exif_data IS NULL`` clause mirrors the scanner's
+    ``exif_extracted`` guard: once ExifTool has stored output for a
+    photo, the scanner won't retry regardless of signal, so flagging
+    such rows here would cause the repair path to fire on every pipeline
+    run without accomplishing anything.
+
+    Rows whose file no longer exists on disk are filtered out: the
+    scanner only repairs files it can rediscover via ``Path.iterdir()``,
+    so a missing-file row would stay broken forever and keep the
+    collection stuck in repair mode on every run instead of returning to
+    the fast-path "Skipped (using collection)" summary.
+
+    IDs are queried in chunks of at most 900 to stay safely under
+    SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
+    typically 999 in production builds). Without chunking, large
+    collections would hit ``OperationalError: too many SQL variables``
+    and abort the scan stage.
+
+    Returns a list of ``(folder_path, file_paths)`` tuples where
+    ``file_paths`` is a list of absolute image paths in that folder.
+    Empty list when nothing needs repair.
+    """
+    if not photo_ids:
+        return []
+    raw_list = ",".join(f"'{e}'" for e in _RAW_EXTENSIONS)
+    ids = list(photo_ids)
+    _CHUNK = 900
+    by_folder: dict[str, list[str]] = {}
+    for i in range(0, len(ids), _CHUNK):
+        chunk = ids[i : i + _CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"""SELECT f.path AS folder_path, p.filename
+                FROM photos p
+                JOIN folders f ON p.folder_id = f.id
+                WHERE p.id IN ({placeholders})
+                  AND p.exif_data IS NULL
+                  AND (p.timestamp IS NULL
+                       OR (p.extension IN ({raw_list})
+                           AND p.width IS NOT NULL AND p.width < 1000))
+                ORDER BY f.path, p.filename""",
+            tuple(chunk),
+        ).fetchall()
+        for r in rows:
+            full_path = os.path.join(r["folder_path"], r["filename"])
+            if not os.path.isfile(full_path):
+                continue
+            by_folder.setdefault(r["folder_path"], []).append(full_path)
+    return [(fp, paths) for fp, paths in by_folder.items()]
+
+
 def _update_stages(runner, job_id, stages):
     """Push a stages progress update."""
     runner.push_event(job_id, "progress", {
@@ -263,13 +324,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     def scanner_stage():
         nonlocal collection_id
 
-        if skip_scan:
-            stages["scan"]["status"] = "skipped"
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary="Skipped (using collection)")
-            _update_stages(runner, job["id"], stages)
-            scan_to_thumb.put(_SENTINEL)
-            return
         # Note: stages["scan"]["status"] is NOT set to "running" here. It is
         # flipped to "running" just before each do_scan() call below, so
         # numScan doesn't pulse during the ingest sub-phase.
@@ -326,6 +380,101 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "eta_seconds": eta,
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
+
+            # Collection mode: no scan targets, but check whether any
+            # photos in the collection have broken metadata (NULL timestamp
+            # or RAW thumbnail-sized dimensions) that would poison
+            # downstream stages. If so, run a targeted repair scan on just
+            # the affected folders. This is the self-healing path — when
+            # nothing's broken, we keep the historical "Skipped" summary.
+            if skip_scan:
+                coll_photos = thread_db.get_collection_photos(
+                    collection_id, per_page=999999,
+                )
+                # Respect the user's preview-time exclusions: photos removed
+                # from this run must not be rescanned or have their metadata
+                # rewritten as a side effect of repair.
+                in_scope_photos = _filter_excluded(coll_photos)
+                broken = _find_broken_metadata_folders(
+                    thread_db, [p["id"] for p in in_scope_photos],
+                )
+                if not broken:
+                    stages["scan"]["status"] = "skipped"
+                    runner.update_step(
+                        job["id"], "scan", status="completed",
+                        summary="Skipped (using collection)",
+                    )
+                    _update_stages(runner, job["id"], stages)
+                    scan_to_thumb.put(_SENTINEL)
+                    return
+
+                total_broken = sum(len(paths) for _, paths in broken)
+                stages["scan"]["label"] = (
+                    f"Repair metadata ({total_broken} photos)"
+                )
+                stages["scan"]["status"] = "running"
+                runner.update_step(
+                    job["id"], "scan", status="running",
+                    summary=(f"Repairing {total_broken} photos in "
+                             f"{len(broken)} folder"
+                             f"{'s' if len(broken) != 1 else ''}"),
+                )
+                _update_stages(runner, job["id"], stages)
+
+                # Display-only callback for the repair path: updates the
+                # scan step's current_file indicator but does NOT enqueue
+                # into scan_to_thumb. In collection mode thumbnail_stage
+                # already replays the full collection against the thumb
+                # cache, so enqueueing here would double-process every
+                # repaired photo and inflate the thumbnail totals.
+                def repair_photo_cb(photo_id, path):
+                    runner.update_step(
+                        job["id"], "scan",
+                        current_file=os.path.basename(path),
+                    )
+
+                unreachable = 0
+                for folder_path, file_paths in broken:
+                    if not os.path.isdir(folder_path):
+                        log.warning(
+                            "Repair scan skipped for missing folder: %s",
+                            folder_path,
+                        )
+                        unreachable += 1
+                        continue
+                    try:
+                        # restrict_files limits discovery to the known
+                        # broken photos in this folder. Without it, new
+                        # untracked files in the same folder would get
+                        # ingested as a side effect of the repair.
+                        do_scan(
+                            folder_path, thread_db,
+                            progress_callback=progress_cb,
+                            incremental=True,
+                            extract_full_metadata=pipeline_cfg.get(
+                                "extract_full_metadata", True,
+                            ),
+                            photo_callback=repair_photo_cb,
+                            status_callback=status_cb,
+                            restrict_dirs=[folder_path],
+                            restrict_files=set(file_paths),
+                        )
+                    except (OSError, RuntimeError) as e:
+                        log.warning(
+                            "Repair scan failed for %s: %s", folder_path, e,
+                        )
+                        unreachable += 1
+
+                summary = f"{total_broken} photos repaired"
+                if unreachable:
+                    summary += (f", {unreachable} folder"
+                                f"{'s' if unreachable != 1 else ''} unreachable")
+                stages["scan"]["status"] = "completed"
+                runner.update_step(
+                    job["id"], "scan", status="completed", summary=summary,
+                )
+                scan_to_thumb.put(_SENTINEL)
+                return
 
             # Determine source folder(s)
             sources = params.sources or ([params.source] if params.source else [])

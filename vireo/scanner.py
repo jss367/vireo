@@ -299,7 +299,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     db.conn.commit()
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, vireo_dir=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -316,6 +316,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             full tree. When provided, only files in these directories are
             discovered (non-recursively), but ``root`` is still used as the
             folder hierarchy root so parent links are preserved correctly.
+        restrict_files: optional iterable of absolute file paths. When
+            provided alongside ``restrict_dirs``, only files whose path
+            is in this set are discovered — untracked files in the same
+            directory are ignored. Used by the pipeline's repair path to
+            touch only photos already in the DB.
         vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
             When provided, working copies are extracted for RAW photos after
             companion pairing.
@@ -333,6 +338,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     if restrict_dirs is not None:
         # Only enumerate files in the specified directories (non-recursive).
         # root is still used as the folder hierarchy root for _ensure_folder.
+        restrict_files_set = set(restrict_files) if restrict_files is not None else None
         for d in restrict_dirs:
             dp = Path(d)
             if dp.is_dir():
@@ -340,7 +346,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     if (f.is_file()
                             and f.suffix.lower() in SUPPORTED_EXTENSIONS
                             and not f.name.startswith(".")
-                            and (skip_paths is None or str(f) not in skip_paths)):
+                            and (skip_paths is None or str(f) not in skip_paths)
+                            and (restrict_files_set is None
+                                 or str(f) in restrict_files_set)):
                         image_files.append(f)
     else:
         candidates = root_path.rglob("*") if recursive else root_path.iterdir()
@@ -420,8 +428,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # timestamp and exif_data are NULL). Photos with genuinely
                 # missing timestamps (screenshots, exports) will have
                 # exif_data set after one extraction attempt.
+                # Also flag rows where a RAW file has absurdly small
+                # dimensions (<1000px) — that's the embedded JPEG thumb
+                # leaking through when ExifTool's File group was missing
+                # on the original scan.
+                dims_suspect = (
+                    existing["extension"] in RAW_EXTENSIONS
+                    and existing["width"] is not None
+                    and existing["width"] < 1000
+                )
                 metadata_missing = (
-                    existing["timestamp"] is None
+                    (existing["timestamp"] is None or dims_suspect)
                     and existing["id"] not in exif_extracted
                 )
 
