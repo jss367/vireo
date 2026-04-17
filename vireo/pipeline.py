@@ -763,6 +763,23 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id
         log.info("Eye-focus detection disabled by config; skipping stage")
         return
 
+    # Stage-level preflight: if no routable keypoint model has weights on
+    # disk, the per-photo loop would be a pure no-op (Gate 2 in
+    # _process_photo_for_eye rejects every row). Short-circuit here so
+    # large collections don't pay an O(N) DB/mask/SSE cost for a stage
+    # that's entirely gated off by the default "not downloaded" state.
+    import keypoints as kp
+    routable_models = set(_EYE_KEYPOINT_MODEL_FOR_CLASS.values())
+    if not any(
+        kp.weights_status(name) == "ready" for name in routable_models
+    ):
+        log.info(
+            "Eye-keypoint stage skipped: no routable keypoint model weights "
+            "installed (%s)",
+            ", ".join(sorted(routable_models)),
+        )
+        return
+
     C = config.get("eye_classifier_conf_gate", 0.5)
     T = config.get("eye_detection_conf_gate", 0.5)
     k_window = config.get("eye_window_k", 0.08)

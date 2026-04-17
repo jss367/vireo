@@ -379,3 +379,44 @@ def test_reject_eye_soft_does_not_fire_when_eye_null():
     score_encounter(enc, config={"reject_eye_focus": 0.35})
 
     assert not any("eye_soft" in r for r in photo.get("reject_reasons", []))
+
+
+def test_eye_detect_disabled_falls_back_to_body_focus():
+    """When eye_detect_enabled=False, eye_tenengrad values stored from a prior
+    run must not change scoring — focus ranks on subject_tenengrad as if the
+    eye columns were absent.
+    """
+    from scoring import score_encounter
+
+    # Same pattern as test_focus_score_uses_eye_tenengrad_when_populated but
+    # with the toggle off: the body-ranking result should win.
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc, config={"eye_detect_enabled": False})
+
+    assert a["focus_score"] > b["focus_score"]
+    assert "eye_focus_score" not in a
+    assert "eye_focus_score" not in b
+
+
+def test_eye_detect_disabled_suppresses_eye_soft_reject():
+    """Toggling eye detection off must also stop eye_soft from firing on
+    photos that already have eye_tenengrad from prior runs.
+    """
+    from scoring import score_encounter
+
+    soft_eye = _make_base_photo(
+        subject_tenengrad=50000, eye_tenengrad=1000,
+    )
+    enc = {"photos": [soft_eye]}
+
+    score_encounter(
+        enc,
+        config={"eye_detect_enabled": False, "reject_eye_focus": 0.35},
+    )
+
+    assert not any(
+        "eye_soft" in r for r in soft_eye.get("reject_reasons", [])
+    )

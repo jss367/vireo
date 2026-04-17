@@ -338,14 +338,17 @@ def score_encounter(encounter, config=None):
     # ranking group so body-based photos don't skew the eye percentile
     # (Option A from the design doc). A body-only photo compares against
     # its peers' subject_tenengrad; an eye photo compares against its
-    # peers' eye_tenengrad.
+    # peers' eye_tenengrad. Skipped entirely when eye detection is
+    # disabled so stale eye_tenengrad values from prior runs don't
+    # influence scoring after the user turns the feature off.
+    eye_enabled = cfg.get("eye_detect_enabled", True)
     enc_eye_tenegrads = [
         p["eye_tenengrad"] for p in photos
         if p.get("eye_tenengrad") is not None
-    ]
+    ] if eye_enabled else []
 
     for photo in photos:
-        eye_t = photo.get("eye_tenengrad")
+        eye_t = photo.get("eye_tenengrad") if eye_enabled else None
         if eye_t is not None and enc_eye_tenegrads:
             # Eye-based focus: pure percentile rank within the eye cohort.
             # The subject-vs-bg ratio term from subject_focus_score does not
@@ -403,8 +406,12 @@ def score_encounter(encounter, config=None):
         # when we have a confidently-localized eye — a null eye_tenengrad
         # means the pipeline stage's gates didn't all pass, and we fall back
         # to out_of_focus on subject_tenengrad (already handled above).
+        # Also skipped when eye detection is disabled so stale eye_tenengrad
+        # values from prior runs can't reject photos after the user toggles
+        # the feature off.
         if (
-            photo.get("eye_tenengrad") is not None
+            eye_enabled
+            and photo.get("eye_tenengrad") is not None
             and f < cfg.get("reject_eye_focus", 0.35)
             and photo.get("mask_path")
         ):

@@ -606,7 +606,11 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
 
 
 def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
-    """Gate 2: no weights on disk → stage processes the photo as a no-op."""
+    """No routable keypoint weights installed → stage-level preflight
+    short-circuits before enumerating photos. Confirms that
+    list_photos_for_eye_keypoint_stage is never called (no O(N) DB pass)
+    and that no eye fields get written.
+    """
     import keypoints as kp
     from pipeline import detect_eye_keypoints_stage
 
@@ -616,8 +620,18 @@ def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
 
     db, pid = _setup_eligible_mammal_photo(tmp_path)
 
+    called = {"listed": False}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(*args, **kwargs):
+        called["listed"] = True
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
 
+    assert called["listed"] is False
     row = db.conn.execute(
         "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
         (pid,),
@@ -658,7 +672,16 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     targeted at one collection must not touch eye fields on unrelated
     photos elsewhere in the workspace.
     """
+    import keypoints as kp
     from pipeline import detect_eye_keypoints_stage
+
+    # Install fake routable weights so the stage-level preflight doesn't
+    # short-circuit before the scoping check.
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    _make_fake_weights(str(models_dir), "superanimal-bird")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
 
     db, pid = _setup_eligible_mammal_photo(tmp_path)
 
