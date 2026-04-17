@@ -4,12 +4,26 @@ Verifies that /keywords renders the keyword table with seeded data,
 filter pills are present and clickable, and the search input exists.
 """
 
+import contextlib
+
 
 def run(session):
     session.goto("/keywords")
 
-    # Wait for the keywords to load via /api/keywords/all
-    session.page.wait_for_timeout(1000)
+    # Wait for the /api/keywords/all fetch to resolve and render() to run,
+    # which replaces the initial "Loading..." stats text.  A fixed sleep
+    # races the fetch on a loaded CI runner and causes false BUGs on the
+    # row/stats assertions below; waiting on the condition makes the
+    # scenario deterministic across network-latency variation.  On
+    # timeout we fall through so the assertions below surface the state.
+    with contextlib.suppress(Exception):
+        session.page.wait_for_function(
+            """() => {
+                const s = document.getElementById('kwStats');
+                return s && !s.textContent.includes('Loading');
+            }""",
+            timeout=10000,
+        )
 
     session.screenshot("keywords-initial")
 

@@ -5,10 +5,25 @@ controls are present, and the appropriate "no geolocated photos" message
 is shown when the seed data has no GPS coordinates.
 """
 
+import contextlib
+
 
 def run(session):
     session.goto("/map")
-    session.page.wait_for_timeout(2000)
+
+    # Wait for Leaflet to load as a condition rather than a fixed sleep.
+    # When the CDN is reachable this resolves in a few hundred ms; when it's
+    # blocked (offline CI) the timeout fires and we fall through to the
+    # CDN-outage handling below.  The generous 15s budget avoids flaking on
+    # slow networks where a fixed 2s wait would prematurely take the
+    # outage path and skip JS-populated assertions.
+    try:
+        session.page.wait_for_function(
+            "() => typeof L !== 'undefined'", timeout=15000
+        )
+        leaflet_loaded = True
+    except Exception:
+        leaflet_loaded = False
 
     session.screenshot("map-initial")
 
@@ -22,7 +37,6 @@ def run(session):
     leaflet_script_present = session.eval(
         "!!document.querySelector('script[src*=\"/leaflet.js\"], script[src*=\"/leaflet.min.js\"]')"
     )
-    leaflet_loaded = session.eval("typeof L !== 'undefined'")
 
     if not leaflet_script_present:
         # Template regression: Leaflet script tag removed from map.html
@@ -61,6 +75,22 @@ def run(session):
     # --- JS-populated assertions (only when Leaflet loaded successfully) ---
 
     if leaflet_loaded:
+        # Wait for the map JS to populate the status and sidebar rather than
+        # reading them at a fixed time — both start as "Loading..." until the
+        # /api/photos fetch resolves and the render path runs.  On timeout
+        # we fall through so the assertions below surface the stale state.
+        with contextlib.suppress(Exception):
+            session.page.wait_for_function(
+                """() => {
+                    const s = document.getElementById('mapStatus');
+                    const sh = document.getElementById('sidebarHeader');
+                    return s && sh
+                        && s.textContent.trim() !== 'Loading...'
+                        && sh.textContent.trim() !== '';
+                }""",
+                timeout=10000,
+            )
+
         status_text = session.eval(
             "(document.getElementById('mapStatus') || {}).textContent || ''"
         )
