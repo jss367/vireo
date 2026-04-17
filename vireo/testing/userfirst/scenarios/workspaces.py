@@ -5,12 +5,26 @@ folder and workspace sections are present, and the "New Workspace" button
 exists.
 """
 
+import contextlib
+
 
 def run(session):
     session.goto("/workspace")
 
-    # Wait for the workspace page JS to load data
-    session.page.wait_for_timeout(1000)
+    # Wait for loadWorkspaces()'s /api/workspaces fetch to resolve and
+    # replace the initial "Loading..." placeholder in #workspacesContent
+    # rather than using a fixed sleep.  On loaded CI the async fetch can
+    # exceed a 1s wait, leaving the page in its loading state and
+    # producing false BUGs on the workspace-input assertion below.  Fall
+    # through on timeout so assertions surface the stale state.
+    with contextlib.suppress(Exception):
+        session.page.wait_for_function(
+            """() => {
+                const c = document.getElementById('workspacesContent');
+                return c && !c.textContent.includes('Loading');
+            }""",
+            timeout=10000,
+        )
 
     session.screenshot("workspace-initial")
 

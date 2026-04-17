@@ -5,13 +5,29 @@ when no pipeline results exist. Also checks that the sidebar and filter
 bar chrome are present.
 """
 
+import contextlib
+
 
 def run(session):
     session.goto("/pipeline/review")
 
-    # Wait for the page JS to settle — it fetches /api/pipeline/page-init
-    # and renders either results or the empty state.
-    session.page.wait_for_timeout(1000)
+    # Wait for initPipelineReviewPage()'s /api/pipeline/page-init fetch to
+    # resolve rather than using a fixed sleep.  The callback either shows
+    # #emptyState (no results) or populates #encountersContainer (results
+    # present); either transition means init completed.  A fixed 1s wait
+    # races the fetch on slow CI and produces false BUGs on the
+    # empty-state assertion.  Fall through on timeout so the assertions
+    # below surface the stale state rather than hang.
+    with contextlib.suppress(Exception):
+        session.page.wait_for_function(
+            """() => {
+                const empty = document.getElementById('emptyState');
+                const cont = document.getElementById('encountersContainer');
+                if (!empty || !cont) return false;
+                return empty.style.display !== 'none' || cont.children.length > 0;
+            }""",
+            timeout=10000,
+        )
 
     session.screenshot("pipeline-review-initial")
 
