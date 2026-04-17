@@ -605,6 +605,39 @@ def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
     return db, pid
 
 
+def test_eye_keypoint_stage_preflight_disabled(tmp_path, monkeypatch):
+    """Preflight returns a skip reason when eye detection is disabled."""
+    from pipeline import eye_keypoint_stage_preflight
+
+    assert eye_keypoint_stage_preflight({"eye_detect_enabled": False}) \
+        == "Disabled in config"
+
+
+def test_eye_keypoint_stage_preflight_no_weights(tmp_path, monkeypatch):
+    """Preflight returns a skip reason when no routable weights are installed."""
+    import keypoints as kp
+    from pipeline import eye_keypoint_stage_preflight
+
+    empty_models_dir = tmp_path / "empty"
+    empty_models_dir.mkdir()
+    monkeypatch.setattr(kp, "MODELS_DIR", str(empty_models_dir))
+
+    assert eye_keypoint_stage_preflight({}) == "No keypoint models installed"
+
+
+def test_eye_keypoint_stage_preflight_ready(tmp_path, monkeypatch):
+    """Preflight returns None when at least one routable model is ready."""
+    import keypoints as kp
+    from pipeline import eye_keypoint_stage_preflight
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
+
+    assert eye_keypoint_stage_preflight({}) is None
+
+
 def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
     """No routable keypoint weights installed → stage-level preflight
     short-circuits before enumerating photos. Confirms that

@@ -612,6 +612,22 @@ _EYE_KEYPOINT_MODEL_FOR_CLASS = {
 }
 
 
+def eye_keypoint_stage_preflight(config):
+    """Return a short skip reason if the eye-keypoint stage cannot do work.
+
+    Returns None when the stage should run. Shared between
+    detect_eye_keypoints_stage and the pipeline job so the job can avoid the
+    O(N) eligibility join when the stage is going to short-circuit anyway.
+    """
+    if not config.get("eye_detect_enabled", True):
+        return "Disabled in config"
+    import keypoints as kp
+    routable = set(_EYE_KEYPOINT_MODEL_FOR_CLASS.values())
+    if not any(kp.weights_status(name) == "ready" for name in routable):
+        return "No keypoint models installed"
+    return None
+
+
 def _resolve_keypoint_model(db, photo_row):
     """Route a photo to a keypoint model name, or None if out of scope.
 
@@ -759,25 +775,9 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id
             the scoping that extract/regroup stages already apply so a run
             started for one collection doesn't mutate eye fields elsewhere.
     """
-    if not config.get("eye_detect_enabled", True):
-        log.info("Eye-focus detection disabled by config; skipping stage")
-        return
-
-    # Stage-level preflight: if no routable keypoint model has weights on
-    # disk, the per-photo loop would be a pure no-op (Gate 2 in
-    # _process_photo_for_eye rejects every row). Short-circuit here so
-    # large collections don't pay an O(N) DB/mask/SSE cost for a stage
-    # that's entirely gated off by the default "not downloaded" state.
-    import keypoints as kp
-    routable_models = set(_EYE_KEYPOINT_MODEL_FOR_CLASS.values())
-    if not any(
-        kp.weights_status(name) == "ready" for name in routable_models
-    ):
-        log.info(
-            "Eye-keypoint stage skipped: no routable keypoint model weights "
-            "installed (%s)",
-            ", ".join(sorted(routable_models)),
-        )
+    skip_reason = eye_keypoint_stage_preflight(config)
+    if skip_reason is not None:
+        log.info("Eye-keypoint stage skipped: %s", skip_reason)
         return
 
     C = config.get("eye_classifier_conf_gate", 0.5)

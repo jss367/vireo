@@ -1900,12 +1900,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             from pipeline import (
                 _resolve_collection_photo_ids,
                 detect_eye_keypoints_stage,
+                eye_keypoint_stage_preflight,
             )
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            # Mirror the stage-level preflight so a no-op run doesn't pay the
+            # O(N) eligibility join cost or report a misleading
+            # "0 of N processed" summary on large libraries.
+            skip_reason = eye_keypoint_stage_preflight(pipeline_cfg)
+            if skip_reason is not None:
+                stages["eye_keypoints"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "eye_keypoints",
+                    status="completed", summary=f"Skipped — {skip_reason}",
+                )
+                result["stages"]["eye_keypoints"] = {
+                    "processed": 0, "total": 0, "skipped": skip_reason,
+                }
+                _update_stages(runner, job["id"], stages)
+                return
 
             collection_photo_ids = (
                 _resolve_collection_photo_ids(thread_db, collection_id)
