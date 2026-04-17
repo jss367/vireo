@@ -347,6 +347,24 @@ def score_encounter(encounter, config=None):
         if p.get("eye_tenengrad") is not None
     ] if eye_enabled else []
 
+    # Body cohort: photos that will fall back to subject_tenengrad scoring.
+    # In mixed encounters (some photos have eye signal, some don't), body-only
+    # photos must rank against body-only peers, otherwise eye-capable frames
+    # dilute the percentile and change out_of_focus decisions for photos that
+    # never saw the eye stage. Falls back to the full cohort when there are no
+    # body-only photos (every photo has an eye signal) so we never pass an
+    # empty comparison list into subject_focus_score.
+    if eye_enabled and enc_eye_tenegrads:
+        enc_body_tenegrads = [
+            p.get("subject_tenengrad", 0) or 0
+            for p in photos
+            if p.get("eye_tenengrad") is None
+        ]
+        if not enc_body_tenegrads:
+            enc_body_tenegrads = enc_tenegrads
+    else:
+        enc_body_tenegrads = enc_tenegrads
+
     for photo in photos:
         eye_t = photo.get("eye_tenengrad") if eye_enabled else None
         if eye_t is not None and enc_eye_tenegrads:
@@ -360,7 +378,7 @@ def score_encounter(encounter, config=None):
             f = subject_focus_score(
                 photo.get("subject_tenengrad"),
                 photo.get("bg_tenengrad"),
-                enc_tenegrads,
+                enc_body_tenegrads,
             )
         e = exposure_score(
             photo.get("subject_clip_high"),

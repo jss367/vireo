@@ -351,6 +351,46 @@ def test_focus_score_mixed_eye_and_body_ranks_within_their_group():
     assert d["focus_score"] > c["focus_score"]
 
 
+def test_body_only_focus_not_diluted_by_eye_capable_peers():
+    """Body-only photos must rank against body-only peers, not against a cohort
+    polluted by eye-capable frames whose body_tenengrad happens to be low
+    (because they won the eye lottery on a small sharp eye, not a sharp body).
+
+    Without the split cohort fix, a body-only photo's focus_score would depend
+    on unrelated eye-capable subjects' body_tenengrad values.
+    """
+    from scoring import score_encounter
+
+    # Mixed encounter: two eye-capable peers with very low body_tenengrad
+    # (they're eye-ranked, so body sharpness is irrelevant), plus two
+    # body-only photos.
+    eye_a = _make_base_photo(subject_tenengrad=50, eye_tenengrad=1000)
+    eye_b = _make_base_photo(subject_tenengrad=50, eye_tenengrad=10000)
+    body_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
+    body_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
+    mixed_enc = {"photos": [eye_a, eye_b, body_lo, body_hi]}
+    score_encounter(mixed_enc)
+    mixed_body_lo = body_lo["focus_score"]
+    mixed_body_hi = body_hi["focus_score"]
+
+    # Reference: the same two body-only photos alone. Their percentile ranks
+    # should match the mixed case because the split cohort excludes the
+    # eye-capable peers.
+    ref_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
+    ref_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
+    ref_enc = {"photos": [ref_lo, ref_hi]}
+    score_encounter(ref_enc)
+
+    assert mixed_body_lo == ref_lo["focus_score"], (
+        f"body-only low scorer should not be diluted by eye peers: "
+        f"mixed={mixed_body_lo} ref={ref_lo['focus_score']}"
+    )
+    assert mixed_body_hi == ref_hi["focus_score"], (
+        f"body-only high scorer should not be diluted by eye peers: "
+        f"mixed={mixed_body_hi} ref={ref_hi['focus_score']}"
+    )
+
+
 def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
     """reject_eye_soft rule: eye is the weak link even if body is sharp."""
     from scoring import score_encounter
