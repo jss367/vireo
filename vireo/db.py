@@ -1476,7 +1476,11 @@ class Database:
     def delete_folder(self, folder_id):
         """Delete a folder and all its photos/data from the database.
 
-        Returns dict with 'deleted_photos' count.
+        Returns dict with 'deleted_photos' count and 'files' (list from
+        delete_photos) so the caller can remove cached thumbnails, previews,
+        and working copies — the FK cascade drops preview_cache rows but
+        leaves the on-disk files, which would otherwise become untracked
+        orphans that eviction can't reclaim.
         """
         photo_ids = [
             row["id"]
@@ -1485,15 +1489,17 @@ class Database:
             ).fetchall()
         ]
 
+        files = []
         if photo_ids:
-            self.delete_photos(photo_ids)
+            inner = self.delete_photos(photo_ids)
+            files = inner.get("files", [])
 
         # Remove folder from workspace_folders and folders
         self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (folder_id,))
         self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
         self.conn.commit()
 
-        return {"deleted_photos": len(photo_ids)}
+        return {"deleted_photos": len(photo_ids), "files": files}
 
     # -- Photos --
 

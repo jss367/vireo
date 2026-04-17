@@ -1125,6 +1125,56 @@ def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
     assert db.preview_cache_total_bytes() == 0
 
 
+def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, monkeypatch):
+    """Clear must survive hundreds of unlink failures without hitting the
+    SQLite variable limit (~999) on the DELETE NOT IN clause. Accounting
+    for failed-to-unlink files must also be preserved so usage reporting
+    continues to reflect the leaked bytes.
+    """
+    import os
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Seed ~600 tracked sized preview files; well above SQLite's default
+    # 999-parameter limit when multiplied by two bind params per pair.
+    N = 600
+    sized_files = []
+    for size in range(1000, 1000 + N):
+        p = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0x")
+        db.preview_cache_insert(photo_id, size, os.path.getsize(p))
+        sized_files.append((p, photo_id, size))
+
+    # Fail every unlink for these files — simulates a locked/read-only dir.
+    real_remove = os.remove
+    sized_set = {p for p, _, _ in sized_files}
+
+    def flaky_remove(path, *a, **kw):
+        if path in sized_set:
+            raise OSError("simulated lock")
+        return real_remove(path, *a, **kw)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+
+    client = app.test_client()
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["failed"] == N
+    assert data["files_removed"] == 0
+
+    # All the rows whose files we couldn't unlink must be kept for
+    # accounting purposes; usage must still reflect the leaked bytes.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM preview_cache"
+    ).fetchone()["c"]
+    assert remaining == N
+    assert db.preview_cache_total_bytes() > 0
+
+
 def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
     """POSTing a smaller preview_cache_max_mb evicts down to the new quota."""
     app, db, photo_id = client_with_photo

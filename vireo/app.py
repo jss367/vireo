@@ -436,6 +436,37 @@ def create_app(db_path, thumb_cache_dir=None):
         if db is not None:
             db.conn.close()
 
+    def _cleanup_cached_files_for_deleted_photos(files):
+        """Remove thumbnail, preview, and working-copy files for deleted photos.
+
+        ``files`` is the list returned by ``db.delete_photos`` /
+        ``db.delete_folder``. The FK cascade drops preview_cache rows when
+        photos are deleted, but the on-disk files stay unless we unlink
+        them here — otherwise they leak into untracked bytes that eviction
+        can't see.
+        """
+        import glob as _glob
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
+        for f in files:
+            pid = f["photo_id"]
+            # {id}.jpg lives in all three dirs (legacy full preview, thumb,
+            # working copy). {id}_{size}.jpg is sized preview variants.
+            for d in [thumb_dir, preview_dir, working_dir]:
+                cached = os.path.join(d, f"{pid}.jpg")
+                if os.path.isfile(cached):
+                    try:
+                        os.remove(cached)
+                    except OSError:
+                        pass
+            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+                try:
+                    os.remove(variant)
+                except OSError:
+                    pass
+
     @app.route("/api/health")
     def api_health():
         return jsonify({"status": "ok"})
@@ -781,7 +812,12 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_folder_delete(folder_id):
         db = _get_db()
         result = db.delete_folder(folder_id)
-        return jsonify(result)
+        # Clean up cached files alongside the cascaded photo rows so preview
+        # files don't get orphaned on disk (untracked by preview_cache).
+        _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        # Don't leak the internal file list to the API response — keep the
+        # shape callers expect.
+        return jsonify({"deleted_photos": result["deleted_photos"]})
 
     @app.route("/api/photos")
     def api_photos():
@@ -1322,25 +1358,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews, working copies).
-        # The preview dir also holds per-size variants named <id>_<size>.jpg,
-        # which must be removed so SQLite id reuse can't surface stale images.
-        import glob as _glob
-        thumb_dir = app.config["THUMB_CACHE_DIR"]
-        vireo_dir = os.path.dirname(thumb_dir)
-        preview_dir = os.path.join(vireo_dir, "previews")
-        working_dir = os.path.join(vireo_dir, "working")
-        for f in result["files"]:
-            pid = f["photo_id"]
-            for d in [thumb_dir, preview_dir, working_dir]:
-                cached = os.path.join(d, f"{pid}.jpg")
-                if os.path.isfile(cached):
-                    os.remove(cached)
-            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
-                try:
-                    os.remove(variant)
-                except OSError:
-                    pass
+        _cleanup_cached_files_for_deleted_photos(result["files"])
 
         trashed = 0
         trash_failed = []
@@ -2736,12 +2754,29 @@ def create_app(db_path, thumb_cache_dir=None):
                         failed_tracked.append((int(m.group(1)), int(m.group(2))))
 
         if failed_tracked:
-            placeholders = ",".join(["(?,?)"] * len(failed_tracked))
-            flat = [v for pair in failed_tracked for v in pair]
+            # Stage failed keys in a temp table so the DELETE isn't a giant
+            # NOT IN clause that blows past SQLite's default variable limit
+            # (~999) with a few hundred unlinkable files. Insert in chunks
+            # of 400 pairs (800 bind parameters) for the same reason.
             db.conn.execute(
-                f"DELETE FROM preview_cache WHERE (photo_id, size) NOT IN ({placeholders})",
-                flat,
+                "CREATE TEMP TABLE _pc_failed (photo_id INTEGER, size INTEGER)"
             )
+            try:
+                CHUNK = 400
+                for i in range(0, len(failed_tracked), CHUNK):
+                    batch = failed_tracked[i:i + CHUNK]
+                    placeholders = ",".join(["(?,?)"] * len(batch))
+                    flat = [v for pair in batch for v in pair]
+                    db.conn.execute(
+                        f"INSERT INTO _pc_failed (photo_id, size) VALUES {placeholders}",
+                        flat,
+                    )
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE (photo_id, size) NOT IN "
+                    "(SELECT photo_id, size FROM _pc_failed)"
+                )
+            finally:
+                db.conn.execute("DROP TABLE _pc_failed")
         else:
             db.conn.execute("DELETE FROM preview_cache")
         db.conn.commit()
