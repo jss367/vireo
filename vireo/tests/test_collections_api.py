@@ -127,6 +127,37 @@ def test_collection_photos_with_rating_rule(app_and_db):
     assert data["total"] == 2
 
 
+def test_collection_photos_includes_detections_and_species(app_and_db):
+    """GET /api/collections/<id>/photos attaches detections and species so the
+    browse grid's detection-box toggle works in collection view."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    target = [p for p in db.get_photos() if p["filename"] == "bird1.jpg"][0]
+    db.save_detections(target["id"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    rules = [{"field": "rating", "op": ">=", "value": 3}]
+    resp = client.post("/api/collections", json={"name": "Rated", "rules": rules})
+    cid = resp.get_json()["id"]
+
+    resp = client.get(f"/api/collections/{cid}/photos")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    bird1 = [p for p in data["photos"] if p["filename"] == "bird1.jpg"][0]
+    assert "detections" in bird1
+    assert len(bird1["detections"]) == 2
+    assert bird1["detections"][0]["confidence"] == 0.95
+    assert "species" in bird1
+
+    bird3 = [p for p in data["photos"] if p["filename"] == "bird3.jpg"][0]
+    assert bird3["detections"] == []
+
+
 def test_collection_photos_pagination(app_and_db):
     """GET collection photos with per_page=1 returns at most 1 photo."""
     app, db = app_and_db

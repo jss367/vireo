@@ -1523,9 +1523,12 @@ def create_app(db_path, thumb_cache_dir=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
         total = db.count_collection_photos(collection_id)
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "page": page,
                 "per_page": per_page,
                 "total": total,
