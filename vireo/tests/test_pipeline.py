@@ -636,9 +636,9 @@ def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypat
     called = {"listed": False}
     orig = db.list_photos_for_eye_keypoint_stage
 
-    def _spy():
+    def _spy(*args, **kwargs):
         called["listed"] = True
-        return orig()
+        return orig(*args, **kwargs)
 
     monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
 
@@ -650,6 +650,58 @@ def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypat
         (pid,),
     ).fetchone()
     assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
+def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
+    """When ``collection_id`` is provided, only photos in that collection
+    are passed to ``list_photos_for_eye_keypoint_stage``. A pipeline run
+    targeted at one collection must not touch eye fields on unrelated
+    photos elsewhere in the workspace.
+    """
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    # Add a second eligible photo not in the collection.
+    fid = db.add_folder(str(tmp_path / "other"), name="other")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    other_pid = db.add_photo(
+        fid, "mammal2.jpg", ".jpg", 1000, 2.0,
+        timestamp="2026-04-16T11:00:00", width=800, height=600,
+    )
+    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
+    det_ids = db.save_detections(
+        other_pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0], species="Vulpes vulpes", confidence=0.9,
+        model="bioclip-2.5", category="match",
+        taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+    )
+
+    cid = db.add_collection(
+        "fox set",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    captured = {}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(photo_ids=None):
+        captured["photo_ids"] = (
+            set(photo_ids) if photo_ids is not None else None
+        )
+        return orig(photo_ids=photo_ids)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True}, collection_id=cid,
+    )
+
+    assert captured["photo_ids"] == {pid}
 
 
 # --- Four-gate matrix tests for detect_eye_keypoints_stage ---

@@ -2677,7 +2677,7 @@ class Database:
             })
         return result
 
-    def list_photos_for_eye_keypoint_stage(self):
+    def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
         """Return photos eligible for the eye-focus keypoint stage.
 
         Eligibility:
@@ -2688,6 +2688,9 @@ class Database:
           * has at least one prediction on that detection
           * has not already been processed — eye_tenengrad IS NULL keeps
             the stage idempotent across reruns
+          * (optional) photo.id is in ``photo_ids`` when provided — lets the
+            caller scope the stage to a collection so a pipeline run doesn't
+            touch unrelated photos elsewhere in the workspace
 
         Returns one row per photo. The row chosen is the highest-confidence
         prediction on the highest-confidence real detection **among
@@ -2702,8 +2705,18 @@ class Database:
         scientific_name, species.
         """
         ws_id = self._ws_id()
+        if photo_ids is not None:
+            photo_ids = list(photo_ids)
+            if not photo_ids:
+                return []
+            placeholders = ",".join("?" for _ in photo_ids)
+            extra_where = f" AND p.id IN ({placeholders})"
+            params = (ws_id, ws_id, *photo_ids)
+        else:
+            extra_where = ""
+            params = (ws_id, ws_id)
         rows = self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.width, p.height,
+            f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
                       d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence,
@@ -2720,7 +2733,7 @@ class Database:
                 AND d.detector_model != 'full-image'
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
-                 AND p.eye_tenengrad IS NULL
+                 AND p.eye_tenengrad IS NULL{extra_where}
                ORDER BY p.id,
                         CASE
                             WHEN pr.taxonomy_class IS NOT NULL
@@ -2729,7 +2742,7 @@ class Database:
                         END,
                         d.detector_confidence DESC,
                         pr.confidence DESC""",
-            (ws_id, ws_id),
+            params,
         ).fetchall()
 
         seen = set()

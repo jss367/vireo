@@ -1859,6 +1859,46 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
     assert rows[0]["scientific_name"] == "Turdus migratorius"
 
 
+def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
+    """When ``photo_ids`` is provided, only those photos are returned even
+    if other eligible photos exist in the workspace. Empty iterables return
+    no rows without hitting the DB.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid_a = db.add_photo(
+        fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600,
+    )
+    pid_b = db.add_photo(
+        fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
+    )
+    for pid in (pid_a, pid_b):
+        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )
+        db.add_prediction(
+            det_ids[0], species="Vulpes vulpes", confidence=0.9,
+            model="bioclip-2.5", category="match",
+            taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+        )
+
+    # No filter: both photos.
+    assert {r["id"] for r in db.list_photos_for_eye_keypoint_stage()} == {pid_a, pid_b}
+    # Scoped to one photo.
+    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=[pid_a])
+    assert [r["id"] for r in rows] == [pid_a]
+    # Empty iterable short-circuits to [].
+    assert db.list_photos_for_eye_keypoint_stage(photo_ids=set()) == []
+
+
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
     """add_keyword auto-detects taxonomy type when name matches a taxon."""
     from db import Database

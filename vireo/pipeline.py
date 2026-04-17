@@ -738,7 +738,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     )
 
 
-def detect_eye_keypoints_stage(db, config, progress_callback=None):
+def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id=None):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
     For each eligible photo (see Database.list_photos_for_eye_keypoint_stage),
@@ -754,6 +754,10 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None):
             - eye_detection_conf_gate (float, default 0.5)
             - eye_window_k (float, default 0.08)
         progress_callback: optional callable(phase, current, total).
+        collection_id: optional collection ID to scope processing to. When
+            provided, only photos in that collection are considered — matches
+            the scoping that extract/regroup stages already apply so a run
+            started for one collection doesn't mutate eye fields elsewhere.
     """
     if not config.get("eye_detect_enabled", True):
         log.info("Eye-focus detection disabled by config; skipping stage")
@@ -763,7 +767,12 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None):
     T = config.get("eye_detection_conf_gate", 0.5)
     k_window = config.get("eye_window_k", 0.08)
 
-    photos = db.list_photos_for_eye_keypoint_stage()
+    photo_ids = None
+    if collection_id is not None:
+        photo_ids = _resolve_collection_photo_ids(db, collection_id)
+        if not photo_ids:
+            return
+    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
     if not photos:
         return
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}

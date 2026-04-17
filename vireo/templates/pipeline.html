@@ -2708,12 +2708,15 @@ var _kpPollTimer = null;
 
 function _renderKeypointRow(modelName, state) {
   // Per-model row in the Eye Keypoints card. state: 'ready' | 'missing' |
-  // 'downloading' | 'failed'.
+  // 'downloading' | 'failed'. Reset disabled=false up front so a stale
+  // disable from the initial click never survives a transition to a state
+  // that re-shows the button (e.g. 'failed' → Retry).
   var row = document.querySelector('[data-keypoint-row="' + modelName + '"]');
   if (!row) return;
   var iconEl = row.querySelector('.kp-state-icon');
   var textEl = row.querySelector('.kp-state-text');
   var btnEl  = row.querySelector('.kp-download-btn');
+  btnEl.disabled = false;
 
   if (state === 'ready') {
     iconEl.textContent = '\u2713';
@@ -2731,14 +2734,12 @@ function _renderKeypointRow(modelName, state) {
     iconEl.style.color = 'var(--danger,#e74c3c)';
     textEl.textContent = 'Download failed \u2014 retry?';
     btnEl.textContent = 'Retry';
-    btnEl.disabled = false;
     btnEl.style.display = '';
   } else {
     iconEl.textContent = '\u25CB';
     iconEl.style.color = 'var(--text-faint,#5A8890)';
     textEl.textContent = 'Not downloaded';
     btnEl.textContent = 'Download';
-    btnEl.disabled = false;
     btnEl.style.display = '';
   }
 }

@@ -1897,14 +1897,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         try:
             import config as cfg
-            from pipeline import detect_eye_keypoints_stage
+            from pipeline import (
+                _resolve_collection_photo_ids,
+                detect_eye_keypoints_stage,
+            )
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            total = len(thread_db.list_photos_for_eye_keypoint_stage())
+            collection_photo_ids = (
+                _resolve_collection_photo_ids(thread_db, collection_id)
+                if collection_id is not None else None
+            )
+            total = len(thread_db.list_photos_for_eye_keypoint_stage(
+                photo_ids=collection_photo_ids,
+            ))
             start_time = time.time()
             processed = {"count": 0}
 
@@ -1928,6 +1937,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
+                collection_id=collection_id,
             )
 
             stages["eye_keypoints"]["status"] = "completed"
