@@ -1958,7 +1958,12 @@ function selectPhoto(e, id, idx) {
       if (photos[i]) selectedPhotos.add(photos[i].id);
     }
   } else if (e.metaKey || e.ctrlKey) {
-    // Cmd/Ctrl-click: toggle in selection
+    // Cmd/Ctrl-click: toggle in selection. Fold the focused photo into the
+    // set so batch operations include it (otherwise the highlighted
+    // selectedPhotoId is silently excluded from keyboard shortcuts).
+    if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
+      selectedPhotos.add(selectedPhotoId);
+    }
     if (selectedPhotos.has(id)) {
       selectedPhotos.delete(id);
     } else {
