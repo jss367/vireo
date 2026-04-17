@@ -30,7 +30,8 @@ _PIPELINE_PHOTO_COLS = """
     p.dino_subject_embedding, p.dino_global_embedding,
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
-    p.flag, p.rating
+    p.flag, p.rating,
+    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
 """
 
 
@@ -242,6 +243,10 @@ def load_photo_features(db, collection_id=None, config=None):
             "noise_estimate": row["noise_estimate"],
             "flag": row["flag"],
             "rating": row["rating"],
+            "eye_x": row["eye_x"],
+            "eye_y": row["eye_y"],
+            "eye_conf": row["eye_conf"],
+            "eye_tenengrad": row["eye_tenengrad"],
         })
 
     log.info("Loaded %d photos with pipeline features", len(photos))
