@@ -2114,6 +2114,11 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
 
   document.getElementById('grmOverlay').classList.add('open');
 
+  // Reset the species input to this encounter's value so a stale value from a
+  // previously-reviewed group doesn't leak in when the prior modal was closed
+  // via × or Escape (only Apply & Close clears it).
+  document.getElementById('grmSpecies').value = enc.confirmed_species || (enc.species ? enc.species[0] : '') || '';
+
   // Sync slider DOM with persisted resolution choice
   var slider = document.getElementById('grmResSlider');
   if (slider) slider.value = grmResolutionIdx;
