@@ -2241,9 +2241,16 @@ function _onPipelineComplete(result) {
     var ekpProcessed = ekp.processed || 0;
     var ekpTxt = document.getElementById('txtEyeKeypoints');
     if (ekpTxt) {
-      ekpTxt.textContent = ekpTotal
-        ? (ekpProcessed + ' of ' + ekpTotal + ' processed')
-        : 'No eligible photos';
+      // When the backend preflight skips the stage (disabled config or no
+      // keypoint weights installed), surface the explicit reason so users
+      // know it's a setup issue rather than an empty eligibility set.
+      if (ekp.skipped) {
+        ekpTxt.textContent = 'Skipped \u2014 ' + ekp.skipped;
+      } else {
+        ekpTxt.textContent = ekpTotal
+          ? (ekpProcessed + ' of ' + ekpTotal + ' processed')
+          : 'No eligible photos';
+      }
     }
     var statusEkp = document.getElementById('statusEyeKeypoints');
     var fillEkp = document.getElementById('fillEyeKeypoints');
@@ -2796,7 +2803,15 @@ async function refreshKeypointsStatus() {
       _kpPollTimer = null;
     }
   } catch (e) {
-    // Leave prior UI state if a one-off fetch fails; polling will retry.
+    // Initial page-load call has no timer yet, so render the fallback
+    // 'missing' state (which shows a Download button) and schedule a
+    // retry. Otherwise users see a blank row after a transient API error
+    // until they reload the page. startKeypointsPolling is idempotent,
+    // and a subsequent successful fetch with no in-flight downloads will
+    // clear the timer via the path above.
+    _renderKeypointRow('superanimal-quadruped', 'missing');
+    _renderKeypointRow('superanimal-bird', 'missing');
+    startKeypointsPolling();
   }
 }
 
