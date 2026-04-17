@@ -54,3 +54,43 @@ def app_and_db(tmp_path, monkeypatch):
 
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
     return app, db
+
+
+@pytest.fixture
+def client_with_photo(tmp_path, monkeypatch):
+    """Flask test client with one real photo whose source file exists.
+
+    Returns (app, db, photo_id). Use for preview/LRU tests that need
+    serve_photo_preview to actually generate a preview file.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    from app import create_app
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src),
+        file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    return app, db, pid

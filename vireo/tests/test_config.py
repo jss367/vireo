@@ -106,6 +106,12 @@ def test_working_copy_defaults(tmp_path, monkeypatch):
     assert config["working_copy_quality"] == 92
 
 
+def test_preview_cache_max_mb_default():
+    """Default config includes preview_cache_max_mb = 2048."""
+    import config as cfg
+    assert cfg.DEFAULTS["preview_cache_max_mb"] == 2048
+
+
 def test_load_returns_defaults_when_no_file(tmp_path):
     """load() returns full defaults when config file does not exist."""
     import config as cfg

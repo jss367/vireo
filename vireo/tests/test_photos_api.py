@@ -642,3 +642,777 @@ def test_crop_preview_falls_back_to_original(app_and_db, tmp_path):
     resp = client.get(f"/photos/{pid}/crop")
     assert resp.status_code == 200
     assert resp.content_type == "image/jpeg"
+
+
+# ---- Preview cache (LRU) tests ----
+
+
+def test_preview_cache_miss_creates_row(client_with_photo):
+    """First request to a size inserts a preview_cache row."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] > 0
+
+
+def test_preview_cache_hit_updates_last_access(client_with_photo):
+    """Second request touches last_access_at."""
+    import time
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    row1 = db.preview_cache_get(photo_id, 1920)
+    time.sleep(0.05)
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    row2 = db.preview_cache_get(photo_id, 1920)
+    assert row2["last_access_at"] > row1["last_access_at"]
+
+
+def test_preview_adopts_existing_file_on_first_access(client_with_photo):
+    """A cached file left over from the old scheme is adopted into the LRU."""
+    import os
+    import time
+    app, db, photo_id = client_with_photo
+    # Create a cache file manually without a DB row
+    preview_dir = os.path.join(
+        os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+    )
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    with open(cache_path, "wb") as f:
+        f.write(b"x" * 12345)
+    # Backdate mtime
+    past = time.time() - 3600
+    os.utime(cache_path, (past, past))
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] == 12345
+
+
+def test_full_is_alias_for_preview_at_configured_size(client_with_photo, monkeypatch):
+    """/full returns the same bytes as /preview?size=<preview_max_size>."""
+    import config as cfg
+    # Pin preview_max_size to 1920 for determinism.
+    monkeypatch.setattr(
+        cfg, "get",
+        lambda k: 1920 if k == "preview_max_size" else cfg.DEFAULTS.get(k),
+    )
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    full = client.get(f"/photos/{photo_id}/full").data
+    preview = client.get(f"/photos/{photo_id}/preview?size=1920").data
+    assert full == preview
+    assert len(full) > 0
+
+
+def test_eviction_removes_oldest_files_when_over_quota(tmp_path, monkeypatch):
+    """When writes push cache over quota, oldest-accessed entries are evicted."""
+    import os
+    import time
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    # Custom fixture with TWO photos because we need to race two writes.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Quota of 0 MB → eviction should clear the cache after each write.
+    cfg.save({**cfg.DEFAULTS, "preview_cache_max_mb": 0})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src1 = photos_dir / "a.jpg"
+    src2 = photos_dir / "b.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src1), "JPEG")
+    Image.new("RGB", (800, 600), (40, 180, 90)).save(str(src2), "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid1 = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=os.path.getsize(src1), file_mtime=os.path.getmtime(src1),
+        width=800, height=600,
+    )
+    pid2 = db.add_photo(
+        folder_id=fid, filename="b.jpg", extension=".jpg",
+        file_size=os.path.getsize(src2), file_mtime=os.path.getmtime(src2),
+        width=800, height=600,
+    )
+
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    client = app.test_client()
+
+    client.get(f"/photos/{pid1}/preview?size=1920")
+    time.sleep(0.05)
+    client.get(f"/photos/{pid2}/preview?size=1920")
+
+    # Quota is 0 MB so after each write eviction drains everything.
+    assert db.preview_cache_total_bytes() == 0
+    preview_dir = vireo_dir / "previews"
+    assert not (preview_dir / f"{pid1}_1920.jpg").exists()
+    assert not (preview_dir / f"{pid2}_1920.jpg").exists()
+
+
+def test_preview_cache_endpoint_uses_db(client_with_photo):
+    """/api/preview-cache returns totals from preview_cache table, not filesystem."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+
+    resp = client.get("/api/preview-cache")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 1
+    assert data["total_size"] > 0
+    assert "quota_bytes" in data
+
+
+def test_preview_cache_clear_removes_all(client_with_photo):
+    """POST /api/preview-cache/clear empties the table and files."""
+    import os
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "files_removed" in data
+
+    assert db.preview_cache_total_bytes() == 0
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "previews", f"{photo_id}_1920.jpg")
+    )
+
+
+def test_preview_serves_bytes_when_quota_is_zero(client_with_photo, monkeypatch):
+    """With preview_cache_max_mb=0, the preview response body is non-empty
+    even though eviction runs immediately after generation."""
+    import config as cfg
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 100  # real JPEG, not empty
+    # Eviction clears the table + file
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
+    """Pre-refactor /full cache files ({id}.jpg) get renamed to
+    {id}_{preview_max_size}.jpg and inserted into preview_cache on
+    app startup so they're visible to accounting and eviction."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    # Set up a photo and a pre-existing legacy preview file.
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    legacy = preview_dir / f"{pid}.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 2048)
+
+    # Creating the app triggers the migration.
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Legacy file renamed, new sized file exists, row inserted.
+    assert not legacy.exists()
+    new_path = preview_dir / f"{pid}_1920.jpg"
+    assert new_path.exists()
+    row = db.preview_cache_get(pid, 1920)
+    assert row is not None
+    assert row["bytes"] == os.path.getsize(new_path)
+
+
+def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
+    """The /api/jobs/previews precompute writes {id}_{size}.jpg and
+    inserts a preview_cache row, not the legacy {id}.jpg path."""
+    import os
+    import time
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    # Poll until the job finishes (it's a single-photo fixture, so fast).
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+
+    # New naming + tracked
+    assert os.path.exists(os.path.join(preview_dir, f"{photo_id}_1920.jpg"))
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    # Legacy naming NOT produced
+    assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
+
+
+def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
+    """If os.remove raises OSError (not FileNotFoundError), the preview_cache
+    row is kept so future passes can retry instead of leaking bytes."""
+    import os
+
+    import config as cfg
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    # Simulate a permission error on unlink.
+    real_remove = os.remove
+
+    def flaky_remove(path, *args, **kwargs):
+        if path.endswith(f"{photo_id}_1920.jpg"):
+            raise PermissionError("simulated")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+
+    # Trigger eviction via a config save. The unlink will fail, so the
+    # row should remain so a subsequent pass can retry.
+    resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
+    assert resp.status_code == 200
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+
+def test_startup_evicts_when_migration_pushes_over_quota(tmp_path, monkeypatch):
+    """If legacy migration inserts rows that exceed the quota, startup
+    eviction drains them without waiting for a later cache write."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({
+        **cfg.DEFAULTS,
+        "preview_max_size": 1920,
+        "preview_cache_max_mb": 0,  # quota of 0 drains everything
+    })
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (180, 90, 40)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    legacy = preview_dir / f"{pid}.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
+
+    # Creating the app runs migration (inserts row) then eviction (drains).
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    assert db.preview_cache_total_bytes() == 0
+    assert not legacy.exists()
+    assert not (preview_dir / f"{pid}_1920.jpg").exists()
+
+
+def test_legacy_migration_skips_orphaned_photo_ids(tmp_path, monkeypatch):
+    """Legacy {id}.jpg where id is no longer in photos table is unlinked,
+    not inserted (which would fail the FK constraint)."""
+
+    import config as cfg
+    from app import create_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    # Drop a legacy file for a photo id that won't exist in the DB.
+    orphan = preview_dir / "99999.jpg"
+    with open(orphan, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0orphan")
+
+    # Must not raise. The orphan file should be removed so disk doesn't
+    # keep pointing at a vanished photo.
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    assert not orphan.exists()
+    assert not (preview_dir / "99999_1920.jpg").exists()
+
+
+def test_legacy_sized_preview_files_are_backfilled_at_startup(tmp_path, monkeypatch):
+    """Pre-existing sized {id}_{size}.jpg files (written before
+    preview_cache existed) get adopted into the LRU at startup so
+    accounting and eviction can see them."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (40, 90, 180)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_kept = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    # Untracked sized preview for an existing photo at two tiers.
+    sized_a = preview_dir / f"{pid_kept}_1920.jpg"
+    sized_b = preview_dir / f"{pid_kept}_2560.jpg"
+    sized_a.write_bytes(b"\xff\xd8\xff\xe0" + b"a" * 1024)
+    sized_b.write_bytes(b"\xff\xd8\xff\xe0" + b"b" * 2048)
+    # Sized preview pointing at a deleted photo — should be unlinked.
+    orphan = preview_dir / "999999_1920.jpg"
+    orphan.write_bytes(b"\xff\xd8\xff\xe0orphan")
+
+    assert db.preview_cache_get(pid_kept, 1920) is None
+    assert db.preview_cache_get(pid_kept, 2560) is None
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Both real sized files are now tracked, with correct byte counts.
+    row_a = db.preview_cache_get(pid_kept, 1920)
+    row_b = db.preview_cache_get(pid_kept, 2560)
+    assert row_a is not None and row_a["bytes"] == os.path.getsize(sized_a)
+    assert row_b is not None and row_b["bytes"] == os.path.getsize(sized_b)
+    # Orphan was removed; no row inserted (would have raised FK error).
+    assert not orphan.exists()
+
+
+def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypatch):
+    """Sized files with an existing preview_cache row are left alone —
+    the migration must not overwrite last_access_at on a fresh row."""
+    import os
+    import time
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=400, height=300,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    sized = preview_dir / f"{pid}_1920.jpg"
+    sized.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
+
+    # Row already exists with a recent last_access_at and the real size.
+    db.preview_cache_insert(pid, 1920, os.path.getsize(sized))
+    original_access = db.preview_cache_get(pid, 1920)["last_access_at"]
+
+    # Wait long enough that an unintended re-insert would change the timestamp.
+    time.sleep(0.05)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    row = db.preview_cache_get(pid, 1920)
+    assert row is not None
+    assert row["last_access_at"] == original_access
+
+
+def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch):
+    """When preview_max_size=0 (full-res), legacy files are left alone —
+    they can't be assigned to a size tier."""
+
+    import config as cfg
+    from app import create_app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 0})
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    legacy = preview_dir / "42.jpg"
+    with open(legacy, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0leave-me")
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # File stays exactly where it was; no renamed version was produced.
+    assert legacy.exists()
+    assert not (preview_dir / "42_1920.jpg").exists()
+
+
+def test_storage_clear_previews_resets_preview_cache(client_with_photo):
+    """/api/storage/clear type=previews drops preview_cache rows so
+    Settings "Current usage" doesn't report phantom bytes."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    # Populate the cache
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    resp = client.post("/api/storage/clear", json={"type": "previews"})
+    assert resp.status_code == 200
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_storage_delete_files_syncs_preview_cache(client_with_photo):
+    """/api/storage/delete-files type=previews removes matching
+    preview_cache rows for each sized-preview filename deleted."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    resp = client.post(
+        "/api/storage/delete-files",
+        json={"type": "previews", "files": [f"{photo_id}_1920.jpg"]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_preview_adoption_enforces_quota(client_with_photo, monkeypatch):
+    """Lazily-adopting a legacy on-disk preview file still runs eviction,
+    so with preview_cache_max_mb=0 the adopted file is drained like a
+    freshly generated one."""
+    import os
+
+    import config as cfg
+
+    monkeypatch.setattr(
+        cfg, "load",
+        lambda: {**cfg.DEFAULTS, "preview_cache_max_mb": 0},
+    )
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Pre-seed a legacy on-disk preview with no preview_cache row.
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    with open(cache_path, "wb") as f:
+        f.write(b"\xff\xd8\xff\xe0" + b"x" * 4096)
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 100  # served from memory
+    # Quota is 0, so eviction drained the row and file after adoption.
+    assert db.preview_cache_total_bytes() == 0
+    assert not os.path.exists(cache_path)
+
+
+def test_preview_cache_clear_removes_untracked_and_legacy(client_with_photo):
+    """/api/preview-cache/clear removes orphaned and legacy files, not just tracked rows."""
+    import os
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Simulate: one tracked preview, one untracked sized preview, one legacy /full cache
+    tracked = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    untracked = os.path.join(preview_dir, f"{photo_id}_2560.jpg")  # no row in preview_cache
+    legacy = os.path.join(preview_dir, f"{photo_id}.jpg")
+
+    for p in (tracked, untracked, legacy):
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0fake")
+    db.preview_cache_insert(photo_id, 1920, os.path.getsize(tracked))
+
+    client = app.test_client()
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["cleared"] == 1
+    assert data["files_removed"] == 3  # all three matching files
+
+    # All three files are gone
+    assert not os.path.exists(tracked)
+    assert not os.path.exists(untracked)
+    assert not os.path.exists(legacy)
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_preview_cache_clear_handles_many_unlink_failures(client_with_photo, monkeypatch):
+    """Clear must survive hundreds of unlink failures without hitting the
+    SQLite variable limit (~999) on the DELETE NOT IN clause. Accounting
+    for failed-to-unlink files must also be preserved so usage reporting
+    continues to reflect the leaked bytes.
+    """
+    import os
+    app, db, photo_id = client_with_photo
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # Seed ~600 tracked sized preview files; well above SQLite's default
+    # 999-parameter limit when multiplied by two bind params per pair.
+    N = 600
+    sized_files = []
+    for size in range(1000, 1000 + N):
+        p = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        with open(p, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0x")
+        db.preview_cache_insert(photo_id, size, os.path.getsize(p))
+        sized_files.append((p, photo_id, size))
+
+    # Fail every unlink for these files — simulates a locked/read-only dir.
+    real_remove = os.remove
+    sized_set = {p for p, _, _ in sized_files}
+
+    def flaky_remove(path, *a, **kw):
+        if path in sized_set:
+            raise OSError("simulated lock")
+        return real_remove(path, *a, **kw)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+
+    client = app.test_client()
+    resp = client.post("/api/preview-cache/clear")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["failed"] == N
+    assert data["files_removed"] == 0
+
+    # All the rows whose files we couldn't unlink must be kept for
+    # accounting purposes; usage must still reflect the leaked bytes.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM preview_cache"
+    ).fetchone()["c"]
+    assert remaining == N
+    assert db.preview_cache_total_bytes() > 0
+
+
+def test_settings_save_triggers_eviction_when_quota_shrinks(client_with_photo):
+    """POSTing a smaller preview_cache_max_mb evicts down to the new quota."""
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+
+    # Populate cache
+    client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert db.preview_cache_total_bytes() > 0
+
+    # Shrink quota to 0 via the config endpoint (same path the UI uses)
+    resp = client.post("/api/config", json={"preview_cache_max_mb": 0})
+    assert resp.status_code == 200
+
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_full_respects_workspace_preview_max_size_override(client_with_photo):
+    """/full uses the workspace-effective preview_max_size, not just global.
+
+    Set a workspace override to 2560 and confirm /full serves the same bytes
+    as /preview?size=2560 (the handler must read get_effective_config, not
+    plain cfg.get).
+    """
+    app, db, photo_id = client_with_photo
+    # Write a workspace override for preview_max_size.
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 2560},
+    )
+    client = app.test_client()
+    full = client.get(f"/photos/{photo_id}/full")
+    preview = client.get(f"/photos/{photo_id}/preview?size=2560")
+    assert full.status_code == 200
+    assert preview.status_code == 200
+    assert full.data == preview.data
+    # Sanity: a row at size=2560 was created (not 1920).
+    assert db.preview_cache_get(photo_id, 2560) is not None
+
+
+def test_preview_precompute_respects_workspace_preview_max_size_override(client_with_photo):
+    """/api/jobs/previews uses workspace-effective preview_max_size.
+
+    Otherwise precompute warms the wrong tier (global size) while /full
+    serves the workspace override, causing a cache miss + regenerate on
+    first view and accumulating duplicate tiers on disk.
+    """
+    import time
+
+    app, db, photo_id = client_with_photo
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 2560},
+    )
+    client = app.test_client()
+    resp = client.post("/api/jobs/previews")
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    for _ in range(100):
+        r = client.get(f"/api/jobs/{job_id}")
+        data = r.get_json()
+        if data["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    # Precompute must have warmed the workspace override tier (2560),
+    # not the global default (1920).
+    assert db.preview_cache_get(photo_id, 2560) is not None
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_zero_byte_cache_file_is_regenerated(client_with_photo):
+    """An interrupted write leaves a 0-byte cache file; serve regenerates it.
+
+    Simulates a prior crashed write by dropping an empty file at the cache
+    path and asserting the next GET produces a real (non-empty) preview
+    and leaves a populated file on disk.
+    """
+    import os
+    app, db, photo_id = client_with_photo
+    preview_dir = os.path.join(
+        os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
+    )
+    os.makedirs(preview_dir, exist_ok=True)
+    cache_path = os.path.join(preview_dir, f"{photo_id}_1920.jpg")
+    # Drop a zero-byte file in place as if a prior write was interrupted.
+    with open(cache_path, "wb"):
+        pass
+    assert os.path.getsize(cache_path) == 0
+
+    client = app.test_client()
+    resp = client.get(f"/photos/{photo_id}/preview?size=1920")
+    assert resp.status_code == 200
+    assert len(resp.data) > 0
+    # File was regenerated with real bytes.
+    assert os.path.getsize(cache_path) > 0
+    # And tracked in the cache.
+    row = db.preview_cache_get(photo_id, 1920)
+    assert row is not None
+    assert row["bytes"] > 0

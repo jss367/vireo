@@ -81,6 +81,17 @@ def test_logs_page(app_and_db):
     assert resp.status_code == 200
 
 
+def test_settings_page_has_preview_cache_field(app_and_db):
+    """Settings page renders the preview_cache_max_mb input and cache controls."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    assert resp.status_code == 200
+    assert b'preview_cache_max_mb' in resp.data
+    assert b'cfgPreviewCacheMaxMb' in resp.data
+    assert b'clearPreviewCache' in resp.data
+
+
 def test_encounter_species_confirm(app_and_db):
     """POST /api/encounters/species tags photos with species keyword."""
     app, db = app_and_db
@@ -2127,6 +2138,46 @@ def test_api_folder_delete(app_and_db):
     assert data["deleted_photos"] == photo_count_before
 
     assert db.conn.execute("SELECT id FROM folders WHERE id = ?", (fid,)).fetchone() is None
+
+
+def test_api_folder_delete_removes_preview_files(app_and_db, tmp_path):
+    """Folder delete must unlink on-disk preview files, not just drop DB rows.
+
+    The preview_cache FK cascades on photo delete, so rows vanish — but
+    unless we explicitly unlink the files, they become untracked bytes
+    that eviction can't reclaim.
+    """
+    app, db = app_and_db
+    fid = db.conn.execute(
+        "SELECT id FROM folders WHERE path = '/photos/2024/January'"
+    ).fetchone()["id"]
+    photo_ids = [r["id"] for r in db.conn.execute(
+        "SELECT id FROM photos WHERE folder_id = ?", (fid,)
+    ).fetchall()]
+    assert photo_ids
+
+    thumb_dir = app.config["THUMB_CACHE_DIR"]
+    vireo_dir = os.path.dirname(thumb_dir)
+    preview_dir = os.path.join(vireo_dir, "previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    created = []
+    for pid in photo_ids:
+        sized = os.path.join(preview_dir, f"{pid}_1920.jpg")
+        legacy = os.path.join(preview_dir, f"{pid}.jpg")
+        with open(sized, "wb") as f:
+            f.write(b"\xff\xd8\xff\xd9")  # minimal JPEG SOI/EOI
+        with open(legacy, "wb") as f:
+            f.write(b"\xff\xd8\xff\xd9")
+        db.preview_cache_insert(pid, 1920, 4)
+        created.extend([sized, legacy])
+
+    client = app.test_client()
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+
+    for path in created:
+        assert not os.path.exists(path), f"Preview file leaked after folder delete: {path}"
 
 
 def test_folder_health_check_runs_at_startup(app_and_db):

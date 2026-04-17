@@ -275,6 +275,15 @@ class Database:
                 PRIMARY KEY (photo_id, workspace_id)
             );
 
+            CREATE TABLE IF NOT EXISTS preview_cache (
+                photo_id INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                bytes INTEGER NOT NULL,
+                last_access_at REAL NOT NULL,
+                PRIMARY KEY (photo_id, size),
+                FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
             CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
             CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
@@ -284,6 +293,9 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
             ON photo_color_labels(workspace_id);
+
+            CREATE INDEX IF NOT EXISTS preview_cache_last_access
+            ON preview_cache(last_access_at);
         """
         )
         # Migrations for existing databases
@@ -1498,7 +1510,11 @@ class Database:
     def delete_folder(self, folder_id):
         """Delete a folder and all its photos/data from the database.
 
-        Returns dict with 'deleted_photos' count.
+        Returns dict with 'deleted_photos' count and 'files' (list from
+        delete_photos) so the caller can remove cached thumbnails, previews,
+        and working copies — the FK cascade drops preview_cache rows but
+        leaves the on-disk files, which would otherwise become untracked
+        orphans that eviction can't reclaim.
         """
         photo_ids = [
             row["id"]
@@ -1507,15 +1523,17 @@ class Database:
             ).fetchall()
         ]
 
+        files = []
         if photo_ids:
-            self.delete_photos(photo_ids)
+            inner = self.delete_photos(photo_ids)
+            files = inner.get("files", [])
 
         # Remove folder from workspace_folders and folders
         self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (folder_id,))
         self.conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
         self.conn.commit()
 
-        return {"deleted_photos": len(photo_ids)}
+        return {"deleted_photos": len(photo_ids), "files": files}
 
     # -- Photos --
 
@@ -2677,6 +2695,58 @@ class Database:
             if affected_folder_ids:
                 self.invalidate_new_images_cache_for_folders(affected_folder_ids)
         return {"deleted": len(all_ids), "files": files}
+
+    # ------------------------------------------------------------------
+    # preview_cache LRU
+    # ------------------------------------------------------------------
+    def preview_cache_insert(self, photo_id, size, bytes_):
+        """Insert or replace a preview_cache entry. last_access_at = now()."""
+        import time
+        self.conn.execute(
+            "INSERT OR REPLACE INTO preview_cache "
+            "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+            (photo_id, size, bytes_, time.time()),
+        )
+        self.conn.commit()
+
+    def preview_cache_touch(self, photo_id, size):
+        """Update last_access_at for an existing entry. No-op if missing."""
+        import time
+        self.conn.execute(
+            "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
+            (time.time(), photo_id, size),
+        )
+        self.conn.commit()
+
+    def preview_cache_delete(self, photo_id, size):
+        """Delete a preview_cache entry (caller removes the file)."""
+        self.conn.execute(
+            "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        )
+        self.conn.commit()
+
+    def preview_cache_total_bytes(self):
+        """Return total bytes tracked in preview_cache."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
+        ).fetchone()
+        return row["total"]
+
+    def preview_cache_oldest_first(self):
+        """Return all rows ordered by last_access_at ascending (oldest first)."""
+        return self.conn.execute(
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
+            "ORDER BY last_access_at ASC"
+        ).fetchall()
+
+    def preview_cache_get(self, photo_id, size):
+        """Return the row for (photo_id, size), or None."""
+        return self.conn.execute(
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
+            "WHERE photo_id=? AND size=?",
+            (photo_id, size),
+        ).fetchone()
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""

@@ -31,6 +31,7 @@ from flask import (
 )
 from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
+from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quota
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -222,6 +223,158 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
 from new_images import invalidate_new_images_after_scan as _invalidate_new_images_after_scan  # noqa: E402
 
 
+def _migrate_legacy_preview_cache(app):
+    """One-shot migration of pre-refactor preview cache files.
+
+    Two classes of pre-existing files are made visible to the LRU here:
+
+    1. Unsized {id}.jpg from the old /full endpoint. These are renamed to
+       {id}_<preview_max_size>.jpg and tracked.
+    2. Sized {id}_{size}.jpg files written by an earlier /preview before
+       preview_cache existed. These already match the new naming scheme,
+       so we just insert a tracking row pointing at the file in place.
+
+    Both classes were previously invisible to accounting and eviction —
+    they sat on disk indefinitely unless the user hit Clear Cache. Runs
+    once per process start; a no-op when nothing needs adopting.
+
+    If preview_max_size=0 (meaning "full") we can't assign a size tier
+    to unsized {id}.jpg, so those are left in place for Clear Cache to
+    remove later. Sized files are still adopted in that case.
+    """
+    import re
+
+    import config as cfg
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    if not os.path.isdir(preview_dir):
+        return
+
+    unsized_pat = re.compile(r"^(\d+)\.jpg$")
+    sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+    try:
+        all_files = os.listdir(preview_dir)
+    except OSError:
+        return
+    unsized_files = [f for f in all_files if unsized_pat.match(f)]
+    sized_files = [f for f in all_files if sized_pat.match(f)]
+    if not unsized_files and not sized_files:
+        return
+
+    # Read preview_max_size explicitly so a configured 0 ("full res")
+    # stays 0 and the tier-assignment guard below is reachable.
+    raw_size = cfg.load().get("preview_max_size")
+    target_size = 0 if raw_size == 0 else int(raw_size or 1920)
+
+    db = Database(app.config["DB_PATH"])
+    try:
+        migrated = 0
+        orphaned = 0
+        adopted = 0
+        if unsized_files and target_size == 0:
+            log.info(
+                "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
+                len(unsized_files),
+            )
+
+        # Pass 1: rename unsized {id}.jpg → {id}_<target>.jpg + insert.
+        if target_size:
+            for fname in unsized_files:
+                m = unsized_pat.match(fname)
+                photo_id = int(m.group(1))
+                src = os.path.join(preview_dir, fname)
+                dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+                # Skip orphans: if the photo was deleted, inserting into
+                # preview_cache would raise a FK error and rolling back the
+                # already-performed os.rename is ugly. Unlink the orphan so
+                # disk doesn't keep pointing at vanished photos.
+                photo_row = db.conn.execute(
+                    "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+                ).fetchone()
+                if photo_row is None:
+                    try:
+                        os.remove(src)
+                        orphaned += 1
+                    except OSError:
+                        pass
+                    continue
+                if os.path.exists(dst):
+                    try:
+                        os.remove(src)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    os.rename(src, dst)
+                    st = os.stat(dst)
+                    db.preview_cache_insert(photo_id, target_size, st.st_size)
+                    migrated += 1
+                except OSError as e:
+                    log.warning("Failed to migrate legacy preview %s: %s", src, e)
+
+        # Pass 2: adopt pre-existing sized {id}_{size}.jpg files that
+        # aren't tracked yet. These are produced by older /preview calls
+        # that ran before preview_cache existed; without this pass they
+        # stay invisible to accounting/eviction even though they already
+        # match the new naming scheme.
+        for fname in sized_files:
+            m = sized_pat.match(fname)
+            photo_id = int(m.group(1))
+            size = int(m.group(2))
+            path = os.path.join(preview_dir, fname)
+            if db.preview_cache_get(photo_id, size):
+                continue
+            photo_row = db.conn.execute(
+                "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+            ).fetchone()
+            if photo_row is None:
+                try:
+                    os.remove(path)
+                    orphaned += 1
+                except OSError:
+                    pass
+                continue
+            try:
+                st = os.stat(path)
+                db.preview_cache_insert(photo_id, size, st.st_size)
+                adopted += 1
+            except OSError as e:
+                log.warning("Failed to adopt sized preview %s: %s", path, e)
+
+        if migrated:
+            log.info(
+                "Migrated %d legacy preview cache files to size %d",
+                migrated, target_size,
+            )
+        if adopted:
+            log.info("Adopted %d untracked sized preview files into LRU", adopted)
+        if orphaned:
+            log.info("Removed %d orphaned legacy preview files", orphaned)
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
+def _enforce_preview_cache_quota_at_startup(app):
+    """Run one eviction pass at startup so migration / prior runs can't
+    leave the app over quota indefinitely.
+    """
+    from preview_cache import evict_if_over_quota
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    db = Database(app.config["DB_PATH"])
+    try:
+        evict_if_over_quota(db, vireo_dir)
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def create_app(db_path, thumb_cache_dir=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -236,6 +389,9 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
         "~/.vireo/thumbnails"
     )
+
+    _migrate_legacy_preview_cache(app)
+    _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions
     @app.before_request
@@ -320,6 +476,50 @@ def create_app(db_path, thumb_cache_dir=None):
         db = g.pop("db", None)
         if db is not None:
             db.conn.close()
+
+    def _cleanup_cached_files_for_deleted_photos(files):
+        """Remove thumbnail, preview, and working-copy files for deleted photos.
+
+        ``files`` is the list returned by ``db.delete_photos`` /
+        ``db.delete_folder``. The FK cascade drops preview_cache rows when
+        photos are deleted, but the on-disk files stay unless we unlink
+        them here — otherwise they leak into untracked bytes that eviction
+        can't see.
+
+        Note: if an unlink fails (e.g. file locked on Windows), the file
+        remains on disk as an orphan because the cascade has already removed
+        the preview_cache row. "Clear cache" in Settings recovers by
+        globbing the directory.
+        """
+        import glob as _glob
+        thumb_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_dir)
+        preview_dir = os.path.join(vireo_dir, "previews")
+        working_dir = os.path.join(vireo_dir, "working")
+        for f in files:
+            pid = f["photo_id"]
+            # {id}.jpg lives in all three dirs (legacy full preview, thumb,
+            # working copy). {id}_{size}.jpg is sized preview variants.
+            for d in [thumb_dir, preview_dir, working_dir]:
+                cached = os.path.join(d, f"{pid}.jpg")
+                if os.path.isfile(cached):
+                    try:
+                        os.remove(cached)
+                    except OSError as e:
+                        log.warning(
+                            "Failed to remove cached file %s after photo "
+                            "delete — will be reclaimed by Clear Cache: %s",
+                            cached, e,
+                        )
+            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
+                try:
+                    os.remove(variant)
+                except OSError as e:
+                    log.warning(
+                        "Failed to remove preview variant %s after photo "
+                        "delete — will be reclaimed by Clear Cache: %s",
+                        variant, e,
+                    )
 
     @app.route("/api/health")
     def api_health():
@@ -682,7 +882,12 @@ def create_app(db_path, thumb_cache_dir=None):
     def api_folder_delete(folder_id):
         db = _get_db()
         result = db.delete_folder(folder_id)
-        return jsonify(result)
+        # Clean up cached files alongside the cascaded photo rows so preview
+        # files don't get orphaned on disk (untracked by preview_cache).
+        _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        # Don't leak the internal file list to the API response — keep the
+        # shape callers expect.
+        return jsonify({"deleted_photos": result["deleted_photos"]})
 
     @app.route("/api/photos")
     def api_photos():
@@ -1224,25 +1429,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         result = db.delete_photos(photo_ids, include_companions=include_companions)
 
-        # Clean up cached files (thumbnails, previews, working copies).
-        # The preview dir also holds per-size variants named <id>_<size>.jpg,
-        # which must be removed so SQLite id reuse can't surface stale images.
-        import glob as _glob
-        thumb_dir = app.config["THUMB_CACHE_DIR"]
-        vireo_dir = os.path.dirname(thumb_dir)
-        preview_dir = os.path.join(vireo_dir, "previews")
-        working_dir = os.path.join(vireo_dir, "working")
-        for f in result["files"]:
-            pid = f["photo_id"]
-            for d in [thumb_dir, preview_dir, working_dir]:
-                cached = os.path.join(d, f"{pid}.jpg")
-                if os.path.isfile(cached):
-                    os.remove(cached)
-            for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
-                try:
-                    os.remove(variant)
-                except OSError:
-                    pass
+        _cleanup_cached_files_for_deleted_photos(result["files"])
 
         trashed = 0
         trash_failed = []
@@ -2320,6 +2507,11 @@ def create_app(db_path, thumb_cache_dir=None):
         elif "HF_TOKEN" in os.environ:
             del os.environ["HF_TOKEN"]
         cfg.save(current)
+        # If the user shrunk the preview cache quota, evict immediately to the
+        # new size rather than waiting for the next cache write. No-op when
+        # already under quota, so always safe to call.
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
         return jsonify({"ok": True})
 
     @app.route("/api/darktable/status")
@@ -2562,6 +2754,11 @@ def create_app(db_path, thumb_cache_dir=None):
             if os.path.isdir(preview_dir):
                 shutil.rmtree(preview_dir)
                 log.info("Preview cache cleared")
+            # Keep preview_cache table in sync with the filesystem so
+            # Settings "Current usage" and eviction don't see phantoms.
+            db = _get_db()
+            db.conn.execute("DELETE FROM preview_cache")
+            db.conn.commit()
             return jsonify({"ok": True})
         elif cache_type == "thumbnails":
             thumb_dir = app.config["THUMB_CACHE_DIR"]
@@ -2601,6 +2798,14 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("No files specified")
 
         deleted = 0
+        # Keep preview_cache rows in sync when previews are deleted directly
+        # via this endpoint (stats page). Matches {pid}_{size}.jpg only;
+        # legacy {pid}.jpg files have no tracking row to remove.
+        preview_rows_removed = 0
+        if cache_type == "previews":
+            import re
+            sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+            db = _get_db()
         for fname in filenames:
             # Prevent path traversal
             safe = os.path.basename(fname)
@@ -2608,24 +2813,109 @@ def create_app(db_path, thumb_cache_dir=None):
             if os.path.isfile(fp):
                 os.remove(fp)
                 deleted += 1
+                if cache_type == "previews":
+                    m = sized_pat.match(safe)
+                    if m:
+                        db.preview_cache_delete(int(m.group(1)), int(m.group(2)))
+                        preview_rows_removed += 1
+        if cache_type == "previews" and preview_rows_removed:
+            log.info("Removed %d preview_cache rows alongside files", preview_rows_removed)
         log.info("Deleted %d files from %s cache", deleted, cache_type)
         return jsonify({"ok": True, "deleted": deleted})
 
     @app.route("/api/preview-cache")
     def api_preview_cache():
-        """Return info about the preview image cache."""
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
-        count = 0
-        total_size = 0
+        """Return counts and totals from the preview_cache table, plus quota."""
+        import config as cfg
+        db = _get_db()
+        count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()
+        total = db.preview_cache_total_bytes()
+        quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
+        return jsonify({
+            "count": count_row["c"],
+            "total_size": total,
+            "quota_bytes": int(quota_mb) * 1024 * 1024,
+        })
+
+    @app.route("/api/preview-cache/clear", methods=["POST"])
+    def api_preview_cache_clear():
+        """Delete every preview_cache file and row, including legacy and
+        untracked files in the previews directory.
+
+        Tracked rows whose on-disk files couldn't be unlinked (e.g. a
+        locked or permission-restricted file) are kept so accounting
+        and future eviction still reflect the leaked bytes — otherwise
+        /api/preview-cache would under-report and eviction would stop
+        targeting them.
+        """
+        import re
+
+        db = _get_db()
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
+
+        count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()
+        tracked = count_row["c"]
+
+        # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
+        pattern = re.compile(r"^(\d+)(?:_(\d+))?\.jpg$")
+        sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
+        files_removed = 0
+        failed_tracked = []  # (photo_id, size) tuples for sized files we couldn't unlink
         if os.path.isdir(preview_dir):
-            for f in os.listdir(preview_dir):
-                fp = os.path.join(preview_dir, f)
-                if os.path.isfile(fp):
-                    count += 1
-                    total_size += os.path.getsize(fp)
-        return jsonify({"count": count, "total_size": total_size})
+            for fname in os.listdir(preview_dir):
+                if not pattern.match(fname):
+                    continue
+                try:
+                    os.remove(os.path.join(preview_dir, fname))
+                    files_removed += 1
+                except OSError:
+                    m = sized_pat.match(fname)
+                    if m:
+                        failed_tracked.append((int(m.group(1)), int(m.group(2))))
+
+        if failed_tracked:
+            # Stage failed keys in a temp table so the DELETE isn't a giant
+            # NOT IN clause that blows past SQLite's default variable limit
+            # (~999) with a few hundred unlinkable files. Insert in chunks
+            # of 400 pairs (800 bind parameters) for the same reason.
+            db.conn.execute(
+                "CREATE TEMP TABLE _pc_failed (photo_id INTEGER, size INTEGER)"
+            )
+            try:
+                CHUNK = 400
+                for i in range(0, len(failed_tracked), CHUNK):
+                    batch = failed_tracked[i:i + CHUNK]
+                    placeholders = ",".join(["(?,?)"] * len(batch))
+                    flat = [v for pair in batch for v in pair]
+                    db.conn.execute(
+                        f"INSERT INTO _pc_failed (photo_id, size) VALUES {placeholders}",
+                        flat,
+                    )
+                db.conn.execute(
+                    "DELETE FROM preview_cache WHERE (photo_id, size) NOT IN "
+                    "(SELECT photo_id, size FROM _pc_failed)"
+                )
+            finally:
+                db.conn.execute("DROP TABLE _pc_failed")
+        else:
+            db.conn.execute("DELETE FROM preview_cache")
+        db.conn.commit()
+
+        remaining = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()["c"]
+        cleared = tracked - remaining
+
+        return jsonify({
+            "cleared": cleared,
+            "files_removed": files_removed,
+            "failed": len(failed_tracked),
+        })
 
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
@@ -4507,18 +4797,31 @@ def create_app(db_path, thumb_cache_dir=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
+            import contextlib
+
             import config as cfg
-            from image_loader import load_image
+            from image_loader import get_canonical_image_path, load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            max_size = cfg.get("preview_max_size") or 1920
-            if max_size == 0:
-                max_size = None  # Full resolution
-            preview_quality = cfg.load().get("preview_quality", 90)
-            preview_dir = os.path.join(
-                os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-            )
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            # Use workspace-effective config so per-workspace preview_max_size
+            # overrides are honored — otherwise precompute warms the wrong
+            # size and /photos/<id>/full (which uses workspace overrides) still
+            # misses on first view.
+            effective = thread_db.get_effective_config(cfg.load())
+            raw_size = effective.get("preview_max_size")
+            if raw_size == 0:
+                # "Full resolution" — /full redirects to /original so
+                # there's no size-suffixed file to warm. Skip precompute
+                # rather than produce untracked {id}.jpg files.
+                job["_start_time"] = time.time()
+                return {"generated": 0, "skipped": 0, "total": 0,
+                        "note": "skipped (preview_max_size=0)"}
+            max_size = int(raw_size or 1920)
+
+            preview_quality = effective.get("preview_quality", 90)
+            preview_dir = os.path.join(vireo_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
             if collection_id:
@@ -4533,15 +4836,26 @@ def create_app(db_path, thumb_cache_dir=None):
             job["_start_time"] = time.time()
 
             for i, photo in enumerate(photos):
-                cache_path = os.path.join(preview_dir, f'{photo["id"]}.jpg')
+                cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 if os.path.exists(cache_path):
                     skipped += 1
+                    # Adopt any untracked file so precompute output is
+                    # visible to eviction and /api/preview-cache.
+                    # Best-effort: photo may be deleted mid-job (FK error).
+                    with contextlib.suppress(Exception):
+                        if not thread_db.preview_cache_get(photo["id"], max_size):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                 else:
-                    folder_path = folders.get(photo["folder_id"], "")
-                    image_path = os.path.join(folder_path, photo["filename"])
-                    img = load_image(image_path, max_size=max_size)
+                    canonical = get_canonical_image_path(photo, vireo_dir, folders)
+                    img = load_image(canonical, max_size=max_size)
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
+                        with contextlib.suppress(Exception):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                         generated += 1
 
                 runner.push_event(
@@ -4557,6 +4871,10 @@ def create_app(db_path, thumb_cache_dir=None):
                         "phase": "Generating previews",
                     },
                 )
+
+            # Run a single eviction pass at the end so the batch doesn't
+            # fsync after every photo.
+            evict_preview_cache_if_over_quota(thread_db, vireo_dir)
 
             return {"generated": generated, "skipped": skipped, "total": total}
 
@@ -7130,76 +7448,32 @@ def create_app(db_path, thumb_cache_dir=None):
         buf.seek(0)
         return Response(buf.read(), mimetype="image/jpeg")
 
-    @app.route("/photos/<int:photo_id>/full")
-    def serve_full_photo(photo_id):
-        """Serve a display-sized preview, cached on first view."""
-        import config as cfg
-        from flask import send_file
+    def allowed_preview_sizes():
+        """Allowlist for /photos/<id>/preview?size=N.
 
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
-        max_size = cfg.get("preview_max_size") or 1920
-        if max_size == 0:
-            max_size = None  # Full resolution
-        cache_path = os.path.join(preview_dir, f"{photo_id}.jpg")
-
-        # Serve from cache if available
-        if os.path.exists(cache_path):
-            return send_file(cache_path, mimetype="image/jpeg")
-
-        # Generate and cache
-        from image_loader import load_image
-
-        db = _get_db()
-        photo = db.get_photo(photo_id)
-        if not photo:
-            return "Not found", 404
-
-        # Try working copy first, fall back to original
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        image_path = None
-        if photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                image_path = wc
-
-        if image_path is None:
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
-            image_path = os.path.join(folder["path"], photo["filename"])
-
-        img = load_image(image_path, max_size=max_size)
-        if img is None:
-            return "Could not load image", 500
-
-        os.makedirs(preview_dir, exist_ok=True)
-        preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
-        return send_file(cache_path, mimetype="image/jpeg")
-
-    PREVIEW_SIZE_ALLOWLIST = (1920, 2560, 3840)
-
-    @app.route("/photos/<int:photo_id>/preview")
-    def serve_photo_preview(photo_id):
-        """Serve a JPEG preview at a chosen max-size, cached per size.
-
-        Query params:
-          size: int — max dimension (longest side). Must be in PREVIEW_SIZE_ALLOWLIST
-                to avoid unbounded cache growth.
+        Includes the fixed tier plus the user-configured preview_max_size
+        so /full can delegate here. Reads workspace-effective config so
+        a per-workspace preview_max_size override is honored.
         """
         import config as cfg
-        from flask import request, send_file
+        effective = _get_db().get_effective_config(cfg.load())
+        fixed = {1920, 2560, 3840}
+        pm = effective.get("preview_max_size") or 1920
+        if pm == 0:
+            return fixed  # 0 = "full" — handled by /original path
+        return fixed | {int(pm)}
 
-        try:
-            size = int(request.args.get("size", "1920"))
-        except ValueError:
-            return "Invalid size", 400
-        if size not in PREVIEW_SIZE_ALLOWLIST:
-            return "Unsupported size", 400
+
+    def _serve_preview(photo_id, size):
+        """Serve a preview at the given size, using the preview_cache LRU.
+
+        This is the single code path behind both /photos/<id>/preview and
+        /photos/<id>/full. Callers have already validated size.
+        """
+        import io
+
+        import config as cfg
+        from flask import send_file
 
         # Confirm the photo still exists before any cache return so that a
         # deleted photo can't be served from a stale per-size cache (and so
@@ -7209,39 +7483,128 @@ def create_app(db_path, thumb_cache_dir=None):
         if not photo:
             return "Not found", 404
 
-        preview_dir = os.path.join(
-            os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-        )
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
 
-        if os.path.exists(cache_path):
+        # Reject corrupt zero-byte cache files (prior write interrupted).
+        # Treat them as a miss so the regeneration path below produces a
+        # real preview.
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) == 0:
+            try:
+                os.remove(cache_path)
+            except OSError:
+                pass
+            db.preview_cache_delete(photo_id, size)  # no-op if no row
+
+        # Cache hit (tracked): touch and serve. The touch is best-effort
+        # bookkeeping — under concurrent traffic SQLite can raise
+        # OperationalError: database is locked, but that shouldn't turn a
+        # valid cache hit into a 500 when the JPEG is right there on disk.
+        if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
+            try:
+                db.preview_cache_touch(photo_id, size)
+            except Exception:
+                pass
             return send_file(cache_path, mimetype="image/jpeg")
 
-        from image_loader import load_image
+        # Cache hit (on-disk but untracked): lazy adoption.
+        # preview_cache_insert uses time.time() for last_access_at, so the
+        # adopted entry is ranked as freshly-accessed in the LRU in a single
+        # commit (instead of insert-with-mtime-then-touch-to-now).
+        # Read bytes into memory before evicting: eviction may delete the
+        # file we just adopted (e.g. preview_cache_max_mb=0), but we can
+        # still serve the response from memory — mirrors the miss path.
+        if os.path.exists(cache_path):
+            with open(cache_path, "rb") as f:
+                data = f.read()
+            try:
+                db.preview_cache_insert(photo_id, size, len(data))
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception:
+                pass
+            return Response(data, mimetype="image/jpeg")
 
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        image_path = None
-        if photo["working_copy_path"]:
-            wc = os.path.join(vireo_dir, photo["working_copy_path"])
-            if os.path.exists(wc):
-                image_path = wc
+        # Cache miss: generate, insert, evict-if-over-quota, serve.
+        from image_loader import get_canonical_image_path, load_image
 
-        if image_path is None:
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
-            image_path = os.path.join(folder["path"], photo["filename"])
+        folder_row = db.conn.execute(
+            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder_row:
+            return "Not found", 404
+        folders = {folder_row["id"]: folder_row["path"]}
 
-        img = load_image(image_path, max_size=size)
+        canonical = get_canonical_image_path(photo, vireo_dir, folders)
+        img = load_image(canonical, max_size=size)
         if img is None:
             return "Could not load image", 500
 
-        os.makedirs(preview_dir, exist_ok=True)
         preview_quality = cfg.load().get("preview_quality", 90)
-        img.save(cache_path, format="JPEG", quality=preview_quality)
-        return send_file(cache_path, mimetype="image/jpeg")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=preview_quality)
+        data = buf.getvalue()
+
+        # Persist to disk and track in the LRU. Eviction may delete the file
+        # we just wrote (e.g. when preview_cache_max_mb is 0), but that's fine:
+        # we serve the bytes from memory below so disk state doesn't matter.
+        # Catch broadly: OSError for disk failures, sqlite3 errors for DB
+        # lock / FK violations (photo deleted between lookup and insert).
+        # The preview bytes are ready in memory — never fail the request
+        # over bookkeeping.
+        try:
+            os.makedirs(preview_dir, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                f.write(data)
+            db.preview_cache_insert(photo_id, size, len(data))
+            evict_preview_cache_if_over_quota(db, vireo_dir)
+        except Exception as e:
+            log.warning(
+                "Failed to persist preview cache %s: %s", cache_path, e,
+            )
+
+        return Response(data, mimetype="image/jpeg")
+
+    @app.route("/photos/<int:photo_id>/full")
+    def serve_full_photo(photo_id):
+        """Serve a display-sized preview (alias for /preview at preview_max_size).
+
+        Reads workspace-effective config so a per-workspace preview_max_size
+        override is honored. preview_max_size == 0 historically meant "full"
+        — we route to /original rather than generate a preview. Using a
+        separate read/fallback (instead of `cfg.get(...) or 1920`) keeps
+        the 0 sentinel reachable.
+        """
+        import config as cfg
+        from flask import redirect
+
+        effective = _get_db().get_effective_config(cfg.load())
+        pm = effective.get("preview_max_size")
+        if pm == 0:
+            return redirect(f"/photos/{photo_id}/original")
+        return _serve_preview(photo_id, int(pm or 1920))
+
+    @app.route("/photos/<int:photo_id>/preview")
+    def serve_photo_preview(photo_id):
+        """Serve a JPEG preview at a chosen max-size.
+
+        Cache is LRU-tracked in the preview_cache table; on-disk files that
+        predate this scheme are adopted lazily on first access.
+
+        Query params:
+          size: int — max dimension (longest side). Must be in
+                allowed_preview_sizes() to avoid unbounded cache growth.
+        """
+        from flask import request
+
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        if size not in allowed_preview_sizes():
+            return "Unsupported size", 400
+        return _serve_preview(photo_id, size)
 
     @app.route("/photos/<int:photo_id>/original")
     def serve_original_photo(photo_id):

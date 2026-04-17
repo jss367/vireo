@@ -836,14 +836,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         try:
             import config as cfg
-            from image_loader import load_image
+            from image_loader import get_canonical_image_path, load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
 
-            max_size = params.preview_max_size
-            if max_size == 0:
-                max_size = None  # Full resolution
+            raw_size = params.preview_max_size
+            if raw_size == 0:
+                # "Full resolution" — /full redirects to /original, so
+                # there's no size-suffixed file to warm. Skip rather
+                # than produce untracked {id}.jpg files.
+                runner.update_step(
+                    job["id"], "previews", status="completed",
+                    summary="Skipped (preview_max_size=0 → serves originals)",
+                )
+                stages["previews"]["status"] = "completed"
+                return
+            max_size = int(raw_size or 1920)
             preview_quality = cfg.load().get("preview_quality", 90)
             base_dir = os.path.dirname(db_path)
             preview_dir = os.path.join(base_dir, "previews")
@@ -870,15 +879,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             for i, photo in enumerate(photos):
                 if _should_abort(abort):
                     break
-                cache_path = os.path.join(preview_dir, f'{photo["id"]}.jpg')
+                cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 if os.path.exists(cache_path):
                     skipped += 1
+                    try:
+                        if not thread_db.preview_cache_get(photo["id"], max_size):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
+                    except Exception:
+                        pass  # photo may have been deleted mid-pipeline
                 else:
-                    folder_path = folders.get(photo["folder_id"], "")
-                    image_path = os.path.join(folder_path, photo["filename"])
-                    img = load_image(image_path, max_size=max_size)
+                    canonical = get_canonical_image_path(photo, base_dir, folders)
+                    img = load_image(canonical, max_size=max_size)
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
+                        with contextlib.suppress(Exception):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                         generated += 1
                     else:
                         # image_loader already logged the failure at WARNING;
@@ -900,6 +919,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     ),
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
+
+            # One eviction pass after the stage so preview_cache_max_mb is
+            # enforced even when the pipeline is the only producer (e.g.
+            # first-run ingest). Writes happen per-photo above to avoid
+            # per-row fsyncs.
+            from preview_cache import evict_if_over_quota
+            evict_if_over_quota(thread_db, base_dir)
 
             result["stages"]["previews"] = {
                 "generated": generated, "skipped": skipped, "failed": failed, "total": total

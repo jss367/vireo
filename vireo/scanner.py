@@ -263,14 +263,36 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
     wc_quality = user_cfg.get("working_copy_quality", 92)
 
+    # Select photos that need a working copy:
+    #   - All RAW files without one.
+    #   - Large JPEGs (width or height exceeds working_copy_max_size)
+    #     without one — these get a downsized working copy so every
+    #     derivative (thumbnail, preview) reads from the same canonical
+    #     image. Skipped when wc_max_size <= 0 (the "full resolution"
+    #     sentinel), where there is no cap to enforce.
+    placeholders = ",".join("?" for _ in RAW_EXTENSIONS)
+    params = list(RAW_EXTENSIONS)
+    jpeg_clause = ""
+    if wc_max_size and wc_max_size > 0:
+        jpeg_clause = (
+            " OR (LOWER(p.extension) IN ('.jpg', '.jpeg', 'jpg', 'jpeg')"
+            "     AND (p.width > ? OR p.height > ?))"
+        )
+        params.extend([wc_max_size, wc_max_size])
     rows = db.conn.execute(
-        "SELECT p.id, p.filename, p.companion_path, p.working_copy_path, "
-        "f.path AS folder_path "
-        "FROM photos p JOIN folders f ON f.id = p.folder_id "
-        "WHERE p.extension IN ({}) AND p.working_copy_path IS NULL".format(
-            ",".join("?" for _ in RAW_EXTENSIONS)
-        ),
-        list(RAW_EXTENSIONS),
+        f"""
+        SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
+               p.extension, p.width, p.height,
+               f.path AS folder_path
+          FROM photos p
+          JOIN folders f ON f.id = p.folder_id
+         WHERE p.working_copy_path IS NULL
+           AND (
+               p.extension IN ({placeholders})
+               {jpeg_clause}
+           )
+        """,
+        params,
     ).fetchall()
 
     if not rows:

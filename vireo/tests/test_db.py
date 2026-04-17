@@ -3434,3 +3434,108 @@ def test_update_photo_embeddings_rewrite_updates_variant(tmp_path):
         "SELECT dino_embedding_variant FROM photos WHERE id = ?", (pid,)
     ).fetchone()
     assert row["dino_embedding_variant"] == "vit-l14"
+
+
+def test_preview_cache_table_exists(tmp_path):
+    """Database creates preview_cache table on init."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='preview_cache'"
+    ).fetchone()
+    assert row is not None
+
+    # Verify schema columns
+    cols = {r["name"] for r in db.conn.execute("PRAGMA table_info(preview_cache)").fetchall()}
+    assert cols == {"photo_id", "size", "bytes", "last_access_at"}
+
+    # Verify index
+    idx = db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='preview_cache_last_access'"
+    ).fetchone()
+    assert idx is not None
+
+
+def test_preview_cache_insert_and_touch(tmp_path):
+    """Insert a row, then touch updates last_access_at."""
+    import time
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Need a real photo row due to FK
+    folder_id = db.add_folder("/tmp/test")
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+
+    t0 = time.time()
+    db.preview_cache_insert(photo_id, size=1920, bytes_=12345)
+
+    row = db.conn.execute(
+        "SELECT bytes, last_access_at FROM preview_cache WHERE photo_id=? AND size=?",
+        (photo_id, 1920),
+    ).fetchone()
+    assert row["bytes"] == 12345
+    assert row["last_access_at"] >= t0
+
+    # Sleep a tiny bit, touch, confirm timestamp advances
+    time.sleep(0.05)
+    db.preview_cache_touch(photo_id, size=1920)
+    row2 = db.conn.execute(
+        "SELECT last_access_at FROM preview_cache WHERE photo_id=? AND size=?",
+        (photo_id, 1920),
+    ).fetchone()
+    assert row2["last_access_at"] > row["last_access_at"]
+
+
+def test_preview_cache_total_bytes(tmp_path):
+    """total_bytes sums all rows."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/test")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+
+    assert db.preview_cache_total_bytes() == 0
+    db.preview_cache_insert(p1, 1920, 100)
+    db.preview_cache_insert(p2, 2560, 200)
+    assert db.preview_cache_total_bytes() == 300
+
+
+def test_preview_cache_delete(tmp_path):
+    """Delete removes the row."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/test")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    db.preview_cache_insert(p1, 1920, 100)
+    db.preview_cache_delete(p1, 1920)
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_preview_cache_oldest_first(tmp_path):
+    """Iterating in LRU order returns oldest first."""
+    import time
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/test")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+
+    db.preview_cache_insert(p1, 1920, 100)
+    time.sleep(0.05)
+    db.preview_cache_insert(p2, 1920, 200)
+
+    rows = db.preview_cache_oldest_first()
+    assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]
