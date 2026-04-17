@@ -66,6 +66,33 @@ def test_api_photos_filter_single_day(app_and_db):
     assert data['photos'][0]['filename'] == 'bird1.jpg'
 
 
+def test_api_photos_includes_all_detections(app_and_db):
+    """GET /api/photos attaches a `detections` list with every box, not just primary."""
+    app, db = app_and_db
+    photos = db.get_photos()
+    target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
+    db.save_detections(target['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.7, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    client = app.test_client()
+    resp = client.get('/api/photos')
+    data = resp.get_json()
+
+    bird1 = [p for p in data['photos'] if p['filename'] == 'bird1.jpg'][0]
+    assert 'detections' in bird1
+    assert len(bird1['detections']) == 2
+    assert bird1['detections'][0]['confidence'] == 0.95
+    assert bird1['detections'][0]['x'] == 0.5
+    assert bird1['detections'][1]['confidence'] == 0.7
+    assert bird1['detections'][0]['category'] == 'animal'
+
+    # Photos without detections get an empty list, not a missing key
+    bird3 = [p for p in data['photos'] if p['filename'] == 'bird3.jpg'][0]
+    assert bird3['detections'] == []
+
+
 def test_api_photos_filter_keyword(app_and_db):
     """GET /api/photos?keyword= filters by keyword."""
     app, _ = app_and_db

@@ -1871,16 +1871,17 @@ function renderGrid() {
   photos.forEach(function(p, idx) {
     var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
 
-    // Detection box overlay
+    // Detection box overlays — render one per detection in the photo
     var boxHtml = '';
-    if (showDetectionBoxes && p.detection_box) {
-      var db = typeof p.detection_box === 'string' ? JSON.parse(p.detection_box) : p.detection_box;
-      if (db && db.x != null) {
-        var conf = p.detection_conf ? Math.round(p.detection_conf * 100) + '%' : '';
-        boxHtml = '<div class="det-box" style="left:' + (db.x * 100) + '%;top:' + (db.y * 100) + '%;width:' + (db.w * 100) + '%;height:' + (db.h * 100) + '%;">' +
-          (conf ? '<span class="det-box-label">' + conf + '</span>' : '') +
+    if (showDetectionBoxes && Array.isArray(p.detections)) {
+      p.detections.forEach(function(d) {
+        if (d == null || d.x == null) return;
+        var conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '';
+        var cat = (d.category && d.category !== 'animal') ? escapeHtml(d.category) + ' ' : '';
+        boxHtml += '<div class="det-box" style="left:' + (d.x * 100) + '%;top:' + (d.y * 100) + '%;width:' + (d.w * 100) + '%;height:' + (d.h * 100) + '%;">' +
+          ((cat || conf) ? '<span class="det-box-label">' + cat + conf + '</span>' : '') +
         '</div>';
-      }
+      });
     }
 
     var clipBadge = '';

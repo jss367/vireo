@@ -1958,6 +1958,59 @@ def test_get_detections_for_photo(tmp_path):
     assert result[0]["detector_model"] == "MDV6"
 
 
+def test_get_detections_for_photos_batch(tmp_path):
+    """get_detections_for_photos should return all detections grouped by photo_id."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
+    p3 = db.add_photo(folder_id=fid, filename="c.jpg", extension=".jpg", file_size=100, file_mtime=3.0)
+    db.save_detections(p1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.8, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+    db.save_detections(p2, [
+        {"box": {"x": 0.2, "y": 0.2, "w": 0.1, "h": 0.1}, "confidence": 0.7, "category": "person"},
+    ], detector_model="MDV6")
+
+    result = db.get_detections_for_photos([p1, p2, p3])
+
+    assert set(result.keys()) == {p1, p2}
+    assert len(result[p1]) == 2
+    assert result[p1][0]["confidence"] == 0.95
+    assert result[p1][1]["confidence"] == 0.8
+    assert result[p1][0]["x"] == 0.5
+    assert result[p1][0]["category"] == "animal"
+    assert len(result[p2]) == 1
+    assert result[p2][0]["category"] == "person"
+
+
+def test_get_detections_for_photos_empty(tmp_path):
+    """get_detections_for_photos with empty input returns empty dict."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.get_detections_for_photos([]) == {}
+
+
+def test_get_detections_for_photos_scoped_to_workspace(tmp_path):
+    """get_detections_for_photos must not leak detections from other workspaces."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    db.add_workspace_folder(db._ws_id(), fid)
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+
+    result = db.get_detections_for_photos([pid])
+    assert result == {}
+
+
 def test_clear_detections(tmp_path):
     """clear_detections should remove detections and cascade to predictions."""
     from db import Database

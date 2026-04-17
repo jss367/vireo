@@ -3655,6 +3655,37 @@ class Database:
             (photo_id, self._ws_id()),
         ).fetchall()
 
+    def get_detections_for_photos(self, photo_ids):
+        """Return {photo_id: [det_dict, ...]} for a batch of photos.
+
+        Each det_dict has keys: x, y, w, h, confidence, category.
+        Lists are ordered by confidence DESC. Scoped to the active workspace.
+        Photos with no detections are omitted from the result.
+        """
+        if not photo_ids:
+            return {}
+        placeholders = ",".join("?" for _ in photo_ids)
+        rows = self.conn.execute(
+            f"""SELECT photo_id, box_x, box_y, box_w, box_h,
+                       detector_confidence, category
+                FROM detections
+                WHERE workspace_id = ?
+                  AND photo_id IN ({placeholders})
+                ORDER BY photo_id, detector_confidence DESC""",
+            [self._ws_id(), *photo_ids],
+        ).fetchall()
+        result = {}
+        for r in rows:
+            result.setdefault(r["photo_id"], []).append({
+                "x": r["box_x"],
+                "y": r["box_y"],
+                "w": r["box_w"],
+                "h": r["box_h"],
+                "confidence": r["detector_confidence"],
+                "category": r["category"],
+            })
+        return result
+
     def clear_detections(self, photo_id):
         """Remove all detections (and cascaded predictions) for a photo."""
         self.conn.execute(
