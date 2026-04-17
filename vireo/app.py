@@ -485,6 +485,11 @@ def create_app(db_path, thumb_cache_dir=None):
         photos are deleted, but the on-disk files stay unless we unlink
         them here — otherwise they leak into untracked bytes that eviction
         can't see.
+
+        Note: if an unlink fails (e.g. file locked on Windows), the file
+        remains on disk as an orphan because the cascade has already removed
+        the preview_cache row. "Clear cache" in Settings recovers by
+        globbing the directory.
         """
         import glob as _glob
         thumb_dir = app.config["THUMB_CACHE_DIR"]
@@ -500,13 +505,21 @@ def create_app(db_path, thumb_cache_dir=None):
                 if os.path.isfile(cached):
                     try:
                         os.remove(cached)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        log.warning(
+                            "Failed to remove cached file %s after photo "
+                            "delete — will be reclaimed by Clear Cache: %s",
+                            cached, e,
+                        )
             for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
                 try:
                     os.remove(variant)
-                except OSError:
-                    pass
+                except OSError as e:
+                    log.warning(
+                        "Failed to remove preview variant %s after photo "
+                        "delete — will be reclaimed by Clear Cache: %s",
+                        variant, e,
+                    )
 
     @app.route("/api/health")
     def api_health():
