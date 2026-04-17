@@ -873,6 +873,11 @@ body { padding-bottom: 36px; }
                   style="margin-left:10px;display:none;">Download</button>
         </div>
       </div>
+      <span class="status-msg" id="statusEyeKeypoints"></span>
+      <div class="progress-wrap" id="progressEyeKeypoints" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillEyeKeypoints"></div></div>
+        <div class="progress-text" id="textEyeKeypoints"></div>
+      </div>
     </div>
   </div>
 
@@ -2226,6 +2231,24 @@ function _onPipelineComplete(result) {
     var fillExt = document.getElementById('fillExtract');
     if (fillExt) fillExt.style.width = '100%';
     if (statusExt) { statusExt.textContent = 'Done!'; statusExt.className = 'status-msg ok'; }
+  }
+
+  // Eye Keypoints card
+  if (stageResults.eye_keypoints) {
+    document.getElementById('numEyeKeypoints').className = 'stage-num complete';
+    var ekp = stageResults.eye_keypoints;
+    var ekpTotal = ekp.total || 0;
+    var ekpProcessed = ekp.processed || 0;
+    var ekpTxt = document.getElementById('txtEyeKeypoints');
+    if (ekpTxt) {
+      ekpTxt.textContent = ekpTotal
+        ? (ekpProcessed + ' of ' + ekpTotal + ' processed')
+        : 'No eligible photos';
+    }
+    var statusEkp = document.getElementById('statusEyeKeypoints');
+    var fillEkp = document.getElementById('fillEyeKeypoints');
+    if (fillEkp) fillEkp.style.width = '100%';
+    if (statusEkp) { statusEkp.textContent = 'Done!'; statusEkp.className = 'status-msg ok'; }
   }
 
   // Show errors if any
