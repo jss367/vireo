@@ -1000,6 +1000,119 @@ def test_legacy_migration_skips_orphaned_photo_ids(tmp_path, monkeypatch):
     assert not (preview_dir / "99999_1920.jpg").exists()
 
 
+def test_legacy_sized_preview_files_are_backfilled_at_startup(tmp_path, monkeypatch):
+    """Pre-existing sized {id}_{size}.jpg files (written before
+    preview_cache existed) get adopted into the LRU at startup so
+    accounting and eviction can see them."""
+    import os
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (800, 600), (40, 90, 180)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid_kept = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=800, height=600,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    # Untracked sized preview for an existing photo at two tiers.
+    sized_a = preview_dir / f"{pid_kept}_1920.jpg"
+    sized_b = preview_dir / f"{pid_kept}_2560.jpg"
+    sized_a.write_bytes(b"\xff\xd8\xff\xe0" + b"a" * 1024)
+    sized_b.write_bytes(b"\xff\xd8\xff\xe0" + b"b" * 2048)
+    # Sized preview pointing at a deleted photo — should be unlinked.
+    orphan = preview_dir / "999999_1920.jpg"
+    orphan.write_bytes(b"\xff\xd8\xff\xe0orphan")
+
+    assert db.preview_cache_get(pid_kept, 1920) is None
+    assert db.preview_cache_get(pid_kept, 2560) is None
+
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    # Both real sized files are now tracked, with correct byte counts.
+    row_a = db.preview_cache_get(pid_kept, 1920)
+    row_b = db.preview_cache_get(pid_kept, 2560)
+    assert row_a is not None and row_a["bytes"] == os.path.getsize(sized_a)
+    assert row_b is not None and row_b["bytes"] == os.path.getsize(sized_b)
+    # Orphan was removed; no row inserted (would have raised FK error).
+    assert not orphan.exists()
+
+
+def test_legacy_sized_preview_backfill_skips_already_tracked(tmp_path, monkeypatch):
+    """Sized files with an existing preview_cache row are left alone —
+    the migration must not overwrite last_access_at on a fresh row."""
+    import os
+    import time
+
+    import config as cfg
+    from app import create_app
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({**cfg.DEFAULTS, "preview_max_size": 1920})
+
+    photos_dir = tmp_path / "photos"
+    photos_dir.mkdir()
+    src = photos_dir / "test.jpg"
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(str(src), "JPEG", quality=85)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(photos_dir), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="test.jpg", extension=".jpg",
+        file_size=os.path.getsize(src), file_mtime=os.path.getmtime(src),
+        width=400, height=300,
+    )
+
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+    sized = preview_dir / f"{pid}_1920.jpg"
+    sized.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 1024)
+
+    # Row already exists with a recent last_access_at and the real size.
+    db.preview_cache_insert(pid, 1920, os.path.getsize(sized))
+    original_access = db.preview_cache_get(pid, 1920)["last_access_at"]
+
+    # Wait long enough that an unintended re-insert would change the timestamp.
+    time.sleep(0.05)
+    create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+
+    row = db.preview_cache_get(pid, 1920)
+    assert row is not None
+    assert row["last_access_at"] == original_access
+
+
 def test_legacy_migration_preserves_preview_max_size_zero(tmp_path, monkeypatch):
     """When preview_max_size=0 (full-res), legacy files are left alone —
     they can't be assigned to a size tier."""

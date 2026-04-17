@@ -224,20 +224,23 @@ from new_images import invalidate_new_images_after_scan as _invalidate_new_image
 
 
 def _migrate_legacy_preview_cache(app):
-    """One-shot migration of pre-refactor /full cache files.
+    """One-shot migration of pre-refactor preview cache files.
 
-    The old /full endpoint wrote previews to ~/.vireo/previews/{id}.jpg
-    (no size suffix). The new pyramid uses {id}_{size}.jpg and tracks
-    every entry in preview_cache. Upgraded installs have legacy files
-    that are invisible to accounting and eviction — they sit on disk
-    indefinitely unless the user hits Clear Cache.
+    Two classes of pre-existing files are made visible to the LRU here:
 
-    Rename each {id}.jpg to {id}_<preview_max_size>.jpg and insert a
-    preview_cache row so the LRU and reporting reflect reality. Runs
-    once per process start; a no-op when there are no legacy files.
+    1. Unsized {id}.jpg from the old /full endpoint. These are renamed to
+       {id}_<preview_max_size>.jpg and tracked.
+    2. Sized {id}_{size}.jpg files written by an earlier /preview before
+       preview_cache existed. These already match the new naming scheme,
+       so we just insert a tracking row pointing at the file in place.
 
-    If preview_max_size=0 (meaning "full") we can't assign a size tier,
-    so legacy files are left in place for Clear Cache to remove later.
+    Both classes were previously invisible to accounting and eviction —
+    they sat on disk indefinitely unless the user hit Clear Cache. Runs
+    once per process start; a no-op when nothing needs adopting.
+
+    If preview_max_size=0 (meaning "full") we can't assign a size tier
+    to unsized {id}.jpg, so those are left in place for Clear Cache to
+    remove later. Sized files are still adopted in that case.
     """
     import re
 
@@ -248,66 +251,104 @@ def _migrate_legacy_preview_cache(app):
     if not os.path.isdir(preview_dir):
         return
 
-    legacy_pat = re.compile(r"^(\d+)\.jpg$")
+    unsized_pat = re.compile(r"^(\d+)\.jpg$")
+    sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
     try:
-        legacy_files = [f for f in os.listdir(preview_dir) if legacy_pat.match(f)]
+        all_files = os.listdir(preview_dir)
     except OSError:
         return
-    if not legacy_files:
+    unsized_files = [f for f in all_files if unsized_pat.match(f)]
+    sized_files = [f for f in all_files if sized_pat.match(f)]
+    if not unsized_files and not sized_files:
         return
 
     # Read preview_max_size explicitly so a configured 0 ("full res")
     # stays 0 and the tier-assignment guard below is reachable.
     raw_size = cfg.load().get("preview_max_size")
-    if raw_size == 0:
-        log.info(
-            "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
-            len(legacy_files),
-        )
-        return
-    target_size = int(raw_size or 1920)
+    target_size = 0 if raw_size == 0 else int(raw_size or 1920)
 
     db = Database(app.config["DB_PATH"])
     try:
         migrated = 0
         orphaned = 0
-        for fname in legacy_files:
-            m = legacy_pat.match(fname)
+        adopted = 0
+        if unsized_files and target_size == 0:
+            log.info(
+                "Leaving %d legacy preview files (preview_max_size=0 — can't assign tier)",
+                len(unsized_files),
+            )
+
+        # Pass 1: rename unsized {id}.jpg → {id}_<target>.jpg + insert.
+        if target_size:
+            for fname in unsized_files:
+                m = unsized_pat.match(fname)
+                photo_id = int(m.group(1))
+                src = os.path.join(preview_dir, fname)
+                dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
+                # Skip orphans: if the photo was deleted, inserting into
+                # preview_cache would raise a FK error and rolling back the
+                # already-performed os.rename is ugly. Unlink the orphan so
+                # disk doesn't keep pointing at vanished photos.
+                photo_row = db.conn.execute(
+                    "SELECT 1 FROM photos WHERE id=?", (photo_id,)
+                ).fetchone()
+                if photo_row is None:
+                    try:
+                        os.remove(src)
+                        orphaned += 1
+                    except OSError:
+                        pass
+                    continue
+                if os.path.exists(dst):
+                    try:
+                        os.remove(src)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    os.rename(src, dst)
+                    st = os.stat(dst)
+                    db.preview_cache_insert(photo_id, target_size, st.st_size)
+                    migrated += 1
+                except OSError as e:
+                    log.warning("Failed to migrate legacy preview %s: %s", src, e)
+
+        # Pass 2: adopt pre-existing sized {id}_{size}.jpg files that
+        # aren't tracked yet. These are produced by older /preview calls
+        # that ran before preview_cache existed; without this pass they
+        # stay invisible to accounting/eviction even though they already
+        # match the new naming scheme.
+        for fname in sized_files:
+            m = sized_pat.match(fname)
             photo_id = int(m.group(1))
-            src = os.path.join(preview_dir, fname)
-            dst = os.path.join(preview_dir, f"{photo_id}_{target_size}.jpg")
-            # Skip orphans: if the photo was deleted, inserting into
-            # preview_cache would raise a FK error and rolling back the
-            # already-performed os.rename is ugly. Unlink the orphan so
-            # disk doesn't keep pointing at vanished photos.
+            size = int(m.group(2))
+            path = os.path.join(preview_dir, fname)
+            if db.preview_cache_get(photo_id, size):
+                continue
             photo_row = db.conn.execute(
                 "SELECT 1 FROM photos WHERE id=?", (photo_id,)
             ).fetchone()
             if photo_row is None:
                 try:
-                    os.remove(src)
+                    os.remove(path)
                     orphaned += 1
                 except OSError:
                     pass
                 continue
-            if os.path.exists(dst):
-                try:
-                    os.remove(src)
-                except OSError:
-                    pass
-                continue
             try:
-                os.rename(src, dst)
-                st = os.stat(dst)
-                db.preview_cache_insert(photo_id, target_size, st.st_size)
-                migrated += 1
+                st = os.stat(path)
+                db.preview_cache_insert(photo_id, size, st.st_size)
+                adopted += 1
             except OSError as e:
-                log.warning("Failed to migrate legacy preview %s: %s", src, e)
+                log.warning("Failed to adopt sized preview %s: %s", path, e)
+
         if migrated:
             log.info(
                 "Migrated %d legacy preview cache files to size %d",
                 migrated, target_size,
             )
+        if adopted:
+            log.info("Adopted %d untracked sized preview files into LRU", adopted)
         if orphaned:
             log.info("Removed %d orphaned legacy preview files", orphaned)
     finally:
