@@ -35,11 +35,15 @@ def run(session):
     has_workspaces = session.eval("!!document.getElementById('workspacesContent')")
     session.assert_that(has_workspaces, "expected all workspaces section on workspace page")
 
-    # The "+ New Workspace" button should exist
+    # The "+ New Workspace" button should exist inside the page-local
+    # `.content` wrapper.  The navbar (_navbar.html) also has a button
+    # with the same `onclick`, so scoping to `.content` ensures we fail
+    # if the workspace page's own button is removed even while the
+    # navbar action remains.
     has_new_ws_btn = session.eval(
-        """!!document.querySelector('button[onclick*="showCreateWorkspaceModal"]')"""
+        """!!document.querySelector('.content button[onclick*="showCreateWorkspaceModal"]')"""
     )
-    session.assert_that(has_new_ws_btn, "expected '+ New Workspace' button")
+    session.assert_that(has_new_ws_btn, "expected '+ New Workspace' button on workspace page")
 
     # The "+ Add Folder" link should exist and point to /pipeline
     has_add_folder = session.eval(

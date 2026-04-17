@@ -33,31 +33,41 @@ def run(session):
     elif not leaflet_loaded:
         # Script tag present but L undefined — could be a CDN outage
         # (tolerate) or a broken URL / wrong version in map.html
-        # (template regression we must surface).  Probe the script URL:
-        # a non-2xx response means the URL is wrong, a network failure
-        # means the CDN is unreachable, and a 2xx with L undefined is
-        # a real bug worth surfacing.
+        # (template regression we must surface).  Probe the script URL
+        # and classify the response:
+        #   - 2xx: reachable but L undefined → real bug, keep findings
+        #   - 4xx (except 408/429): wrong URL in template → fail
+        #   - 408/429/5xx: transient CDN issue → tolerate
+        #   - no response (network error): CDN unreachable → tolerate
         probe_status = None
         with contextlib.suppress(Exception):
             probe_status = session.page.request.fetch(
                 leaflet_src, method="GET", timeout=5000
             ).status
 
-        if probe_status is not None and 200 <= probe_status < 300:
-            pass  # reachable but L undefined — leave findings as-is
-        elif probe_status is not None:
-            session.assert_that(
-                False,
-                f"Leaflet script URL returned HTTP {probe_status}: {leaflet_src}",
-            )
-        else:
-            # CDN unreachable — suppress the "L is not defined" BUG
-            # findings it produced; they're not our regression.
+        def _suppress_leaflet_findings():
             session.report.findings = [
                 f
                 for f in session.report.findings
                 if not (f.kind == "BUG" and "L is not defined" in f.message)
             ]
+
+        if probe_status is None:
+            _suppress_leaflet_findings()  # network failure → CDN outage
+        elif 200 <= probe_status < 300:
+            pass  # reachable but L undefined — leave findings as-is
+        elif probe_status in (408, 429) or 500 <= probe_status < 600:
+            # Transient CDN condition (timeout, rate limit, server error).
+            # Template is still correct; don't fail on external availability.
+            _suppress_leaflet_findings()
+        else:
+            # 4xx other than 408/429 — the URL in the template is wrong
+            # (e.g. 404 from a typo'd path or deleted CDN version).  This
+            # is a genuine template regression worth surfacing.
+            session.assert_that(
+                False,
+                f"Leaflet script URL returned HTTP {probe_status}: {leaflet_src}",
+            )
 
     # --- Static HTML assertions (always valid) ---
 
