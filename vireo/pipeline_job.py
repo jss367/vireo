@@ -767,6 +767,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     "stages": {k: dict(v) for k, v in stages.items()},
                 })
 
+            # One eviction pass after the stage so preview_cache_max_mb is
+            # enforced even when the pipeline is the only producer (e.g.
+            # first-run ingest). Writes happen per-photo above to avoid
+            # per-row fsyncs.
+            from preview_cache import evict_if_over_quota
+            evict_if_over_quota(thread_db, base_dir)
+
             result["stages"]["previews"] = {
                 "generated": generated, "skipped": skipped, "failed": failed, "total": total
             }

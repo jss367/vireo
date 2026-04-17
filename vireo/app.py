@@ -31,6 +31,7 @@ from flask import (
 )
 from highlights import select_highlights
 from jobs import JobRunner, LogBroadcaster
+from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quota
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -319,49 +320,13 @@ def _migrate_legacy_preview_cache(app):
 def _enforce_preview_cache_quota_at_startup(app):
     """Run one eviction pass at startup so migration / prior runs can't
     leave the app over quota indefinitely.
-
-    Imports the module-level helper defined inside ``create_app`` by
-    reusing the same logic inline — we don't have access to the closure
-    here, so we replicate the small eviction loop against a fresh
-    Database instance.
     """
-    import config as cfg
+    from preview_cache import evict_if_over_quota
 
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    preview_dir = os.path.join(vireo_dir, "previews")
-    quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
-    max_bytes = int(quota_mb) * 1024 * 1024
-
     db = Database(app.config["DB_PATH"])
     try:
-        total = db.preview_cache_total_bytes()
-        if total <= max_bytes:
-            return
-        to_delete = []
-        for row in db.preview_cache_oldest_first():
-            if total <= max_bytes:
-                break
-            path = os.path.join(
-                preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
-            )
-            removed = True
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log.warning("Startup eviction: failed to unlink %s: %s", path, e)
-                removed = False
-            if removed:
-                to_delete.append((row["photo_id"], row["size"]))
-                total -= row["bytes"]
-        if to_delete:
-            db.conn.executemany(
-                "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-                to_delete,
-            )
-            db.conn.commit()
-            log.info("Startup eviction removed %d preview_cache entries", len(to_delete))
+        evict_if_over_quota(db, vireo_dir)
     finally:
         try:
             db.conn.close()
@@ -2734,7 +2699,14 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/preview-cache/clear", methods=["POST"])
     def api_preview_cache_clear():
         """Delete every preview_cache file and row, including legacy and
-        untracked files in the previews directory."""
+        untracked files in the previews directory.
+
+        Tracked rows whose on-disk files couldn't be unlinked (e.g. a
+        locked or permission-restricted file) are kept so accounting
+        and future eviction still reflect the leaked bytes — otherwise
+        /api/preview-cache would under-report and eviction would stop
+        targeting them.
+        """
         import re
 
         db = _get_db()
@@ -2747,21 +2719,43 @@ def create_app(db_path, thumb_cache_dir=None):
         tracked = count_row["c"]
 
         # Matches {id}.jpg (legacy /full cache) and {id}_{size}.jpg (current).
-        pattern = re.compile(r"^\d+(_\d+)?\.jpg$")
+        pattern = re.compile(r"^(\d+)(?:_(\d+))?\.jpg$")
+        sized_pat = re.compile(r"^(\d+)_(\d+)\.jpg$")
         files_removed = 0
+        failed_tracked = []  # (photo_id, size) tuples for sized files we couldn't unlink
         if os.path.isdir(preview_dir):
             for fname in os.listdir(preview_dir):
-                if pattern.match(fname):
-                    try:
-                        os.remove(os.path.join(preview_dir, fname))
-                        files_removed += 1
-                    except OSError:
-                        pass
+                if not pattern.match(fname):
+                    continue
+                try:
+                    os.remove(os.path.join(preview_dir, fname))
+                    files_removed += 1
+                except OSError:
+                    m = sized_pat.match(fname)
+                    if m:
+                        failed_tracked.append((int(m.group(1)), int(m.group(2))))
 
-        db.conn.execute("DELETE FROM preview_cache")
+        if failed_tracked:
+            placeholders = ",".join(["(?,?)"] * len(failed_tracked))
+            flat = [v for pair in failed_tracked for v in pair]
+            db.conn.execute(
+                f"DELETE FROM preview_cache WHERE (photo_id, size) NOT IN ({placeholders})",
+                flat,
+            )
+        else:
+            db.conn.execute("DELETE FROM preview_cache")
         db.conn.commit()
 
-        return jsonify({"cleared": tracked, "files_removed": files_removed})
+        remaining = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM preview_cache"
+        ).fetchone()["c"]
+        cleared = tracked - remaining
+
+        return jsonify({
+            "cleared": cleared,
+            "files_removed": files_removed,
+            "failed": len(failed_tracked),
+        })
 
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
@@ -7304,59 +7298,6 @@ def create_app(db_path, thumb_cache_dir=None):
             return fixed  # 0 = "full" — handled by /original path
         return fixed | {int(pm)}
 
-    def evict_preview_cache_if_over_quota(db, vireo_dir):
-        """Evict oldest preview_cache entries until under preview_cache_max_mb.
-
-        Walks rows in ascending last_access_at order. Removes files and
-        rows; stops as soon as total <= quota. Self-healing: if a file
-        is already missing we still delete the row so we don't chase
-        ghosts; if unlink fails for any other OS reason we log and
-        continue so one bad file doesn't abort the whole eviction pass.
-
-        Deletes are batched into one transaction at the end to avoid
-        hundreds of fsyncs when the quota is shrunk dramatically.
-        """
-        import config as cfg
-        quota_mb = cfg.load().get("preview_cache_max_mb", 2048)
-        max_bytes = int(quota_mb) * 1024 * 1024
-        total = db.preview_cache_total_bytes()
-        if total <= max_bytes:
-            return
-
-        preview_dir = os.path.join(vireo_dir, "previews")
-        to_delete = []  # list of (photo_id, size)
-        for row in db.preview_cache_oldest_first():
-            if total <= max_bytes:
-                break
-            path = os.path.join(
-                preview_dir, f"{row['photo_id']}_{row['size']}.jpg"
-            )
-            removed = True
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                # File already missing — row is a ghost, remove it.
-                pass
-            except OSError as e:
-                # Unlink failed for a non-missing reason (locked file,
-                # permission). Leave the row so future passes can retry;
-                # otherwise the bytes leak from accounting and eviction
-                # stops targeting them.
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Failed to remove preview cache file %s: %s", path, e,
-                )
-                removed = False
-            if removed:
-                to_delete.append((row["photo_id"], row["size"]))
-                total -= row["bytes"]
-
-        if to_delete:
-            db.conn.executemany(
-                "DELETE FROM preview_cache WHERE photo_id=? AND size=?",
-                to_delete,
-            )
-            db.conn.commit()
 
     def _serve_preview(photo_id, size):
         """Serve a preview at the given size, using the preview_cache LRU.
