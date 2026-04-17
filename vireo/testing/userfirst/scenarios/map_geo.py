@@ -16,8 +16,11 @@ def run(session):
     # tag for Leaflet is present but L is undefined, the CDN was
     # unavailable — tolerate it.  If the tag is missing entirely,
     # someone broke map.html — that's a real bug we must surface.
+    # Match the core Leaflet script specifically, not any src containing
+    # "leaflet" — map.html also loads leaflet.markercluster.js which would
+    # match the broader selector even if the primary leaflet.js is removed.
     leaflet_script_present = session.eval(
-        "!!document.querySelector('script[src*=\"leaflet\"]')"
+        "!!document.querySelector('script[src*=\"/leaflet.js\"], script[src*=\"/leaflet.min.js\"]')"
     )
     leaflet_loaded = session.eval("typeof L !== 'undefined'")
 
