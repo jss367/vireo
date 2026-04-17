@@ -7,6 +7,8 @@ Requirements:
   - ``playwright`` with Chromium installed (``playwright install chromium``)
   - ``Pillow`` for thumbnail generation
 """
+from pathlib import Path
+
 import pytest
 
 try:
@@ -16,8 +18,20 @@ try:
 except ImportError:
     _HAS_PLAYWRIGHT = False
 
+
+def _chromium_installed():
+    if not _HAS_PLAYWRIGHT:
+        return False
+    cache = Path.home() / "Library" / "Caches" / "ms-playwright"
+    if not cache.exists():
+        cache = Path.home() / ".cache" / "ms-playwright"
+    if not cache.exists():
+        return False
+    return any(p.name.startswith("chromium") for p in cache.iterdir())
+
+
 pytestmark = pytest.mark.skipif(
-    not _HAS_PLAYWRIGHT,
+    not _chromium_installed(),
     reason="playwright is not installed or chromium is not available",
 )
 

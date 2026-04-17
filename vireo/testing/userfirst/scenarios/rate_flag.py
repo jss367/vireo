@@ -50,14 +50,34 @@ def run(session):
     session.goto("/browse")
     session.screenshot("after-rating-and-flag")
 
-    # Verify the flagged photo shows the flag badge somewhere in the grid
-    flag_badges = session.eval(
-        "document.querySelectorAll('.grid-card-flag.flag-flagged').length"
+    # Verify the *specific* photo we targeted shows the flag badge. A grid-wide
+    # check would pass even if the endpoint failed, because browse_seed already
+    # includes pre-flagged photos.
+    target_flag = session.eval(
+        f"""(() => {{
+            const card = document.querySelector('.grid-card[data-id="{first_id}"]');
+            if (!card) return 'card-missing';
+            return card.querySelector('.grid-card-flag.flag-flagged') ? 'flagged' : 'not-flagged';
+        }})()"""
     )
-    session.assert_that(flag_badges > 0, "expected at least one flagged badge after flagging")
+    session.assert_that(
+        target_flag == "flagged",
+        f"expected photo {first_id} to show flagged badge, got {target_flag!r}",
+    )
 
-    # Verify ratings are displayed (at least one card should have stars)
-    star_spans = session.eval(
-        "document.querySelectorAll('.grid-card-rating').length"
+    # Verify the *specific* photo's rating badge shows 4 stars. Same reasoning
+    # as above: the seed includes pre-rated photos, so a grid-wide check is
+    # insufficient.
+    target_stars = session.eval(
+        f"""(() => {{
+            const card = document.querySelector('.grid-card[data-id="{first_id}"]');
+            if (!card) return null;
+            const el = card.querySelector('.grid-card-rating');
+            return el ? el.textContent : '';
+        }})()"""
     )
-    session.assert_that(star_spans > 0, "expected rating stars after setting rating")
+    star_count = target_stars.count("\u2605") if isinstance(target_stars, str) else -1
+    session.assert_that(
+        star_count == 4,
+        f"expected photo {first_id} to show 4 stars, got {target_stars!r}",
+    )
