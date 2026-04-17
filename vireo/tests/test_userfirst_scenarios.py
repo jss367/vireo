@@ -98,3 +98,99 @@ def test_rate_flag_scenario(userfirst_env):
             f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
         )
         pytest.fail(f"rate_flag scenario reported bugs:\n{msg}")
+
+
+def test_scan_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import scan
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="scan", seed=browse_seed) as session:
+        scan.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"scan scenario reported bugs:\n{msg}")
+
+
+def test_pipeline_review_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import pipeline_review
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="pipeline_review", seed=browse_seed) as session:
+        pipeline_review.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"pipeline_review scenario reported bugs:\n{msg}")
+
+
+def test_keywords_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import keywords
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="keywords", seed=browse_seed) as session:
+        keywords.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"keywords scenario reported bugs:\n{msg}")
+
+
+def test_workspaces_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import workspaces
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="workspaces", seed=browse_seed) as session:
+        workspaces.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"workspaces scenario reported bugs:\n{msg}")
+
+
+def test_duplicates_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import duplicates
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="duplicates", seed=browse_seed) as session:
+        duplicates.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"duplicates scenario reported bugs:\n{msg}")
+
+
+def test_map_geo_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import map_geo
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="map_geo", seed=browse_seed) as session:
+        map_geo.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"map_geo scenario reported bugs:\n{msg}")
