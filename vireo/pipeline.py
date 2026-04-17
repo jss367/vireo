@@ -753,10 +753,17 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
             best_score = score
             best = eye
 
+    # Persist eye coords normalized to 0-1 against the loaded (oriented)
+    # image dims. Two reasons: (a) EXIF-rotated JPEGs would otherwise
+    # need the oriented dims stored separately for the lightbox to map
+    # pixel coords back to a percentage — photos.width/height come from
+    # the un-oriented sensor tag so the math goes wrong on orientation
+    # 6/8; (b) this matches the detection-box storage convention
+    # (box_x/box_y are also normalized 0-1).
     db.update_photo_pipeline_features(
         row["id"],
-        eye_x=best["x"],
-        eye_y=best["y"],
+        eye_x=best["x"] / float(iw),
+        eye_y=best["y"] / float(ih),
         eye_conf=best["conf"],
         eye_tenengrad=best_score,
     )

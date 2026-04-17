@@ -1813,9 +1813,11 @@ function _lbGetSpeciesColor(species) {
 
 function _lbRenderEyeCrosshair(photo) {
   // Draws a crosshair at the detected eye keypoint on the current lightbox
-  // photo. eye_x / eye_y are stored in original-image pixel space; the
-  // overlay is absolute-positioned inside .lightbox-transform which sits
-  // at the image's natural size, so percentage-of-image is the right unit.
+  // photo. eye_x / eye_y are stored normalized 0-1 against the oriented
+  // (EXIF-transposed) image, same as detection boxes, so we can map
+  // directly to percentage without touching photo.width/photo.height
+  // (which come from the un-oriented sensor tag and would swap axes on
+  // orientation 6/8 rotations).
   var container = document.getElementById('lightboxEye');
   if (!container) return;
   container.innerHTML = '';
@@ -1823,13 +1825,8 @@ function _lbRenderEyeCrosshair(photo) {
     container.style.display = 'none';
     return;
   }
-  if (!photo.width || !photo.height) {
-    // Without dimensions we cannot map pixel coords to percentages.
-    container.style.display = 'none';
-    return;
-  }
-  var xPct = (photo.eye_x / photo.width) * 100;
-  var yPct = (photo.eye_y / photo.height) * 100;
+  var xPct = photo.eye_x * 100;
+  var yPct = photo.eye_y * 100;
   var marker = document.createElement('div');
   marker.className = 'lb-eye-crosshair';
   marker.style.left = xPct.toFixed(3) + '%';

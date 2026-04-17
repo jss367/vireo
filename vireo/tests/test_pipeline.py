@@ -1072,8 +1072,9 @@ def test_eye_stage_picks_eye_with_higher_tenengrad(tmp_path, monkeypatch):
     detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
 
     eye_x, eye_y, eye_conf, eye_teng = _read_eye_fields(db, pid)
-    # Winner is chosen by tenengrad, not conf, so the sharp-region eye wins.
-    assert abs(eye_x - 300.0) < 1.0
-    assert abs(eye_y - 300.0) < 1.0
+    # Winner is chosen by tenengrad, not conf, so the sharp-region eye
+    # wins. Coords are normalized 0-1 against the 800x600 fixture image.
+    assert abs(eye_x - 300.0 / 800.0) < 1.0 / 800.0
+    assert abs(eye_y - 300.0 / 600.0) < 1.0 / 600.0
     assert eye_conf == 0.80
     assert eye_teng > 0.0
