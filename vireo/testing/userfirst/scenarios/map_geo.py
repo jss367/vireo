@@ -5,6 +5,18 @@ controls are present, and the appropriate "no geolocated photos" message
 is shown when the seed data has no GPS coordinates.
 """
 import contextlib
+import re
+from urllib.parse import urlparse
+
+# Hosts we trust to be Leaflet CDNs.  When the script URL points at one
+# of these and the probe fails (no response / DNS failure), assume a
+# transient outage rather than a template regression.  Anything else is
+# treated as a bad URL in the template.
+_KNOWN_LEAFLET_CDN_HOSTS = frozenset({
+    "unpkg.com",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+})
 
 
 def run(session):
@@ -53,7 +65,20 @@ def run(session):
             ]
 
         if probe_status is None:
-            _suppress_leaflet_findings()  # network failure → CDN outage
+            # Network-level failure (DNS, connection refused, timeout
+            # before HTTP).  Only treat this as a CDN outage when the
+            # URL points at a known Leaflet CDN; otherwise the template
+            # was edited to point at an unresolvable host (e.g. typo'd
+            # or removed CDN), which is a real regression.
+            host = (urlparse(leaflet_src).hostname or "").lower()
+            if host in _KNOWN_LEAFLET_CDN_HOSTS:
+                _suppress_leaflet_findings()
+            else:
+                session.assert_that(
+                    False,
+                    "Leaflet script URL unreachable and host is not a known "
+                    f"CDN ({host!r}): {leaflet_src}",
+                )
         elif 200 <= probe_status < 300:
             pass  # reachable but L undefined — leave findings as-is
         elif probe_status in (408, 429) or 500 <= probe_status < 600:
@@ -97,19 +122,34 @@ def run(session):
         status_text = session.eval(
             "(document.getElementById('mapStatus') || {}).textContent || ''"
         )
-        session.assert_that(
+        # The status bar either shows the explicit "No geolocated photos
+        # found" message or "Showing 0 of 0 geolocated photos | 0% GPS
+        # coverage".  Match those exact zero shapes — a substring check
+        # for "0%" would also match "100% GPS coverage", and "Showing 0"
+        # would match "Showing 0 of 100" (visible-after-filtering, not a
+        # zero-GPS state).
+        zero_gps_status = (
             "No geolocated" in status_text
-            or "0%" in status_text
-            or "Showing 0" in status_text,
-            f"expected 'no geolocated' or '0%' in status, got {status_text!r}",
+            or (
+                re.search(r"\bShowing 0 of 0\b", status_text) is not None
+                and re.search(r"(?<!\d)0% GPS coverage\b", status_text) is not None
+            )
+        )
+        session.assert_that(
+            zero_gps_status,
+            "expected zero-GPS status ('No geolocated' message or "
+            f"'Showing 0 of 0' + '0% GPS coverage'), got {status_text!r}",
         )
 
         sidebar_text = session.eval(
             "(document.getElementById('sidebarHeader') || {}).textContent || ''"
         )
+        # Require an exact zero count — "0 photo" as a substring also
+        # matches "10 photos", "20 photos", etc.  Use a leading
+        # non-digit boundary plus the trailing word boundary.
         session.assert_that(
-            "0 photo" in sidebar_text,
-            f"expected '0 photos' in sidebar header, got {sidebar_text!r}",
+            re.search(r"(?<!\d)0 photos?\b", sidebar_text) is not None,
+            f"expected exactly '0 photos' in sidebar header, got {sidebar_text!r}",
         )
 
     session.screenshot("map-no-gps-data")
