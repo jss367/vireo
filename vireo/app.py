@@ -7408,9 +7408,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 pass
             db.preview_cache_delete(photo_id, size)  # no-op if no row
 
-        # Cache hit (tracked): touch and serve.
+        # Cache hit (tracked): touch and serve. The touch is best-effort
+        # bookkeeping — under concurrent traffic SQLite can raise
+        # OperationalError: database is locked, but that shouldn't turn a
+        # valid cache hit into a 500 when the JPEG is right there on disk.
         if db.preview_cache_get(photo_id, size) and os.path.exists(cache_path):
-            db.preview_cache_touch(photo_id, size)
+            try:
+                db.preview_cache_touch(photo_id, size)
+            except Exception:
+                pass
             return send_file(cache_path, mimetype="image/jpeg")
 
         # Cache hit (on-disk but untracked): lazy adoption.
