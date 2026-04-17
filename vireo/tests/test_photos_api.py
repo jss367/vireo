@@ -1164,6 +1164,39 @@ def test_full_respects_workspace_preview_max_size_override(client_with_photo):
     assert db.preview_cache_get(photo_id, 2560) is not None
 
 
+def test_preview_precompute_respects_workspace_preview_max_size_override(client_with_photo):
+    """/api/jobs/previews uses workspace-effective preview_max_size.
+
+    Otherwise precompute warms the wrong tier (global size) while /full
+    serves the workspace override, causing a cache miss + regenerate on
+    first view and accumulating duplicate tiers on disk.
+    """
+    import time
+
+    app, db, photo_id = client_with_photo
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 2560},
+    )
+    client = app.test_client()
+    resp = client.post("/api/jobs/previews")
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    for _ in range(100):
+        r = client.get(f"/api/jobs/{job_id}")
+        data = r.get_json()
+        if data["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    # Precompute must have warmed the workspace override tier (2560),
+    # not the global default (1920).
+    assert db.preview_cache_get(photo_id, 2560) is not None
+    assert db.preview_cache_get(photo_id, 1920) is None
+
+
 def test_zero_byte_cache_file_is_regenerated(client_with_photo):
     """An interrupted write leaves a 0-byte cache file; serve regenerates it.
 

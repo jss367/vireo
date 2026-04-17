@@ -4649,7 +4649,12 @@ def create_app(db_path, thumb_cache_dir=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            raw_size = cfg.get("preview_max_size")
+            # Use workspace-effective config so per-workspace preview_max_size
+            # overrides are honored — otherwise precompute warms the wrong
+            # size and /photos/<id>/full (which uses workspace overrides) still
+            # misses on first view.
+            effective = thread_db.get_effective_config(cfg.load())
+            raw_size = effective.get("preview_max_size")
             if raw_size == 0:
                 # "Full resolution" — /full redirects to /original so
                 # there's no size-suffixed file to warm. Skip precompute
@@ -4659,7 +4664,7 @@ def create_app(db_path, thumb_cache_dir=None):
                         "note": "skipped (preview_max_size=0)"}
             max_size = int(raw_size or 1920)
 
-            preview_quality = cfg.load().get("preview_quality", 90)
+            preview_quality = effective.get("preview_quality", 90)
             preview_dir = os.path.join(vireo_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
