@@ -12,18 +12,16 @@ def run(session):
     # The map page loads Leaflet from unpkg.com.  The harness only records
     # context.url for same-origin requests, so CDN failures won't appear
     # there.  The real offline failure mode is a downstream console error
-    # like "ReferenceError: L is not defined" when the Leaflet global is
-    # missing.  Filter both patterns so CDN outages don't flag as Vireo bugs.
+    # "ReferenceError: L is not defined" when the Leaflet global is missing.
+    # Only suppress that specific signature — broader patterns like "leaflet"
+    # would hide real map regressions where Vireo feeds bad data to Leaflet.
     session.page.wait_for_timeout(2000)
     session.report.findings = [
         f
         for f in session.report.findings
         if not (
             f.kind == "BUG"
-            and (
-                "L is not defined" in f.message
-                or "leaflet" in f.message.lower()
-            )
+            and "L is not defined" in f.message
         )
     ]
 
