@@ -4,6 +4,7 @@ Verifies that /map renders, the Leaflet map container exists, filter
 controls are present, and the appropriate "no geolocated photos" message
 is shown when the seed data has no GPS coordinates.
 """
+import contextlib
 
 
 def run(session):
@@ -12,29 +13,51 @@ def run(session):
 
     session.screenshot("map-initial")
 
-    # Distinguish CDN outage from template regression.  If the <script>
-    # tag for Leaflet is present but L is undefined, the CDN was
-    # unavailable — tolerate it.  If the tag is missing entirely,
-    # someone broke map.html — that's a real bug we must surface.
-    # Match the core Leaflet script specifically, not any src containing
-    # "leaflet" — map.html also loads leaflet.markercluster.js which would
-    # match the broader selector even if the primary leaflet.js is removed.
-    leaflet_script_present = session.eval(
-        "!!document.querySelector('script[src*=\"/leaflet.js\"], script[src*=\"/leaflet.min.js\"]')"
+    # Distinguish CDN outage from template regression.  Match the core
+    # Leaflet script specifically, not any src containing "leaflet" —
+    # map.html also loads leaflet.markercluster.js which would match a
+    # broader selector even if the primary leaflet.js is removed.
+    leaflet_src = session.eval(
+        """(() => {
+            const s = document.querySelector(
+                'script[src*="/leaflet.js"], script[src*="/leaflet.min.js"]'
+            );
+            return s ? s.src : null;
+        })()"""
     )
     leaflet_loaded = session.eval("typeof L !== 'undefined'")
 
-    if not leaflet_script_present:
+    if leaflet_src is None:
         # Template regression: Leaflet script tag removed from map.html
         session.assert_that(False, "Leaflet <script> tag missing from map.html")
     elif not leaflet_loaded:
-        # CDN outage: script tag exists but L didn't load.  Suppress
-        # the "L is not defined" console errors — they're not our bug.
-        session.report.findings = [
-            f
-            for f in session.report.findings
-            if not (f.kind == "BUG" and "L is not defined" in f.message)
-        ]
+        # Script tag present but L undefined — could be a CDN outage
+        # (tolerate) or a broken URL / wrong version in map.html
+        # (template regression we must surface).  Probe the script URL:
+        # a non-2xx response means the URL is wrong, a network failure
+        # means the CDN is unreachable, and a 2xx with L undefined is
+        # a real bug worth surfacing.
+        probe_status = None
+        with contextlib.suppress(Exception):
+            probe_status = session.page.request.fetch(
+                leaflet_src, method="GET", timeout=5000
+            ).status
+
+        if probe_status is not None and 200 <= probe_status < 300:
+            pass  # reachable but L undefined — leave findings as-is
+        elif probe_status is not None:
+            session.assert_that(
+                False,
+                f"Leaflet script URL returned HTTP {probe_status}: {leaflet_src}",
+            )
+        else:
+            # CDN unreachable — suppress the "L is not defined" BUG
+            # findings it produced; they're not our regression.
+            session.report.findings = [
+                f
+                for f in session.report.findings
+                if not (f.kind == "BUG" and "L is not defined" in f.message)
+            ]
 
     # --- Static HTML assertions (always valid) ---
 
