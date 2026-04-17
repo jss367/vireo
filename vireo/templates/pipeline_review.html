@@ -1116,12 +1116,20 @@ function grmUpdateResLabel() {
 
 function grmSetResolution(idx) {
   grmResolutionIdx = parseInt(idx, 10) || 0;
-  renderGroupModal();
-  // If a photo is selected, reload the loupe at the new resolution
+  // Update card image sources in place (preserves zoom transforms so the
+  // loupe stays locked on the current region while the slider drags).
+  document.querySelectorAll('#grmOverlay .grm-card').forEach(function(card) {
+    var pid = parseInt(card.getAttribute('data-photo-id'), 10);
+    if (!pid) return;
+    var img = card.querySelector('img');
+    if (img) img.src = grmPhotoUrl(pid);
+  });
   if (grmState && grmState.selected) {
-    var img = document.getElementById('grmLoupePhoto');
-    if (img) img.src = grmPhotoUrl(grmState.selected);
+    var loupe = document.getElementById('grmLoupePhoto');
+    if (loupe) loupe.src = grmPhotoUrl(grmState.selected);
   }
+  // Re-apply card transforms so the zoom factor matches the new 1:1 scale.
+  grmApplyCardTransforms();
   grmUpdateResLabel();
 }
 
@@ -2093,6 +2101,9 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     selected: null
   };
   _grmLoupeLocked = false;
+  _grmZoomMultiplier = 1;
+  _grmLastHoverX = null;
+  _grmLastHoverY = null;
 
   // Auto-pick the AI best (highest quality_composite)
   var best = null;
@@ -2296,10 +2307,55 @@ function buildPipelineMetadataHtml(photo) {
   return html;
 }
 
-/* --- Loupe zoom/pan --- */
+/* --- Loupe zoom/pan ---
+ *
+ * The resolution slider drives the zoom: each stop scales cards so one
+ * source pixel maps to one display pixel (1:1) at that resolution.
+ * Mouse wheel is a fine-tune multiplier on top.
+ */
 
-var _grmZoomLevel = 4;
+// Card thumbnails are 180px wide × 120px tall (3:2). Used to compute the
+// cover-fit ratio when deriving a 1:1 scale.
+var GRM_CARD_W = 180;
+var GRM_CARD_H = 120;
+
+var _grmZoomMultiplier = 1;   // wheel fine-tune on top of the 1:1 base scale
 var _grmLoupeLocked = false;
+var _grmLastHoverX = null;    // last cursor x% on the loupe (null = no hover yet)
+var _grmLastHoverY = null;
+
+function grmBaseScale() {
+  // 1:1 source-to-display scale for the current resolution stop, assuming
+  // all cards share the first photo's aspect ratio (true for a burst).
+  var stop = GRM_RES_STOPS[grmResolutionIdx];
+  var photo = grmState && grmState.selected
+    ? grmState.items.find(function(p) { return p.id === grmState.selected; })
+    : (grmState && grmState.items[0]);
+  if (!photo || !photo.width || !photo.height) return 4;
+  var W = photo.width, H = photo.height;
+  if (stop.kind !== 'original') {
+    var longest = Math.max(W, H);
+    if (longest > stop.size) {
+      var r = stop.size / longest;
+      W = W * r;
+      H = H * r;
+    }
+  }
+  var coverRatio = Math.max(GRM_CARD_W / W, GRM_CARD_H / H);
+  return 1 / coverRatio;
+}
+
+function grmApplyCardTransforms() {
+  if (_grmLastHoverX == null) return;
+  var scale = grmBaseScale() * _grmZoomMultiplier;
+  var origin = _grmLastHoverX + '% ' + _grmLastHoverY + '%';
+  var xf = 'scale(' + scale + ')';
+  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
+    img.style.transformOrigin = origin;
+    img.style.transform = xf;
+    img.parentElement.classList.add('zoomed');
+  });
+}
 
 function grmLoupeToggleLock(e) {
   _grmLoupeLocked = !_grmLoupeLocked;
@@ -2321,32 +2377,29 @@ function grmLoupeMove(e) {
   var rect = e.currentTarget.getBoundingClientRect();
   var x = ((e.clientX - rect.left) / rect.width) * 100;
   var y = ((e.clientY - rect.top) / rect.height) * 100;
+  _grmLastHoverX = x;
+  _grmLastHoverY = y;
 
   document.getElementById('grmCrosshairH').style.top = y + '%';
   document.getElementById('grmCrosshairV').style.left = x + '%';
 
-  document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
-    img.style.transformOrigin = x + '% ' + y + '%';
-    img.style.transform = 'scale(' + _grmZoomLevel + ')';
-    img.parentElement.classList.add('zoomed');
-  });
+  grmApplyCardTransforms();
 }
 
 function grmLoupeZoom(e) {
   e.preventDefault();
   if (e.deltaY < 0) {
-    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+    _grmZoomMultiplier = Math.min(3, _grmZoomMultiplier * 1.25);
   } else {
-    _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
+    _grmZoomMultiplier = Math.max(0.33, _grmZoomMultiplier / 1.25);
   }
-  var wasLocked = _grmLoupeLocked;
-  _grmLoupeLocked = false;
-  grmLoupeMove(e);
-  _grmLoupeLocked = wasLocked;
+  grmApplyCardTransforms();
 }
 
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
+  _grmLastHoverX = null;
+  _grmLastHoverY = null;
   document.querySelectorAll('#grmOverlay .grm-card img').forEach(function(img) {
     img.style.transform = '';
     img.style.transformOrigin = '';
