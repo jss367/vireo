@@ -4644,17 +4644,23 @@ def create_app(db_path, thumb_cache_dir=None):
 
         def work(job):
             import config as cfg
-            from image_loader import load_image
+            from image_loader import get_canonical_image_path, load_image
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
-            max_size = cfg.get("preview_max_size") or 1920
-            if max_size == 0:
-                max_size = None  # Full resolution
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            raw_size = cfg.get("preview_max_size")
+            if raw_size == 0:
+                # "Full resolution" — /full redirects to /original so
+                # there's no size-suffixed file to warm. Skip precompute
+                # rather than produce untracked {id}.jpg files.
+                job["_start_time"] = time.time()
+                return {"generated": 0, "skipped": 0, "total": 0,
+                        "note": "skipped (preview_max_size=0)"}
+            max_size = int(raw_size or 1920)
+
             preview_quality = cfg.load().get("preview_quality", 90)
-            preview_dir = os.path.join(
-                os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
-            )
+            preview_dir = os.path.join(vireo_dir, "previews")
             os.makedirs(preview_dir, exist_ok=True)
 
             if collection_id:
@@ -4669,15 +4675,23 @@ def create_app(db_path, thumb_cache_dir=None):
             job["_start_time"] = time.time()
 
             for i, photo in enumerate(photos):
-                cache_path = os.path.join(preview_dir, f'{photo["id"]}.jpg')
+                cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 if os.path.exists(cache_path):
                     skipped += 1
+                    # Adopt any untracked file so precompute output is
+                    # visible to eviction and /api/preview-cache.
+                    if not thread_db.preview_cache_get(photo["id"], max_size):
+                        thread_db.preview_cache_insert(
+                            photo["id"], max_size, os.path.getsize(cache_path),
+                        )
                 else:
-                    folder_path = folders.get(photo["folder_id"], "")
-                    image_path = os.path.join(folder_path, photo["filename"])
-                    img = load_image(image_path, max_size=max_size)
+                    canonical = get_canonical_image_path(photo, vireo_dir, folders)
+                    img = load_image(canonical, max_size=max_size)
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
+                        thread_db.preview_cache_insert(
+                            photo["id"], max_size, os.path.getsize(cache_path),
+                        )
                         generated += 1
 
                 runner.push_event(
@@ -4693,6 +4707,10 @@ def create_app(db_path, thumb_cache_dir=None):
                         "phase": "Generating previews",
                     },
                 )
+
+            # Run a single eviction pass at the end so the batch doesn't
+            # fsync after every photo.
+            evict_preview_cache_if_over_quota(thread_db, vireo_dir)
 
             return {"generated": generated, "skipped": skipped, "total": total}
 

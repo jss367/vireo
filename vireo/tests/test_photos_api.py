@@ -849,6 +849,42 @@ def test_legacy_full_cache_files_are_migrated_at_startup(tmp_path, monkeypatch):
     assert row["bytes"] == os.path.getsize(new_path)
 
 
+def test_preview_job_writes_sized_filename_and_tracks(client_with_photo):
+    """The /api/jobs/previews precompute writes {id}_{size}.jpg and
+    inserts a preview_cache row, not the legacy {id}.jpg path."""
+    import os
+    import time
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    # Poll until the job finishes (it's a single-photo fixture, so fast).
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert data["status"] == "completed"
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+
+    # New naming + tracked
+    assert os.path.exists(os.path.join(preview_dir, f"{photo_id}_1920.jpg"))
+    assert db.preview_cache_get(photo_id, 1920) is not None
+
+    # Legacy naming NOT produced
+    assert not os.path.exists(os.path.join(preview_dir, f"{photo_id}.jpg"))
+
+
 def test_eviction_keeps_row_when_unlink_fails(client_with_photo, monkeypatch):
     """If os.remove raises OSError (not FileNotFoundError), the preview_cache
     row is kept so future passes can retry instead of leaking bytes."""
