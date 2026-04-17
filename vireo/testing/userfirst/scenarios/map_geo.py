@@ -94,8 +94,19 @@ def run(session):
             )
         elif probe_status in (408, 429) or 500 <= probe_status < 600:
             # Transient CDN condition (timeout, rate limit, server error).
-            # Template is still correct; don't fail on external availability.
-            _suppress_leaflet_findings()
+            # Only tolerate this when the URL points at a known Leaflet
+            # CDN — otherwise the template was edited to point at a
+            # different host that happens to be returning 5xx/429, which
+            # is a real regression we should surface.
+            host = (urlparse(leaflet_src).hostname or "").lower()
+            if host in _KNOWN_LEAFLET_CDN_HOSTS:
+                _suppress_leaflet_findings()
+            else:
+                session.assert_that(
+                    False,
+                    f"Leaflet script URL returned HTTP {probe_status} from "
+                    f"non-CDN host {host!r}: {leaflet_src}",
+                )
         else:
             # 4xx other than 408/429 — the URL in the template is wrong
             # (e.g. 404 from a typo'd path or deleted CDN version).  This

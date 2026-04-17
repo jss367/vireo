@@ -29,6 +29,10 @@ def run(session):
         "Destination" in stage_names,
         f"expected 'Destination' in stage names, got {stage_names!r}",
     )
+    session.assert_that(
+        "Scan & Import" in stage_names,
+        f"expected 'Scan & Import' in stage names, got {stage_names!r}",
+    )
 
     # The "Start Pipeline" button should exist
     has_start_btn = session.eval("!!document.getElementById('btnStartPipeline')")
