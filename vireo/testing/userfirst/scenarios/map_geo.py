@@ -8,38 +8,36 @@ is shown when the seed data has no GPS coordinates.
 
 def run(session):
     session.goto("/map")
-
-    # The map page loads Leaflet from unpkg.com.  The harness only records
-    # context.url for same-origin requests, so CDN failures won't appear
-    # there.  The real offline failure mode is a downstream console error
-    # "ReferenceError: L is not defined" when the Leaflet global is missing.
-    # Only suppress that specific signature — broader patterns like "leaflet"
-    # would hide real map regressions where Vireo feeds bad data to Leaflet.
     session.page.wait_for_timeout(2000)
-    session.report.findings = [
-        f
-        for f in session.report.findings
-        if not (
-            f.kind == "BUG"
-            and "L is not defined" in f.message
-        )
-    ]
 
     session.screenshot("map-initial")
 
-    # Check whether Leaflet actually loaded.  If the CDN was unavailable,
-    # the map JS throws before loadPhotos() runs, so status/sidebar remain
-    # at their initial "Loading..." text.  In that case, only assert on the
-    # static HTML (container, filters) — not on JS-populated content.
+    # Distinguish CDN outage from template regression.  If the <script>
+    # tag for Leaflet is present but L is undefined, the CDN was
+    # unavailable — tolerate it.  If the tag is missing entirely,
+    # someone broke map.html — that's a real bug we must surface.
+    leaflet_script_present = session.eval(
+        "!!document.querySelector('script[src*=\"leaflet\"]')"
+    )
     leaflet_loaded = session.eval("typeof L !== 'undefined'")
+
+    if not leaflet_script_present:
+        # Template regression: Leaflet script tag removed from map.html
+        session.assert_that(False, "Leaflet <script> tag missing from map.html")
+    elif not leaflet_loaded:
+        # CDN outage: script tag exists but L didn't load.  Suppress
+        # the "L is not defined" console errors — they're not our bug.
+        session.report.findings = [
+            f
+            for f in session.report.findings
+            if not (f.kind == "BUG" and "L is not defined" in f.message)
+        ]
 
     # --- Static HTML assertions (always valid) ---
 
-    # The map container div should exist
     has_map = session.eval("!!document.getElementById('map')")
     session.assert_that(has_map, "expected #map container on map page")
 
-    # Filter controls should be present
     for elem_id, label in [
         ("filterFolder", "folder filter dropdown"),
         ("filterRating", "rating filter dropdown"),
@@ -51,17 +49,15 @@ def run(session):
         present = session.eval(f"!!document.getElementById('{elem_id}')")
         session.assert_that(present, f"expected {label}")
 
-    # The sidebar header and status bar elements should exist in the DOM
     has_sidebar_header = session.eval("!!document.getElementById('sidebarHeader')")
     session.assert_that(has_sidebar_header, "expected sidebar header on map page")
 
     has_status = session.eval("!!document.getElementById('mapStatus')")
     session.assert_that(has_status, "expected map status bar")
 
-    # --- JS-populated assertions (only when Leaflet loaded) ---
+    # --- JS-populated assertions (only when Leaflet loaded successfully) ---
 
     if leaflet_loaded:
-        # Without GPS data, the status should indicate no geolocated photos
         status_text = session.eval(
             "(document.getElementById('mapStatus') || {}).textContent || ''"
         )
@@ -72,7 +68,6 @@ def run(session):
             f"expected 'no geolocated' or '0%' in status, got {status_text!r}",
         )
 
-        # The sidebar should show "0 photos"
         sidebar_text = session.eval(
             "(document.getElementById('sidebarHeader') || {}).textContent || ''"
         )
