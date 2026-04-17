@@ -9,16 +9,21 @@ is shown when the seed data has no GPS coordinates.
 def run(session):
     session.goto("/map")
 
-    # The map page loads Leaflet from unpkg.com — external CDN requests
-    # may fail in CI or offline environments.  Filter out those failures
-    # so they don't flag as bugs against Vireo itself.
+    # The map page loads Leaflet from unpkg.com.  The harness only records
+    # context.url for same-origin requests, so CDN failures won't appear
+    # there.  The real offline failure mode is a downstream console error
+    # like "ReferenceError: L is not defined" when the Leaflet global is
+    # missing.  Filter both patterns so CDN outages don't flag as Vireo bugs.
     session.page.wait_for_timeout(2000)
     session.report.findings = [
         f
         for f in session.report.findings
         if not (
             f.kind == "BUG"
-            and "unpkg.com" in f.context.get("url", "")
+            and (
+                "L is not defined" in f.message
+                or "leaflet" in f.message.lower()
+            )
         )
     ]
 
