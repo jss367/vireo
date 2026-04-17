@@ -1753,6 +1753,112 @@ def test_update_photo_eye_fields_accept_null(tmp_path):
     assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
 
 
+def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path):
+    """When the top-confidence prediction lacks taxonomy_class and
+    scientific_name, a lower-confidence prediction with routable taxonomy
+    info must be chosen instead — otherwise ``_resolve_keypoint_model``
+    gets a non-routable row and the stage skips the photo.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "mammal.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    # Top-confidence prediction has species but no taxonomy_class/scientific_name.
+    db.add_prediction(
+        det_ids[0],
+        species="Unknown top",
+        confidence=0.99,
+        model="bioclip-2.5",
+        category="match",
+    )
+    # Lower-confidence prediction carries full taxonomy.
+    db.add_prediction(
+        det_ids[0],
+        species="Vulpes vulpes",
+        confidence=0.55,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={
+            "class": "Mammalia",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    assert rows[0]["taxonomy_class"] == "Mammalia"
+    assert rows[0]["scientific_name"] == "Vulpes vulpes"
+
+
+def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable(tmp_path):
+    """When multiple predictions carry routable taxonomy info, the
+    highest-confidence one wins — the routability preference must not
+    override confidence among routable rows.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "bird.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Turdus migratorius",
+        confidence=0.92,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={"class": "Aves", "scientific_name": "Turdus migratorius"},
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Corvus corax",
+        confidence=0.55,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={"class": "Aves", "scientific_name": "Corvus corax"},
+    )
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    assert rows[0]["scientific_name"] == "Turdus migratorius"
+
+
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
     """add_keyword auto-detects taxonomy type when name matches a taxon."""
     from db import Database

@@ -2689,10 +2689,15 @@ class Database:
           * has not already been processed — eye_tenengrad IS NULL keeps
             the stage idempotent across reruns
 
-        Returns one row per photo, using the highest-confidence prediction
-        on the highest-confidence real detection. Each row is a dict with
-        the fields the eye stage needs to run without further DB calls:
-        id, folder_id, filename, width, height, mask_path,
+        Returns one row per photo. The row chosen is the highest-confidence
+        prediction on the highest-confidence real detection **among
+        predictions that carry routable taxonomy info** (taxonomy_class or
+        scientific_name set); predictions missing both fields are only
+        chosen when nothing else is available. This prevents a top-ranked
+        but taxonomy-less prediction from masking a lower-ranked prediction
+        that ``_resolve_keypoint_model`` could actually route. Each row is
+        a dict with the fields the eye stage needs to run without further
+        DB calls: id, folder_id, filename, width, height, mask_path,
         box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
         scientific_name, species.
         """
@@ -2717,6 +2722,11 @@ class Database:
                WHERE p.mask_path IS NOT NULL
                  AND p.eye_tenengrad IS NULL
                ORDER BY p.id,
+                        CASE
+                            WHEN pr.taxonomy_class IS NOT NULL
+                              OR pr.scientific_name IS NOT NULL THEN 0
+                            ELSE 1
+                        END,
                         d.detector_confidence DESC,
                         pr.confidence DESC""",
             (ws_id, ws_id),
