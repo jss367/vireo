@@ -670,7 +670,7 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     import os
 
     import keypoints as kp
-    from PIL import Image
+    from image_loader import load_image
     from quality import compute_eye_tenengrad
 
     # Gate 1: classifier confidence + species in scope.
@@ -692,7 +692,15 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     image_path = os.path.join(folder_path, row["filename"])
     if not os.path.isfile(image_path):
         return
-    image = Image.open(image_path).convert("RGB")
+    # Use image_loader (same path as detector/masking/sharpness) so RAW
+    # inputs decode and EXIF-rotated JPEGs are transposed to match the
+    # frame bbox and mask were authored in. max_size=1024 matches the
+    # sharpness stage so tenengrad operators are applied at the same
+    # pixel scale across the cohort.
+    image = load_image(image_path, max_size=1024)
+    if image is None:
+        return
+    image = image.convert("RGB")
 
     # Normalized 0-1 box → pixel bbox in image coords.
     iw, ih = image.size

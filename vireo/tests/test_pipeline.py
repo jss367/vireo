@@ -1015,6 +1015,41 @@ def test_eye_stage_all_gates_pass_writes_eye_fields(tmp_path, monkeypatch):
     assert eye_teng is not None and eye_teng > 0.0
 
 
+def test_eye_stage_uses_image_loader_and_tolerates_none(tmp_path, monkeypatch):
+    """Stage calls image_loader.load_image (which handles RAW + EXIF
+    orientation) rather than plain PIL.Image.open. If the loader returns
+    None (unsupported format, decode failure), the stage skips the photo
+    without raising.
+    """
+    import image_loader
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    calls = {"n": 0}
+
+    def _fake_loader(path, max_size=1024):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr("pipeline.load_image", _fake_loader, raising=False)
+    # Also patch in the module where pipeline imports it, in case the
+    # function binds at call time via `from image_loader import load_image`.
+    monkeypatch.setattr(image_loader, "load_image", _fake_loader)
+
+    def _boom(*a, **kw):
+        raise AssertionError("detect_keypoints should not run when image load fails")
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    assert calls["n"] >= 1
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
 def test_eye_stage_picks_eye_with_higher_tenengrad(tmp_path, monkeypatch):
     """Two valid eyes → pick the one with the higher windowed tenengrad.
 
