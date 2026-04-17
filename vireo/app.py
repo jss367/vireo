@@ -7442,8 +7442,11 @@ def create_app(db_path, thumb_cache_dir=None):
         if os.path.exists(cache_path):
             with open(cache_path, "rb") as f:
                 data = f.read()
-            db.preview_cache_insert(photo_id, size, len(data))
-            evict_preview_cache_if_over_quota(db, vireo_dir)
+            try:
+                db.preview_cache_insert(photo_id, size, len(data))
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception:
+                pass
             return Response(data, mimetype="image/jpeg")
 
         # Cache miss: generate, insert, evict-if-over-quota, serve.
@@ -7470,14 +7473,18 @@ def create_app(db_path, thumb_cache_dir=None):
         # Persist to disk and track in the LRU. Eviction may delete the file
         # we just wrote (e.g. when preview_cache_max_mb is 0), but that's fine:
         # we serve the bytes from memory below so disk state doesn't matter.
+        # Catch broadly: OSError for disk failures, sqlite3 errors for DB
+        # lock / FK violations (photo deleted between lookup and insert).
+        # The preview bytes are ready in memory — never fail the request
+        # over bookkeeping.
         try:
             os.makedirs(preview_dir, exist_ok=True)
             with open(cache_path, "wb") as f:
                 f.write(data)
             db.preview_cache_insert(photo_id, size, len(data))
             evict_preview_cache_if_over_quota(db, vireo_dir)
-        except OSError as e:
-            logging.getLogger(__name__).warning(
+        except Exception as e:
+            log.warning(
                 "Failed to persist preview cache %s: %s", cache_path, e,
             )
 

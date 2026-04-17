@@ -733,18 +733,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 cache_path = os.path.join(preview_dir, f'{photo["id"]}_{max_size}.jpg')
                 if os.path.exists(cache_path):
                     skipped += 1
-                    if not thread_db.preview_cache_get(photo["id"], max_size):
-                        thread_db.preview_cache_insert(
-                            photo["id"], max_size, os.path.getsize(cache_path),
-                        )
+                    try:
+                        if not thread_db.preview_cache_get(photo["id"], max_size):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
+                    except Exception:
+                        pass  # photo may have been deleted mid-pipeline
                 else:
                     canonical = get_canonical_image_path(photo, base_dir, folders)
                     img = load_image(canonical, max_size=max_size)
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
-                        thread_db.preview_cache_insert(
-                            photo["id"], max_size, os.path.getsize(cache_path),
-                        )
+                        with contextlib.suppress(Exception):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                         generated += 1
                     else:
                         # image_loader already logged the failure at WARNING;
