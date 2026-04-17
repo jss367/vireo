@@ -2362,13 +2362,22 @@ def create_app(db_path, thumb_cache_dir=None):
                 app_bundle = editor_path
             elif os.path.isdir(editor_path):
                 try:
-                    for entry in sorted(os.listdir(editor_path)):
-                        if entry.endswith(".app"):
-                            app_bundle = os.path.join(editor_path, entry)
-                            break
+                    bundles = [
+                        entry for entry in sorted(os.listdir(editor_path))
+                        if entry.endswith(".app")
+                    ]
                 except OSError:
-                    pass
-                if app_bundle is None:
+                    bundles = []
+                if len(bundles) == 1:
+                    app_bundle = os.path.join(editor_path, bundles[0])
+                elif len(bundles) > 1:
+                    return json_error(
+                        f"Multiple .app bundles found in {editor_path} "
+                        f"({', '.join(bundles)}). "
+                        "Set the editor to a specific .app bundle.",
+                        500,
+                    )
+                else:
                     return json_error(
                         f"No .app bundle found in {editor_path}. "
                         "Set the editor to the .app bundle directly.",

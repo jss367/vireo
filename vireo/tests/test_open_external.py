@@ -223,6 +223,35 @@ def test_open_external_directory_without_app_bundle_errors(app_and_db, monkeypat
     assert ".app" in body["error"]
 
 
+def test_open_external_directory_with_multiple_app_bundles_errors(app_and_db, monkeypatch, tmp_path):
+    """Directory containing multiple .app bundles reports a clear error instead of
+    silently picking the first one alphabetically."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+
+    container = tmp_path / "AmbiguousApps"
+    (container / "Alpha.app").mkdir(parents=True)
+    (container / "Beta.app").mkdir()
+
+    client.post('/api/config',
+                data=json.dumps({"external_editor": str(container)}),
+                content_type='application/json')
+
+    launched = _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 500
+    body = resp.get_json()
+    assert "Multiple" in body["error"]
+    assert "Alpha.app" in body["error"]
+    assert "Beta.app" in body["error"]
+    assert launched == []
+
+
 def test_open_external_rejects_non_string_editor(app_and_db, monkeypatch):
     """Non-string external_editor values return a structured 500, not an uncaught TypeError.
 
