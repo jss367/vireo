@@ -361,3 +361,58 @@ def test_compute_all_features_compatible_with_db(tmp_path):
     assert row["subject_tenengrad"] == features["subject_tenengrad"]
     assert row["bg_tenengrad"] == features["bg_tenengrad"]
     assert row["phash_crop"] == features["phash_crop"]
+
+
+# -- Eye-focus windowed tenengrad --
+
+
+def test_compute_eye_tenengrad_uses_window_around_eye():
+    """Sharp edge pattern inside the window produces a non-trivial signal."""
+    from quality import compute_eye_tenengrad
+
+    arr = np.full((400, 400), 128, dtype=np.uint8)
+    # High-contrast vertical stripe pattern centered on (200, 200).
+    arr[180:220, 180:220] = np.tile([0, 255] * 20, (40, 1)).astype(np.uint8)
+    img = Image.fromarray(arr, mode="L").convert("RGB")
+
+    bbox = (100, 100, 300, 300)  # 200x200 bbox
+    eye_xy = (200.0, 200.0)
+    result = compute_eye_tenengrad(img, eye_xy, bbox, k=0.08)
+
+    # Window side = 0.08 * 200 = 16 px (clamped to min 8). Fully inside the
+    # stripe pattern → tenengrad should be well above zero on a gray image.
+    assert result > 1000
+
+
+def test_compute_eye_tenengrad_clamps_to_image_bounds():
+    """Eye near image edge: window clips, no crash, returns finite float."""
+    from quality import compute_eye_tenengrad
+
+    img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+    bbox = (0, 0, 100, 100)
+    result = compute_eye_tenengrad(img, (2.0, 2.0), bbox, k=0.1)
+
+    # Uniform gray → zero gradient → 0.0 after multiscale Tenengrad.
+    assert result == 0.0
+
+
+def test_compute_eye_tenengrad_minimum_window_size_is_8():
+    """Tiny bbox still produces a reasonable 8-pixel window rather than a
+    degenerate 0/1-px one that would break the Sobel filter."""
+    from quality import compute_eye_tenengrad
+
+    img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+    # bbox of side 10 * k=0.08 = 0.8 px → clamp to 8 px
+    bbox = (40, 40, 50, 50)
+    result = compute_eye_tenengrad(img, (45.0, 45.0), bbox, k=0.08)
+    assert result == 0.0  # uniform gray, but no crash
+
+
+def test_compute_eye_tenengrad_empty_window_returns_zero():
+    """Eye entirely outside the image bounds → empty window → 0.0."""
+    from quality import compute_eye_tenengrad
+
+    img = Image.new("RGB", (100, 100), color=(128, 128, 128))
+    bbox = (0, 0, 100, 100)
+    result = compute_eye_tenengrad(img, (-50.0, -50.0), bbox, k=0.1)
+    assert result == 0.0

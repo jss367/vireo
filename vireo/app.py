@@ -2409,6 +2409,60 @@ def create_app(db_path, thumb_cache_dir=None):
             "dinov2_known": dinov2_variant in DINOV2_VARIANTS,
         })
 
+    # --- Eye-focus keypoint model download (opt-in) ---
+    _ALLOWED_KEYPOINT_MODELS = (
+        "superanimal-quadruped",
+        "superanimal-bird",
+        "rtmpose-animal",
+    )
+
+    @app.route("/api/models/keypoints/status")
+    def api_keypoints_status():
+        """Return download state for each eye-focus keypoint model."""
+        import keypoints as kp
+
+        return jsonify({
+            name.replace("-", "_"): kp.weights_status(name)
+            for name in _ALLOWED_KEYPOINT_MODELS
+        })
+
+    @app.route(
+        "/api/models/keypoints/<model_name>/download",
+        methods=["POST"],
+    )
+    def api_keypoints_download(model_name):
+        """Trigger a background download of the named keypoint model.
+
+        Rejects unknown model names so a bad argument can't be coerced into
+        an arbitrary HuggingFace fetch. Returns immediately; the client
+        polls /api/models/keypoints/status to observe progress.
+        """
+        import threading
+
+        import keypoints as kp
+
+        if model_name not in _ALLOWED_KEYPOINT_MODELS:
+            return json_error(f"unknown keypoint model {model_name!r}", 400)
+
+        current = kp.weights_status(model_name)
+        if current in ("ready", "downloading"):
+            return jsonify({"status": current})
+
+        def _download():
+            kp._download_state[model_name] = "downloading"
+            try:
+                kp.ensure_keypoint_weights(model_name)
+                kp._download_state[model_name] = "idle"
+            except Exception as exc:
+                log.warning(
+                    "Keypoint weights download failed for %s: %s",
+                    model_name, exc,
+                )
+                kp._download_state[model_name] = "failed"
+
+        threading.Thread(target=_download, daemon=True).start()
+        return jsonify({"status": "downloading"})
+
     @app.route("/api/system/install-exiftool", methods=["POST"])
     def api_install_exiftool():
         """Install exiftool via Homebrew."""

@@ -817,6 +817,45 @@ def download_taxonomy(output_path, progress_callback=None):
             os.remove(zip_path)
 
 
+def classify_to_keypoint_group(db, inat_id):
+    """Walk a taxon's lineage; return 'Aves' or 'Mammalia' if in ancestry, else None.
+
+    Used to route keypoint-model selection for eye-focus detection. Returns
+    None for fish, reptiles, insects, invertebrates, or any taxon absent
+    from the local taxa table.
+
+    Note: ``taxa.parent_id`` references ``taxa.id`` (local PK), not
+    ``taxa.inat_id``. The walk chains local IDs after the initial inat_id
+    lookup.
+    """
+    if inat_id is None:
+        return None
+    row = db.conn.execute(
+        "SELECT id, name, rank, parent_id FROM taxa WHERE inat_id=?",
+        (inat_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    seen = set()
+    while row is not None:
+        local_id = row["id"] if hasattr(row, "keys") else row[0]
+        name = row["name"] if hasattr(row, "keys") else row[1]
+        rank = row["rank"] if hasattr(row, "keys") else row[2]
+        parent_id = row["parent_id"] if hasattr(row, "keys") else row[3]
+        if local_id in seen:
+            return None
+        seen.add(local_id)
+        if rank == "class" and name in ("Aves", "Mammalia"):
+            return name
+        if parent_id is None:
+            return None
+        row = db.conn.execute(
+            "SELECT id, name, rank, parent_id FROM taxa WHERE id=?",
+            (parent_id,),
+        ).fetchone()
+    return None
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     parser = argparse.ArgumentParser(

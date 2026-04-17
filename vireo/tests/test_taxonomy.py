@@ -770,3 +770,85 @@ def test_download_with_resume_no_range_stalls_correctly(tmp_path):
             )
     finally:
         server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# classify_to_keypoint_group — taxonomy routing for eye-focus detection
+# ---------------------------------------------------------------------------
+#
+# The taxa table stores parent_id as a local PK reference (parent_id -> taxa.id),
+# not iNat-id. These fixtures set id explicitly so parent_id resolution is
+# unambiguous.
+
+def test_classify_to_keypoint_group_bird(tmp_path):
+    from taxonomy import classify_to_keypoint_group
+
+    db = Database(str(tmp_path / "x.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom) "
+        "VALUES (3, 3, 'Aves', 'class', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (7019, 7019, 'Passeriformes', 'order', 'Animalia', 3)"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (12345, 12345, 'Cardinalis cardinalis', 'species', 'Animalia', 7019)"
+    )
+    db.conn.commit()
+    assert classify_to_keypoint_group(db, 12345) == "Aves"
+
+
+def test_classify_to_keypoint_group_mammal(tmp_path):
+    from taxonomy import classify_to_keypoint_group
+
+    db = Database(str(tmp_path / "x.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom) "
+        "VALUES (40151, 40151, 'Mammalia', 'class', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (42158, 42158, 'Carnivora', 'order', 'Animalia', 40151)"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (42048, 42048, 'Vulpes vulpes', 'species', 'Animalia', 42158)"
+    )
+    db.conn.commit()
+    assert classify_to_keypoint_group(db, 42048) == "Mammalia"
+
+
+def test_classify_to_keypoint_group_fish_returns_none(tmp_path):
+    from taxonomy import classify_to_keypoint_group
+
+    db = Database(str(tmp_path / "x.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom) "
+        "VALUES (47178, 47178, 'Actinopterygii', 'class', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (47179, 47179, 'Perciformes', 'order', 'Animalia', 47178)"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, inat_id, name, rank, kingdom, parent_id) "
+        "VALUES (99999, 99999, 'Somefish somefish', 'species', 'Animalia', 47179)"
+    )
+    db.conn.commit()
+    assert classify_to_keypoint_group(db, 99999) is None
+
+
+def test_classify_to_keypoint_group_unknown_returns_none(tmp_path):
+    from taxonomy import classify_to_keypoint_group
+
+    db = Database(str(tmp_path / "x.db"))
+    assert classify_to_keypoint_group(db, 999999) is None
+
+
+def test_classify_to_keypoint_group_none_input(tmp_path):
+    from taxonomy import classify_to_keypoint_group
+
+    db = Database(str(tmp_path / "x.db"))
+    assert classify_to_keypoint_group(db, None) is None

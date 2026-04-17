@@ -1820,6 +1820,219 @@ def test_photos_has_file_hash_and_companion_path(tmp_path):
     assert "companion_path" in col_names
 
 
+def test_photos_has_eye_focus_columns(tmp_path):
+    """Photos table has eye_x, eye_y, eye_conf, eye_tenengrad columns."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    cols = {row[1] for row in db.conn.execute("PRAGMA table_info(photos)")}
+    assert "eye_x" in cols
+    assert "eye_y" in cols
+    assert "eye_conf" in cols
+    assert "eye_tenengrad" in cols
+
+
+def test_update_photo_eye_fields_roundtrip(tmp_path):
+    """update_photo_pipeline_features persists eye_* fields."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="eye.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+    )
+    db.update_photo_pipeline_features(
+        pid,
+        eye_x=123.4,
+        eye_y=56.7,
+        eye_conf=0.82,
+        eye_tenengrad=18450.2,
+    )
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (123.4, 56.7, 0.82, 18450.2)
+
+
+def test_update_photo_eye_fields_accept_null(tmp_path):
+    """update_photo_pipeline_features accepts explicit None for eye_* fields."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="eye.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+    )
+    # First set some values
+    db.update_photo_pipeline_features(
+        pid, eye_x=1.0, eye_y=2.0, eye_conf=0.5, eye_tenengrad=9.0
+    )
+    # Then clear them
+    db.update_photo_pipeline_features(
+        pid, eye_x=None, eye_y=None, eye_conf=None, eye_tenengrad=None
+    )
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
+def test_list_photos_for_eye_keypoint_stage_prefers_routable_prediction(tmp_path):
+    """When the top-confidence prediction lacks taxonomy_class and
+    scientific_name, a lower-confidence prediction with routable taxonomy
+    info must be chosen instead — otherwise ``_resolve_keypoint_model``
+    gets a non-routable row and the stage skips the photo.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "mammal.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    # Top-confidence prediction has species but no taxonomy_class/scientific_name.
+    db.add_prediction(
+        det_ids[0],
+        species="Unknown top",
+        confidence=0.99,
+        model="bioclip-2.5",
+        category="match",
+    )
+    # Lower-confidence prediction carries full taxonomy.
+    db.add_prediction(
+        det_ids[0],
+        species="Vulpes vulpes",
+        confidence=0.55,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={
+            "class": "Mammalia",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    assert rows[0]["taxonomy_class"] == "Mammalia"
+    assert rows[0]["scientific_name"] == "Vulpes vulpes"
+
+
+def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable(tmp_path):
+    """When multiple predictions carry routable taxonomy info, the
+    highest-confidence one wins — the routability preference must not
+    override confidence among routable rows.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "bird.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Turdus migratorius",
+        confidence=0.92,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={"class": "Aves", "scientific_name": "Turdus migratorius"},
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Corvus corax",
+        confidence=0.55,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={"class": "Aves", "scientific_name": "Corvus corax"},
+    )
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    assert rows[0]["scientific_name"] == "Turdus migratorius"
+
+
+def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
+    """When ``photo_ids`` is provided, only those photos are returned even
+    if other eligible photos exist in the workspace. Empty iterables return
+    no rows without hitting the DB.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid_a = db.add_photo(
+        fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600,
+    )
+    pid_b = db.add_photo(
+        fid, "b.jpg", ".jpg", 1000, 2.0, width=800, height=600,
+    )
+    for pid in (pid_a, pid_b):
+        db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+        det_ids = db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+            detector_model="MegaDetector",
+        )
+        db.add_prediction(
+            det_ids[0], species="Vulpes vulpes", confidence=0.9,
+            model="bioclip-2.5", category="match",
+            taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+        )
+
+    # No filter: both photos.
+    assert {r["id"] for r in db.list_photos_for_eye_keypoint_stage()} == {pid_a, pid_b}
+    # Scoped to one photo.
+    rows = db.list_photos_for_eye_keypoint_stage(photo_ids=[pid_a])
+    assert [r["id"] for r in rows] == [pid_a]
+    # Empty iterable short-circuits to [].
+    assert db.list_photos_for_eye_keypoint_stage(photo_ids=set()) == []
+
+
 def test_add_keyword_auto_detects_taxonomy(tmp_path):
     """add_keyword auto-detects taxonomy type when name matches a taxon."""
     from db import Database

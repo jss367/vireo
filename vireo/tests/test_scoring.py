@@ -271,3 +271,192 @@ def test_score_encounter_labels_rejects():
     assert enc["photos"][0]["label"] is None  # not rejected
     assert enc["photos"][0]["quality_composite"] > 0
     assert enc["photos"][1]["label"] == "REJECT"
+
+
+# ---------------------------------------------------------------------------
+# Eye-focus composite replacement (Milestone 7)
+# ---------------------------------------------------------------------------
+
+def _make_base_photo(**overrides):
+    """Minimal photo dict with fields score_encounter needs."""
+    photo = {
+        "subject_tenengrad": 500,
+        "bg_tenengrad": 50,
+        "subject_clip_high": 0.0,
+        "subject_clip_low": 0.0,
+        "subject_y_median": 115,
+        "crop_complete": 0.95,
+        "bg_separation": 10.0,
+        "subject_size": 0.15,
+        "mask_path": "/masks/1.png",
+    }
+    photo.update(overrides)
+    return photo
+
+
+def test_focus_score_uses_eye_tenengrad_when_populated():
+    """When photos carry eye_tenengrad, focus_score must rank on eye sharpness, not body.
+
+    Two photos with opposite body/eye sharpness patterns:
+      A: sharp body (50000), soft eye (5000)
+      B: soft body (5000), sharp eye (50000)
+    Body-based ranking would score A higher; eye-based ranking scores B higher.
+    """
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc)
+
+    assert b["focus_score"] > a["focus_score"], (
+        f"eye-based ranking should put sharp-eye photo ahead; "
+        f"got A={a['focus_score']} vs B={b['focus_score']}"
+    )
+
+
+def test_focus_score_falls_back_to_subject_tenengrad_when_eye_null():
+    """Photos without an eye signal keep the pre-feature body-ranking behavior."""
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=None)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc)
+
+    assert a["focus_score"] > b["focus_score"], (
+        "without eye_tenengrad, score_encounter must rank on subject_tenengrad"
+    )
+
+
+def test_focus_score_mixed_eye_and_body_ranks_within_their_group():
+    """Mixed encounter: eye-having photos rank against each other; body-only photos
+    rank against each other. No cross-contamination that would make the
+    percentiles unfair."""
+    from scoring import score_encounter
+
+    # Two eye-having photos (eye sharpness: b > a).
+    a = _make_base_photo(subject_tenengrad=100, eye_tenengrad=1000)
+    b = _make_base_photo(subject_tenengrad=100, eye_tenengrad=10000)
+    # Two body-only photos (body sharpness: d > c).
+    c = _make_base_photo(subject_tenengrad=1000, eye_tenengrad=None)
+    d = _make_base_photo(subject_tenengrad=10000, eye_tenengrad=None)
+    enc = {"photos": [a, b, c, d]}
+
+    score_encounter(enc)
+
+    assert b["focus_score"] > a["focus_score"]
+    assert d["focus_score"] > c["focus_score"]
+
+
+def test_body_only_focus_not_diluted_by_eye_capable_peers():
+    """Body-only photos must rank against body-only peers, not against a cohort
+    polluted by eye-capable frames whose body_tenengrad happens to be low
+    (because they won the eye lottery on a small sharp eye, not a sharp body).
+
+    Without the split cohort fix, a body-only photo's focus_score would depend
+    on unrelated eye-capable subjects' body_tenengrad values.
+    """
+    from scoring import score_encounter
+
+    # Mixed encounter: two eye-capable peers with very low body_tenengrad
+    # (they're eye-ranked, so body sharpness is irrelevant), plus two
+    # body-only photos.
+    eye_a = _make_base_photo(subject_tenengrad=50, eye_tenengrad=1000)
+    eye_b = _make_base_photo(subject_tenengrad=50, eye_tenengrad=10000)
+    body_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
+    body_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
+    mixed_enc = {"photos": [eye_a, eye_b, body_lo, body_hi]}
+    score_encounter(mixed_enc)
+    mixed_body_lo = body_lo["focus_score"]
+    mixed_body_hi = body_hi["focus_score"]
+
+    # Reference: the same two body-only photos alone. Their percentile ranks
+    # should match the mixed case because the split cohort excludes the
+    # eye-capable peers.
+    ref_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
+    ref_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
+    ref_enc = {"photos": [ref_lo, ref_hi]}
+    score_encounter(ref_enc)
+
+    assert mixed_body_lo == ref_lo["focus_score"], (
+        f"body-only low scorer should not be diluted by eye peers: "
+        f"mixed={mixed_body_lo} ref={ref_lo['focus_score']}"
+    )
+    assert mixed_body_hi == ref_hi["focus_score"], (
+        f"body-only high scorer should not be diluted by eye peers: "
+        f"mixed={mixed_body_hi} ref={ref_hi['focus_score']}"
+    )
+
+
+def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
+    """reject_eye_soft rule: eye is the weak link even if body is sharp."""
+    from scoring import score_encounter
+
+    soft_eye = _make_base_photo(
+        subject_tenengrad=50000, eye_tenengrad=1000,
+    )
+    sharp_eye = _make_base_photo(
+        subject_tenengrad=50000, eye_tenengrad=50000,
+    )
+    enc = {"photos": [soft_eye, sharp_eye]}
+
+    score_encounter(enc, config={"reject_eye_focus": 0.35})
+
+    assert any("eye_soft" in r for r in soft_eye.get("reject_reasons", []))
+    assert not any("eye_soft" in r for r in sharp_eye.get("reject_reasons", []))
+
+
+def test_reject_eye_soft_does_not_fire_when_eye_null():
+    """Photos without an eye signal must not trigger eye_soft — even if body is soft."""
+    from scoring import score_encounter
+
+    photo = _make_base_photo(subject_tenengrad=1000, eye_tenengrad=None)
+    enc = {"photos": [photo]}
+
+    score_encounter(enc, config={"reject_eye_focus": 0.35})
+
+    assert not any("eye_soft" in r for r in photo.get("reject_reasons", []))
+
+
+def test_eye_detect_disabled_falls_back_to_body_focus():
+    """When eye_detect_enabled=False, eye_tenengrad values stored from a prior
+    run must not change scoring — focus ranks on subject_tenengrad as if the
+    eye columns were absent.
+    """
+    from scoring import score_encounter
+
+    # Same pattern as test_focus_score_uses_eye_tenengrad_when_populated but
+    # with the toggle off: the body-ranking result should win.
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc, config={"eye_detect_enabled": False})
+
+    assert a["focus_score"] > b["focus_score"]
+    assert "eye_focus_score" not in a
+    assert "eye_focus_score" not in b
+
+
+def test_eye_detect_disabled_suppresses_eye_soft_reject():
+    """Toggling eye detection off must also stop eye_soft from firing on
+    photos that already have eye_tenengrad from prior runs.
+    """
+    from scoring import score_encounter
+
+    soft_eye = _make_base_photo(
+        subject_tenengrad=50000, eye_tenengrad=1000,
+    )
+    enc = {"photos": [soft_eye]}
+
+    score_encounter(
+        enc,
+        config={"eye_detect_enabled": False, "reject_eye_focus": 0.35},
+    )
+
+    assert not any(
+        "eye_soft" in r for r in soft_eye.get("reject_reasons", [])
+    )

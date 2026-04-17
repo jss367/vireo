@@ -414,6 +414,15 @@ class Database:
         except Exception:
             self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_path TEXT")
 
+        # Eye-focus detection columns (keypoint + windowed tenengrad)
+        try:
+            self.conn.execute("SELECT eye_x FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_x REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_y REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_conf REAL")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_tenengrad REAL")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
@@ -1752,8 +1761,11 @@ class Database:
                     subject_sharpness, subject_size, quality_score,
                     latitude, longitude, companion_path, working_copy_path"""
 
-    # Columns for single-photo detail queries (includes exif_data JSON)
-    PHOTO_DETAIL_COLS = PHOTO_COLS + ", exif_data"
+    # Columns for single-photo detail queries (includes exif_data JSON +
+    # eye-focus fields consumed by the review lightbox's crosshair overlay)
+    PHOTO_DETAIL_COLS = (
+        PHOTO_COLS + ", exif_data, eye_x, eye_y, eye_conf, eye_tenengrad"
+    )
 
     def get_photo(self, photo_id, verify_workspace=False):
         """Return a single photo by id, including full metadata.
@@ -2799,6 +2811,10 @@ class Database:
         subject_y_median=_UNSET,
         phash_crop=_UNSET,
         noise_estimate=_UNSET,
+        eye_x=_UNSET,
+        eye_y=_UNSET,
+        eye_conf=_UNSET,
+        eye_tenengrad=_UNSET,
     ):
         """Update pipeline feature columns for a photo.
 
@@ -2815,6 +2831,10 @@ class Database:
             "subject_y_median": subject_y_median,
             "phash_crop": phash_crop,
             "noise_estimate": noise_estimate,
+            "eye_x": eye_x,
+            "eye_y": eye_y,
+            "eye_conf": eye_conf,
+            "eye_tenengrad": eye_tenengrad,
         }
         # Filter to only provided values
         updates = {k: v for k, v in cols.items() if v is not _UNSET}
@@ -2885,6 +2905,98 @@ class Database:
                     "w": r["box_w"], "h": r["box_h"],
                 }),
                 "detection_conf": r["detector_confidence"],
+            })
+        return result
+
+    def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
+        """Return photos eligible for the eye-focus keypoint stage.
+
+        Eligibility:
+          * photo is in the active workspace (via workspace_folders)
+          * mask_path is set (SAM2 produced a subject mask)
+          * has at least one non-synthetic detection (excludes full-image
+            rows that exist only to anchor predictions)
+          * has at least one prediction on that detection
+          * has not already been processed — eye_tenengrad IS NULL keeps
+            the stage idempotent across reruns
+          * (optional) photo.id is in ``photo_ids`` when provided — lets the
+            caller scope the stage to a collection so a pipeline run doesn't
+            touch unrelated photos elsewhere in the workspace
+
+        Returns one row per photo. The row chosen is the highest-confidence
+        prediction on the highest-confidence real detection **among
+        predictions that carry routable taxonomy info** (taxonomy_class or
+        scientific_name set); predictions missing both fields are only
+        chosen when nothing else is available. This prevents a top-ranked
+        but taxonomy-less prediction from masking a lower-ranked prediction
+        that ``_resolve_keypoint_model`` could actually route. Each row is
+        a dict with the fields the eye stage needs to run without further
+        DB calls: id, folder_id, filename, width, height, mask_path,
+        box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
+        scientific_name, species.
+        """
+        ws_id = self._ws_id()
+        if photo_ids is not None:
+            photo_ids = list(photo_ids)
+            if not photo_ids:
+                return []
+            placeholders = ",".join("?" for _ in photo_ids)
+            extra_where = f" AND p.id IN ({placeholders})"
+            params = (ws_id, ws_id, *photo_ids)
+        else:
+            extra_where = ""
+            params = (ws_id, ws_id)
+        rows = self.conn.execute(
+            f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
+                      p.mask_path,
+                      d.box_x, d.box_y, d.box_w, d.box_h,
+                      d.detector_confidence,
+                      pr.confidence AS species_conf,
+                      pr.taxonomy_class,
+                      pr.scientific_name,
+                      pr.species
+               FROM photos p
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN detections d
+                 ON d.photo_id = p.id
+                AND d.workspace_id = ?
+                AND d.detector_model != 'full-image'
+               JOIN predictions pr ON pr.detection_id = d.id
+               WHERE p.mask_path IS NOT NULL
+                 AND p.eye_tenengrad IS NULL{extra_where}
+               ORDER BY p.id,
+                        CASE
+                            WHEN pr.taxonomy_class IS NOT NULL
+                              OR pr.scientific_name IS NOT NULL THEN 0
+                            ELSE 1
+                        END,
+                        d.detector_confidence DESC,
+                        pr.confidence DESC""",
+            params,
+        ).fetchall()
+
+        seen = set()
+        result = []
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            seen.add(r["id"])
+            result.append({
+                "id": r["id"],
+                "folder_id": r["folder_id"],
+                "filename": r["filename"],
+                "width": r["width"],
+                "height": r["height"],
+                "mask_path": r["mask_path"],
+                "box_x": r["box_x"],
+                "box_y": r["box_y"],
+                "box_w": r["box_w"],
+                "box_h": r["box_h"],
+                "species_conf": r["species_conf"],
+                "taxonomy_class": r["taxonomy_class"],
+                "scientific_name": r["scientific_name"],
+                "species": r["species"],
             })
         return result
 

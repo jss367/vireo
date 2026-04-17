@@ -60,6 +60,12 @@ DEFAULTS = {
         "reject_focus": 0.35,
         "reject_clip_high": 0.30,
         "reject_composite": 0.40,
+        # Eye-focus detection
+        "eye_detect_enabled": True,
+        "eye_classifier_conf_gate": 0.50,
+        "eye_detection_conf_gate": 0.50,
+        "eye_window_k": 0.08,
+        "reject_eye_focus": 0.35,
         "burst_time_gap": 3.0,
         "burst_phash_threshold": 12,
         "burst_embedding_threshold": 0.80,

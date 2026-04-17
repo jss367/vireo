@@ -30,7 +30,8 @@ _PIPELINE_PHOTO_COLS = """
     p.dino_subject_embedding, p.dino_global_embedding,
     p.dino_embedding_variant,
     p.focal_length, p.burst_id, p.noise_estimate,
-    p.flag, p.rating
+    p.flag, p.rating,
+    p.eye_x, p.eye_y, p.eye_conf, p.eye_tenengrad
 """
 
 
@@ -242,6 +243,10 @@ def load_photo_features(db, collection_id=None, config=None):
             "noise_estimate": row["noise_estimate"],
             "flag": row["flag"],
             "rating": row["rating"],
+            "eye_x": row["eye_x"],
+            "eye_y": row["eye_y"],
+            "eye_conf": row["eye_conf"],
+            "eye_tenengrad": row["eye_tenengrad"],
         })
 
     log.info("Loaded %d photos with pipeline features", len(photos))
@@ -580,3 +585,259 @@ def save_results_raw(results, cache_dir, workspace_id):
     with open(path, "w") as f:
         json.dump(results, f)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Eye-focus keypoint detection stage
+# ---------------------------------------------------------------------------
+#
+# Runs between masking and scoring. For each photo with a subject mask and
+# an in-scope (Aves or Mammalia) species classification, route to the
+# appropriate ONNX keypoint model, run top-down keypoint detection, apply a
+# three-gate trust policy, and persist raw (eye_x, eye_y, eye_conf,
+# eye_tenengrad). Scoring picks these up downstream; the normalized
+# eye_focus_score is computed ephemerally at scoring time.
+#
+# Gates:
+#   1. Classifier confidence >= C AND species in {Aves, Mammalia}.
+#   2. ONNX weights for the routed model present on disk (no auto-download
+#      from the stage — weights are user-opt-in via the pipeline page).
+#   3. Eye keypoint confidence >= T.
+#   4. Eye keypoint falls inside the subject mask.
+
+
+_EYE_KEYPOINT_MODEL_FOR_CLASS = {
+    "Aves": "superanimal-bird",
+    "Mammalia": "superanimal-quadruped",
+}
+
+
+def eye_keypoint_stage_preflight(config):
+    """Return a short skip reason if the eye-keypoint stage cannot do work.
+
+    Returns None when the stage should run. Shared between
+    detect_eye_keypoints_stage and the pipeline job so the job can avoid the
+    O(N) eligibility join when the stage is going to short-circuit anyway.
+    """
+    if not config.get("eye_detect_enabled", True):
+        return "Disabled in config"
+    import keypoints as kp
+    routable = set(_EYE_KEYPOINT_MODEL_FOR_CLASS.values())
+    if not any(kp.weights_status(name) == "ready" for name in routable):
+        return "No keypoint models installed"
+    return None
+
+
+def _resolve_keypoint_model(db, photo_row):
+    """Route a photo to a keypoint model name, or None if out of scope.
+
+    Primary path: use ``taxonomy_class`` stored on the prediction — set by
+    classifiers that resolve full iNat lineage. Fallback: look up the
+    scientific name in the local taxa table and walk the parent chain with
+    classify_to_keypoint_group.
+    """
+    tax_class = photo_row.get("taxonomy_class")
+    if tax_class in _EYE_KEYPOINT_MODEL_FOR_CLASS:
+        return _EYE_KEYPOINT_MODEL_FOR_CLASS[tax_class]
+    # Fallback: species name -> taxa.inat_id -> classify_to_keypoint_group.
+    name = photo_row.get("scientific_name") or photo_row.get("species")
+    if not name:
+        return None
+    from taxonomy import classify_to_keypoint_group
+    row = db.conn.execute(
+        "SELECT inat_id FROM taxa WHERE name = ? LIMIT 1", (name,)
+    ).fetchone()
+    if row is None:
+        return None
+    group = classify_to_keypoint_group(db, row[0] if not hasattr(row, "keys") else row["inat_id"])
+    return _EYE_KEYPOINT_MODEL_FOR_CLASS.get(group)
+
+
+def _load_mask_array(mask_path):
+    """Load a saved SAM2 mask PNG as a boolean (H, W) array."""
+    from PIL import Image
+    mask_img = Image.open(mask_path).convert("L")
+    return np.array(mask_img) > 127
+
+
+def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
+    """Run the four-gate policy on a single photo row.
+
+    Persists (eye_x, eye_y, eye_conf, eye_tenengrad) when every gate passes,
+    otherwise returns without writing. Called per-photo from the stage loop;
+    exceptions bubble up so the stage can log and continue.
+    """
+    import os
+
+    import keypoints as kp
+    from image_loader import load_image
+    from quality import compute_eye_tenengrad
+
+    # Gate 1: classifier confidence + species in scope.
+    if (row.get("species_conf") or 0.0) < C:
+        return
+    model_name = _resolve_keypoint_model(db, row)
+    if model_name is None:
+        return
+
+    # Gate 2: weights present on disk. Stage does NOT auto-download — the
+    # user opts in via the pipeline models card. If a partial download left
+    # model.onnx but no config.json (or vice versa), skip defensively.
+    onnx_path = os.path.join(kp.MODELS_DIR, model_name, "model.onnx")
+    config_path = os.path.join(kp.MODELS_DIR, model_name, "config.json")
+    if not (os.path.isfile(onnx_path) and os.path.isfile(config_path)):
+        return
+
+    folder_path = folders.get(row["folder_id"], "")
+    image_path = os.path.join(folder_path, row["filename"])
+    if not os.path.isfile(image_path):
+        return
+    # Use image_loader (same path as detector/masking/sharpness) so RAW
+    # inputs decode and EXIF-rotated JPEGs are transposed to match the
+    # frame bbox and mask were authored in. max_size=1024 matches the
+    # sharpness stage so tenengrad operators are applied at the same
+    # pixel scale across the cohort.
+    image = load_image(image_path, max_size=1024)
+    if image is None:
+        return
+    image = image.convert("RGB")
+
+    # Normalized 0-1 box → pixel bbox in image coords.
+    iw, ih = image.size
+    bbox = (
+        int(round(row["box_x"] * iw)),
+        int(round(row["box_y"] * ih)),
+        int(round((row["box_x"] + row["box_w"]) * iw)),
+        int(round((row["box_y"] + row["box_h"]) * ih)),
+    )
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return
+
+    kps = kp.detect_keypoints(image, bbox, model_name)
+
+    # Resize mask to image dims if needed (masks are typically saved at
+    # proxy resolution and must be compared to full-image keypoint coords).
+    mask = _load_mask_array(row["mask_path"])
+    if mask.shape != (ih, iw):
+        from PIL import Image as _PIL
+        mask_img = _PIL.fromarray(mask.astype(np.uint8) * 255).resize(
+            (iw, ih), _PIL.NEAREST
+        )
+        mask = np.array(mask_img) > 127
+
+    # Gate 3 + 4: eye keypoint conf >= T AND inside the subject mask.
+    eye_candidates = []
+    for k_point in kps:
+        if k_point["name"] not in ("left_eye", "right_eye"):
+            continue
+        if k_point["conf"] < T:
+            continue
+        mx, my = int(k_point["x"]), int(k_point["y"])
+        if not (0 <= mx < mask.shape[1] and 0 <= my < mask.shape[0]):
+            continue
+        if not mask[my, mx]:
+            continue
+        eye_candidates.append(k_point)
+
+    if not eye_candidates:
+        return
+
+    # Pick the eye with the highest windowed tenengrad — "best" eye wins.
+    best = None
+    best_score = -1.0
+    for eye in eye_candidates:
+        score = compute_eye_tenengrad(
+            image, (eye["x"], eye["y"]), bbox, k=k_window
+        )
+        if score > best_score:
+            best_score = score
+            best = eye
+
+    # Persist eye coords normalized to 0-1 against the loaded (oriented)
+    # image dims. Two reasons: (a) EXIF-rotated JPEGs would otherwise
+    # need the oriented dims stored separately for the lightbox to map
+    # pixel coords back to a percentage — photos.width/height come from
+    # the un-oriented sensor tag so the math goes wrong on orientation
+    # 6/8; (b) this matches the detection-box storage convention
+    # (box_x/box_y are also normalized 0-1).
+    db.update_photo_pipeline_features(
+        row["id"],
+        eye_x=best["x"] / float(iw),
+        eye_y=best["y"] / float(ih),
+        eye_conf=best["conf"],
+        eye_tenengrad=best_score,
+    )
+
+
+def detect_eye_keypoints_stage(
+    db, config, progress_callback=None,
+    collection_id=None, exclude_photo_ids=None,
+):
+    """Pipeline stage: detect eye keypoints and persist raw tenengrad.
+
+    For each eligible photo (see Database.list_photos_for_eye_keypoint_stage),
+    run the routed keypoint model, apply the four-gate trust policy, and
+    persist (eye_x, eye_y, eye_conf, eye_tenengrad) for gated-through photos.
+    Per-photo exceptions are logged and do not abort the stage.
+
+    Args:
+        db: Database with an active workspace.
+        config: dict of tunables. Reads:
+            - eye_detect_enabled (bool, default True)
+            - eye_classifier_conf_gate (float, default 0.5)
+            - eye_detection_conf_gate (float, default 0.5)
+            - eye_window_k (float, default 0.08)
+        progress_callback: optional callable(phase, current, total).
+        collection_id: optional collection ID to scope processing to. When
+            provided, only photos in that collection are considered — matches
+            the scoping that extract/regroup stages already apply so a run
+            started for one collection doesn't mutate eye fields elsewhere.
+        exclude_photo_ids: optional iterable of photo IDs to exclude. Mirrors
+            the preview-deselection filter that extract/regroup honor, so
+            photos the user unchecked don't get eye_* values locked in (the
+            stage is idempotent via eye_tenengrad IS NULL, so leaking writes
+            here would survive future reruns).
+    """
+    skip_reason = eye_keypoint_stage_preflight(config)
+    if skip_reason is not None:
+        log.info("Eye-keypoint stage skipped: %s", skip_reason)
+        return
+
+    C = config.get("eye_classifier_conf_gate", 0.5)
+    T = config.get("eye_detection_conf_gate", 0.5)
+    k_window = config.get("eye_window_k", 0.08)
+
+    exclude_set = set(exclude_photo_ids) if exclude_photo_ids else None
+
+    photo_ids = None
+    if collection_id is not None:
+        photo_ids = _resolve_collection_photo_ids(db, collection_id)
+        if not photo_ids:
+            return
+    if exclude_set and photo_ids is not None:
+        photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
+        if not photo_ids:
+            return
+    photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
+    if exclude_set and photo_ids is None:
+        photos = [p for p in photos if p["id"] not in exclude_set]
+    if not photos:
+        return
+    folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
+    total = len(photos)
+
+    for i, row in enumerate(photos):
+        if progress_callback:
+            progress_callback("Eye keypoints", i, total)
+        try:
+            _process_photo_for_eye(
+                db, row, folders, C=C, T=T, k_window=k_window,
+            )
+        except Exception:
+            log.warning(
+                "Eye keypoint detection failed for photo %s", row["id"],
+                exc_info=True,
+            )
+
+    if progress_callback:
+        progress_callback("Eye keypoints", total, total)

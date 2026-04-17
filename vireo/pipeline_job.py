@@ -151,7 +151,7 @@ def _update_stages(runner, job_id, stages):
 
 def _current_phase(stages):
     """Determine the primary phase label from stage statuses."""
-    for name in ["regroup", "extract_masks", "classify", "detect",
+    for name in ["regroup", "eye_keypoints", "extract_masks", "classify", "detect",
                  "model_loader", "previews", "thumbnails", "scan", "ingest"]:
         info = stages.get(name, {})
         if info.get("status") == "running":
@@ -200,6 +200,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         "detect": {"status": "pending", "count": 0, "label": "Detecting subjects"},
         "classify": {"status": "pending", "count": 0, "label": "Classifying species"},
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
+        "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
     }
 
@@ -294,6 +295,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             })
     if not params.skip_extract_masks:
         step_defs.append({"id": "extract_masks", "label": "Extract features"})
+        step_defs.append({"id": "eye_keypoints", "label": "Detect eye keypoints"})
     if not params.skip_regroup:
         step_defs.append({"id": "regroup", "label": "Group encounters"})
     runner.set_steps(job["id"], step_defs)
@@ -2073,6 +2075,118 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         _update_stages(runner, job["id"], stages)
 
+    def eye_keypoints_stage():
+        """Run per-photo eye keypoint detection between mask extraction and scoring.
+
+        No-op when the stage is disabled by config, when no SuperAnimal
+        weights are on disk (users opt-in via the pipeline models card),
+        or when no eligible photos remain. Per-photo failures are logged
+        and do not abort the stage.
+        """
+        if params.skip_extract_masks or abort.is_set() or not collection_id:
+            stages["eye_keypoints"]["status"] = "skipped"
+            runner.update_step(
+                job["id"], "eye_keypoints", status="completed", summary="Skipped",
+            )
+            return
+
+        stages["eye_keypoints"]["status"] = "running"
+        runner.update_step(job["id"], "eye_keypoints", status="running")
+        _update_stages(runner, job["id"], stages)
+
+        try:
+            import config as cfg
+            from pipeline import (
+                _resolve_collection_photo_ids,
+                detect_eye_keypoints_stage,
+                eye_keypoint_stage_preflight,
+            )
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            # Mirror the stage-level preflight so a no-op run doesn't pay the
+            # O(N) eligibility join cost or report a misleading
+            # "0 of N processed" summary on large libraries.
+            skip_reason = eye_keypoint_stage_preflight(pipeline_cfg)
+            if skip_reason is not None:
+                stages["eye_keypoints"]["status"] = "skipped"
+                runner.update_step(
+                    job["id"], "eye_keypoints",
+                    status="completed", summary=f"Skipped — {skip_reason}",
+                )
+                result["stages"]["eye_keypoints"] = {
+                    "processed": 0, "total": 0, "skipped": skip_reason,
+                }
+                _update_stages(runner, job["id"], stages)
+                return
+
+            collection_photo_ids = (
+                _resolve_collection_photo_ids(thread_db, collection_id)
+                if collection_id is not None else None
+            )
+            # Honor preview-deselection so the eye stage matches the set of
+            # photos extract/regroup will act on. Without this the stage
+            # mutates eye_* for unchecked photos and those values are locked
+            # in by the eye_tenengrad IS NULL idempotency guard on reruns.
+            if params.exclude_photo_ids and collection_photo_ids is not None:
+                collection_photo_ids = {
+                    pid for pid in collection_photo_ids
+                    if pid not in params.exclude_photo_ids
+                }
+            total = len(thread_db.list_photos_for_eye_keypoint_stage(
+                photo_ids=collection_photo_ids,
+            ))
+            start_time = time.time()
+            processed = {"count": 0}
+
+            def _progress(phase, current, total_steps):
+                processed["count"] = current
+                stages["eye_keypoints"]["count"] = current
+                runner.update_step(
+                    job["id"], "eye_keypoints",
+                    progress={"current": current, "total": total_steps},
+                )
+                runner.push_event(job["id"], "progress", {
+                    "phase": phase,
+                    "stage_id": "eye_keypoints",
+                    "current": current,
+                    "total": total_steps,
+                    "rate": round(
+                        current / max(time.time() - start_time, 0.01) * 60, 1
+                    ),
+                    "stages": {k: dict(v) for k, v in stages.items()},
+                })
+
+            detect_eye_keypoints_stage(
+                thread_db, config=pipeline_cfg, progress_callback=_progress,
+                collection_id=collection_id,
+                exclude_photo_ids=params.exclude_photo_ids,
+            )
+
+            stages["eye_keypoints"]["status"] = "completed"
+            summary = (
+                f"{processed['count']} of {total} photos processed"
+                if total else "No eligible photos"
+            )
+            runner.update_step(
+                job["id"], "eye_keypoints", status="completed", summary=summary,
+            )
+            result["stages"]["eye_keypoints"] = {
+                "processed": processed["count"], "total": total,
+            }
+        except Exception as e:
+            errors.append(f"[eye_keypoints] Fatal: {e}")
+            log.exception("Pipeline eye-keypoints stage failed")
+            stages["eye_keypoints"]["status"] = "failed"
+            runner.update_step(
+                job["id"], "eye_keypoints", status="failed", error=str(e),
+            )
+
+        _update_stages(runner, job["id"], stages)
+
     def regroup_stage():
         """Run pipeline grouping + scoring + triage from cached features."""
         if params.skip_regroup or abort.is_set() or not collection_id:
@@ -2166,7 +2280,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     if not abort.is_set():
         extract_masks_stage()
 
-    # Phase 4: regroup (needs extract-masks output)
+    # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
+    # SuperAnimal weights are absent — users opt in on the pipeline models
+    # card. Per-photo failures log and continue rather than abort the stage.
+    if not abort.is_set():
+        eye_keypoints_stage()
+
+    # Phase 4: regroup (needs extract-masks + eye-keypoints output)
     if not abort.is_set():
         regroup_stage()
 

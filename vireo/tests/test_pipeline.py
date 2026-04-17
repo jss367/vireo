@@ -550,3 +550,531 @@ def test_load_photo_features_no_variant_configured_keeps_embeddings(tmp_path):
     photos = load_photo_features(db)  # no config
     assert len(photos) == 1
     assert photos[0]["dino_subject_embedding"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Eye-focus detection stage
+# ---------------------------------------------------------------------------
+
+def _setup_eligible_mammal_photo(tmp_path, taxonomy_class="Mammalia"):
+    """Create one photo that passes gate 1 + has a mask + has a detection.
+
+    Returns (db, photo_id). Caller controls whether weights exist (gate 2)
+    via monkeypatching keypoints.MODELS_DIR.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id  # auto-created Default workspace
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid,
+        "mammal.jpg",
+        ".jpg",
+        1000,
+        1.0,
+        timestamp="2026-04-16T10:00:00",
+        width=800,
+        height=600,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Vulpes vulpes",
+        confidence=0.92,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={
+            "kingdom": "Animalia",
+            "phylum": "Chordata",
+            "class": taxonomy_class,
+            "order": "Carnivora",
+            "family": "Canidae",
+            "genus": "Vulpes",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+    return db, pid
+
+
+def test_eye_keypoint_stage_preflight_disabled(tmp_path, monkeypatch):
+    """Preflight returns a skip reason when eye detection is disabled."""
+    from pipeline import eye_keypoint_stage_preflight
+
+    assert eye_keypoint_stage_preflight({"eye_detect_enabled": False}) \
+        == "Disabled in config"
+
+
+def test_eye_keypoint_stage_preflight_no_weights(tmp_path, monkeypatch):
+    """Preflight returns a skip reason when no routable weights are installed."""
+    import keypoints as kp
+    from pipeline import eye_keypoint_stage_preflight
+
+    empty_models_dir = tmp_path / "empty"
+    empty_models_dir.mkdir()
+    monkeypatch.setattr(kp, "MODELS_DIR", str(empty_models_dir))
+
+    assert eye_keypoint_stage_preflight({}) == "No keypoint models installed"
+
+
+def test_eye_keypoint_stage_preflight_ready(tmp_path, monkeypatch):
+    """Preflight returns None when at least one routable model is ready."""
+    import keypoints as kp
+    from pipeline import eye_keypoint_stage_preflight
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
+
+    assert eye_keypoint_stage_preflight({}) is None
+
+
+def test_eye_keypoint_stage_skips_when_weights_absent(tmp_path, monkeypatch):
+    """No routable keypoint weights installed → stage-level preflight
+    short-circuits before enumerating photos. Confirms that
+    list_photos_for_eye_keypoint_stage is never called (no O(N) DB pass)
+    and that no eye fields get written.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    empty_models_dir = tmp_path / "empty_models"
+    empty_models_dir.mkdir()
+    monkeypatch.setattr(kp, "MODELS_DIR", str(empty_models_dir))
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    called = {"listed": False}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(*args, **kwargs):
+        called["listed"] = True
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    assert called["listed"] is False
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
+def test_eye_keypoint_stage_respects_eye_detect_enabled_flag(tmp_path, monkeypatch):
+    """When config disables eye detection, the stage does not enumerate photos."""
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    # Any call through to list_photos_for_eye_keypoint_stage would be a bug —
+    # the disabled flag must short-circuit before the DB helper.
+    called = {"listed": False}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(*args, **kwargs):
+        called["listed"] = True
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": False})
+
+    assert called["listed"] is False
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    assert (row[0], row[1], row[2], row[3]) == (None, None, None, None)
+
+
+def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
+    """When ``collection_id`` is provided, only photos in that collection
+    are passed to ``list_photos_for_eye_keypoint_stage``. A pipeline run
+    targeted at one collection must not touch eye fields on unrelated
+    photos elsewhere in the workspace.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    # Install fake routable weights so the stage-level preflight doesn't
+    # short-circuit before the scoping check.
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    _make_fake_weights(str(models_dir), "superanimal-bird")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    # Add a second eligible photo not in the collection.
+    fid = db.add_folder(str(tmp_path / "other"), name="other")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    other_pid = db.add_photo(
+        fid, "mammal2.jpg", ".jpg", 1000, 2.0,
+        timestamp="2026-04-16T11:00:00", width=800, height=600,
+    )
+    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
+    det_ids = db.save_detections(
+        other_pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0], species="Vulpes vulpes", confidence=0.9,
+        model="bioclip-2.5", category="match",
+        taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+    )
+
+    cid = db.add_collection(
+        "fox set",
+        json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    captured = {}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(photo_ids=None):
+        captured["photo_ids"] = (
+            set(photo_ids) if photo_ids is not None else None
+        )
+        return orig(photo_ids=photo_ids)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True}, collection_id=cid,
+    )
+
+    assert captured["photo_ids"] == {pid}
+
+
+def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
+    """When ``exclude_photo_ids`` is provided, excluded photos are filtered
+    out before the eligibility query so the stage doesn't mutate eye_*
+    fields for photos the user deselected in preview.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    _make_fake_weights(str(models_dir), "superanimal-bird")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    fid = db.add_folder(str(tmp_path / "other"), name="other")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    other_pid = db.add_photo(
+        fid, "mammal2.jpg", ".jpg", 1000, 2.0,
+        timestamp="2026-04-16T11:00:00", width=800, height=600,
+    )
+    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
+    det_ids = db.save_detections(
+        other_pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0], species="Vulpes vulpes", confidence=0.9,
+        model="bioclip-2.5", category="match",
+        taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+    )
+
+    cid = db.add_collection(
+        "both",
+        json.dumps([{"field": "photo_ids", "value": [pid, other_pid]}]),
+    )
+
+    captured = {}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(photo_ids=None):
+        captured["photo_ids"] = (
+            set(photo_ids) if photo_ids is not None else None
+        )
+        return orig(photo_ids=photo_ids)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True}, collection_id=cid,
+        exclude_photo_ids={other_pid},
+    )
+
+    assert captured["photo_ids"] == {pid}
+
+
+# --- Four-gate matrix tests for detect_eye_keypoints_stage ---
+
+
+def _make_fake_weights(models_dir, model_name):
+    """Create model.onnx + config.json under MODELS_DIR/<name>/.
+
+    Contents are placeholders; _load_session is monkeypatched elsewhere
+    so the files only exist to pass the gate-2 presence check.
+    """
+    target = os.path.join(models_dir, model_name)
+    os.makedirs(target, exist_ok=True)
+    with open(os.path.join(target, "model.onnx"), "wb") as f:
+        f.write(b"fake")
+    with open(os.path.join(target, "config.json"), "w") as f:
+        f.write("{}")
+
+
+def _setup_eligible_mammal_with_files(tmp_path, *, classifier_conf=0.92,
+                                       taxonomy_class="Mammalia",
+                                       img_size=(800, 600)):
+    """Extended fixture: writes a real image and mask PNG to disk.
+
+    Fake SuperAnimal-Quadruped weights are placed under a tmp MODELS_DIR
+    so gate 2 passes. Caller monkeypatches kp.MODELS_DIR to that location
+    and kp.detect_keypoints to control the eye the stage will evaluate.
+    """
+    from db import Database
+    from PIL import Image
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    img_w, img_h = img_size
+    img = Image.new("RGB", (img_w, img_h), color=(128, 128, 128))
+    # High-contrast edge block so compute_eye_tenengrad returns >0 when it
+    # runs on a window inside the block.
+    arr = np.array(img)
+    arr[200:400, 200:400] = np.tile([0, 255] * 100, (200, 1)).astype(np.uint8)[:, :, None]
+    Image.fromarray(arr).save(tmp_path / "mammal.jpg")
+
+    # Mask PNG — white where the subject is (center region), black elsewhere.
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    mask[100:500, 100:700] = 255
+    Image.fromarray(mask).save(tmp_path / "mask.png")
+
+    pid = db.add_photo(
+        fid, "mammal.jpg", ".jpg", 1000, 1.0,
+        timestamp="2026-04-16T10:00:00",
+        width=img_w, height=img_h,
+    )
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0.125, "y": 0.167, "w": 0.75, "h": 0.667},
+          "confidence": 0.95}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0],
+        species="Vulpes vulpes",
+        confidence=classifier_conf,
+        model="bioclip-2.5",
+        category="match",
+        taxonomy={
+            "kingdom": "Animalia", "phylum": "Chordata",
+            "class": taxonomy_class, "order": "Carnivora",
+            "family": "Canidae", "genus": "Vulpes",
+            "scientific_name": "Vulpes vulpes",
+        },
+    )
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    _make_fake_weights(str(models_dir), "superanimal-bird")
+
+    return db, pid, str(models_dir)
+
+
+def _read_eye_fields(db, pid):
+    row = db.conn.execute(
+        "SELECT eye_x, eye_y, eye_conf, eye_tenengrad FROM photos WHERE id=?",
+        (pid,),
+    ).fetchone()
+    return (row[0], row[1], row[2], row[3])
+
+
+def test_eye_stage_gate1_low_classifier_conf_no_write(tmp_path, monkeypatch):
+    """Gate 1: classifier conf below threshold → no keypoint model is even loaded."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, classifier_conf=0.3,
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # If the stage reaches keypoint detection, the test setup is broken.
+    def _boom(*a, **kw):
+        raise AssertionError("detect_keypoints should not run when gate 1 fails")
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_classifier_conf_gate": 0.5},
+    )
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_gate1_out_of_scope_species_no_write(tmp_path, monkeypatch):
+    """Gate 1: species class not in {Aves, Mammalia} → no write."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(
+        tmp_path, taxonomy_class="Actinopterygii",  # ray-finned fish
+    )
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    def _boom(*a, **kw):
+        raise AssertionError("detect_keypoints should not run for fish")
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_gate3_low_eye_conf_no_write(tmp_path, monkeypatch):
+    """Gate 3: both eye keypoints below eye_detection_conf_gate → no write."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    low = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.2},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.15},
+        {"name": "nose", "x": 325.0, "y": 350.0, "conf": 0.9},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: low)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True, "eye_detection_conf_gate": 0.5},
+    )
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_gate4_eye_outside_mask_no_write(tmp_path, monkeypatch):
+    """Gate 4: eye keypoint falls outside the subject mask → no write."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # Mask covers [100:500, 100:700]; (50, 50) is well outside it.
+    outside = [
+        {"name": "left_eye", "x": 50.0, "y": 50.0, "conf": 0.9},
+        {"name": "right_eye", "x": 60.0, "y": 50.0, "conf": 0.9},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: outside)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_all_gates_pass_writes_eye_fields(tmp_path, monkeypatch):
+    """All four gates pass → eye_x, eye_y, eye_conf, eye_tenengrad populated."""
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    # Eye at (300, 300) is inside mask [100:500, 100:700] and inside the
+    # high-contrast block [200:400, 200:400] so tenengrad > 0.
+    good = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.88},
+        {"name": "right_eye", "x": 350.0, "y": 300.0, "conf": 0.85},
+        {"name": "nose", "x": 325.0, "y": 350.0, "conf": 0.9},
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: good)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    eye_x, eye_y, eye_conf, eye_teng = _read_eye_fields(db, pid)
+    assert eye_x is not None
+    assert eye_y is not None
+    assert eye_conf is not None and eye_conf >= 0.5
+    assert eye_teng is not None and eye_teng > 0.0
+
+
+def test_eye_stage_uses_image_loader_and_tolerates_none(tmp_path, monkeypatch):
+    """Stage calls image_loader.load_image (which handles RAW + EXIF
+    orientation) rather than plain PIL.Image.open. If the loader returns
+    None (unsupported format, decode failure), the stage skips the photo
+    without raising.
+    """
+    import image_loader
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    calls = {"n": 0}
+
+    def _fake_loader(path, max_size=1024):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr("pipeline.load_image", _fake_loader, raising=False)
+    # Also patch in the module where pipeline imports it, in case the
+    # function binds at call time via `from image_loader import load_image`.
+    monkeypatch.setattr(image_loader, "load_image", _fake_loader)
+
+    def _boom(*a, **kw):
+        raise AssertionError("detect_keypoints should not run when image load fails")
+
+    monkeypatch.setattr(kp, "detect_keypoints", _boom)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    assert calls["n"] >= 1
+    assert _read_eye_fields(db, pid) == (None, None, None, None)
+
+
+def test_eye_stage_picks_eye_with_higher_tenengrad(tmp_path, monkeypatch):
+    """Two valid eyes → pick the one with the higher windowed tenengrad.
+
+    The high-contrast block covers [200:400, 200:400]. A window around
+    (300, 300) lands fully inside it; a window around (600, 300) lands on
+    flat gray. The stage must persist the (300, 300) eye.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    db, pid, models_dir = _setup_eligible_mammal_with_files(tmp_path)
+    monkeypatch.setattr(kp, "MODELS_DIR", models_dir)
+
+    two_eyes = [
+        {"name": "left_eye", "x": 300.0, "y": 300.0, "conf": 0.80},  # sharp region
+        {"name": "right_eye", "x": 600.0, "y": 300.0, "conf": 0.90}, # flat region (but higher conf)
+    ]
+    monkeypatch.setattr(kp, "detect_keypoints", lambda *a, **kw: two_eyes)
+
+    detect_eye_keypoints_stage(db, config={"eye_detect_enabled": True})
+
+    eye_x, eye_y, eye_conf, eye_teng = _read_eye_fields(db, pid)
+    # Winner is chosen by tenengrad, not conf, so the sharp-region eye
+    # wins. Coords are normalized 0-1 against the 800x600 fixture image.
+    assert abs(eye_x - 300.0 / 800.0) < 1.0 / 800.0
+    assert abs(eye_y - 300.0 / 600.0) < 1.0 / 600.0
+    assert eye_conf == 0.80
+    assert eye_teng > 0.0

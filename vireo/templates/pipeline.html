@@ -838,10 +838,53 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 7: Group & Score -->
+  <!-- Card 7: Eye Keypoints (optional, off by default until weights downloaded) -->
+  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
+    <div class="stage-header" onclick="toggleCard('eyekeypoints')">
+      <span class="stage-num" id="numEyeKeypoints">7</span>
+      <span class="stage-name">Eye Keypoints (optional)</span>
+      <span class="stage-summary" id="summaryEyeKeypoints">
+        <span id="txtEyeKeypoints"></span>
+      </span>
+      <span class="stage-chevron">&#9656;</span>
+    </div>
+    <div class="stage-body">
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+        Per-photo eye localization via SuperAnimal keypoint models. When weights
+        are present, the pipeline refines the focus score using the windowed
+        sharpness around the eye instead of the whole subject. Fish, reptiles,
+        and invertebrates are skipped automatically.
+      </p>
+      <div id="eyeKeypointsReadinessPanel" style="font-size:13px;line-height:1.8;">
+        <div data-keypoint-row="superanimal-quadruped">
+          <span class="kp-state-icon"></span>
+          <span>SuperAnimal-Quadruped</span>
+          <span class="kp-state-text" style="color:var(--text-secondary);margin-left:6px;"></span>
+          <button type="button" class="btn btn-small kp-download-btn"
+                  onclick="downloadKeypointModel('superanimal-quadruped')"
+                  style="margin-left:10px;display:none;">Download</button>
+        </div>
+        <div data-keypoint-row="superanimal-bird">
+          <span class="kp-state-icon"></span>
+          <span>SuperAnimal-Bird</span>
+          <span class="kp-state-text" style="color:var(--text-secondary);margin-left:6px;"></span>
+          <button type="button" class="btn btn-small kp-download-btn"
+                  onclick="downloadKeypointModel('superanimal-bird')"
+                  style="margin-left:10px;display:none;">Download</button>
+        </div>
+      </div>
+      <span class="status-msg" id="statusEyeKeypoints"></span>
+      <div class="progress-wrap" id="progressEyeKeypoints" style="display:none;">
+        <div class="progress-bar-track"><div class="progress-bar-fill" id="fillEyeKeypoints"></div></div>
+        <div class="progress-text" id="textEyeKeypoints"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card 8: Group & Score -->
   <div class="stage-card" id="card-group" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">7</span>
+      <span class="stage-num" id="numGroup">8</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
@@ -959,6 +1002,7 @@ function initPipelinePage() {
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
       if (typeof updateExtractReadiness === 'function') updateExtractReadiness();
+      if (typeof refreshKeypointsStatus === 'function') refreshKeypointsStatus();
 
       // Populate recent destinations
       var recents = data.recent_destinations || [];
@@ -2015,6 +2059,7 @@ var _stageToCard = {
   model_loader: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
+  eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
 };
 
@@ -2031,6 +2076,7 @@ var _stageToProgress = {
   detect: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
+  eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
 };
 
@@ -2185,6 +2231,31 @@ function _onPipelineComplete(result) {
     var fillExt = document.getElementById('fillExtract');
     if (fillExt) fillExt.style.width = '100%';
     if (statusExt) { statusExt.textContent = 'Done!'; statusExt.className = 'status-msg ok'; }
+  }
+
+  // Eye Keypoints card
+  if (stageResults.eye_keypoints) {
+    document.getElementById('numEyeKeypoints').className = 'stage-num complete';
+    var ekp = stageResults.eye_keypoints;
+    var ekpTotal = ekp.total || 0;
+    var ekpProcessed = ekp.processed || 0;
+    var ekpTxt = document.getElementById('txtEyeKeypoints');
+    if (ekpTxt) {
+      // When the backend preflight skips the stage (disabled config or no
+      // keypoint weights installed), surface the explicit reason so users
+      // know it's a setup issue rather than an empty eligibility set.
+      if (ekp.skipped) {
+        ekpTxt.textContent = 'Skipped \u2014 ' + ekp.skipped;
+      } else {
+        ekpTxt.textContent = ekpTotal
+          ? (ekpProcessed + ' of ' + ekpTotal + ' processed')
+          : 'No eligible photos';
+      }
+    }
+    var statusEkp = document.getElementById('statusEyeKeypoints');
+    var fillEkp = document.getElementById('fillEyeKeypoints');
+    if (fillEkp) fillEkp.style.width = '100%';
+    if (statusEkp) { statusEkp.textContent = 'Done!'; statusEkp.className = 'status-msg ok'; }
   }
 
   // Show errors if any
@@ -2658,6 +2729,120 @@ function renderModelReadiness(label, info, known) {
   frag.appendChild(document.createTextNode(
     ' \u2014 will download' + size + ' on first run'));
   return frag;
+}
+
+// -- Card 7: Eye Keypoints (optional) --
+// Status polling is driven by openKeypointsCardPolling / closeKeypointsCardPolling
+// to avoid a permanent background timer that wastes cycles when the card is
+// not expanded.
+
+var _kpPollTimer = null;
+
+function _renderKeypointRow(modelName, state) {
+  // Per-model row in the Eye Keypoints card. state: 'ready' | 'missing' |
+  // 'downloading' | 'failed'. Reset disabled=false up front so a stale
+  // disable from the initial click never survives a transition to a state
+  // that re-shows the button (e.g. 'failed' → Retry).
+  var row = document.querySelector('[data-keypoint-row="' + modelName + '"]');
+  if (!row) return;
+  var iconEl = row.querySelector('.kp-state-icon');
+  var textEl = row.querySelector('.kp-state-text');
+  var btnEl  = row.querySelector('.kp-download-btn');
+  btnEl.disabled = false;
+
+  if (state === 'ready') {
+    iconEl.textContent = '\u2713';
+    iconEl.style.color = 'var(--accent,#24E5CA)';
+    textEl.textContent = 'Ready';
+    btnEl.style.display = 'none';
+  } else if (state === 'downloading') {
+    iconEl.textContent = '\u25EF';
+    iconEl.style.color = 'var(--warning,#f0c040)';
+    textEl.textContent = 'Downloading...';
+    btnEl.disabled = true;
+    btnEl.style.display = 'none';
+  } else if (state === 'failed') {
+    iconEl.textContent = '\u2717';
+    iconEl.style.color = 'var(--danger,#e74c3c)';
+    textEl.textContent = 'Download failed \u2014 retry?';
+    btnEl.textContent = 'Retry';
+    btnEl.style.display = '';
+  } else {
+    iconEl.textContent = '\u25CB';
+    iconEl.style.color = 'var(--text-faint,#5A8890)';
+    textEl.textContent = 'Not downloaded';
+    btnEl.textContent = 'Download';
+    btnEl.style.display = '';
+  }
+}
+
+async function refreshKeypointsStatus() {
+  try {
+    var s = await safeFetch(
+      '/api/models/keypoints/status', {}, { toast: false }
+    );
+    _renderKeypointRow(
+      'superanimal-quadruped', s.superanimal_quadruped || 'missing'
+    );
+    _renderKeypointRow(
+      'superanimal-bird', s.superanimal_bird || 'missing'
+    );
+    // If either model is still downloading, ensure polling is running.
+    // Covers the page-reload-mid-download case where init calls
+    // refreshKeypointsStatus once and finds an in-flight download but no
+    // local timer. Otherwise stop polling — user will re-trigger via a
+    // button click that restarts it.
+    var inflight = (
+      s.superanimal_quadruped === 'downloading' ||
+      s.superanimal_bird === 'downloading'
+    );
+    if (inflight) {
+      startKeypointsPolling();
+    } else if (_kpPollTimer) {
+      clearInterval(_kpPollTimer);
+      _kpPollTimer = null;
+    }
+  } catch (e) {
+    // Initial page-load call has no timer yet, so render the fallback
+    // 'missing' state (which shows a Download button) and schedule a
+    // retry. Otherwise users see a blank row after a transient API error
+    // until they reload the page. startKeypointsPolling is idempotent,
+    // and a subsequent successful fetch with no in-flight downloads will
+    // clear the timer via the path above.
+    _renderKeypointRow('superanimal-quadruped', 'missing');
+    _renderKeypointRow('superanimal-bird', 'missing');
+    startKeypointsPolling();
+  }
+}
+
+function startKeypointsPolling() {
+  if (_kpPollTimer) return;
+  _kpPollTimer = setInterval(refreshKeypointsStatus, 2000);
+}
+
+async function downloadKeypointModel(modelName) {
+  // Disable the button immediately to prevent double-clicks; refreshKeypointsStatus
+  // will re-render with the real server state on the next poll tick.
+  var row = document.querySelector('[data-keypoint-row="' + modelName + '"]');
+  if (row) {
+    var btn = row.querySelector('.kp-download-btn');
+    if (btn) btn.disabled = true;
+  }
+  try {
+    await safeFetch(
+      '/api/models/keypoints/' + encodeURIComponent(modelName) + '/download',
+      { method: 'POST' },
+      { toast: false }
+    );
+    // Optimistic render: show 'downloading' before the first poll confirms.
+    _renderKeypointRow(modelName, 'downloading');
+    startKeypointsPolling();
+  } catch (e) {
+    if (row) {
+      var btn2 = row.querySelector('.kp-download-btn');
+      if (btn2) btn2.disabled = false;
+    }
+  }
 }
 
 async function runExtractStep(collectionId) {

@@ -28,6 +28,10 @@ DEFAULTS = {
     "reject_focus": 0.35,
     "reject_clip_high": 0.30,  # subject highlight clipping fraction
     "reject_composite": 0.40,
+    # Eye-focus reject: fires when an eye is confidently localized but its
+    # windowed sharpness ranks poorly. Catches "sharp body, soft eye" frames
+    # that would otherwise pass subject-level focus checks.
+    "reject_eye_focus": 0.35,
 }
 
 EPS = 1e-8
@@ -330,13 +334,52 @@ def score_encounter(encounter, config=None):
     enc_bg_tenegrads = [p.get("bg_tenengrad", 0) or 0 for p in photos]
     enc_bg_seps = [p.get("bg_separation", 0) or 0 for p in photos]
     enc_noise = [p.get("noise_estimate") for p in photos]
+    # Eye cohort: photos with a populated eye_tenengrad form their own
+    # ranking group so body-based photos don't skew the eye percentile
+    # (Option A from the design doc). A body-only photo compares against
+    # its peers' subject_tenengrad; an eye photo compares against its
+    # peers' eye_tenengrad. Skipped entirely when eye detection is
+    # disabled so stale eye_tenengrad values from prior runs don't
+    # influence scoring after the user turns the feature off.
+    eye_enabled = cfg.get("eye_detect_enabled", True)
+    enc_eye_tenegrads = [
+        p["eye_tenengrad"] for p in photos
+        if p.get("eye_tenengrad") is not None
+    ] if eye_enabled else []
+
+    # Body cohort: photos that will fall back to subject_tenengrad scoring.
+    # In mixed encounters (some photos have eye signal, some don't), body-only
+    # photos must rank against body-only peers, otherwise eye-capable frames
+    # dilute the percentile and change out_of_focus decisions for photos that
+    # never saw the eye stage. Falls back to the full cohort when there are no
+    # body-only photos (every photo has an eye signal) so we never pass an
+    # empty comparison list into subject_focus_score.
+    if eye_enabled and enc_eye_tenegrads:
+        enc_body_tenegrads = [
+            p.get("subject_tenengrad", 0) or 0
+            for p in photos
+            if p.get("eye_tenengrad") is None
+        ]
+        if not enc_body_tenegrads:
+            enc_body_tenegrads = enc_tenegrads
+    else:
+        enc_body_tenegrads = enc_tenegrads
 
     for photo in photos:
-        f = subject_focus_score(
-            photo.get("subject_tenengrad"),
-            photo.get("bg_tenengrad"),
-            enc_tenegrads,
-        )
+        eye_t = photo.get("eye_tenengrad") if eye_enabled else None
+        if eye_t is not None and enc_eye_tenegrads:
+            # Eye-based focus: pure percentile rank within the eye cohort.
+            # The subject-vs-bg ratio term from subject_focus_score does not
+            # translate to a small eye window, so the normalization is just
+            # the peer comparison — sharper eye relative to peers = higher.
+            f = _percentile_rank(eye_t, enc_eye_tenegrads)
+            photo["eye_focus_score"] = round(f, 4)
+        else:
+            f = subject_focus_score(
+                photo.get("subject_tenengrad"),
+                photo.get("bg_tenengrad"),
+                enc_body_tenegrads,
+            )
         e = exposure_score(
             photo.get("subject_clip_high"),
             photo.get("subject_clip_low"),
@@ -376,6 +419,23 @@ def score_encounter(encounter, config=None):
         reasons = hard_reject_reasons(photo, q, config=cfg)
         if f < cfg.get("reject_focus", 0.35) and photo.get("mask_path"):
             reasons.append(f"out_of_focus (F={f:.3f} < {cfg['reject_focus']})")
+
+        # Eye-soft reject: catches "sharp body, soft eye" frames. Only fires
+        # when we have a confidently-localized eye — a null eye_tenengrad
+        # means the pipeline stage's gates didn't all pass, and we fall back
+        # to out_of_focus on subject_tenengrad (already handled above).
+        # Also skipped when eye detection is disabled so stale eye_tenengrad
+        # values from prior runs can't reject photos after the user toggles
+        # the feature off.
+        if (
+            eye_enabled
+            and photo.get("eye_tenengrad") is not None
+            and f < cfg.get("reject_eye_focus", 0.35)
+            and photo.get("mask_path")
+        ):
+            reasons.append(
+                f"eye_soft (E={f:.3f} < {cfg['reject_eye_focus']})"
+            )
 
         photo["reject_reasons"] = reasons
         photo["label"] = "REJECT" if reasons else None
