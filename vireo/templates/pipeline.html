@@ -839,8 +839,8 @@ body { padding-bottom: 36px; }
   </div>
 
   <!-- Card 7: Eye Keypoints (optional, off by default until weights downloaded) -->
-  <div class="stage-card" id="card-eye-keypoints" data-testid="stage-card">
-    <div class="stage-header" onclick="toggleCard('eye-keypoints')">
+  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
+    <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">7</span>
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-summary" id="summaryEyeKeypoints">
@@ -2054,6 +2054,7 @@ var _stageToCard = {
   model_loader: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
+  eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
 };
 
@@ -2070,6 +2071,7 @@ var _stageToProgress = {
   detect: 'Classify',
   classify: 'Classify',
   extract_masks: 'Extract',
+  eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
 };
 
