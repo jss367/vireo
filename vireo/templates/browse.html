@@ -2024,6 +2024,24 @@ async function batchSetFlag(flag) {
   showUndoToast();
 }
 
+async function batchSetColorLabel(color) {
+  var ids = Array.from(selectedPhotos);
+  if (!ids.length) return;
+  colorLabelGen++;
+  try {
+    await safeFetch('/api/batch/color_label', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, color: color}),
+    });
+  } catch(e) { return; }
+  ids.forEach(function(id) {
+    if (color) colorLabels[id] = color;
+    else delete colorLabels[id];
+  });
+  renderGrid();
+  showUndoToast();
+}
+
 function batchAddKeyword() {
   document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + selectedPhotos.size + ' photos';
   document.getElementById('batchKeywordInput').value = '';
@@ -2689,24 +2707,32 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
+  var multi = selectedPhotos.size > 1;
+
   // Ratings: 0-5
-  if (selectedPhotoId) {
+  if (multi || selectedPhotoId) {
     for (var r = 0; r <= 5; r++) {
-      if (matchesShortcut(e, _shortcuts['rate_' + r])) { setRating(selectedPhotoId, r); return; }
+      if (matchesShortcut(e, _shortcuts['rate_' + r])) {
+        if (multi) batchSetRating(r);
+        else setRating(selectedPhotoId, r);
+        return;
+      }
     }
   }
 
   // Flag, reject, unflag
-  if (selectedPhotoId) {
-    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); setFlag('flagged'); }
-    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); setFlag('rejected'); }
-    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); setFlag('none'); }
+  if (multi || selectedPhotoId) {
+    var applyFlag = multi ? batchSetFlag : setFlag;
+    var applyColor = multi ? batchSetColorLabel : setColorLabel;
+    if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); }
+    else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); }
+    else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); }
 
     // Color labels
-    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); setColorLabel('red'); }
-    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); setColorLabel('yellow'); }
-    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); setColorLabel('green'); }
-    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); setColorLabel('blue'); }
+    if (matchesShortcut(e, _shortcuts.color_red)) { e.preventDefault(); applyColor('red'); }
+    else if (matchesShortcut(e, _shortcuts.color_yellow)) { e.preventDefault(); applyColor('yellow'); }
+    else if (matchesShortcut(e, _shortcuts.color_green)) { e.preventDefault(); applyColor('green'); }
+    else if (matchesShortcut(e, _shortcuts.color_blue)) { e.preventDefault(); applyColor('blue'); }
   }
 });
 
