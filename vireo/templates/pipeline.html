@@ -2755,13 +2755,18 @@ async function refreshKeypointsStatus() {
     _renderKeypointRow(
       'superanimal-bird', s.superanimal_bird || 'missing'
     );
-    // If either model is still downloading, keep polling. Otherwise stop —
-    // user will re-trigger via a button click that restarts polling.
+    // If either model is still downloading, ensure polling is running.
+    // Covers the page-reload-mid-download case where init calls
+    // refreshKeypointsStatus once and finds an in-flight download but no
+    // local timer. Otherwise stop polling — user will re-trigger via a
+    // button click that restarts it.
     var inflight = (
       s.superanimal_quadruped === 'downloading' ||
       s.superanimal_bird === 'downloading'
     );
-    if (!inflight && _kpPollTimer) {
+    if (inflight) {
+      startKeypointsPolling();
+    } else if (_kpPollTimer) {
       clearInterval(_kpPollTimer);
       _kpPollTimer = null;
     }
