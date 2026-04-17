@@ -4726,6 +4726,8 @@ def create_app(db_path, thumb_cache_dir=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
+            import contextlib
+
             import config as cfg
             from image_loader import get_canonical_image_path, load_image
 
@@ -4768,18 +4770,21 @@ def create_app(db_path, thumb_cache_dir=None):
                     skipped += 1
                     # Adopt any untracked file so precompute output is
                     # visible to eviction and /api/preview-cache.
-                    if not thread_db.preview_cache_get(photo["id"], max_size):
-                        thread_db.preview_cache_insert(
-                            photo["id"], max_size, os.path.getsize(cache_path),
-                        )
+                    # Best-effort: photo may be deleted mid-job (FK error).
+                    with contextlib.suppress(Exception):
+                        if not thread_db.preview_cache_get(photo["id"], max_size):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                 else:
                     canonical = get_canonical_image_path(photo, vireo_dir, folders)
                     img = load_image(canonical, max_size=max_size)
                     if img:
                         img.save(cache_path, format="JPEG", quality=preview_quality)
-                        thread_db.preview_cache_insert(
-                            photo["id"], max_size, os.path.getsize(cache_path),
-                        )
+                        with contextlib.suppress(Exception):
+                            thread_db.preview_cache_insert(
+                                photo["id"], max_size, os.path.getsize(cache_path),
+                            )
                         generated += 1
 
                 runner.push_event(
