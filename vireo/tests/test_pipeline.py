@@ -760,6 +760,64 @@ def test_eye_keypoint_stage_scopes_to_collection(tmp_path, monkeypatch):
     assert captured["photo_ids"] == {pid}
 
 
+def test_eye_keypoint_stage_honors_exclude_photo_ids(tmp_path, monkeypatch):
+    """When ``exclude_photo_ids`` is provided, excluded photos are filtered
+    out before the eligibility query so the stage doesn't mutate eye_*
+    fields for photos the user deselected in preview.
+    """
+    import keypoints as kp
+    from pipeline import detect_eye_keypoints_stage
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _make_fake_weights(str(models_dir), "superanimal-quadruped")
+    _make_fake_weights(str(models_dir), "superanimal-bird")
+    monkeypatch.setattr(kp, "MODELS_DIR", str(models_dir))
+
+    db, pid = _setup_eligible_mammal_photo(tmp_path)
+
+    fid = db.add_folder(str(tmp_path / "other"), name="other")
+    db.add_workspace_folder(db._active_workspace_id, fid)
+    other_pid = db.add_photo(
+        fid, "mammal2.jpg", ".jpg", 1000, 2.0,
+        timestamp="2026-04-16T11:00:00", width=800, height=600,
+    )
+    db.update_photo_pipeline_features(other_pid, mask_path=str(tmp_path / "mask.png"))
+    det_ids = db.save_detections(
+        other_pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8}, "confidence": 0.9}],
+        detector_model="MegaDetector",
+    )
+    db.add_prediction(
+        det_ids[0], species="Vulpes vulpes", confidence=0.9,
+        model="bioclip-2.5", category="match",
+        taxonomy={"class": "Mammalia", "scientific_name": "Vulpes vulpes"},
+    )
+
+    cid = db.add_collection(
+        "both",
+        json.dumps([{"field": "photo_ids", "value": [pid, other_pid]}]),
+    )
+
+    captured = {}
+    orig = db.list_photos_for_eye_keypoint_stage
+
+    def _spy(photo_ids=None):
+        captured["photo_ids"] = (
+            set(photo_ids) if photo_ids is not None else None
+        )
+        return orig(photo_ids=photo_ids)
+
+    monkeypatch.setattr(db, "list_photos_for_eye_keypoint_stage", _spy)
+
+    detect_eye_keypoints_stage(
+        db, config={"eye_detect_enabled": True}, collection_id=cid,
+        exclude_photo_ids={other_pid},
+    )
+
+    assert captured["photo_ids"] == {pid}
+
+
 # --- Four-gate matrix tests for detect_eye_keypoints_stage ---
 
 

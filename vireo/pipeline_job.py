@@ -1928,6 +1928,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 _resolve_collection_photo_ids(thread_db, collection_id)
                 if collection_id is not None else None
             )
+            # Honor preview-deselection so the eye stage matches the set of
+            # photos extract/regroup will act on. Without this the stage
+            # mutates eye_* for unchecked photos and those values are locked
+            # in by the eye_tenengrad IS NULL idempotency guard on reruns.
+            if params.exclude_photo_ids and collection_photo_ids is not None:
+                collection_photo_ids = {
+                    pid for pid in collection_photo_ids
+                    if pid not in params.exclude_photo_ids
+                }
             total = len(thread_db.list_photos_for_eye_keypoint_stage(
                 photo_ids=collection_photo_ids,
             ))
@@ -1955,6 +1964,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             detect_eye_keypoints_stage(
                 thread_db, config=pipeline_cfg, progress_callback=_progress,
                 collection_id=collection_id,
+                exclude_photo_ids=params.exclude_photo_ids,
             )
 
             stages["eye_keypoints"]["status"] = "completed"

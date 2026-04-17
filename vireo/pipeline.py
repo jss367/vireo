@@ -754,7 +754,10 @@ def _process_photo_for_eye(db, row, folders, *, C, T, k_window):
     )
 
 
-def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id=None):
+def detect_eye_keypoints_stage(
+    db, config, progress_callback=None,
+    collection_id=None, exclude_photo_ids=None,
+):
     """Pipeline stage: detect eye keypoints and persist raw tenengrad.
 
     For each eligible photo (see Database.list_photos_for_eye_keypoint_stage),
@@ -774,6 +777,11 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id
             provided, only photos in that collection are considered — matches
             the scoping that extract/regroup stages already apply so a run
             started for one collection doesn't mutate eye fields elsewhere.
+        exclude_photo_ids: optional iterable of photo IDs to exclude. Mirrors
+            the preview-deselection filter that extract/regroup honor, so
+            photos the user unchecked don't get eye_* values locked in (the
+            stage is idempotent via eye_tenengrad IS NULL, so leaking writes
+            here would survive future reruns).
     """
     skip_reason = eye_keypoint_stage_preflight(config)
     if skip_reason is not None:
@@ -784,12 +792,20 @@ def detect_eye_keypoints_stage(db, config, progress_callback=None, collection_id
     T = config.get("eye_detection_conf_gate", 0.5)
     k_window = config.get("eye_window_k", 0.08)
 
+    exclude_set = set(exclude_photo_ids) if exclude_photo_ids else None
+
     photo_ids = None
     if collection_id is not None:
         photo_ids = _resolve_collection_photo_ids(db, collection_id)
         if not photo_ids:
             return
+    if exclude_set and photo_ids is not None:
+        photo_ids = {pid for pid in photo_ids if pid not in exclude_set}
+        if not photo_ids:
+            return
     photos = db.list_photos_for_eye_keypoint_stage(photo_ids=photo_ids)
+    if exclude_set and photo_ids is None:
+        photos = [p for p in photos if p["id"] not in exclude_set]
     if not photos:
         return
     folders = {f["id"]: f["path"] for f in db.get_folder_tree()}
