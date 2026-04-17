@@ -2347,21 +2347,72 @@ def create_app(db_path, thumb_cache_dir=None):
             return json_error("No photos found", 404)
 
         editor = cfg.get("external_editor")
+        if editor and not isinstance(editor, str):
+            return json_error(
+                "external_editor config must be a string path", 500
+            )
+        editor_path = os.path.expanduser(editor) if editor else ""
+
+        # On macOS, an .app bundle is a directory — execing it raises EACCES.
+        # Resolve the bundle when the user gives the parent folder (e.g.
+        # /Applications/Adobe Lightroom Classic/) and route through `open -a`.
+        app_bundle = None
+        if sys.platform == "darwin" and editor_path:
+            if editor_path.endswith(".app"):
+                app_bundle = editor_path
+            elif os.path.isdir(editor_path):
+                try:
+                    bundles = [
+                        entry for entry in sorted(os.listdir(editor_path))
+                        if entry.endswith(".app")
+                    ]
+                except OSError:
+                    bundles = []
+                if len(bundles) == 1:
+                    app_bundle = os.path.join(editor_path, bundles[0])
+                elif len(bundles) > 1:
+                    return json_error(
+                        f"Multiple .app bundles found in {editor_path} "
+                        f"({', '.join(bundles)}). "
+                        "Set the editor to a specific .app bundle.",
+                        500,
+                    )
+                else:
+                    return json_error(
+                        f"No .app bundle found in {editor_path}. "
+                        "Set the editor to the .app bundle directly.",
+                        500,
+                    )
+
         try:
-            if editor:
-                if sys.platform == "darwin" and editor.endswith(".app"):
-                    subprocess.Popen(["open", "-a", editor] + file_paths)
-                else:
-                    subprocess.Popen([editor] + file_paths)
+            if app_bundle:
+                # `open -a` returns quickly after launching; capture the exit
+                # so launch failures surface instead of disappearing silently.
+                result = subprocess.run(
+                    ["open", "-a", app_bundle] + file_paths,
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "open failed").strip()
+                    log.warning("open -a %s failed: %s", app_bundle, err)
+                    return json_error(err, 500)
+            elif editor_path:
+                subprocess.Popen([editor_path] + file_paths)
+            elif sys.platform == "darwin":
+                result = subprocess.run(
+                    ["open"] + file_paths,
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "open failed").strip()
+                    log.warning("open %s failed: %s", file_paths, err)
+                    return json_error(err, 500)
+            elif sys.platform == "win32":
+                for fp in file_paths:
+                    os.startfile(fp)
             else:
-                if sys.platform == "darwin":
-                    subprocess.Popen(["open"] + file_paths)
-                elif sys.platform == "win32":
-                    for fp in file_paths:
-                        os.startfile(fp)
-                else:
-                    for fp in file_paths:
-                        subprocess.Popen(["xdg-open", fp])
+                for fp in file_paths:
+                    subprocess.Popen(["xdg-open", fp])
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
             return json_error(str(e), 500)
