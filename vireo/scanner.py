@@ -268,8 +268,17 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     #   - Large JPEGs (width or height exceeds working_copy_max_size)
     #     without one — these get a downsized working copy so every
     #     derivative (thumbnail, preview) reads from the same canonical
-    #     image.
+    #     image. Skipped when wc_max_size <= 0 (the "full resolution"
+    #     sentinel), where there is no cap to enforce.
     placeholders = ",".join("?" for _ in RAW_EXTENSIONS)
+    params = list(RAW_EXTENSIONS)
+    jpeg_clause = ""
+    if wc_max_size and wc_max_size > 0:
+        jpeg_clause = (
+            " OR (LOWER(p.extension) IN ('.jpg', '.jpeg', 'jpg', 'jpeg')"
+            "     AND (p.width > ? OR p.height > ?))"
+        )
+        params.extend([wc_max_size, wc_max_size])
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
@@ -280,11 +289,10 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
          WHERE p.working_copy_path IS NULL
            AND (
                p.extension IN ({placeholders})
-            OR (LOWER(p.extension) IN ('.jpg', '.jpeg', 'jpg', 'jpeg')
-                 AND (p.width > ? OR p.height > ?))
+               {jpeg_clause}
            )
         """,
-        list(RAW_EXTENSIONS) + [wc_max_size, wc_max_size],
+        params,
     ).fetchall()
 
     if not rows:
