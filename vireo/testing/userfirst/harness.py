@@ -1,5 +1,6 @@
 """User-first testing harness — runs Vireo in a subprocess, drives it via Playwright."""
 import contextlib
+import json
 import os
 import shutil
 import socket
@@ -193,8 +194,17 @@ class VireoSession:
 
 
 @contextmanager
-def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
+def vireo_session(name="session", startup_timeout=30.0, keep_runs=20, seed=None):
     """Start Vireo against the test profile + launch Playwright; yield a session.
+
+    Args:
+        name: Label for the session (used in reports).
+        startup_timeout: Max seconds to wait for the app health endpoint.
+        keep_runs: Number of past run directories to retain.
+        seed: Optional callable ``(db_path, thumb_dir, photos_root)`` that
+              populates the database and creates thumbnails before the app
+              starts.  When provided, any existing DB at ``db_path`` is
+              deleted first so every session starts from a clean slate.
 
     Requires:
       - VIREO_PROFILE env var set to a safe test directory
@@ -213,6 +223,15 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
     paths["thumbnails"].mkdir(parents=True, exist_ok=True)
     paths["runs"].mkdir(parents=True, exist_ok=True)
 
+    # -- Seed: populate DB + thumbnails from scratch if a seed callable is provided --
+    if seed is not None:
+        db_file = paths["db"]
+        # Remove stale DB so the seed always starts fresh
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(FileNotFoundError):
+                Path(str(db_file) + suffix).unlink()
+        seed(str(db_file), str(paths["thumbnails"]), str(photos_root) if photos_root else None)
+
     validate_db_folders(paths["db"], photos_root)
 
     run_id = _new_run_id()
@@ -230,6 +249,16 @@ def vireo_session(name="session", startup_timeout=30.0, keep_runs=20):
     # resolve to <profile>/fake_home/.vireo/* — isolated from real data.
     fake_home = profile / "fake_home"
     (fake_home / ".vireo").mkdir(parents=True, exist_ok=True)
+
+    # Ensure the subprocess skips the welcome/setup screen by writing
+    # setup_complete into the config that the subprocess will read.
+    _fake_config = fake_home / ".vireo" / "config.json"
+    _cfg_data = {}
+    if _fake_config.exists():
+        with contextlib.suppress(Exception):
+            _cfg_data = json.loads(_fake_config.read_text())
+    _cfg_data["setup_complete"] = True
+    _fake_config.write_text(json.dumps(_cfg_data, indent=2))
 
     proc, log_fh = _start_app(paths, port, log_file, fake_home)
     print(f"USER-FIRST TEST MODE — profile={profile}, photos={photos_root}, port={port}")
