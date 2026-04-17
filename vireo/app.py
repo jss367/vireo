@@ -537,6 +537,21 @@ def create_app(db_path, thumb_cache_dir=None):
             p["species"] = species_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_detections(db, photo_dicts):
+        """Attach detection bounding boxes to a list of photo dicts (in-place).
+
+        Each photo gets a `detections` list of {x, y, w, h, confidence,
+        category} dicts, ordered by confidence DESC. Photos with no
+        detections get an empty list.
+        """
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts]
+        det_map = db.get_detections_for_photos(ids)
+        for p in photo_dicts:
+            p["detections"] = det_map.get(p["id"], [])
+        return photo_dicts
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -555,6 +570,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
 
         return jsonify(
             {
@@ -710,6 +726,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
 
         return jsonify(
             {
@@ -1506,9 +1523,12 @@ def create_app(db_path, thumb_cache_dir=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
         total = db.count_collection_photos(collection_id)
+        photo_dicts = [dict(p) for p in photos]
+        _attach_species(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
         return jsonify(
             {
-                "photos": [dict(p) for p in photos],
+                "photos": photo_dicts,
                 "page": page,
                 "per_page": per_page,
                 "total": total,
