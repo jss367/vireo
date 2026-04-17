@@ -223,6 +223,30 @@ def test_open_external_directory_without_app_bundle_errors(app_and_db, monkeypat
     assert ".app" in body["error"]
 
 
+def test_open_external_rejects_non_string_editor(app_and_db, monkeypatch):
+    """Non-string external_editor values return a structured 500, not an uncaught TypeError.
+
+    /api/config doesn't type-validate writes, so the persisted value can be any
+    JSON type. The endpoint must guard expanduser() to keep returning the
+    documented JSON error envelope.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    import config as cfg
+    cfg.set("external_editor", 12345)
+
+    _patch_launchers(monkeypatch)
+
+    resp = client.post('/api/photos/open-external',
+                       data=json.dumps({"photo_ids": [1]}),
+                       content_type='application/json')
+    assert resp.status_code == 500
+    body = resp.get_json()
+    assert "error" in body
+    assert "string" in body["error"].lower()
+
+
 def test_open_external_expands_user_in_editor_path(app_and_db, monkeypatch, tmp_path):
     """`~`-prefixed editor paths are expanded before use."""
     app, _ = app_and_db
