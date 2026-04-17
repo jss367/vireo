@@ -47,7 +47,7 @@ def run(session):
         # (tolerate) or a broken URL / wrong version in map.html
         # (template regression we must surface).  Probe the script URL
         # and classify the response:
-        #   - 2xx: reachable but L undefined → real bug, keep findings
+        #   - 2xx: reachable but L undefined → real bug, fail explicitly
         #   - 4xx (except 408/429): wrong URL in template → fail
         #   - 408/429/5xx: transient CDN issue → tolerate
         #   - no response (network error): CDN unreachable → tolerate
@@ -80,7 +80,18 @@ def run(session):
                     f"CDN ({host!r}): {leaflet_src}",
                 )
         elif 200 <= probe_status < 300:
-            pass  # reachable but L undefined — leave findings as-is
+            # Script URL is reachable but L is undefined — this is a real
+            # regression (e.g. map init logic removed, the URL now serves
+            # non-Leaflet content, or the script errors during execution).
+            # Fail explicitly rather than relying on a downstream "L is not
+            # defined" finding, which may be absent if the page defensively
+            # guards against the missing global.
+            session.assert_that(
+                False,
+                f"Leaflet script reachable at {leaflet_src} "
+                f"(HTTP {probe_status}) but window.L is undefined — "
+                "map initialization regression",
+            )
         elif probe_status in (408, 429) or 500 <= probe_status < 600:
             # Transient CDN condition (timeout, rate limit, server error).
             # Template is still correct; don't fail on external availability.
