@@ -44,22 +44,30 @@ def run(session):
     )
     session.assert_that(empty_visible, "expected empty state visible before scan")
 
-    # The progress box should be hidden
-    progress_hidden = session.eval(
+    # The progress box should exist and be hidden
+    progress_state = session.eval(
         """(() => {
             const el = document.getElementById('progress');
-            return el ? el.style.display === 'none' : true;
+            if (!el) return 'missing';
+            return el.style.display === 'none' ? 'hidden' : 'visible';
         })()"""
     )
-    session.assert_that(progress_hidden, "expected progress box hidden before scan")
+    session.assert_that(
+        progress_state == "hidden",
+        f"expected progress box present and hidden before scan, got {progress_state!r}",
+    )
 
-    # The apply bar should be hidden (no results to apply)
-    apply_hidden = session.eval(
+    # The apply bar should exist and be hidden (no results to apply)
+    apply_state = session.eval(
         """(() => {
             const el = document.getElementById('applyBar');
-            return el ? el.style.display === 'none' : true;
+            if (!el) return 'missing';
+            return el.style.display === 'none' ? 'hidden' : 'visible';
         })()"""
     )
-    session.assert_that(apply_hidden, "expected apply bar hidden before scan")
+    session.assert_that(
+        apply_state == "hidden",
+        f"expected apply bar present and hidden before scan, got {apply_state!r}",
+    )
 
     session.screenshot("duplicates-empty-state")
