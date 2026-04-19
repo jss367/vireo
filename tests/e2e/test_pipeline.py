@@ -7,7 +7,7 @@ def test_pipeline_page_loads_with_stages(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     stages = page.locator("[data-testid='stage-card']")
-    expect(stages).to_have_count(7)
+    expect(stages).to_have_count(8)
 
 
 def test_pipeline_start_button_disabled_without_folders(live_server, page):
