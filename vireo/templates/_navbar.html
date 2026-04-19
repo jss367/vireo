@@ -1510,6 +1510,7 @@ function sendReport() {
       rate_3: 'Rate 3', rate_4: 'Rate 4', rate_5: 'Rate 5',
       flag: 'Flag', reject: 'Reject', unflag: 'Unflag',
       undo: 'Undo', redo: 'Redo', select_all: 'Select all', zoom: 'Toggle zoom',
+      toggle_boxes: 'Toggle detection boxes',
     },
   };
 
@@ -1526,6 +1527,7 @@ function sendReport() {
       rate_4: '4', rate_5: '5',
       flag: 'p', reject: 'x', unflag: 'u',
       undo: 'ctrl+z', redo: 'ctrl+shift+z', select_all: 'ctrl+a', zoom: 'z',
+      toggle_boxes: 'b',
     },
   };
 
@@ -1749,6 +1751,9 @@ async function createWorkspace() {
   <div class="lightbox-filename" id="lightboxFilename"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div style="position:absolute;bottom:16px;right:24px;display:flex;gap:8px;">
+    <button id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" style="background:rgba(0,0,0,0.6);color:var(--text-secondary);border:1px solid var(--text-faint);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;" title="Toggle detection boxes (b)">
+      Hide Boxes
+    </button>
     <button id="lightboxInat" onclick="" style="background:rgba(0,0,0,0.6);color:#74ac00;border:1px solid #74ac00;border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;">
       iNaturalist
     </button>
@@ -1822,6 +1827,22 @@ var _lbCurrentSrcKey = null; // 'full' | '2560' | '3840' | 'original'
 var _lbFullLongEdge = null;  // actual long edge of /full for current photo (may be < 1920 if preview_max_size is configured low)
 var _lbSessionFullLongEdge = null;  // last learned /full size across photos; better fallback than hardcoded 1920 for custom preview_max_size
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
+var _lbBoxesVisible = (function() {
+  try { return localStorage.getItem('vireo.lb.boxesVisible') !== '0'; } catch (e) { return true; }
+})();
+
+function _lbApplyBoxesVisibility() {
+  var container = document.getElementById('lightboxDetections');
+  if (container) container.style.display = _lbBoxesVisible ? '' : 'none';
+  var btn = document.getElementById('lightboxToggleBoxes');
+  if (btn) btn.textContent = _lbBoxesVisible ? 'Hide Boxes' : 'Show Boxes';
+}
+
+function toggleLightboxBoxes() {
+  _lbBoxesVisible = !_lbBoxesVisible;
+  try { localStorage.setItem('vireo.lb.boxesVisible', _lbBoxesVisible ? '1' : '0'); } catch (e) {}
+  _lbApplyBoxesVisibility();
+}
 
 /* Species color palette for lightbox bounding boxes */
 var _lbSpeciesColors = {};
@@ -1975,6 +1996,7 @@ function openLightbox(photoId, filename, photoList) {
 
   // Fetch and render detection bounding boxes
   _lbLoadDetections(photoId);
+  _lbApplyBoxesVisibility();
 
   // Show position indicator if navigating a list
   var counter = document.getElementById('lightboxCounter');
@@ -2399,6 +2421,18 @@ document.addEventListener('keydown', function(e) {
   if (!document.getElementById('lightboxOverlay').classList.contains('active')) return;
   if (e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
   if (e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  var boxesKey = (window._vireoShortcuts && window._vireoShortcuts.browse && window._vireoShortcuts.browse.toggle_boxes) || 'b';
+  if (matchesShortcut(e, boxesKey)) {
+    var tag2 = e.target && e.target.tagName;
+    var editable2 = tag2 === 'INPUT' || tag2 === 'TEXTAREA' || tag2 === 'SELECT' ||
+      (e.target && e.target.isContentEditable);
+    if (!editable2) {
+      toggleLightboxBoxes();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+  }
   var zoomKey = (window._vireoShortcuts && window._vireoShortcuts.browse) ? window._vireoShortcuts.browse.zoom : 'z';
   if (matchesShortcut(e, zoomKey)) {
     // Zoom toggle — simulate a click in the center

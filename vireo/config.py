@@ -127,6 +127,7 @@ DEFAULTS = {
             "undo": "ctrl+z",
             "select_all": "ctrl+a",
             "zoom": "z",
+            "toggle_boxes": "b",
         },
     },
 }
