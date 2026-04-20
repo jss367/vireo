@@ -53,9 +53,17 @@ def run(session):
         return
 
     session.page.click(f'#folderTree .tree-item[data-folder-id="{orphan["id"]}"]')
+    # Wait until the grid has narrowed to exactly the orphan's one photo. The
+    # unfiltered grid contains both archive2024_01.jpg and inbox_01.jpg, so
+    # asserting only that archive2024 is present would pass on a filter no-op.
     session.page.wait_for_function(
-        f'() => document.querySelectorAll(\'.grid-card[data-id]\').length >= 1'
-        f' && document.querySelector(\'#folderTree .tree-item[data-folder-id="{orphan["id"]}"]\').classList.contains(\'active\')',
+        f'() => {{'
+        f'  const cards = Array.from(document.querySelectorAll(\'.grid-card[data-id]\'));'
+        f'  const item = document.querySelector(\'#folderTree .tree-item[data-folder-id="{orphan["id"]}"]\');'
+        f'  return item && item.classList.contains(\'active\')'
+        f'    && cards.length === 1'
+        f'    && (cards[0].dataset.filename || \'\').includes(\'archive2024\');'
+        f'}}',
         timeout=5000,
     )
     session.screenshot("browse-folder-filtered")
@@ -67,4 +75,14 @@ def run(session):
     session.assert_that(
         any("archive2024" in f for f in filtered_filenames),
         f"expected orphan folder's photo to appear when filtered; got {filtered_filenames!r}",
+    )
+    # The control folder's photo must be filtered out — otherwise the click
+    # was a no-op and the regression guard would miss the failure mode.
+    session.assert_that(
+        not any("inbox_" in f for f in filtered_filenames),
+        f"expected control folder's photo to be excluded when filtering by orphan; got {filtered_filenames!r}",
+    )
+    session.assert_that(
+        len(filtered_filenames) == 1,
+        f"expected exactly one photo after filtering by orphan folder; got {filtered_filenames!r}",
     )
