@@ -194,3 +194,58 @@ def test_map_geo_scenario(userfirst_env):
             f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
         )
         pytest.fail(f"map_geo scenario reported bugs:\n{msg}")
+
+
+# ---------------------------------------------------------------------------
+# Regression scenarios — each one guards against a specific past bug.
+# ---------------------------------------------------------------------------
+
+def test_browse_lightbox_arrows_regression(userfirst_env):
+    """Regression guard for #598: lightbox arrows navigate photos from /browse."""
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import browse_lightbox
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="browse_lightbox", seed=browse_seed) as session:
+        browse_lightbox.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"browse_lightbox scenario reported bugs:\n{msg}")
+
+
+def test_browse_folders_orphan_parent_regression(userfirst_env):
+    """Regression guard for #597: orphan-parent folders stay visible on /browse."""
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import browse_folders
+    from vireo.testing.userfirst.seeds import orphan_folder_seed
+
+    with vireo_session(name="browse_folders", seed=orphan_folder_seed) as session:
+        browse_folders.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"browse_folders scenario reported bugs:\n{msg}")
+
+
+def test_browse_multiselect_shortcut_regression(userfirst_env):
+    """Regression guard for #601: keyboard shortcuts act on full multi-selection."""
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import browse_multiselect
+    from vireo.testing.userfirst.seeds import browse_seed
+
+    with vireo_session(name="browse_multiselect", seed=browse_seed) as session:
+        browse_multiselect.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"browse_multiselect scenario reported bugs:\n{msg}")
