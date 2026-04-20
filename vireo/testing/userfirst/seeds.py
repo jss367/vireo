@@ -94,3 +94,55 @@ def browse_seed(db_path, thumb_dir, photos_root):
         _make_thumb(thumb_dir, pid)
 
     db.conn.close()
+
+
+def orphan_folder_seed(db_path, thumb_dir, photos_root):
+    """Seed: a child folder whose parent is linked-then-unlinked.
+
+    Reproduces the condition that caused #597 — ``folders.parent_id`` points
+    at a folder that is not linked to the active workspace. Before the
+    ``get_folder_tree`` fix, the child was invisible in the browse sidebar
+    (stranded under an unreachable parent bucket). After the fix, the
+    child reparents to root and renders.
+    """
+    from db import Database
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    base = photos_root if photos_root else "/test/photos"
+
+    # Parent is linked during creation (add_folder auto-links), child is added
+    # with parent_id pointing at it, then the parent is unlinked.
+    parent_id = db.add_folder(os.path.join(base, "archive"), name="archive")
+    child_id = db.add_folder(
+        os.path.join(base, "archive", "2024"), name="2024", parent_id=parent_id
+    )
+    # Independent folder that's always a root — control to prove the tree renders.
+    linked_root_id = db.add_folder(os.path.join(base, "inbox"), name="inbox")
+
+    # Unlink the parent so it's a "ghost" parent of the child.
+    db.remove_workspace_folder(ws_id, parent_id)
+
+    # Give the orphan child one photo so the grid isn't empty when filtered.
+    photos = []
+    for folder_id, fname, ts in (
+        (child_id, "archive2024_01.jpg", "2024-01-15T10:00:00"),
+        (linked_root_id, "inbox_01.jpg", "2024-11-01T09:00:00"),
+    ):
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=fname,
+            extension=".jpg",
+            file_size=5000,
+            file_mtime=1.0,
+            timestamp=ts,
+        )
+        photos.append(pid)
+
+    os.makedirs(thumb_dir, exist_ok=True)
+    for pid in photos:
+        _make_thumb(thumb_dir, pid)
+
+    db.conn.close()
