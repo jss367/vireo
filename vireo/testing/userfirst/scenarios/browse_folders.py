@@ -20,10 +20,15 @@ def run(session):
     tree = session.eval(
         """(() => {
             return Array.from(document.querySelectorAll('#folderTree .tree-item'))
-                .map(el => ({
-                    id: parseInt(el.dataset.folderId, 10),
-                    name: (el.querySelector('span') || {}).textContent || '',
-                }));
+                .map(el => {
+                    const nameEl = el.querySelector(
+                        'span:not(.tree-indent):not(.tree-toggle):not(.count)'
+                    );
+                    return {
+                        id: parseInt(el.dataset.folderId, 10),
+                        name: (nameEl ? nameEl.textContent : '').trim(),
+                    };
+                });
         })()"""
     )
 
