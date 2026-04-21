@@ -22,10 +22,11 @@ def test_find_darktable_returns_configured_path(tmp_path):
     assert find_darktable(str(fake_bin)) == str(fake_bin)
 
 
-def test_find_darktable_returns_none_for_bad_configured_path():
-    """find_darktable returns None when configured path doesn't exist."""
+def test_find_darktable_returns_none_for_bad_configured_path(monkeypatch):
+    """find_darktable returns None when configured path doesn't exist and PATH has nothing."""
     from develop import find_darktable
 
+    monkeypatch.setattr("shutil.which", lambda x: None)
     assert find_darktable("/nonexistent/darktable-cli") is None
 
 
@@ -121,3 +122,125 @@ def test_develop_photo_returns_error_when_input_missing():
     )
     assert result["success"] is False
     assert "not found" in result["error"].lower()
+
+
+def test_find_darktable_resolves_symlink(tmp_path):
+    """find_darktable follows symlinks so macOS bundle lookup works.
+
+    darktable-cli invoked via a symlink (e.g. Homebrew's /usr/local/bin
+    symlink into /Applications/darktable.app) dies in dt_init because the
+    bundle-resource walk starts from argv[0]. Vireo must resolve to the real
+    binary path before handing it to subprocess.
+    """
+    import develop
+
+    real = tmp_path / "real_darktable-cli"
+    real.touch()
+    real.chmod(0o755)
+    link = tmp_path / "symlinked_darktable-cli"
+    link.symlink_to(real)
+
+    # Configured path case
+    assert develop.find_darktable(str(link)) == str(real)
+
+    # PATH-auto-detect case: monkeypatch shutil.which to hand back the symlink
+    import unittest.mock
+    with unittest.mock.patch("shutil.which", return_value=str(link)):
+        assert develop.find_darktable("") == str(real)
+
+
+def _fake_completed(returncode, stdout="", stderr=""):
+    import subprocess
+    return subprocess.CompletedProcess(args=[], returncode=returncode,
+                                        stdout=stdout, stderr=stderr)
+
+
+def test_develop_photo_surfaces_stdout_when_stderr_empty(tmp_path, monkeypatch):
+    """darktable writes critical errors to stdout; error message must not be blank."""
+    import subprocess
+
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    fake_bin = tmp_path / "darktable-cli"
+    fake_bin.touch()
+    fake_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+
+    stdout_msg = "     0.1899 [dt_init] ERROR: can't init develop system, aborting."
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **kw: _fake_completed(1, stdout=stdout_msg, stderr=""))
+
+    result = develop.develop_photo(str(fake_bin), str(raw), str(out))
+    assert result["success"] is False
+    assert "can't init develop system" in result["error"]
+    assert "exited with code 1" in result["error"]
+
+
+def test_develop_photo_surfaces_stderr_when_stdout_empty(tmp_path, monkeypatch):
+    """Stderr-only failures still surface (back-compat)."""
+    import subprocess
+
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    fake_bin = tmp_path / "darktable-cli"
+    fake_bin.touch()
+    fake_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **kw: _fake_completed(1, stdout="", stderr="Segfault in lua"))
+
+    result = develop.develop_photo(str(fake_bin), str(raw), str(out))
+    assert result["success"] is False
+    assert "Segfault in lua" in result["error"]
+
+
+def test_develop_photo_labels_both_streams_when_both_present(tmp_path, monkeypatch):
+    """When darktable writes to both streams, include both with labels."""
+    import subprocess
+
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    fake_bin = tmp_path / "darktable-cli"
+    fake_bin.touch()
+    fake_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **kw: _fake_completed(1, stdout="stdout msg", stderr="stderr msg"))
+
+    result = develop.develop_photo(str(fake_bin), str(raw), str(out))
+    assert "stdout msg" in result["error"]
+    assert "stderr msg" in result["error"]
+    assert "stdout:" in result["error"]
+    assert "stderr:" in result["error"]
+
+
+def test_develop_photo_truncates_verbose_failure(tmp_path, monkeypatch):
+    """A pathological multi-KB failure shouldn't explode the job error list."""
+    import subprocess
+
+    import develop
+
+    raw = tmp_path / "bird.NEF"
+    raw.touch()
+    fake_bin = tmp_path / "darktable-cli"
+    fake_bin.touch()
+    fake_bin.chmod(0o755)
+    out = tmp_path / "out" / "bird.jpg"
+
+    huge = "A" * 5000 + "TAIL_MARKER"
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **kw: _fake_completed(1, stdout=huge, stderr=""))
+
+    result = develop.develop_photo(str(fake_bin), str(raw), str(out))
+    # Most of the head should be dropped; the tail (which carries the actual
+    # error message darktable prints near the end) must survive.
+    assert "TAIL_MARKER" in result["error"]
+    assert len(result["error"]) < 800
