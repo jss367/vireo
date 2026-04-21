@@ -1,5 +1,6 @@
 """Photo export with resize, quality control, and template-based naming."""
 
+import hashlib
 import logging
 import os
 import re
@@ -76,13 +77,16 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             developed_dir: str -- optional path to darktable-developed
                 outputs (mirrors darktable_output_dir config). Export
                 prefers a developed JPG/TIFF at
-                <developed_dir>/<folder_id>/<stem>.<ext> (or at the
+                <developed_dir>/<path_key>/<stem>.<ext> (or at the
                 default <folder>/developed/<stem>.<ext>) over
-                re-decoding the RAW. The folder_id nesting matches the
-                develop job's write convention and keeps lookups one-to-one
-                even when two source folders share a basename. As a legacy
-                fallback, <developed_dir>/<stem>.<ext> is also probed so
-                libraries developed before the folder_id convention was
+                re-decoding the RAW. `path_key` is a stable hash of the
+                source folder's path (see `developed_folder_key`), so the
+                per-folder nesting matches the develop job's write
+                convention, keeps lookups one-to-one when two source
+                folders share a basename, and survives SQLite row-id
+                reuse after folder deletion. As a legacy fallback,
+                <developed_dir>/<stem>.<ext> is also probed so libraries
+                developed before the per-folder nesting convention was
                 introduced still pick up their developed outputs.
         progress_cb: optional callback(current, total, current_file)
 
@@ -138,7 +142,6 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         folder_path = folders.get(photo["folder_id"], "")
         source_path = _find_developed_output(
             photo["filename"],
-            photo["folder_id"],
             folder_path,
             developed_dir,
             developed_index,
@@ -224,6 +227,25 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
 
 
+def developed_folder_key(folder_path):
+    """Return a stable filesystem-safe key for the given source folder path.
+
+    Derived from the folder's canonical path rather than its SQLite row id
+    so the key survives folder churn. `folders.id` is an INTEGER PRIMARY
+    KEY, which SQLite happily reuses after a row is deleted, and
+    `delete_folder` does not clean the external developed directory. Using
+    the row id as an on-disk key therefore risked a freshly-added folder
+    silently inheriting stale developed files left on disk by a deleted
+    folder whose id it reused. Hashing the path sidesteps that entirely:
+    distinct paths always get distinct keys, and a re-scan of the same
+    path resolves to the same key (so its existing developed outputs are
+    correctly picked up again).
+    """
+    if not folder_path:
+        return ""
+    return hashlib.sha1(folder_path.encode("utf-8")).hexdigest()[:16]
+
+
 class _DevelopedDirIndex:
     """Lazy, per-export cache of directory listings for developed lookups.
 
@@ -261,22 +283,26 @@ class _DevelopedDirIndex:
         return None
 
 
-def _find_developed_output(filename, folder_id, folder_path, developed_dir, index=None):
+def _find_developed_output(filename, folder_path, developed_dir, index=None):
     """Return the path to a darktable-developed output for this photo, or None.
 
     Lookup locations are probed in order:
 
-      * <developed_dir>/<folder_id>/<stem>.<ext> — matches how the develop
-        job writes when darktable_output_dir is configured (the flat output
-        dir is nested per folder_id to avoid collisions).
+      * <developed_dir>/<path_key>/<stem>.<ext> — matches how the develop
+        job writes when darktable_output_dir is configured (the flat
+        output dir is nested per source-folder so basename collisions
+        stay one-to-one). `path_key` is derived from the folder path
+        rather than its SQLite row id, so the on-disk key survives row
+        deletion without risking a reused id silently inheriting stale
+        outputs — see `developed_folder_key`.
       * <folder_path>/developed/<stem>.<ext> — the default develop-job
         location, naturally disambiguated because each source folder has
         its own developed/ subdir.
       * <developed_dir>/<stem>.<ext> — legacy flat layout used by older
         versions of the develop job. Probed last so that any new
         folder-scoped output wins, but kept so libraries developed before
-        the folder_id convention still light up their developed render on
-        export.
+        the per-folder nesting convention still light up their developed
+        render on export.
 
     Extensions are matched case-insensitively so exports still pick up
     developed files written with uppercase extensions — e.g. IMG_0001.JPG
@@ -294,8 +320,8 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir, inde
     """
     stem = os.path.splitext(filename)[0]
     candidates = []
-    if developed_dir and folder_id is not None:
-        candidates.append(os.path.join(developed_dir, str(folder_id)))
+    if developed_dir and folder_path:
+        candidates.append(os.path.join(developed_dir, developed_folder_key(folder_path)))
     if folder_path:
         candidates.append(os.path.join(folder_path, "developed"))
     if developed_dir:

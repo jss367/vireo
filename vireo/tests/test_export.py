@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from db import Database
-from export import export_photos, resolve_template, sanitize_filename
+from export import developed_folder_key, export_photos, resolve_template, sanitize_filename
 from PIL import Image
 
 
@@ -429,9 +429,10 @@ def test_export_honors_configured_developed_dir(export_env):
 
     Mirrors the darktable_output_dir config: users who configure a custom
     output location expect export to find the developed outputs at that
-    location. Files are looked up under a <folder_id>/ subdir to match the
-    develop job's write convention and keep lookups one-to-one when two
-    source folders share a basename.
+    location. Files are looked up under a per-folder subdir keyed by a
+    hash of the source folder's path (see `developed_folder_key`); that
+    matches the develop job's write convention and keeps lookups
+    one-to-one when two source folders share a basename.
     """
     env = export_env
     # Decoy in the default location — export must NOT pick this.
@@ -440,10 +441,10 @@ def test_export_honors_configured_developed_dir(export_env):
     Image.new("RGB", (800, 600), color=(200, 200, 0)).save(
         str(decoy_dir / "bird1.jpg"), "JPEG",
     )
-    # Real output in the configured dir, under the folder_id subdir.
+    # Real output in the configured dir, under the per-folder subdir.
     configured = env["tmp_path"] / "darktable_out"
     configured.mkdir()
-    folder_subdir = configured / str(env["fid"])
+    folder_subdir = configured / developed_folder_key(str(env["src"]))
     folder_subdir.mkdir()
     Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
         str(folder_subdir / "bird1.jpg"), "JPEG",
@@ -526,7 +527,8 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
     filename stem, so two photos named IMG_0001.CR3 in different source
     folders both resolved to <developed_dir>/IMG_0001.jpg — silently mixing
     developed outputs. Each photo's developed file now lives under a
-    <folder_id>/ subdir, so matches are one-to-one.
+    per-source-folder subdir keyed by a hash of the folder's path
+    (see `developed_folder_key`), so matches are one-to-one.
     """
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.ensure_default_workspace()
@@ -556,17 +558,21 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
     pid_b = db.add_photo(folder_id=fid_b, filename="IMG_0001.jpg", extension=".jpg",
                          file_size=1, file_mtime=1.0)
 
-    # Developed outputs under <developed_dir>/<folder_id>/<stem>.jpg — two
-    # distinct files, each a different solid color.
+    # Developed outputs under <developed_dir>/<path_key>/<stem>.jpg — two
+    # distinct files, each a different solid color. Keys derive from each
+    # folder's path, so the two folders get distinct subdirs.
     developed = tmp_path / "darktable_out"
     developed.mkdir()
-    (developed / str(fid_a)).mkdir()
-    (developed / str(fid_b)).mkdir()
+    key_a = developed_folder_key(str(src_a))
+    key_b = developed_folder_key(str(src_b))
+    assert key_a != key_b
+    (developed / key_a).mkdir()
+    (developed / key_b).mkdir()
     Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
-        str(developed / str(fid_a) / "IMG_0001.jpg"), "JPEG", quality=95,
+        str(developed / key_a / "IMG_0001.jpg"), "JPEG", quality=95,
     )
     Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
-        str(developed / str(fid_b) / "IMG_0001.jpg"), "JPEG", quality=95,
+        str(developed / key_b / "IMG_0001.jpg"), "JPEG", quality=95,
     )
 
     export_photos(
@@ -682,7 +688,7 @@ def test_export_developed_stem_match_is_case_sensitive(tmp_path):
 def test_export_legacy_flat_developed_dir_fallback(export_env):
     """Developed outputs written flat to <developed_dir>/<stem>.<ext> still light up.
 
-    Before the folder_id nesting convention existed, the develop job wrote
+    Before the per-folder nesting convention existed, the develop job wrote
     directly into `darktable_output_dir` with no per-folder subdir. Users
     who upgraded would otherwise silently regress to RAW export; the flat
     path is still probed as a last-resort fallback.
@@ -716,8 +722,8 @@ def test_export_folder_scoped_developed_wins_over_legacy_flat(export_env):
     """When both folder-scoped and legacy flat outputs exist, folder-scoped wins.
 
     The legacy flat fallback exists only to avoid regressing libraries that
-    predate the folder_id nesting. Any newly-developed file (written under
-    <folder_id>/) must still take precedence so same-basename collisions
+    predate the per-folder nesting. Any newly-developed file (written under
+    <path_key>/) must still take precedence so same-basename collisions
     across folders stay resolved one-to-one.
     """
     env = export_env
@@ -728,7 +734,7 @@ def test_export_folder_scoped_developed_wins_over_legacy_flat(export_env):
         str(configured / "bird1.jpg"), "JPEG", quality=95,
     )
     # Folder-scoped (green) — wins.
-    folder_subdir = configured / str(env["fid"])
+    folder_subdir = configured / developed_folder_key(str(env["src"]))
     folder_subdir.mkdir()
     Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
         str(folder_subdir / "bird1.jpg"), "JPEG", quality=95,
@@ -797,3 +803,85 @@ def test_export_caches_developed_dir_scans(export_env, monkeypatch):
     # Sanity: any directory we scanned, we scanned at most once.
     for path, n in counts.items():
         assert n <= 1, f"{path} was scanned {n} times; expected ≤1 after caching"
+
+
+def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
+    """A freshly-added folder that happens to reuse a deleted folder's row id
+    must not inherit the deleted folder's developed files.
+
+    Regression: when the configured developed_dir was nested by folder_id,
+    a SQLite row-id reuse (folders.id is INTEGER PRIMARY KEY, not
+    AUTOINCREMENT) silently cross-wired the new folder's export onto
+    stale pixels left on disk by the deleted folder. Nesting by a hash
+    of the folder path instead makes distinct paths always resolve to
+    distinct on-disk keys, so the stale files never match.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    dest = tmp_path / "export_out"
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+
+    # Step 1: add a folder, add a photo, lay down a developed file for it,
+    # then delete the folder. The external developed file is intentionally
+    # left on disk (delete_folder does not reach into darktable_output_dir),
+    # mirroring the real-world scenario.
+    src_old = tmp_path / "old_folder"
+    src_old.mkdir()
+    Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
+        str(src_old / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+    fid_old = db.add_folder(str(src_old), name="Old")
+    pid_old = db.add_photo(folder_id=fid_old, filename="IMG_0001.jpg", extension=".jpg",
+                           file_size=1, file_mtime=1.0)
+    # Yellow stale file under the OLD folder's path key — must not bleed
+    # into the new folder's export.
+    stale_key = developed_folder_key(str(src_old))
+    (developed / stale_key).mkdir()
+    Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
+        str(developed / stale_key / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+    db.delete_folder(fid_old)
+    _ = pid_old  # photo row is cascaded away with its folder
+
+    # Step 2: add a NEW folder at a different path, with a photo that has
+    # the same basename as the deleted one. The new folder should receive
+    # a distinct on-disk key and never see the stale yellow file.
+    src_new = tmp_path / "new_folder"
+    src_new.mkdir()
+    # Blue original so we can tell in the output whether we got the stale
+    # yellow developed file (regression) or fell back to the fresh blue
+    # original (correct behavior when no developed file exists yet).
+    Image.new("RGB", (800, 600), color=(0, 0, 200)).save(
+        str(src_new / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+    fid_new = db.add_folder(str(src_new), name="New")
+    pid_new = db.add_photo(folder_id=fid_new, filename="IMG_0001.jpg", extension=".jpg",
+                           file_size=1, file_mtime=2.0)
+
+    # The path-based key for the new folder must differ from the stale key.
+    new_key = developed_folder_key(str(src_new))
+    assert new_key != stale_key
+
+    export_photos(
+        db=db,
+        vireo_dir=str(vireo_dir),
+        photo_ids=[pid_new],
+        destination=str(dest),
+        options={
+            "naming_template": "{original}",
+            "developed_dir": str(developed),
+        },
+    )
+
+    r, g, b = _avg_rgb(os.path.join(str(dest), "IMG_0001.jpg"))
+    # Blue-dominant = fell back to the fresh original, not the stale
+    # yellow file left behind by the deleted folder.
+    assert b > r and b > g, (
+        f"expected blue-dominant from fresh original (not stale yellow "
+        f"developed file), got rgb=({r},{g},{b})"
+    )

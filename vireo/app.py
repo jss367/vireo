@@ -6147,6 +6147,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         def work(job):
             from develop import develop_photo, output_path_for_photo
+            from export import developed_folder_key
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -6172,11 +6173,13 @@ def create_app(db_path, thumb_cache_dir=None):
 
                 # Determine output directory. The per-folder "developed/" default
                 # is naturally disambiguated (one dir per source folder). The
-                # globally configured dir is flat, so nest each photo under its
-                # folder_id to avoid collisions when two source folders contain
-                # files with the same basename (e.g. IMG_0001.CR3 in both).
+                # globally configured dir is flat, so nest each photo under a
+                # stable key derived from the source folder's path (not its row
+                # id — SQLite reuses those after deletion, which would silently
+                # cross-wire new folders onto stale developed files left on
+                # disk by a previously-deleted folder).
                 if output_dir:
-                    out_dir = os.path.join(output_dir, str(photo["folder_id"]))
+                    out_dir = os.path.join(output_dir, developed_folder_key(folder_path))
                 else:
                     out_dir = os.path.join(folder_path, "developed")
                 out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
