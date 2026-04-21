@@ -2202,6 +2202,16 @@ function clearSelection() {
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
+  // If the detail panel is still open after clearing, its actions (setFlag,
+  // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
+  // and silently do nothing. Hide it so there is no ghost UI to interact with.
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('visible')) {
+    detail.classList.remove('visible');
+    var summary = document.getElementById('summaryPanel');
+    if (summary) summary.classList.remove('hidden');
+    loadSummary();
+  }
   updateBatchBar();
 }
 

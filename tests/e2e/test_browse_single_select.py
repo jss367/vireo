@@ -83,3 +83,35 @@ def test_clear_button_clears_single_focus(live_server, page):
     expect(bar).to_be_hidden()
     # selectedPhotoId must be cleared too so batch actions no longer target it.
     assert page.evaluate("selectedPhotoId") is None
+
+
+def test_clear_button_closes_detail_panel(live_server, page):
+    """Clear in the batch bar must also hide the detail panel.
+
+    Regression: clearSelection() nulled selectedPhotoId but left the detail
+    panel visible. Detail-panel handlers (setFlag, setColorLabel, addKeyword)
+    early-return on null selectedPhotoId, so buttons silently did nothing
+    while the panel remained on screen.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+
+    # Detail panel gains the "visible" class when a photo is focused.
+    page.wait_for_function(
+        "document.getElementById('detailContent').classList.contains('visible')",
+        timeout=2000,
+    )
+
+    page.locator("#batchBar button", has_text="Clear").click()
+
+    # Detail panel must drop the visible class so the summary comes back.
+    assert not page.evaluate(
+        "document.getElementById('detailContent').classList.contains('visible')"
+    )
+    assert not page.evaluate(
+        "document.getElementById('summaryPanel').classList.contains('hidden')"
+    )
