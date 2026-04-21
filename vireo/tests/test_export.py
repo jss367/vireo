@@ -587,3 +587,94 @@ def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
     assert g_a > r_a and g_a > b_a, f"A: expected green-dominant, got rgb=({r_a},{g_a},{b_a})"
     # Folder B got the yellow-dominant (red+green) developed output.
     assert r_b > b_b and g_b > b_b, f"B: expected yellow-dominant, got rgb=({r_b},{g_b},{b_b})"
+
+
+def _fs_is_case_sensitive(path):
+    """Return True if creating 'x' and 'X' in path yields two distinct files."""
+    probe_lo = os.path.join(str(path), "_case_probe_a")
+    probe_up = os.path.join(str(path), "_CASE_PROBE_A")
+    try:
+        open(probe_lo, "w").close()
+        result = not os.path.exists(probe_up)
+        return result
+    finally:
+        try:
+            os.remove(probe_lo)
+        except OSError:
+            pass
+
+
+def test_export_developed_stem_match_is_case_sensitive(tmp_path):
+    """Two photos whose filenames differ only by case resolve to distinct developed files.
+
+    Regression: `_find_developed_output` used to lowercase the search stem
+    as well as the directory entries, so on case-sensitive filesystems
+    Bird1.CR3 and bird1.CR3 in the same source folder silently collided
+    on the same developed file. Stems must match case-sensitively.
+    """
+    if not _fs_is_case_sensitive(tmp_path):
+        pytest.skip("filesystem is case-insensitive; scenario cannot occur here")
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / "src"
+    src.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    dest = tmp_path / "export_out"
+
+    # Two originals in the same folder with stems that differ only by case.
+    Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
+        str(src / "Bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(0, 0, 200)).save(
+        str(src / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    fid = db.add_folder(str(src), name="Mixed")
+    pid_upper = db.add_photo(folder_id=fid, filename="Bird1.jpg", extension=".jpg",
+                             file_size=1, file_mtime=1.0)
+    pid_lower = db.add_photo(folder_id=fid, filename="bird1.jpg", extension=".jpg",
+                             file_size=1, file_mtime=2.0)
+
+    # Developed outputs with matching cases. If the lookup lowercases the
+    # stem, both photos resolve to whichever entry os.listdir happens to
+    # return first — a silent data-correctness bug.
+    developed = src / "developed"
+    developed.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed / "Bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
+        str(developed / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    # Export one at a time so the two output filenames don't collide on
+    # a case-insensitive destination view; they land with their own cases.
+    export_photos(
+        db=db,
+        vireo_dir=str(vireo_dir),
+        photo_ids=[pid_upper],
+        destination=str(dest),
+        options={"naming_template": "{original}"},
+    )
+    export_photos(
+        db=db,
+        vireo_dir=str(vireo_dir),
+        photo_ids=[pid_lower],
+        destination=str(dest),
+        options={"naming_template": "{original}"},
+    )
+
+    r_u, g_u, b_u = _avg_rgb(os.path.join(str(dest), "Bird1.jpg"))
+    r_l, g_l, b_l = _avg_rgb(os.path.join(str(dest), "bird1.jpg"))
+    # Bird1.jpg (upper) → green-dominant developed output.
+    assert g_u > r_u and g_u > b_u, (
+        f"Bird1: expected green-dominant developed, got rgb=({r_u},{g_u},{b_u})"
+    )
+    # bird1.jpg (lower) → yellow-dominant developed output.
+    assert r_l > b_l and g_l > b_l, (
+        f"bird1: expected yellow-dominant developed, got rgb=({r_l},{g_l},{b_l})"
+    )

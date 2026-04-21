@@ -221,11 +221,14 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
         location, naturally disambiguated because each source folder has
         its own developed/ subdir.
 
-    Extensions (and stems) are matched case-insensitively so exports still
-    pick up developed files written with uppercase extensions — e.g.
-    IMG_0001.JPG — which can happen on case-sensitive filesystems when
+    Extensions are matched case-insensitively so exports still pick up
+    developed files written with uppercase extensions — e.g. IMG_0001.JPG
+    — which can happen on case-sensitive filesystems when
     darktable_output_format is configured with uppercase, or for files
-    placed manually.
+    placed manually. Stems are matched case-sensitively so that two photos
+    whose filenames differ only by case (e.g. Bird1.CR3 and bird1.CR3 in
+    the same folder on a case-sensitive filesystem) resolve to distinct
+    developed files.
 
     JPG is preferred over TIFF when both exist.
     """
@@ -241,15 +244,17 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
             names = os.listdir(base)
         except OSError:
             continue
-        # Map lowercased basename → actual path. If two files in the same
-        # dir differ only in case, the first one listed wins (arbitrary but
-        # acceptable — that's a user-engineered collision).
+        # Map (exact stem, lowercased ext) → actual filename. Stem match
+        # must be case-sensitive to avoid collisions between photos whose
+        # names differ only by case. Extension match is case-insensitive
+        # so developed files written as .JPG / .TIFF are still picked up.
         entries = {}
         for name in names:
-            entries.setdefault(name.lower(), os.path.join(base, name))
-        lower_stem = stem.lower()
+            ent_stem, ent_ext = os.path.splitext(name)
+            ext_key = ent_ext[1:].lower() if ent_ext.startswith(".") else ent_ext.lower()
+            entries.setdefault((ent_stem, ext_key), os.path.join(base, name))
         for ext in preferred_exts:
-            path = entries.get(f"{lower_stem}.{ext}")
+            path = entries.get((stem, ext))
             if path and os.path.isfile(path):
                 return path
     return None
