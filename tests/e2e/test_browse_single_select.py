@@ -162,6 +162,47 @@ def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
     )
 
 
+def test_close_detail_preserves_multiselect_highlight(live_server, page):
+    """click A -> cmd-click B -> cmd-click B -> closeDetail must keep A lit.
+
+    Regression: closeDetail() stripped .selected from every card but left
+    selectedPhotos intact, so the bar kept showing "1 selected" while no
+    card was visibly highlighted. Destructive batch actions (delete/export/
+    develop) would then target a photo the user could no longer identify.
+    Fix: re-apply the .selected class to any card still in selectedPhotos
+    during closeDetail.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    a_id = int(cards.nth(0).get_attribute("data-id"))
+    b_id = int(cards.nth(1).get_attribute("data-id"))
+
+    cards.nth(0).click()  # click A: set={}, focus=A
+    cards.nth(1).click(modifiers=["Meta"])  # cmd-click B: set={A,B}, focus=A
+    cards.nth(1).click(modifiers=["Meta"])  # cmd-click B again: set={A}, focus=A
+
+    page.evaluate("closeDetail()")
+
+    # Bar must still reflect the surviving multi-select entry.
+    expect(page.locator("#batchBar")).to_be_visible()
+    expect(page.locator("#batchCount")).to_have_text("1 selected")
+    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
+    assert page.evaluate("selectedPhotoId") is None
+
+    # Card A must still paint as selected so the user can see what will be acted on.
+    assert page.evaluate(
+        f"document.querySelector('.grid-card[data-id=\"{a_id}\"]').classList.contains('selected')"
+    )
+    assert not page.evaluate(
+        f"document.querySelector('.grid-card[data-id=\"{b_id}\"]').classList.contains('selected')"
+    )
+
+
 def test_resetAndLoad_clears_multiselect_set(live_server, page):
     """Changing sort/filter/folder must drop a surviving multi-select set.
 

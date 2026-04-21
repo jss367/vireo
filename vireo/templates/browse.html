@@ -2505,8 +2505,14 @@ function closeDetail() {
   document.getElementById('summaryPanel').classList.remove('hidden');
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Re-highlight any cmd/shift-click selections that survive detail close.
+  // A blanket .remove('selected') would leave selectedPhotos armed for batch
+  // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
+  // B drops the set to {A}, and closing detail would otherwise show "1 selected"
+  // in the bar against an unhighlighted photo.
   document.querySelectorAll('.grid-card').forEach(function(el) {
-    el.classList.remove('selected');
+    var cardId = parseInt(el.dataset.id);
+    el.classList.toggle('selected', selectedPhotos.has(cardId));
   });
   updateBatchBar();
   loadSummary();
