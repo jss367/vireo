@@ -1,3 +1,5 @@
+import json
+
 from playwright.sync_api import expect
 
 
@@ -224,6 +226,41 @@ def test_resetAndLoad_clears_multiselect_set(live_server, page):
 
     # Simulate any dataset-changing action (sort change, filter, folder click).
     page.evaluate("resetAndLoad()")
+
+    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("selectedPhotoId") is None
+    expect(bar).to_be_hidden()
+
+
+def test_filterByCollection_clears_multiselect_set(live_server, page):
+    """Switching to a collection must drop a surviving multi-select set.
+
+    Regression: filterByCollection() reset `photos = []` and called
+    closeDetail() but never cleared selectedPhotos, so a cmd-click selection
+    from the previous view survived the collection switch. The batch bar
+    would reappear in the new view with stale ids, arming Delete/Export/
+    Develop against photos that weren't visible.
+    """
+    db = live_server["db"]
+    rules = json.dumps([{"field": "extension", "op": "is", "value": ".jpg"}])
+    collection_id = db.add_collection("All JPGs", rules)
+
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click(modifiers=["Meta"])
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    assert page.evaluate("selectedPhotos.size") == 1
+
+    # Switch to a collection; stale selection must drop before loadPhotos.
+    page.evaluate(f"filterByCollection({collection_id})")
+    page.wait_for_function(
+        f"activeCollectionId === {collection_id}", timeout=2000
+    )
 
     assert page.evaluate("selectedPhotos.size") == 0
     assert page.evaluate("selectedPhotoId") is None

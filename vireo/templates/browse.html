@@ -1352,6 +1352,13 @@ async function filterByCollection(id) {
   allLoaded = false;
   loadEpoch++;         // invalidate any in-flight loadPhotos response
   loading = false;     // safe to clear: the stale response will be dropped
+  // Dataset is about to change; a surviving multi-select Set points at
+  // photos from the previous collection. Without this clear, closeDetail()
+  // keeps selectedPhotos intact and updateBatchBar() shows "N selected" with
+  // stale ids, arming Delete/Export/Develop against hidden photos.
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
   document.getElementById('grid').innerHTML = '';
   closeDetail();
   await loadPhotos();
@@ -2873,6 +2880,9 @@ function openInEditorBatch() {
     photos = [];
     currentPage = 1;
     allLoaded = false;
+    // Same hazard as filterByCollection: leaving selectedPhotos populated
+    // across a dataset switch leaves the batch bar armed against stale ids.
+    selectedPhotos.clear();
     selectedPhotoId = null;
     selectedIndex = -1;
     closeDetail();
