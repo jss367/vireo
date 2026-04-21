@@ -59,3 +59,27 @@ def test_cmd_click_single_photo_shows_bar(live_server, page):
     bar = page.locator("#batchBar")
     expect(bar).to_be_visible()
     expect(page.locator("#batchCount")).to_have_text("1 selected")
+
+
+def test_clear_button_clears_single_focus(live_server, page):
+    """Clear in the batch bar must hide the bar after a single-click focus.
+
+    Regression: clearSelection() only emptied selectedPhotos, so the focused
+    selectedPhotoId survived and updateBatchBar() re-showed "1 selected",
+    leaving batch actions silently armed against that photo.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click()
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+
+    page.locator("#batchBar button", has_text="Clear").click()
+
+    expect(bar).to_be_hidden()
+    # selectedPhotoId must be cleared too so batch actions no longer target it.
+    assert page.evaluate("selectedPhotoId") is None

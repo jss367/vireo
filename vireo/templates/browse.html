@@ -2194,7 +2194,11 @@ async function confirmBatchCollection() {
 }
 
 function clearSelection() {
+  // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
+  // reappears immediately with the single-focus photo still armed for actions.
   selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
