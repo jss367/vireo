@@ -1,5 +1,6 @@
 """Tests for photo export operations."""
 
+import contextlib
 import os
 import sys
 
@@ -598,10 +599,8 @@ def _fs_is_case_sensitive(path):
         result = not os.path.exists(probe_up)
         return result
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.remove(probe_lo)
-        except OSError:
-            pass
 
 
 def test_export_developed_stem_match_is_case_sensitive(tmp_path):
