@@ -1462,6 +1462,11 @@ function resetAndLoad() {
   allLoaded = false;
   loadEpoch++;
   loading = false;
+  // Dataset is about to change; any prior selection (multi-select Set or
+  // single-focus id) points at photos that may not exist in the new view.
+  // Leaving them set would let updateBatchBar() keep showing "N selected"
+  // and arm batch actions (delete/export/develop) against stale ids.
+  selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
   // Leaving collection mode when applying non-collection filters (sort, rating,

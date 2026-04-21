@@ -115,3 +115,30 @@ def test_clear_button_closes_detail_panel(live_server, page):
     assert not page.evaluate(
         "document.getElementById('summaryPanel').classList.contains('hidden')"
     )
+
+
+def test_resetAndLoad_clears_multiselect_set(live_server, page):
+    """Changing sort/filter/folder must drop a surviving multi-select set.
+
+    Regression: resetAndLoad() cleared selectedPhotoId but left selectedPhotos
+    intact, so a cmd-click selection survived sort/filter/folder changes. The
+    bar would reappear in the new view with stale ids, arming delete/export/
+    develop against photos that might not be present anymore.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    first.click(modifiers=["Meta"])
+
+    bar = page.locator("#batchBar")
+    expect(bar).to_be_visible()
+    assert page.evaluate("selectedPhotos.size") == 1
+
+    # Simulate any dataset-changing action (sort change, filter, folder click).
+    page.evaluate("resetAndLoad()")
+
+    assert page.evaluate("selectedPhotos.size") == 0
+    assert page.evaluate("selectedPhotoId") is None
+    expect(bar).to_be_hidden()
