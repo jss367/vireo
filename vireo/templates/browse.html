@@ -1352,6 +1352,13 @@ async function filterByCollection(id) {
   allLoaded = false;
   loadEpoch++;         // invalidate any in-flight loadPhotos response
   loading = false;     // safe to clear: the stale response will be dropped
+  // Dataset is about to change; a surviving multi-select Set points at
+  // photos from the previous collection. Without this clear, closeDetail()
+  // keeps selectedPhotos intact and updateBatchBar() shows "N selected" with
+  // stale ids, arming Delete/Export/Develop against hidden photos.
+  selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
   document.getElementById('grid').innerHTML = '';
   closeDetail();
   await loadPhotos();
@@ -1462,6 +1469,11 @@ function resetAndLoad() {
   allLoaded = false;
   loadEpoch++;
   loading = false;
+  // Dataset is about to change; any prior selection (multi-select Set or
+  // single-focus id) points at photos that may not exist in the new view.
+  // Leaving them set would let updateBatchBar() keep showing "N selected"
+  // and arm batch actions (delete/export/develop) against stale ids.
+  selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
   // Leaving collection mode when applying non-collection filters (sort, rating,
@@ -1841,7 +1853,7 @@ async function loadInatStatus(photoIds) {
 }
 
 function batchSubmitInat() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (ids.length === 0) return;
   submitToInatBatch(ids);
 }
@@ -1970,6 +1982,23 @@ function selectPhoto(e, id, idx) {
     } else {
       selectedPhotos.add(id);
     }
+    // If the toggle dropped the focused photo out of a non-empty set, its
+    // highlight/detail focus is now stale: the card still paints "selected"
+    // via the selectedPhotoId branch of the highlight rule, yet
+    // getActiveSelection() returns the set — so destructive actions
+    // (delete/export/develop) would target the set while the user is staring
+    // at a different, visibly-focused card. Reconcile by dropping the focus.
+    if (selectedPhotoId !== null && selectedPhotos.size > 0 && !selectedPhotos.has(selectedPhotoId)) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      var detail = document.getElementById('detailContent');
+      if (detail && detail.classList.contains('visible')) {
+        detail.classList.remove('visible');
+        var summary = document.getElementById('summaryPanel');
+        if (summary) summary.classList.remove('hidden');
+        loadSummary();
+      }
+    }
   } else {
     // Normal click: single select
     selectedPhotos.clear();
@@ -1987,19 +2016,30 @@ function selectPhoto(e, id, idx) {
   updateBatchBar();
 }
 
+// The batch bar drives Develop/Export/Delete/etc. "Active selection" is
+// whichever of {selectedPhotos, selectedPhotoId} has entries — the Set for
+// cmd/shift-clicks, the single id for a normal click focus. Single-focused
+// photos count as selected for the purposes of batch actions.
+function getActiveSelection() {
+  if (selectedPhotos.size > 0) return Array.from(selectedPhotos);
+  if (selectedPhotoId != null) return [selectedPhotoId];
+  return [];
+}
+
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
-  if (selectedPhotos.size > 1) {
+  var ids = getActiveSelection();
+  if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = selectedPhotos.size + ' selected';
+    document.getElementById('batchCount').textContent = ids.length + ' selected';
   } else {
     bar.style.display = 'none';
   }
 }
 
 async function batchSetRating(rating) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2015,7 +2055,7 @@ async function batchSetRating(rating) {
 }
 
 async function batchSetFlag(flag) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2031,7 +2071,7 @@ async function batchSetFlag(flag) {
 }
 
 async function batchSetColorLabel(color) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
   colorLabelGen++;
   try {
@@ -2049,7 +2089,7 @@ async function batchSetColorLabel(color) {
 }
 
 function batchAddKeyword() {
-  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + selectedPhotos.size + ' photos';
+  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   document.getElementById('batchKeywordInput').value = '';
   document.getElementById('batchKeywordModal').classList.add('open');
   setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
@@ -2063,7 +2103,7 @@ async function confirmBatchKeyword() {
   var name = document.getElementById('batchKeywordInput').value.trim();
   if (!name) return;
   hideBatchKeywordModal();
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2074,7 +2114,7 @@ async function confirmBatchKeyword() {
 }
 
 function batchDelete() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (ids.length === 0) return;
   var companionCount = 0;
   ids.forEach(function(id) {
@@ -2102,7 +2142,8 @@ var _batchCollections = [];
 var _batchCollectionSelectedId = null;
 
 async function addToCollection() {
-  if (selectedPhotos.size === 0) return;
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
 
   var collections;
   try {
@@ -2111,7 +2152,7 @@ async function addToCollection() {
 
   _batchCollections = collections;
   _batchCollectionSelectedId = null;
-  document.getElementById('batchCollectionTitle').textContent = 'Add ' + selectedPhotos.size + ' photo(s) to collection';
+  document.getElementById('batchCollectionTitle').textContent = 'Add ' + activeIds.length + ' photo(s) to collection';
 
   var listHtml = '';
   collections.forEach(function(c) {
@@ -2140,7 +2181,7 @@ function hideBatchCollectionModal() {
 
 async function confirmBatchCollection() {
   var newName = document.getElementById('batchCollectionNewName').value.trim();
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   var collectionId = _batchCollectionSelectedId;
   var collectionName = '';
 
@@ -2182,10 +2223,24 @@ async function confirmBatchCollection() {
 }
 
 function clearSelection() {
+  // Clear both tracks that feed getActiveSelection(), otherwise the batch bar
+  // reappears immediately with the single-focus photo still armed for actions.
   selectedPhotos.clear();
+  selectedPhotoId = null;
+  selectedIndex = -1;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
+  // If the detail panel is still open after clearing, its actions (setFlag,
+  // setColorLabel, addKeyword, etc.) early-return on the null selectedPhotoId
+  // and silently do nothing. Hide it so there is no ghost UI to interact with.
+  var detail = document.getElementById('detailContent');
+  if (detail && detail.classList.contains('visible')) {
+    detail.classList.remove('visible');
+    var summary = document.getElementById('summaryPanel');
+    if (summary) summary.classList.remove('hidden');
+    loadSummary();
+  }
   updateBatchBar();
 }
 
@@ -2457,9 +2512,16 @@ function closeDetail() {
   document.getElementById('summaryPanel').classList.remove('hidden');
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Re-highlight any cmd/shift-click selections that survive detail close.
+  // A blanket .remove('selected') would leave selectedPhotos armed for batch
+  // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
+  // B drops the set to {A}, and closing detail would otherwise show "1 selected"
+  // in the bar against an unhighlighted photo.
   document.querySelectorAll('.grid-card').forEach(function(el) {
-    el.classList.remove('selected');
+    var cardId = parseInt(el.dataset.id);
+    el.classList.toggle('selected', selectedPhotos.has(cardId));
   });
+  updateBatchBar();
   loadSummary();
 }
 
@@ -2713,13 +2775,17 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  var multi = selectedPhotos.size > 1;
+  // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
+  // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
+  // the bar advertises "1 selected" after cmd-click reduces the set to one.
+  var useBatch = selectedPhotos.size >= 1;
+  var hasActive = useBatch || selectedPhotoId;
 
   // Ratings: 0-5
-  if (multi || selectedPhotoId) {
+  if (hasActive) {
     for (var r = 0; r <= 5; r++) {
       if (matchesShortcut(e, _shortcuts['rate_' + r])) {
-        if (multi) batchSetRating(r);
+        if (useBatch) batchSetRating(r);
         else setRating(selectedPhotoId, r);
         return;
       }
@@ -2727,9 +2793,9 @@ document.addEventListener('keydown', function(e) {
   }
 
   // Flag, reject, unflag
-  if (multi || selectedPhotoId) {
-    var applyFlag = multi ? batchSetFlag : setFlag;
-    var applyColor = multi ? batchSetColorLabel : setColorLabel;
+  if (hasActive) {
+    var applyFlag = useBatch ? batchSetFlag : setFlag;
+    var applyColor = useBatch ? batchSetColorLabel : setColorLabel;
     if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); }
     else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); }
     else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); }
@@ -2748,7 +2814,7 @@ function scrollToCard(idx) {
 }
 
 async function developSelected() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
 
   // Check darktable availability first
@@ -2788,7 +2854,7 @@ async function developSelected() {
 }
 
 function openInEditorBatch() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
   if (ids.length > 20) {
     if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
@@ -2818,6 +2884,9 @@ function openInEditorBatch() {
     photos = [];
     currentPage = 1;
     allLoaded = false;
+    // Same hazard as filterByCollection: leaving selectedPhotos populated
+    // across a dataset switch leaves the batch bar armed against stale ids.
+    selectedPhotos.clear();
     selectedPhotoId = null;
     selectedIndex = -1;
     closeDetail();
@@ -2867,8 +2936,9 @@ function openInEditorBatch() {
 
 /* ---------- Export Modal ---------- */
 function openExportModal() {
-  if (selectedPhotos.size === 0) return;
-  document.getElementById('exportSubmitBtn').textContent = 'Export ' + selectedPhotos.size + ' photo' + (selectedPhotos.size === 1 ? '' : 's');
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
+  document.getElementById('exportSubmitBtn').textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
   document.getElementById('exportSubmitBtn').disabled = false;
   document.getElementById('exportResize').value = '';
   document.getElementById('exportResizeCustom').style.display = 'none';
@@ -2899,7 +2969,7 @@ function updateExportPreview() {
   var template = document.getElementById('exportTemplate').value;
   if (!template) { document.getElementById('exportPreview').textContent = ''; return; }
   // Use first selected photo for preview
-  var firstId = Array.from(selectedPhotos)[0];
+  var firstId = getActiveSelection()[0];
   var photo = photos.find(function(p) { return p.id === firstId; });
   if (!photo) { document.getElementById('exportPreview').textContent = ''; return; }
   var stem = photo.filename.replace(/\.[^.]+$/, '');
@@ -2944,7 +3014,8 @@ async function startExport() {
   var quality = parseInt(document.getElementById('exportQuality').value) || 92;
   var template = document.getElementById('exportTemplate').value || '{original}';
   var btn = document.getElementById('exportSubmitBtn');
-  var count = selectedPhotos.size;
+  var activeIds = getActiveSelection();
+  var count = activeIds.length;
   btn.disabled = true;
 
   try {
@@ -2952,7 +3023,7 @@ async function startExport() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        photo_ids: Array.from(selectedPhotos),
+        photo_ids: activeIds,
         destination: dest,
         naming_template: template,
         max_size: maxSize,
