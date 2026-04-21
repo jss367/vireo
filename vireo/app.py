@@ -6206,12 +6206,20 @@ def create_app(db_path, thumb_cache_dir=None):
                 # so _persist_job (jobs.py ~L197-210) merges them with the
                 # primary error message, then raise so _run_job records
                 # status="failed".
+                #
+                # Re-raise with an existing entry in job["errors"] so
+                # _run_job's dedup guard (err_str not in job["errors"])
+                # skips the append — otherwise a novel exception string
+                # gets tacked on as a synthetic extra error, inflating
+                # error_count by 1. Keep the nicer "N/M failed: <err>"
+                # summary on job["_fatal_error"], which _persist_job
+                # prefers over errors[0] when building the result row.
                 job["result"] = result
-                first_err = job["errors"][0] if job["errors"] else ""
-                msg = f"{errors}/{total} develop operations failed"
-                if first_err:
-                    msg = f"{msg}: {first_err}"
-                raise RuntimeError(msg)
+                first_err = job["errors"][0]
+                job["_fatal_error"] = (
+                    f"{errors}/{total} develop operations failed: {first_err}"
+                )
+                raise RuntimeError(first_err)
             return result
 
         job_id = runner.start(

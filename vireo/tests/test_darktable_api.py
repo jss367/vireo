@@ -111,6 +111,10 @@ def test_api_job_develop_all_failures_marks_job_failed(app_and_db, tmp_path, mon
     # And the primary per-photo error should be surfaced in job['errors'].
     errs = data.get('errors') or []
     assert any('fake failure' in e for e in errs), f"expected fake failure in errors: {errs}"
+    # Regression: the rollup failure raise must not synthesize a second,
+    # non-matching error string that _run_job then appends on top of the
+    # real per-photo failure (would inflate error_count to 2 for 1 photo).
+    assert len(errs) == 1, f"expected exactly one error entry, got {len(errs)}: {errs}"
 
 
 def test_api_job_develop_mixed_outcomes_marks_job_failed(app_and_db, tmp_path, monkeypatch):
@@ -158,3 +162,8 @@ def test_api_job_develop_mixed_outcomes_marks_job_failed(app_and_db, tmp_path, m
     assert result.get('developed') == 1
     assert result.get('errors') == 1
     assert result.get('total') == 2
+    # Regression: only the actual per-photo failure should appear in the
+    # errors list — no synthetic summary string tacked on by _run_job.
+    errs = data.get('errors') or []
+    assert len(errs) == 1, f"expected exactly one error entry, got {len(errs)}: {errs}"
+    assert any('fake failure on second photo' in e for e in errs), errs
