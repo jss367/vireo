@@ -8,7 +8,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from db import Database
-from export import developed_folder_key, export_photos, resolve_template, sanitize_filename
+from export import (
+    developed_folder_key,
+    export_photos,
+    relocate_developed_dir,
+    resolve_template,
+    sanitize_filename,
+)
 from PIL import Image
 
 
@@ -885,3 +891,163 @@ def test_export_reused_folder_id_does_not_inherit_stale_developed(tmp_path):
         f"expected blue-dominant from fresh original (not stale yellow "
         f"developed file), got rgb=({r},{g},{b})"
     )
+
+
+def test_export_case_variant_developed_prefers_lowercase_extension(tmp_path):
+    """When both bird1.jpg and bird1.JPG exist, export picks the lowercase one deterministically.
+
+    Regression: the developed directory index previously used
+    `setdefault` keyed on the lowercased extension, so whichever entry
+    `os.listdir` returned first won. That made the exported pixels
+    nondeterministic across filesystems and between runs. The index now
+    breaks ties in favour of the canonical lowercase extension — which
+    is what `darktable-cli` writes when `darktable_output_format` is
+    left at its default — so the winner is stable.
+    """
+    if not _fs_is_case_sensitive(tmp_path):
+        pytest.skip("filesystem is case-insensitive; scenario cannot occur here")
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / "src"
+    src.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    dest = tmp_path / "export_out"
+
+    Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
+        str(src / "bird1.jpg"), "JPEG", quality=95,
+    )
+    fid = db.add_folder(str(src), name="Src")
+    pid = db.add_photo(folder_id=fid, filename="bird1.jpg", extension=".jpg",
+                        file_size=1, file_mtime=1.0)
+
+    developed = src / "developed"
+    developed.mkdir()
+    # Two developed files for the same stem, differing only by extension
+    # case. The lowercase .jpg file encodes green; the uppercase .JPG
+    # file encodes yellow. A deterministic winner is the lowercase one.
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
+        str(developed / "bird1.JPG"), "JPEG", quality=95,
+    )
+
+    export_photos(
+        db=db,
+        vireo_dir=str(vireo_dir),
+        photo_ids=[pid],
+        destination=str(dest),
+        options={"naming_template": "{original}"},
+    )
+
+    r, g, b = _avg_rgb(os.path.join(str(dest), "bird1.jpg"))
+    assert g > r and g > b, (
+        f"expected green-dominant (lowercase .jpg) developed output to win "
+        f"the tie over yellow (.JPG), got rgb=({r},{g},{b})"
+    )
+
+
+def test_relocate_developed_dir_renames_subdir_on_path_change(tmp_path):
+    """After a folder move, its developed subdir is rebased to the new path key."""
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/birds"
+    new_path = "/srv/photos/archive/birds"
+
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+    assert old_key != new_key
+
+    old_subdir = developed / old_key
+    old_subdir.mkdir()
+    (old_subdir / "IMG_0001.jpg").write_bytes(b"developed-bytes")
+
+    assert relocate_developed_dir(str(developed), old_path, new_path) is True
+
+    assert not old_subdir.exists()
+    new_subdir = developed / new_key
+    assert new_subdir.is_dir()
+    assert (new_subdir / "IMG_0001.jpg").read_bytes() == b"developed-bytes"
+
+
+def test_relocate_developed_dir_noop_when_nothing_to_move(tmp_path):
+    """No-ops when developed_dir is unset, old subdir is absent, or paths match."""
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+
+    # No developed_dir configured.
+    assert relocate_developed_dir("", "/a", "/b") is False
+    # Old subdir missing.
+    assert relocate_developed_dir(str(developed), "/missing", "/other") is False
+    # Same path on both sides.
+    assert relocate_developed_dir(str(developed), "/same", "/same") is False
+
+
+def test_relocate_developed_dir_skips_when_target_exists(tmp_path):
+    """If the target key already exists, leave the source in place and log."""
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/a"
+    new_path = "/srv/photos/b"
+
+    (developed / developed_folder_key(old_path)).mkdir()
+    (developed / developed_folder_key(new_path)).mkdir()
+
+    assert relocate_developed_dir(str(developed), old_path, new_path) is False
+    # Both still present — nothing was clobbered.
+    assert (developed / developed_folder_key(old_path)).is_dir()
+    assert (developed / developed_folder_key(new_path)).is_dir()
+
+
+def test_move_folder_rebases_configured_developed_dir(tmp_path):
+    """End-to-end: `move_folder` relocates the darktable output subdir to match the new path.
+
+    Before this fix, a folder move updated `folders.path` in the DB
+    without touching the external `darktable_output_dir` layout, so
+    every previously-developed photo in the moved folder would silently
+    fall back to RAW on export until re-developed.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src_parent = tmp_path / "old_parent"
+    src_parent.mkdir()
+    src = src_parent / "birds"
+    src.mkdir()
+    # One photo in the source folder (contents don't matter for this test).
+    (src / "IMG_0001.jpg").write_bytes(b"raw-bytes")
+
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG_0001.jpg").write_bytes(b"developed-bytes")
+
+    fid = db.add_folder(str(src), name="birds")
+
+    dest_parent = tmp_path / "new_parent"
+    dest_parent.mkdir()
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dest_parent),
+        developed_dir=str(developed),
+    )
+
+    assert not result["errors"], result["errors"]
+    new_src = dest_parent / "birds"
+    assert new_src.is_dir()
+
+    new_key = developed_folder_key(str(new_src))
+    assert old_key != new_key
+    # Old key subdir gone; new key subdir carries the developed file.
+    assert not (developed / old_key).exists()
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed-bytes"

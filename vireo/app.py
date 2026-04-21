@@ -5183,6 +5183,10 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        import config as cfg
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+
         def work(job):
             from move import move_folder
 
@@ -5207,6 +5211,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 folder_id=folder_id,
                 destination=destination,
                 progress_cb=progress_cb,
+                developed_dir=developed_dir,
             )
 
         job_id = runner.start(

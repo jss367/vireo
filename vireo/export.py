@@ -240,10 +240,62 @@ def developed_folder_key(folder_path):
     distinct paths always get distinct keys, and a re-scan of the same
     path resolves to the same key (so its existing developed outputs are
     correctly picked up again).
+
+    Because the key is derived from the *current* path, any operation
+    that rewrites a folder's path (e.g. `/api/jobs/move-folder`) must
+    also rebase the corresponding developed subdirectory on disk — see
+    `relocate_developed_dir` for the rebase helper used by move.
     """
     if not folder_path:
         return ""
     return hashlib.sha1(folder_path.encode("utf-8")).hexdigest()[:16]
+
+
+def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
+    """Rebase a folder's developed-output subdir after its path changes.
+
+    The configured `darktable_output_dir` layout is flat, so each source
+    folder is nested under `developed_folder_key(folder_path)`. That key
+    is path-derived for safety against SQLite row-id reuse, but it means
+    a folder move (which rewrites `folders.path`) orphans the old
+    subdirectory. Without this rebase, export would silently fall back
+    to re-decoding the RAW for every previously-developed photo in the
+    moved folder.
+
+    Returns True if a directory was renamed, False otherwise (no
+    developed_dir configured, nothing to move, or the target already
+    exists — in the last case the caller can decide what to do). Never
+    raises; failures are logged and treated as a no-op so a filesystem
+    hiccup here doesn't also fail the folder move.
+    """
+    if not developed_dir or not old_folder_path or not new_folder_path:
+        return False
+    if old_folder_path == new_folder_path:
+        return False
+    old_key = developed_folder_key(old_folder_path)
+    new_key = developed_folder_key(new_folder_path)
+    if not old_key or not new_key or old_key == new_key:
+        return False
+    old_subdir = os.path.join(developed_dir, old_key)
+    new_subdir = os.path.join(developed_dir, new_key)
+    if not os.path.isdir(old_subdir):
+        return False
+    if os.path.exists(new_subdir):
+        log.warning(
+            "Cannot relocate developed dir %s -> %s: target already exists; "
+            "leaving source in place",
+            old_subdir, new_subdir,
+        )
+        return False
+    try:
+        os.rename(old_subdir, new_subdir)
+        return True
+    except OSError as exc:
+        log.warning(
+            "Failed to relocate developed dir %s -> %s: %s",
+            old_subdir, new_subdir, exc,
+        )
+        return False
 
 
 class _DevelopedDirIndex:
@@ -271,10 +323,27 @@ class _DevelopedDirIndex:
             # between photos whose names differ only by case. Extension
             # match is case-insensitive so developed files written as
             # .JPG / .TIFF are still picked up.
-            for name in names:
+            #
+            # When two files in the same directory share a stem and
+            # differ only by extension case (e.g. bird1.jpg vs bird1.JPG
+            # on a case-sensitive filesystem), prefer the file whose
+            # extension is already the canonical lowercase form — that's
+            # what the develop job writes when `darktable_output_format`
+            # is left at its default — and break any remaining ties by
+            # iterating sorted(names) so the winner is stable across
+            # runs rather than depending on os.listdir order.
+            for name in sorted(names):
                 ent_stem, ent_ext = os.path.splitext(name)
-                ext_key = ent_ext[1:].lower() if ent_ext.startswith(".") else ent_ext.lower()
-                entries.setdefault((ent_stem, ext_key), os.path.join(base, name))
+                raw_ext = ent_ext[1:] if ent_ext.startswith(".") else ent_ext
+                ext_key = raw_ext.lower()
+                key = (ent_stem, ext_key)
+                existing = entries.get(key)
+                if existing is None:
+                    entries[key] = os.path.join(base, name)
+                    continue
+                existing_ext = os.path.splitext(existing)[1][1:]
+                if raw_ext == ext_key and existing_ext != ext_key:
+                    entries[key] = os.path.join(base, name)
             self._cache[base] = entries
         for ext in _PREFERRED_DEVELOPED_EXTS:
             path = entries.get((stem, ext))
