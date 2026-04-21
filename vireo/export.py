@@ -221,6 +221,12 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
         location, naturally disambiguated because each source folder has
         its own developed/ subdir.
 
+    Extensions (and stems) are matched case-insensitively so exports still
+    pick up developed files written with uppercase extensions — e.g.
+    IMG_0001.JPG — which can happen on case-sensitive filesystems when
+    darktable_output_format is configured with uppercase, or for files
+    placed manually.
+
     JPG is preferred over TIFF when both exist.
     """
     stem = os.path.splitext(filename)[0]
@@ -229,10 +235,22 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
         candidates.append(os.path.join(developed_dir, str(folder_id)))
     if folder_path:
         candidates.append(os.path.join(folder_path, "developed"))
+    preferred_exts = ("jpg", "jpeg", "tiff", "tif")
     for base in candidates:
-        for ext in ("jpg", "jpeg", "tiff", "tif"):
-            path = os.path.join(base, f"{stem}.{ext}")
-            if os.path.isfile(path):
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        # Map lowercased basename → actual path. If two files in the same
+        # dir differ only in case, the first one listed wins (arbitrary but
+        # acceptable — that's a user-engineered collision).
+        entries = {}
+        for name in names:
+            entries.setdefault(name.lower(), os.path.join(base, name))
+        lower_stem = stem.lower()
+        for ext in preferred_exts:
+            path = entries.get(f"{lower_stem}.{ext}")
+            if path and os.path.isfile(path):
                 return path
     return None
 

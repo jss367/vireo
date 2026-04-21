@@ -463,6 +463,61 @@ def test_export_honors_configured_developed_dir(export_env):
     assert g > r and g > b, f"expected green-dominant from configured dir, got rgb=({r},{g},{b})"
 
 
+def test_export_developed_matches_uppercase_extension(export_env):
+    """Developed files with uppercase extensions are still matched.
+
+    Regression: `_find_developed_output` previously probed only lowercase
+    extensions, so on case-sensitive filesystems a developed file written
+    as IMG_0001.JPG (or .TIFF) silently fell through to the RAW fallback.
+    That can happen when darktable_output_format is configured uppercase
+    or for files placed manually.
+    """
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.JPG"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, (
+        f"expected green-dominant from uppercase-ext developed JPG, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_developed_matches_uppercase_tiff(export_env):
+    """Uppercase TIFF extensions also match when no JPG is present."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.TIFF"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert b > r and b > g, (
+        f"expected blue-dominant from uppercase-ext developed TIFF, got rgb=({r},{g},{b})"
+    )
+
+
 def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
     """Two folders with the same basename resolve to distinct developed outputs.
 
