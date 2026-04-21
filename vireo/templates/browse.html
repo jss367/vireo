@@ -1841,7 +1841,7 @@ async function loadInatStatus(photoIds) {
 }
 
 function batchSubmitInat() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (ids.length === 0) return;
   submitToInatBatch(ids);
 }
@@ -1987,19 +1987,30 @@ function selectPhoto(e, id, idx) {
   updateBatchBar();
 }
 
+// The batch bar drives Develop/Export/Delete/etc. "Active selection" is
+// whichever of {selectedPhotos, selectedPhotoId} has entries — the Set for
+// cmd/shift-clicks, the single id for a normal click focus. Single-focused
+// photos count as selected for the purposes of batch actions.
+function getActiveSelection() {
+  if (selectedPhotos.size > 0) return Array.from(selectedPhotos);
+  if (selectedPhotoId != null) return [selectedPhotoId];
+  return [];
+}
+
 function updateBatchBar() {
   var bar = document.getElementById('batchBar');
   if (!bar) return;
-  if (selectedPhotos.size > 1) {
+  var ids = getActiveSelection();
+  if (ids.length >= 1) {
     bar.style.display = 'flex';
-    document.getElementById('batchCount').textContent = selectedPhotos.size + ' selected';
+    document.getElementById('batchCount').textContent = ids.length + ' selected';
   } else {
     bar.style.display = 'none';
   }
 }
 
 async function batchSetRating(rating) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/rating', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2015,7 +2026,7 @@ async function batchSetRating(rating) {
 }
 
 async function batchSetFlag(flag) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/flag', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2031,7 +2042,7 @@ async function batchSetFlag(flag) {
 }
 
 async function batchSetColorLabel(color) {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
   colorLabelGen++;
   try {
@@ -2049,7 +2060,7 @@ async function batchSetColorLabel(color) {
 }
 
 function batchAddKeyword() {
-  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + selectedPhotos.size + ' photos';
+  document.getElementById('batchKeywordTitle').textContent = 'Add keyword to ' + getActiveSelection().length + ' photos';
   document.getElementById('batchKeywordInput').value = '';
   document.getElementById('batchKeywordModal').classList.add('open');
   setTimeout(function() { document.getElementById('batchKeywordInput').focus(); }, 50);
@@ -2063,7 +2074,7 @@ async function confirmBatchKeyword() {
   var name = document.getElementById('batchKeywordInput').value.trim();
   if (!name) return;
   hideBatchKeywordModal();
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   try {
     await safeFetch('/api/batch/keyword', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2074,7 +2085,7 @@ async function confirmBatchKeyword() {
 }
 
 function batchDelete() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (ids.length === 0) return;
   var companionCount = 0;
   ids.forEach(function(id) {
@@ -2102,7 +2113,8 @@ var _batchCollections = [];
 var _batchCollectionSelectedId = null;
 
 async function addToCollection() {
-  if (selectedPhotos.size === 0) return;
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
 
   var collections;
   try {
@@ -2111,7 +2123,7 @@ async function addToCollection() {
 
   _batchCollections = collections;
   _batchCollectionSelectedId = null;
-  document.getElementById('batchCollectionTitle').textContent = 'Add ' + selectedPhotos.size + ' photo(s) to collection';
+  document.getElementById('batchCollectionTitle').textContent = 'Add ' + activeIds.length + ' photo(s) to collection';
 
   var listHtml = '';
   collections.forEach(function(c) {
@@ -2140,7 +2152,7 @@ function hideBatchCollectionModal() {
 
 async function confirmBatchCollection() {
   var newName = document.getElementById('batchCollectionNewName').value.trim();
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   var collectionId = _batchCollectionSelectedId;
   var collectionName = '';
 
@@ -2460,6 +2472,7 @@ function closeDetail() {
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
+  updateBatchBar();
   loadSummary();
 }
 
@@ -2748,7 +2761,7 @@ function scrollToCard(idx) {
 }
 
 async function developSelected() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
 
   // Check darktable availability first
@@ -2788,7 +2801,7 @@ async function developSelected() {
 }
 
 function openInEditorBatch() {
-  var ids = Array.from(selectedPhotos);
+  var ids = getActiveSelection();
   if (!ids.length) return;
   if (ids.length > 20) {
     if (!confirm('Open ' + ids.length + ' photos in editor?')) return;
@@ -2867,8 +2880,9 @@ function openInEditorBatch() {
 
 /* ---------- Export Modal ---------- */
 function openExportModal() {
-  if (selectedPhotos.size === 0) return;
-  document.getElementById('exportSubmitBtn').textContent = 'Export ' + selectedPhotos.size + ' photo' + (selectedPhotos.size === 1 ? '' : 's');
+  var activeIds = getActiveSelection();
+  if (activeIds.length === 0) return;
+  document.getElementById('exportSubmitBtn').textContent = 'Export ' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's');
   document.getElementById('exportSubmitBtn').disabled = false;
   document.getElementById('exportResize').value = '';
   document.getElementById('exportResizeCustom').style.display = 'none';
@@ -2899,7 +2913,7 @@ function updateExportPreview() {
   var template = document.getElementById('exportTemplate').value;
   if (!template) { document.getElementById('exportPreview').textContent = ''; return; }
   // Use first selected photo for preview
-  var firstId = Array.from(selectedPhotos)[0];
+  var firstId = getActiveSelection()[0];
   var photo = photos.find(function(p) { return p.id === firstId; });
   if (!photo) { document.getElementById('exportPreview').textContent = ''; return; }
   var stem = photo.filename.replace(/\.[^.]+$/, '');
@@ -2944,7 +2958,8 @@ async function startExport() {
   var quality = parseInt(document.getElementById('exportQuality').value) || 92;
   var template = document.getElementById('exportTemplate').value || '{original}';
   var btn = document.getElementById('exportSubmitBtn');
-  var count = selectedPhotos.size;
+  var activeIds = getActiveSelection();
+  var count = activeIds.length;
   btn.disabled = true;
 
   try {
@@ -2952,7 +2967,7 @@ async function startExport() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        photo_ids: Array.from(selectedPhotos),
+        photo_ids: activeIds,
         destination: dest,
         naming_template: template,
         max_size: maxSize,
