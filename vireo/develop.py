@@ -7,6 +7,26 @@ import subprocess
 
 log = logging.getLogger(__name__)
 
+_DIAG_MAX_CHARS = 500
+
+
+def _format_subprocess_diag(stdout, stderr):
+    """Combine stdout and stderr into a single short diagnostic string.
+
+    Prefers whichever stream carries output. When both are present, labels
+    them so readers know which channel each line came from. Caps total length
+    at the last _DIAG_MAX_CHARS characters.
+    """
+    out = (stdout or "").strip()
+    err = (stderr or "").strip()
+    if out and err:
+        combined = f"stdout: {out}\nstderr: {err}"
+    else:
+        combined = out or err
+    if len(combined) > _DIAG_MAX_CHARS:
+        combined = "…" + combined[-_DIAG_MAX_CHARS:]
+    return combined
+
 
 def find_darktable(configured_path):
     """Find the darktable-cli binary.
@@ -16,11 +36,23 @@ def find_darktable(configured_path):
 
     Returns:
         absolute path to darktable-cli, or None if not found
+
+    Note:
+        Returned path is resolved via os.path.realpath. On macOS the Homebrew
+        cask installs darktable-cli as a symlink at /usr/local/bin/darktable-cli
+        pointing into /Applications/darktable.app/Contents/MacOS/. Invoking via
+        the symlink dies in dt_init ("can't init develop system") because
+        darktable locates its bundled resources (Resources/share/darktable/,
+        camera profiles, etc.) by walking up from argv[0]; under /usr/local/bin
+        that walk finds nothing. Resolving the symlink first makes every call
+        go through the real bundle path.
     """
     if configured_path and os.path.isfile(configured_path):
-        return configured_path
+        return os.path.realpath(configured_path)
     found = shutil.which("darktable-cli")
-    return found
+    if found:
+        return os.path.realpath(found)
+    return None
 
 
 def build_command(darktable_bin, input_path, output_path, style=None, width=None):
@@ -86,10 +118,12 @@ def develop_photo(darktable_bin, input_path, output_path, style=None, width=None
         log.info("Developing %s -> %s", os.path.basename(input_path), output_path)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
+            # darktable-cli writes init/IO failures to stdout, not stderr.
+            diag = _format_subprocess_diag(result.stdout, result.stderr)
             return {
                 "success": False,
                 "output_path": output_path,
-                "error": f"darktable-cli exited with code {result.returncode}: {result.stderr.strip()}",
+                "error": f"darktable-cli exited with code {result.returncode}: {diag}",
             }
         if not os.path.isfile(output_path):
             return {"success": False, "output_path": output_path, "error": "Output file was not created"}
