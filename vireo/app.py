@@ -6199,7 +6199,20 @@ def create_app(db_path, thumb_cache_dir=None):
                     },
                 )
 
-            return {"developed": developed, "errors": errors, "total": total}
+            result = {"developed": developed, "errors": errors, "total": total}
+            if errors > 0:
+                # Rollup rule: if any per-photo develop failed, the overall
+                # job is failed (not completed). Stash the counts on the job
+                # so _persist_job (jobs.py ~L197-210) merges them with the
+                # primary error message, then raise so _run_job records
+                # status="failed".
+                job["result"] = result
+                first_err = job["errors"][0] if job["errors"] else ""
+                msg = f"{errors}/{total} develop operations failed"
+                if first_err:
+                    msg = f"{msg}: {first_err}"
+                raise RuntimeError(msg)
+            return result
 
         job_id = runner.start(
             "develop",
