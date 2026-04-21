@@ -6170,8 +6170,15 @@ def create_app(db_path, thumb_cache_dir=None):
                 folder_path = folders.get(photo["folder_id"], "")
                 input_path = os.path.join(folder_path, photo["filename"])
 
-                # Determine output directory: configured, or "developed" subfolder next to originals
-                out_dir = output_dir if output_dir else os.path.join(folder_path, "developed")
+                # Determine output directory. The per-folder "developed/" default
+                # is naturally disambiguated (one dir per source folder). The
+                # globally configured dir is flat, so nest each photo under its
+                # folder_id to avoid collisions when two source folders contain
+                # files with the same basename (e.g. IMG_0001.CR3 in both).
+                if output_dir:
+                    out_dir = os.path.join(output_dir, str(photo["folder_id"]))
+                else:
+                    out_dir = os.path.join(folder_path, "developed")
                 out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
 
                 result = develop_photo(

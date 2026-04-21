@@ -428,7 +428,9 @@ def test_export_honors_configured_developed_dir(export_env):
 
     Mirrors the darktable_output_dir config: users who configure a custom
     output location expect export to find the developed outputs at that
-    location.
+    location. Files are looked up under a <folder_id>/ subdir to match the
+    develop job's write convention and keep lookups one-to-one when two
+    source folders share a basename.
     """
     env = export_env
     # Decoy in the default location — export must NOT pick this.
@@ -437,11 +439,13 @@ def test_export_honors_configured_developed_dir(export_env):
     Image.new("RGB", (800, 600), color=(200, 200, 0)).save(
         str(decoy_dir / "bird1.jpg"), "JPEG",
     )
-    # Real output in the configured dir.
+    # Real output in the configured dir, under the folder_id subdir.
     configured = env["tmp_path"] / "darktable_out"
     configured.mkdir()
+    folder_subdir = configured / str(env["fid"])
+    folder_subdir.mkdir()
     Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
-        str(configured / "bird1.jpg"), "JPEG",
+        str(folder_subdir / "bird1.jpg"), "JPEG",
     )
 
     export_photos(
@@ -457,3 +461,74 @@ def test_export_honors_configured_developed_dir(export_env):
 
     r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
     assert g > r and g > b, f"expected green-dominant from configured dir, got rgb=({r},{g},{b})"
+
+
+def test_export_configured_developed_dir_disambiguates_same_basename(tmp_path):
+    """Two folders with the same basename resolve to distinct developed outputs.
+
+    Regression: previously the configured developed_dir lookup used only the
+    filename stem, so two photos named IMG_0001.CR3 in different source
+    folders both resolved to <developed_dir>/IMG_0001.jpg — silently mixing
+    developed outputs. Each photo's developed file now lives under a
+    <folder_id>/ subdir, so matches are one-to-one.
+    """
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    # Two source folders, each with a photo that shares the same basename.
+    src_a = tmp_path / "folderA"
+    src_a.mkdir()
+    src_b = tmp_path / "folderB"
+    src_b.mkdir()
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    dest = tmp_path / "export_out"
+
+    # Originals are visually distinct so we can tell them apart in the output.
+    Image.new("RGB", (800, 600), color=(200, 0, 0)).save(
+        str(src_a / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(0, 0, 200)).save(
+        str(src_b / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+
+    fid_a = db.add_folder(str(src_a), name="A")
+    fid_b = db.add_folder(str(src_b), name="B")
+    pid_a = db.add_photo(folder_id=fid_a, filename="IMG_0001.jpg", extension=".jpg",
+                         file_size=1, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid_b, filename="IMG_0001.jpg", extension=".jpg",
+                         file_size=1, file_mtime=1.0)
+
+    # Developed outputs under <developed_dir>/<folder_id>/<stem>.jpg — two
+    # distinct files, each a different solid color.
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    (developed / str(fid_a)).mkdir()
+    (developed / str(fid_b)).mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed / str(fid_a) / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
+        str(developed / str(fid_b) / "IMG_0001.jpg"), "JPEG", quality=95,
+    )
+
+    export_photos(
+        db=db,
+        vireo_dir=str(vireo_dir),
+        photo_ids=[pid_a, pid_b],
+        destination=str(dest),
+        options={
+            "naming_template": "{folder}/{original}",
+            "developed_dir": str(developed),
+        },
+    )
+
+    # {folder} in the naming template resolves to the source folder's
+    # basename (folderA / folderB), so outputs land under those dirs.
+    r_a, g_a, b_a = _avg_rgb(os.path.join(str(dest), "folderA", "IMG_0001.jpg"))
+    r_b, g_b, b_b = _avg_rgb(os.path.join(str(dest), "folderB", "IMG_0001.jpg"))
+    # Folder A got the green-dominant developed output.
+    assert g_a > r_a and g_a > b_a, f"A: expected green-dominant, got rgb=({r_a},{g_a},{b_a})"
+    # Folder B got the yellow-dominant (red+green) developed output.
+    assert r_b > b_b and g_b > b_b, f"B: expected yellow-dominant, got rgb=({r_b},{g_b},{b_b})"

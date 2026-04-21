@@ -75,8 +75,12 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 the working copy can satisfy the requested max_size.
             developed_dir: str -- optional path to darktable-developed
                 outputs (mirrors darktable_output_dir config). Export
-                prefers a developed JPG/TIFF at this location (or at
-                <folder>/developed/) over re-decoding the RAW.
+                prefers a developed JPG/TIFF at
+                <developed_dir>/<folder_id>/<stem>.<ext> (or at the
+                default <folder>/developed/<stem>.<ext>) over
+                re-decoding the RAW. The folder_id nesting matches the
+                develop job's write convention and keeps lookups one-to-one
+                even when two source folders share a basename.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -122,7 +126,9 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         #   2. working copy when resizing to a size it can satisfy.
         #   3. original file (default; also used for full-res exports).
         folder_path = folders.get(photo["folder_id"], "")
-        source_path = _find_developed_output(photo["filename"], folder_path, developed_dir)
+        source_path = _find_developed_output(
+            photo["filename"], photo["folder_id"], folder_path, developed_dir
+        )
         if not source_path:
             use_wc = bool(max_size) and max_size <= wc_max
             source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
@@ -201,17 +207,26 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
-def _find_developed_output(filename, folder_path, developed_dir):
+def _find_developed_output(filename, folder_id, folder_path, developed_dir):
     """Return the path to a darktable-developed output for this photo, or None.
 
-    Checks the configured developed_dir first (mirroring darktable_output_dir),
-    then the default "<folder>/developed/" location used by the develop job.
+    Both lookup locations are scoped so that two photos with the same basename
+    in different source folders (e.g. IMG_0001.CR3 in folder A and folder B)
+    resolve to distinct developed files:
+
+      * <developed_dir>/<folder_id>/<stem>.<ext> — matches how the develop
+        job writes when darktable_output_dir is configured (the flat output
+        dir is nested per folder_id to avoid collisions).
+      * <folder_path>/developed/<stem>.<ext> — the default develop-job
+        location, naturally disambiguated because each source folder has
+        its own developed/ subdir.
+
     JPG is preferred over TIFF when both exist.
     """
     stem = os.path.splitext(filename)[0]
     candidates = []
-    if developed_dir:
-        candidates.append(developed_dir)
+    if developed_dir and folder_id is not None:
+        candidates.append(os.path.join(developed_dir, str(folder_id)))
     if folder_path:
         candidates.append(os.path.join(folder_path, "developed"))
     for base in candidates:
