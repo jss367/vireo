@@ -1975,6 +1975,23 @@ function selectPhoto(e, id, idx) {
     } else {
       selectedPhotos.add(id);
     }
+    // If the toggle dropped the focused photo out of a non-empty set, its
+    // highlight/detail focus is now stale: the card still paints "selected"
+    // via the selectedPhotoId branch of the highlight rule, yet
+    // getActiveSelection() returns the set — so destructive actions
+    // (delete/export/develop) would target the set while the user is staring
+    // at a different, visibly-focused card. Reconcile by dropping the focus.
+    if (selectedPhotoId !== null && selectedPhotos.size > 0 && !selectedPhotos.has(selectedPhotoId)) {
+      selectedPhotoId = null;
+      selectedIndex = -1;
+      var detail = document.getElementById('detailContent');
+      if (detail && detail.classList.contains('visible')) {
+        detail.classList.remove('visible');
+        var summary = document.getElementById('summaryPanel');
+        if (summary) summary.classList.remove('hidden');
+        loadSummary();
+      }
+    }
   } else {
     // Normal click: single select
     selectedPhotos.clear();

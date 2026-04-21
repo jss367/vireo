@@ -117,6 +117,51 @@ def test_clear_button_closes_detail_panel(live_server, page):
     )
 
 
+def test_cmd_click_toggles_focus_out_of_set_reconciles(live_server, page):
+    """click A, cmd-click B, cmd-click A: the focus must not linger on A.
+
+    Regression: getActiveSelection() prefers selectedPhotos over
+    selectedPhotoId, so after this sequence the set was {B} while
+    selectedPhotoId was still A. A remained visibly highlighted (and the
+    detail panel still showed A), but batch actions silently targeted B.
+    Fix: after a cmd-click toggle that removes selectedPhotoId from a
+    non-empty set, clear selectedPhotoId and close the stale detail panel.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    a_id = int(cards.nth(0).get_attribute("data-id"))
+    b_id = int(cards.nth(1).get_attribute("data-id"))
+
+    cards.nth(0).click()  # click A: focus A
+    cards.nth(1).click(modifiers=["Meta"])  # cmd-click B: set={A,B}, focus=A
+    cards.nth(0).click(modifiers=["Meta"])  # cmd-click A: set={B}, stale focus
+
+    # Active selection must only contain B, and the focused id must be cleared
+    # so the visible highlight and getActiveSelection() agree.
+    active = page.evaluate("getActiveSelection()")
+    assert active == [b_id], f"expected [{b_id}], got {active}"
+    assert page.evaluate("selectedPhotoId") is None
+
+    # The stale detail panel must be hidden so its (now no-op) handlers
+    # can't be invoked against a null selectedPhotoId.
+    assert not page.evaluate(
+        "document.getElementById('detailContent').classList.contains('visible')"
+    )
+
+    # Card A must no longer carry the "selected" highlight; card B still does.
+    assert not page.evaluate(
+        f"document.querySelector('.grid-card[data-id=\"{a_id}\"]').classList.contains('selected')"
+    )
+    assert page.evaluate(
+        f"document.querySelector('.grid-card[data-id=\"{b_id}\"]').classList.contains('selected')"
+    )
+
+
 def test_resetAndLoad_clears_multiselect_set(live_server, page):
     """Changing sort/filter/folder must drop a surviving multi-select set.
 
