@@ -677,3 +677,123 @@ def test_export_developed_stem_match_is_case_sensitive(tmp_path):
     assert r_l > b_l and g_l > b_l, (
         f"bird1: expected yellow-dominant developed, got rgb=({r_l},{g_l},{b_l})"
     )
+
+
+def test_export_legacy_flat_developed_dir_fallback(export_env):
+    """Developed outputs written flat to <developed_dir>/<stem>.<ext> still light up.
+
+    Before the folder_id nesting convention existed, the develop job wrote
+    directly into `darktable_output_dir` with no per-folder subdir. Users
+    who upgraded would otherwise silently regress to RAW export; the flat
+    path is still probed as a last-resort fallback.
+    """
+    env = export_env
+    configured = env["tmp_path"] / "darktable_out"
+    configured.mkdir()
+    # Legacy flat layout — no <folder_id>/ subdir.
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(configured / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "developed_dir": str(configured),
+        },
+    )
+
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, (
+        f"expected green-dominant from legacy flat developed dir, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_folder_scoped_developed_wins_over_legacy_flat(export_env):
+    """When both folder-scoped and legacy flat outputs exist, folder-scoped wins.
+
+    The legacy flat fallback exists only to avoid regressing libraries that
+    predate the folder_id nesting. Any newly-developed file (written under
+    <folder_id>/) must still take precedence so same-basename collisions
+    across folders stay resolved one-to-one.
+    """
+    env = export_env
+    configured = env["tmp_path"] / "darktable_out"
+    configured.mkdir()
+    # Legacy flat (yellow) — should NOT be picked when a folder-scoped file exists.
+    Image.new("RGB", (800, 600), color=(200, 200, 10)).save(
+        str(configured / "bird1.jpg"), "JPEG", quality=95,
+    )
+    # Folder-scoped (green) — wins.
+    folder_subdir = configured / str(env["fid"])
+    folder_subdir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(folder_subdir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "developed_dir": str(configured),
+        },
+    )
+
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, (
+        f"expected green-dominant folder-scoped output to win, got rgb=({r},{g},{b})"
+    )
+
+
+def test_export_caches_developed_dir_scans(export_env, monkeypatch):
+    """os.listdir is called at most once per developed directory across the export.
+
+    Regression guard: without caching, `_find_developed_output` rescans the
+    same folder for every photo, turning a single-directory export of N
+    photos into N×cost(listdir). The per-export index collapses that back
+    to one listdir per distinct base directory.
+    """
+    env = export_env
+    # Develop both photos into a shared directory so every photo probes
+    # the same developed folder(s).
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird2.jpg"), "JPEG", quality=95,
+    )
+
+    import export as export_module
+
+    counts = {}
+    real_listdir = os.listdir
+
+    def counting_listdir(path):
+        counts[path] = counts.get(path, 0) + 1
+        return real_listdir(path)
+
+    monkeypatch.setattr(export_module.os, "listdir", counting_listdir)
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 2
+    assert counts.get(str(developed_dir), 0) == 1, (
+        f"expected 1 listdir of {developed_dir}, got {counts.get(str(developed_dir), 0)}"
+    )
+    # Sanity: any directory we scanned, we scanned at most once.
+    for path, n in counts.items():
+        assert n <= 1, f"{path} was scanned {n} times; expected ≤1 after caching"

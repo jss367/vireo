@@ -80,7 +80,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 default <folder>/developed/<stem>.<ext>) over
                 re-decoding the RAW. The folder_id nesting matches the
                 develop job's write convention and keeps lookups one-to-one
-                even when two source folders share a basename.
+                even when two source folders share a basename. As a legacy
+                fallback, <developed_dir>/<stem>.<ext> is also probed so
+                libraries developed before the folder_id convention was
+                introduced still pick up their developed outputs.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -111,6 +114,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     exported = 0
     errors = []
 
+    # Per-export cache of developed-directory scans. Keyed by directory
+    # path; each value is the (stem, ext_lower) → absolute-path map that
+    # _find_developed_output would otherwise rebuild for every photo.
+    # Large exports routinely probe the same directory N times; caching
+    # keeps that cost O(1) per photo after the first hit.
+    developed_index = _DevelopedDirIndex()
+
     for i, pid in enumerate(photo_ids):
         photo = photos_map.get(pid)
         if not photo:
@@ -127,7 +137,11 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         #   3. original file (default; also used for full-res exports).
         folder_path = folders.get(photo["folder_id"], "")
         source_path = _find_developed_output(
-            photo["filename"], photo["folder_id"], folder_path, developed_dir
+            photo["filename"],
+            photo["folder_id"],
+            folder_path,
+            developed_dir,
+            developed_index,
         )
         if not source_path:
             use_wc = bool(max_size) and max_size <= wc_max
@@ -207,12 +221,50 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     return {"exported": exported, "errors": errors, "destination": destination}
 
 
-def _find_developed_output(filename, folder_id, folder_path, developed_dir):
+_PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+
+
+class _DevelopedDirIndex:
+    """Lazy, per-export cache of directory listings for developed lookups.
+
+    Each directory is scanned with os.listdir once and indexed as
+    (exact stem, lowercased ext) → absolute path. Subsequent lookups
+    against the same directory are O(1), which avoids turning the
+    per-photo probe into quadratic work on large exports where many
+    photos share a developed directory.
+    """
+
+    def __init__(self):
+        self._cache = {}
+
+    def lookup(self, base, stem):
+        entries = self._cache.get(base)
+        if entries is None:
+            entries = {}
+            try:
+                names = os.listdir(base)
+            except OSError:
+                names = []
+            # Stem match must be case-sensitive to avoid collisions
+            # between photos whose names differ only by case. Extension
+            # match is case-insensitive so developed files written as
+            # .JPG / .TIFF are still picked up.
+            for name in names:
+                ent_stem, ent_ext = os.path.splitext(name)
+                ext_key = ent_ext[1:].lower() if ent_ext.startswith(".") else ent_ext.lower()
+                entries.setdefault((ent_stem, ext_key), os.path.join(base, name))
+            self._cache[base] = entries
+        for ext in _PREFERRED_DEVELOPED_EXTS:
+            path = entries.get((stem, ext))
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+
+def _find_developed_output(filename, folder_id, folder_path, developed_dir, index=None):
     """Return the path to a darktable-developed output for this photo, or None.
 
-    Both lookup locations are scoped so that two photos with the same basename
-    in different source folders (e.g. IMG_0001.CR3 in folder A and folder B)
-    resolve to distinct developed files:
+    Lookup locations are probed in order:
 
       * <developed_dir>/<folder_id>/<stem>.<ext> — matches how the develop
         job writes when darktable_output_dir is configured (the flat output
@@ -220,6 +272,11 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
       * <folder_path>/developed/<stem>.<ext> — the default develop-job
         location, naturally disambiguated because each source folder has
         its own developed/ subdir.
+      * <developed_dir>/<stem>.<ext> — legacy flat layout used by older
+        versions of the develop job. Probed last so that any new
+        folder-scoped output wins, but kept so libraries developed before
+        the folder_id convention still light up their developed render on
+        export.
 
     Extensions are matched case-insensitively so exports still pick up
     developed files written with uppercase extensions — e.g. IMG_0001.JPG
@@ -231,6 +288,9 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
     developed files.
 
     JPG is preferred over TIFF when both exist.
+
+    Pass `index` (a _DevelopedDirIndex) to amortize directory scans
+    across many photos in the same export.
     """
     stem = os.path.splitext(filename)[0]
     candidates = []
@@ -238,25 +298,14 @@ def _find_developed_output(filename, folder_id, folder_path, developed_dir):
         candidates.append(os.path.join(developed_dir, str(folder_id)))
     if folder_path:
         candidates.append(os.path.join(folder_path, "developed"))
-    preferred_exts = ("jpg", "jpeg", "tiff", "tif")
+    if developed_dir:
+        candidates.append(developed_dir)
+    if index is None:
+        index = _DevelopedDirIndex()
     for base in candidates:
-        try:
-            names = os.listdir(base)
-        except OSError:
-            continue
-        # Map (exact stem, lowercased ext) → actual filename. Stem match
-        # must be case-sensitive to avoid collisions between photos whose
-        # names differ only by case. Extension match is case-insensitive
-        # so developed files written as .JPG / .TIFF are still picked up.
-        entries = {}
-        for name in names:
-            ent_stem, ent_ext = os.path.splitext(name)
-            ext_key = ent_ext[1:].lower() if ent_ext.startswith(".") else ent_ext.lower()
-            entries.setdefault((ent_stem, ext_key), os.path.join(base, name))
-        for ext in preferred_exts:
-            path = entries.get((stem, ext))
-            if path and os.path.isfile(path):
-                return path
+        hit = index.lookup(base, stem)
+        if hit:
+            return hit
     return None
 
 
