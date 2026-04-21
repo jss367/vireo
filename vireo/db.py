@@ -3286,10 +3286,15 @@ class Database:
     def get_highlights_candidates(self, folder_id, min_quality=0.0):
         """Return photos eligible for highlights selection.
 
-        Returns photos in the given folder (and its descendant folders) that
-        have a quality_score >= min_quality and are not user-rejected. Includes
-        the photo's species keyword (or NULL) and DINO embeddings for MMR
-        diversity.
+        When ``folder_id`` is an int, returns photos in that folder and its
+        descendant folders. When ``folder_id`` is ``None``, returns photos
+        across every folder visible in the active workspace — useful when a
+        photoshoot spans multiple dated folders (Vireo auto-organizes imports
+        by EXIF capture date into ``YYYY/YYYY-MM-DD/`` subfolders).
+
+        In both cases, only photos with ``quality_score >= min_quality`` that
+        are not user-rejected are returned. Includes the photo's species
+        keyword (or NULL) and DINO embeddings for MMR diversity.
 
         Species is derived from photo_keywords joined to keywords where
         is_species = 1, which covers both accepted predictions (accept_prediction
@@ -3297,8 +3302,15 @@ class Database:
 
         Ordered by quality_score DESC.
         """
-        subtree = self.get_folder_subtree_ids(folder_id)
-        placeholders = ",".join("?" for _ in subtree)
+        ws = self._ws_id()
+        if folder_id is None:
+            folder_filter = ""
+            folder_params = ()
+        else:
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_filter = f"AND p.folder_id IN ({placeholders})"
+            folder_params = tuple(subtree)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.extension,
                       p.timestamp, p.width, p.height, p.rating, p.flag,
@@ -3321,13 +3333,13 @@ class Database:
                        WHERE k.is_species = 1
                    ) WHERE rn = 1
                ) bp ON bp.photo_id = p.id
-               WHERE p.folder_id IN ({placeholders})
-                 AND wf.workspace_id = ?
+               WHERE wf.workspace_id = ?
+                 {folder_filter}
                  AND p.quality_score IS NOT NULL
                  AND p.quality_score >= ?
                  AND p.flag != 'rejected'
                ORDER BY p.quality_score DESC""",
-            (*subtree, self._ws_id(), min_quality),
+            (ws, *folder_params, min_quality),
         ).fetchall()
         return rows
 
