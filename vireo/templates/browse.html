@@ -2775,13 +2775,17 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  var multi = selectedPhotos.size > 1;
+  // Must stay aligned with updateBatchBar(): any non-empty selectedPhotos is
+  // actionable (size >= 1, not > 1), otherwise shortcuts silently no-op while
+  // the bar advertises "1 selected" after cmd-click reduces the set to one.
+  var useBatch = selectedPhotos.size >= 1;
+  var hasActive = useBatch || selectedPhotoId;
 
   // Ratings: 0-5
-  if (multi || selectedPhotoId) {
+  if (hasActive) {
     for (var r = 0; r <= 5; r++) {
       if (matchesShortcut(e, _shortcuts['rate_' + r])) {
-        if (multi) batchSetRating(r);
+        if (useBatch) batchSetRating(r);
         else setRating(selectedPhotoId, r);
         return;
       }
@@ -2789,9 +2793,9 @@ document.addEventListener('keydown', function(e) {
   }
 
   // Flag, reject, unflag
-  if (multi || selectedPhotoId) {
-    var applyFlag = multi ? batchSetFlag : setFlag;
-    var applyColor = multi ? batchSetColorLabel : setColorLabel;
+  if (hasActive) {
+    var applyFlag = useBatch ? batchSetFlag : setFlag;
+    var applyColor = useBatch ? batchSetColorLabel : setColorLabel;
     if (matchesShortcut(e, _shortcuts.flag)) { e.preventDefault(); applyFlag('flagged'); }
     else if (matchesShortcut(e, _shortcuts.reject)) { e.preventDefault(); applyFlag('rejected'); }
     else if (matchesShortcut(e, _shortcuts.unflag)) { e.preventDefault(); applyFlag('none'); }

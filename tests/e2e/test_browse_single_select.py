@@ -232,6 +232,39 @@ def test_resetAndLoad_clears_multiselect_set(live_server, page):
     expect(bar).to_be_hidden()
 
 
+def test_singleton_set_keyboard_shortcut_applies(live_server, page):
+    """Cmd-click one photo, then press a rating shortcut — the rating must apply.
+
+    Regression: the keydown handler used `selectedPhotos.size > 1` while the
+    batch bar used `>= 1`, so rating/flag/color shortcuts were silent no-ops
+    whenever a one-item set was the only active selection (e.g. a single
+    cmd-click from fresh state, or cmd-click-toggle dropping focus). The bar
+    advertised "1 selected" but digit keys did nothing.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+
+    a_id = int(cards.nth(0).get_attribute("data-id"))
+    cards.nth(0).click(modifiers=["Meta"])
+
+    # Cmd-click one item from fresh state leaves set={A} with no single-focus.
+    assert page.evaluate("Array.from(selectedPhotos)") == [a_id]
+    assert page.evaluate("selectedPhotoId") is None
+    expect(page.locator("#batchBar")).to_be_visible()
+
+    # "3" maps to _shortcuts.rate_3 by default.
+    page.keyboard.press("3")
+
+    # batchSetRating updates local state after the API call returns.
+    page.wait_for_function(
+        f"(photos.find(function(p){{return p.id==={a_id};}}) || {{}}).rating === 3",
+        timeout=3000,
+    )
+
+
 def test_filterByCollection_clears_multiselect_set(live_server, page):
     """Switching to a collection must drop a surviving multi-select set.
 
