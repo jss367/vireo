@@ -339,3 +339,121 @@ def test_export_large_max_size_uses_original(export_env):
     with Image.open(out_path) as img:
         # Should use original (800x600), not working copy (100x75)
         assert img.size == (800, 600)
+
+
+def _avg_rgb(path):
+    """Return the average RGB tuple of an image across a small sample grid."""
+    with Image.open(path) as img:
+        rgb = img.convert("RGB")
+        w, h = rgb.size
+        xs = (w // 10, w // 4, w // 2, 3 * w // 4, 9 * w // 10)
+        ys = (h // 10, h // 4, h // 2, 3 * h // 4, 9 * h // 10)
+        rs, gs, bs, n = 0, 0, 0, 0
+        for x in xs:
+            for y in ys:
+                r, g, b = rgb.getpixel((x, y))
+                rs += r
+                gs += g
+                bs += b
+                n += 1
+        return (rs // n, gs // n, bs // n)
+
+
+def test_export_prefers_developed_jpg_when_present(export_env):
+    """When <folder>/developed/<stem>.jpg exists, export uses it, not the original.
+
+    Motivation: darktable produces the user's intended rendering; export has
+    historically re-decoded the RAW via libraw, discarding that rendering.
+    """
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    # Visually distinct from the red original.
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, f"expected green-dominant from developed JPG, got rgb=({r},{g},{b})"
+
+
+def test_export_prefers_developed_tiff_when_jpg_absent(export_env):
+    """Developed output may be .tiff — export prefers it over the RAW."""
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(20, 30, 220)).save(
+        str(developed_dir / "bird1.tiff"), "TIFF",
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert b > r and b > g, f"expected blue-dominant from developed TIFF, got rgb=({r},{g},{b})"
+
+
+def test_export_falls_back_to_original_when_no_developed(export_env):
+    """No developed output → export uses the original file (existing behavior)."""
+    env = export_env
+    export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert r > g and r > b, f"expected red-dominant from original, got rgb=({r},{g},{b})"
+
+
+def test_export_honors_configured_developed_dir(export_env):
+    """When developed_dir option is passed, export looks there, not in <folder>/developed/.
+
+    Mirrors the darktable_output_dir config: users who configure a custom
+    output location expect export to find the developed outputs at that
+    location.
+    """
+    env = export_env
+    # Decoy in the default location — export must NOT pick this.
+    decoy_dir = env["src"] / "developed"
+    decoy_dir.mkdir()
+    Image.new("RGB", (800, 600), color=(200, 200, 0)).save(
+        str(decoy_dir / "bird1.jpg"), "JPEG",
+    )
+    # Real output in the configured dir.
+    configured = env["tmp_path"] / "darktable_out"
+    configured.mkdir()
+    Image.new("RGB", (800, 600), color=(10, 200, 40)).save(
+        str(configured / "bird1.jpg"), "JPEG",
+    )
+
+    export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={
+            "naming_template": "{original}",
+            "developed_dir": str(configured),
+        },
+    )
+
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, f"expected green-dominant from configured dir, got rgb=({r},{g},{b})"

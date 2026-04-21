@@ -5113,6 +5113,9 @@ def create_app(db_path, thumb_cache_dir=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        # Pass the configured darktable output dir so export prefers the
+        # perfected render over a fresh libraw decode of the RAW.
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         def work(job):
             from export import export_photos
@@ -5147,6 +5150,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "max_size": max_size,
                     "quality": quality,
                     "working_copy_max_size": wc_max_size,
+                    "developed_dir": developed_dir,
                 },
                 progress_cb=progress_cb,
             )

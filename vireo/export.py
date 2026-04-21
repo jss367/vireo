@@ -73,6 +73,10 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             working_copy_max_size: int -- the cap used when generating
                 working copies (default 4096); used to decide whether
                 the working copy can satisfy the requested max_size.
+            developed_dir: str -- optional path to darktable-developed
+                outputs (mirrors darktable_output_dir config). Export
+                prefers a developed JPG/TIFF at this location (or at
+                <folder>/developed/) over re-decoding the RAW.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -88,6 +92,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         wc_max = int(options.get("working_copy_max_size", 4096))
     except (ValueError, TypeError):
         wc_max = 4096
+    developed_dir = options.get("developed_dir") or ""
 
     os.makedirs(destination, exist_ok=True)
 
@@ -110,11 +115,17 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path.  Use the working copy only when resizing to
-        # a size the working copy can satisfy (i.e. max_size <= wc cap).
-        # Otherwise use the original to avoid silent downscaling.
-        use_wc = bool(max_size) and max_size <= wc_max
-        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
+        # Resolve source path.  Precedence:
+        #   1. darktable-developed output ("perfected" rendering) — takes
+        #      priority over RAW so Export ships what the user sees after
+        #      Develop, not a fresh libraw decode of the RAW.
+        #   2. working copy when resizing to a size it can satisfy.
+        #   3. original file (default; also used for full-res exports).
+        folder_path = folders.get(photo["folder_id"], "")
+        source_path = _find_developed_output(photo["filename"], folder_path, developed_dir)
+        if not source_path:
+            use_wc = bool(max_size) and max_size <= wc_max
+            source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -188,6 +199,27 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             progress_cb(i + 1, len(photo_ids), photo["filename"])
 
     return {"exported": exported, "errors": errors, "destination": destination}
+
+
+def _find_developed_output(filename, folder_path, developed_dir):
+    """Return the path to a darktable-developed output for this photo, or None.
+
+    Checks the configured developed_dir first (mirroring darktable_output_dir),
+    then the default "<folder>/developed/" location used by the develop job.
+    JPG is preferred over TIFF when both exist.
+    """
+    stem = os.path.splitext(filename)[0]
+    candidates = []
+    if developed_dir:
+        candidates.append(developed_dir)
+    if folder_path:
+        candidates.append(os.path.join(folder_path, "developed"))
+    for base in candidates:
+        for ext in ("jpg", "jpeg", "tiff", "tif"):
+            path = os.path.join(base, f"{stem}.{ext}")
+            if os.path.isfile(path):
+                return path
+    return None
 
 
 def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):
