@@ -1464,6 +1464,13 @@ function grmCardMouseDown(e) {
 
 function grmCardMouseMove(e) {
   if (!_grmDragging) return;
+  // If the primary button is no longer held (e.g. mouseup fired outside the
+  // window and was missed), end the drag instead of continuing to mutate
+  // offsets from passive cursor motion.
+  if ((e.buttons & 1) === 0) {
+    grmCardMouseUp(e);
+    return;
+  }
   var dx = e.clientX - _grmDragging.startX;
   var dy = e.clientY - _grmDragging.startY;
   if (!_grmDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
@@ -1482,11 +1489,18 @@ function grmCardMouseMove(e) {
 function grmCardMouseUp(e) {
   if (!_grmDragging) return;
   var moved = _grmDragging.moved;
-  _grmDragging.card.classList.remove('dragging');
+  var card = _grmDragging.card;
+  card.classList.remove('dragging');
   document.removeEventListener('mousemove', grmCardMouseMove);
   document.removeEventListener('mouseup', grmCardMouseUp);
   _grmDragging = null;
-  if (moved) _grmSuppressNextClick = true;
+  // Only suppress the trailing click when the release is inside the dragged
+  // card — that's the only case where a `click` will fire on the card and
+  // need to be swallowed. Off-card releases produce no card click, so
+  // setting the flag would eat the user's next real selection.
+  if (moved && e && e.target && card.contains(e.target)) {
+    _grmSuppressNextClick = true;
+  }
   grmRefreshResetAllVisibility();
 }
 
