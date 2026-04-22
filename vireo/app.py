@@ -8040,7 +8040,19 @@ def main():
     # initialization. Reserving up-front (rather than writing runtime.json
     # at the end of startup) closes the race where two near-simultaneous
     # launches both see an empty slot and both start serving.
-    status, info = acquire_single_instance(pid=os.getpid())
+    try:
+        status, info = acquire_single_instance(pid=os.getpid())
+    except OSError as e:
+        # Filesystem fault opening the lock file (unreadable ~/.vireo,
+        # permission denied, etc). Surface the real cause rather than
+        # misreporting as already_running — the two need different
+        # remediation.
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "startup_failed",
+            "reason": str(e),
+        }) + "\n")
+        raise SystemExit(2) from e
     if status == "conflict":
         import sys as _sys
         _sys.stderr.write(json.dumps({
@@ -8102,12 +8114,22 @@ def main():
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    # Look up the running version from package metadata (same fallback chain as /api/version).
+    # Look up the running version using the same fallback chain as
+    # /api/version: package metadata, then pyproject.toml, then "0.0.0".
+    # In source/dev runs where importlib.metadata is missing but
+    # pyproject.toml is present, runtime.json must agree with
+    # /api/v1/version — external callers use it to make compatibility
+    # decisions and a bare "0.0.0" would mislead them.
     try:
         from importlib.metadata import version as pkg_version
         ver = pkg_version("vireo")
     except Exception:
-        ver = "0.0.0"
+        import tomllib
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                ver = tomllib.load(f)["project"]["version"]
+        except Exception:
+            ver = "0.0.0"
 
     # Finalize runtime.json, replacing the reservation marker with the full
     # payload now that the port and token are known. Cleanup handlers were

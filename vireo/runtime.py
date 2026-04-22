@@ -299,10 +299,12 @@ def acquire_single_instance(
         if status == "conflict":
             return ("conflict", info)
 
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        except OSError:
-            continue
+        # Open the lock file. If this raises (e.g. unreadable `~/.vireo`,
+        # permission denied, filesystem fault), let the OSError propagate:
+        # misclassifying a startup fault as "already_running" sends the
+        # user to the wrong remediation and can block startup indefinitely
+        # when no peer exists.
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
 
         if not _try_take_lock(fd):
             # Another process holds the lock — a real peer is alive

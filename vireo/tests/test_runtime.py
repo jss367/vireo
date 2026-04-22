@@ -703,6 +703,27 @@ def test_acquire_handles_garbage_lock_contents(tmp_path, monkeypatch):
     assert status == "acquired"
 
 
+def test_acquire_surfaces_lock_open_errors_not_conflict(tmp_path, monkeypatch):
+    """If `os.open` on the lock file fails (e.g. filesystem fault, permission
+    denied on ~/.vireo), that must surface as an OSError — NOT be silently
+    converted to a ('conflict', ...) that main() reports as already_running.
+    The two conditions need different remediation."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    import runtime as rt
+
+    def boom(*_a, **_kw):
+        raise PermissionError(13, "simulated permission denied")
+
+    # Swap in a failing os.open only for the lock-file call. Leave
+    # everything else alone so check_single_instance still works.
+    monkeypatch.setattr(rt.os, "open", boom)
+
+    with pytest.raises(PermissionError):
+        rt.acquire_single_instance(pid=os.getpid())
+
+
 def test_release_single_instance_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
