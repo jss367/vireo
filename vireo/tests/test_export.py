@@ -1051,3 +1051,71 @@ def test_move_folder_rebases_configured_developed_dir(tmp_path):
     # Old key subdir gone; new key subdir carries the developed file.
     assert not (developed / old_key).exists()
     assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed-bytes"
+
+
+def test_move_folder_descendant_query_ignores_like_wildcard_matches(tmp_path, monkeypatch):
+    """LIKE wildcards in dest_path must not drag unrelated folders into the rebase.
+
+    Regression: `move_folder`'s descendant query used `WHERE path LIKE ?`
+    with `dest_path + "/%"`. SQL LIKE treats `_` and `%` inside `dest_path`
+    as wildcards (valid characters on POSIX paths), so unrelated folders
+    whose paths happen to match the wildcard pattern were returned and
+    fed into `relocate_developed_dir` with a bogus computed old_path.
+    """
+    import export
+    from db import Database
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src_parent = tmp_path / "src"
+    src_parent.mkdir()
+    src = src_parent / "birds"
+    src.mkdir()
+    (src / "IMG_0001.jpg").write_bytes(b"raw")
+    fid = db.add_folder(str(src), name="birds")
+
+    # Destination dir whose name contains `_`: SQL LIKE treats `_` as any
+    # single char. Final moved path becomes `<tmp>/d_st/birds`.
+    dest_parent = tmp_path / "d_st"
+    dest_parent.mkdir()
+
+    # Unrelated folder whose path matches the buggy LIKE pattern
+    # `<tmp>/d_st/birds/%` because `_` matches the literal `X`. The folder
+    # is NOT a descendant of the moved folder and must be left alone.
+    unrelated_parent = tmp_path / "dXst" / "birds"
+    unrelated_parent.mkdir(parents=True)
+    unrelated = unrelated_parent / "fake"
+    unrelated.mkdir()
+    db.add_folder(str(unrelated), name="fake")
+
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+
+    calls = []
+    real_fn = export.relocate_developed_dir
+
+    def spy(devdir, old, new):
+        calls.append((old, new))
+        return real_fn(devdir, old, new)
+
+    monkeypatch.setattr(export, "relocate_developed_dir", spy)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dest_parent),
+        developed_dir=str(developed),
+    )
+    assert not result["errors"], result["errors"]
+
+    # Only the parent rebase should have fired; no call should reference
+    # the unrelated path on either side.
+    unrelated_str = str(unrelated)
+    touched = {old for old, _ in calls} | {new for _, new in calls}
+    assert unrelated_str not in touched, (
+        f"relocate_developed_dir was called against the unrelated folder; "
+        f"calls={calls}"
+    )

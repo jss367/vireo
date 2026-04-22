@@ -253,12 +253,21 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
     if developed_dir:
         from export import relocate_developed_dir
         relocate_developed_dir(developed_dir, src_path, dest_path)
+        # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
+        # all of which are valid POSIX path characters. Without a strict
+        # prefix guard, an unrelated folder like `/dXst/birds/fake` would
+        # match a pattern like `/d_st/birds/%` and feed a bogus computed
+        # old_path into relocate_developed_dir, mis-rebasing the wrong
+        # developed subdir. Filter results by a literal prefix check.
         descendant_rows = db.conn.execute(
             "SELECT path FROM folders WHERE path LIKE ?",
             (dest_path + "/%",),
         ).fetchall()
+        prefix = dest_path + "/"
         for row in descendant_rows:
             new_child = row["path"]
+            if not new_child.startswith(prefix):
+                continue
             old_child = src_path + new_child[len(dest_path):]
             relocate_developed_dir(developed_dir, old_child, new_child)
 
