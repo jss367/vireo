@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import sys
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
@@ -28,6 +29,11 @@ _SCAN_MP_METHOD = (
     if "forkserver" in multiprocessing.get_all_start_methods()
     else "spawn"
 )
+
+# Windows' ProcessPoolExecutor raises ValueError when max_workers > 61
+# (the WaitForMultipleObjects handle limit). Clamp on Windows so scans
+# don't fail on high-core-count machines or misconfigured scan_workers.
+_WINDOWS_MAX_WORKERS = 61
 
 
 def compute_file_hash(file_path, chunk_size=65536):
@@ -80,6 +86,8 @@ def _resolve_worker_count(files_to_process):
         workers = cpu
     else:
         workers = min(configured, cpu)
+    if sys.platform == "win32":
+        workers = min(workers, _WINDOWS_MAX_WORKERS)
     return max(1, min(workers, n))
 
 
