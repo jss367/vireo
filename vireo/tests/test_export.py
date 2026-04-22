@@ -987,8 +987,14 @@ def test_relocate_developed_dir_noop_when_nothing_to_move(tmp_path):
     assert relocate_developed_dir(str(developed), "/same", "/same") is False
 
 
-def test_relocate_developed_dir_skips_when_target_exists(tmp_path):
-    """If the target key already exists, leave the source in place and log."""
+def test_relocate_developed_dir_merges_empty_source_into_existing_target(tmp_path):
+    """Empty source + existing target: merge succeeds, empty source is removed.
+
+    With the merge semantics in place (relocation into an existing target
+    is a merge, not a skip), an empty source directory is a no-op merge:
+    there's nothing to move in, and the empty source is cleaned up so
+    callers don't leak orphaned directories.
+    """
     developed = tmp_path / "darktable_out"
     developed.mkdir()
     old_path = "/srv/photos/a"
@@ -997,9 +1003,8 @@ def test_relocate_developed_dir_skips_when_target_exists(tmp_path):
     (developed / developed_folder_key(old_path)).mkdir()
     (developed / developed_folder_key(new_path)).mkdir()
 
-    assert relocate_developed_dir(str(developed), old_path, new_path) is False
-    # Both still present — nothing was clobbered.
-    assert (developed / developed_folder_key(old_path)).is_dir()
+    assert relocate_developed_dir(str(developed), old_path, new_path) is True
+    assert not (developed / developed_folder_key(old_path)).exists()
     assert (developed / developed_folder_key(new_path)).is_dir()
 
 
@@ -1051,6 +1056,48 @@ def test_move_folder_rebases_configured_developed_dir(tmp_path):
     # Old key subdir gone; new key subdir carries the developed file.
     assert not (developed / old_key).exists()
     assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed-bytes"
+
+
+def test_relocate_developed_dir_merges_into_existing_target(tmp_path):
+    """When target exists, merge source files in; don't strand them at old key.
+
+    Regression: relocate_developed_dir used to bail out when the target
+    subdir existed, but `db._merge_into_existing` (hit by
+    /api/folders/<id>/relocate when the new path is already tracked)
+    reassigns source photos to the target folder — their developed files
+    belong under the target's key after the merge. The previous behaviour
+    left them stranded under the old key, so export silently fell back
+    to RAW for every merged photo.
+    """
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/source"
+    new_path = "/srv/photos/target"
+
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+
+    old_subdir = developed / old_key
+    new_subdir = developed / new_key
+    old_subdir.mkdir()
+    new_subdir.mkdir()
+
+    # Source-only file (must move into target).
+    (old_subdir / "unique_src.jpg").write_bytes(b"src-only")
+    # Collision: target-side wins (matches merge semantics where target
+    # folder's photos are authoritative on filename collisions).
+    (old_subdir / "collision.jpg").write_bytes(b"src-version")
+    (new_subdir / "collision.jpg").write_bytes(b"target-wins")
+    # Target-only file (must stay untouched).
+    (new_subdir / "unique_tgt.jpg").write_bytes(b"tgt-only")
+
+    assert relocate_developed_dir(str(developed), old_path, new_path) is True
+
+    assert not old_subdir.exists(), "source subdir must be removed after merge"
+    assert (new_subdir / "unique_src.jpg").read_bytes() == b"src-only"
+    assert (new_subdir / "unique_tgt.jpg").read_bytes() == b"tgt-only"
+    # Collision: target's version must survive.
+    assert (new_subdir / "collision.jpg").read_bytes() == b"target-wins"
 
 
 def test_move_folder_descendant_query_ignores_like_wildcard_matches(tmp_path, monkeypatch):

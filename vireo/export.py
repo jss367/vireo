@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 
 from image_loader import load_image
 
@@ -281,12 +282,32 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
     if not os.path.isdir(old_subdir):
         return False
     if os.path.exists(new_subdir):
-        log.warning(
-            "Cannot relocate developed dir %s -> %s: target already exists; "
-            "leaving source in place",
-            old_subdir, new_subdir,
-        )
-        return False
+        # Target already exists — this is the merge case (e.g.
+        # `/api/folders/<id>/relocate` routing through
+        # `db._merge_into_existing`). Move individual files into the
+        # target so reassigned photos still resolve to their developed
+        # render instead of being stranded under the old key. On
+        # filename collision the target wins, matching the DB merge's
+        # drop-source-on-collision policy.
+        try:
+            for name in os.listdir(old_subdir):
+                src_file = os.path.join(old_subdir, name)
+                dst_file = os.path.join(new_subdir, name)
+                if os.path.exists(dst_file):
+                    if os.path.isdir(src_file) and not os.path.islink(src_file):
+                        shutil.rmtree(src_file)
+                    else:
+                        os.remove(src_file)
+                else:
+                    os.rename(src_file, dst_file)
+            os.rmdir(old_subdir)
+            return True
+        except OSError as exc:
+            log.warning(
+                "Failed to merge developed dir %s into %s: %s",
+                old_subdir, new_subdir, exc,
+            )
+            return False
     try:
         os.rename(old_subdir, new_subdir)
         return True
