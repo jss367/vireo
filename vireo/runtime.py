@@ -86,7 +86,16 @@ def write_runtime_json(
     data = json.dumps(payload, indent=2).encode()
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(fd, data)
+        # os.write is allowed to do partial writes even on regular files
+        # under signal/resource pressure. If we os.replace() a truncated
+        # payload into place, external callers read malformed runtime.json
+        # and discovery fails — loop until the full buffer is flushed.
+        view = memoryview(data)
+        while view:
+            n = os.write(fd, view)
+            if n <= 0:
+                raise OSError("runtime.json.tmp: write returned zero bytes")
+            view = view[n:]
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -331,15 +340,22 @@ def acquire_single_instance(
 
 
 def release_single_instance() -> None:
-    """Release the kernel lock, close the FD, and unlink the file. Idempotent."""
+    """Release the kernel lock and close the FD. Idempotent.
+
+    The lock file itself is intentionally left on disk. flock() binds to
+    the inode, not the path — if we unlink after close, a newcomer that
+    already opened the old inode and holds a lock on it keeps that lock,
+    while the next starter creates a fresh inode and also locks it. Two
+    processes end up holding locks on different inodes, defeating the
+    single-instance guarantee. Leaving the file in place forces every
+    process to converge on the same inode.
+    """
     global _lock_fd
     if _lock_fd is not None:
         _release_lock(_lock_fd)
         with contextlib.suppress(OSError):
             os.close(_lock_fd)
         _lock_fd = None
-    with contextlib.suppress(FileNotFoundError):
-        _lock_path().unlink()
 
 
 def _read_lock_holder(lock_path: Path) -> int:

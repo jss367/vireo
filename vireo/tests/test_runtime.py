@@ -725,16 +725,88 @@ def test_acquire_surfaces_lock_open_errors_not_conflict(tmp_path, monkeypatch):
 
 
 def test_release_single_instance_is_idempotent(tmp_path, monkeypatch):
+    """release() must be idempotent and leave the lock file on disk.
+
+    We intentionally keep runtime.lock around after release — flock binds
+    to inodes, so unlinking creates a race where a surviving opener on
+    the old inode and a new starter on a fresh inode can both hold locks
+    simultaneously. Leaving the file in place forces convergence on one
+    inode."""
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
-    lock_path = tmp_path / ".vireo" / "runtime.lock"
-    lock_path.write_text(str(os.getpid()))
+    from runtime import acquire_single_instance, release_single_instance
 
-    from runtime import release_single_instance
+    status, _ = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    assert lock_path.exists()
+
     release_single_instance()
-    assert not lock_path.exists()
+    # File is deliberately preserved — see docstring.
+    assert lock_path.exists()
     release_single_instance()  # second call must not raise
+
+
+def test_release_then_reacquire_converges_on_same_inode(tmp_path, monkeypatch):
+    """After release, a subsequent acquire must lock the same inode.
+
+    If release() unlinked the lock file, a newcomer could open a brand-new
+    inode and hold a lock concurrently with a lingering opener on the old
+    inode, defeating the single-instance guarantee. This test verifies
+    the inode number does not change across a release/re-acquire cycle."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+
+    from runtime import acquire_single_instance, release_single_instance
+
+    status, _ = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+    inode_before = os.stat(lock_path).st_ino
+
+    release_single_instance()
+
+    status, _ = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+    inode_after = os.stat(lock_path).st_ino
+
+    assert inode_before == inode_after
+
+
+def test_write_runtime_json_survives_partial_os_write(tmp_path, monkeypatch):
+    """os.write is allowed to do partial writes even on regular files under
+    signal/resource pressure. write_runtime_json must loop until the full
+    payload has been flushed; otherwise os.replace atomically promotes a
+    truncated (malformed) JSON file and discovery fails."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    import runtime as rt
+
+    real_write = os.write
+    call_count = {"n": 0}
+
+    def chunked_write(fd, buf):
+        # First call writes 1 byte, subsequent calls flush the rest —
+        # forces the caller's loop to iterate.
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return real_write(fd, bytes(buf[:1]))
+        return real_write(fd, bytes(buf))
+
+    monkeypatch.setattr(rt.os, "write", chunked_write)
+
+    rt.write_runtime_json(
+        port=1, pid=2, version="v", db_path="/x", token="tok", mode="headless"
+    )
+
+    # File must exist and be fully-formed JSON.
+    data = json.loads((tmp_path / ".vireo" / "runtime.json").read_text())
+    assert data["token"] == "tok"
+    assert data["port"] == 1
+    assert call_count["n"] >= 2  # loop actually iterated
 
 
 def test_acquire_is_atomic_across_concurrent_calls(tmp_path, monkeypatch):
