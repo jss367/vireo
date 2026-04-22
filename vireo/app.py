@@ -1246,8 +1246,12 @@ def create_app(db_path, thumb_cache_dir=None):
         pid = body.get("photo_id")
         if pid is None:
             return json_error("photo_id required")
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            return json_error("photo_id must be an integer")
         db = _get_db()
-        photo = db.get_photo(int(pid))
+        photo = db.get_photo(pid_int)
         if not photo:
             return json_error("photo not found", 404)
         folder_row = db.conn.execute(
@@ -1259,14 +1263,14 @@ def create_app(db_path, thumb_cache_dir=None):
         path = os.path.join(folder_path, photo["filename"])
         try:
             if sys.platform == "darwin":
-                subprocess.run(["open", "-R", path], timeout=5, check=False)
+                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
             elif sys.platform.startswith("win"):
                 subprocess.run(
                     ["explorer", f"/select,{path}"], timeout=5, check=False
                 )
             else:
                 parent = os.path.dirname(path) or path
-                subprocess.run(["xdg-open", parent], timeout=5, check=False)
+                subprocess.run(["xdg-open", "--", parent], timeout=5, check=False)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
