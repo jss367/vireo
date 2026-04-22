@@ -2085,6 +2085,83 @@ def test_api_folder_relocate(app_and_db, tmp_path):
     assert row["path"] == new_path
 
 
+def test_api_folder_relocate_rebases_configured_developed_dir(app_and_db, tmp_path):
+    """POST /api/folders/<id>/relocate rebases the darktable output subdir.
+
+    Regression: /api/folders/<id>/relocate only called db.relocate_folder,
+    never invoking relocate_developed_dir. Any previously-developed photo
+    in a relocated folder would silently fall back to RAW on export
+    because the path-derived key changes when the folder's path changes.
+    """
+    import config as cfg
+    from export import developed_folder_key
+
+    app, db = app_and_db
+
+    old_dir = str(tmp_path / "old_birds")
+    new_dir = str(tmp_path / "new_birds")
+    os.makedirs(new_dir)
+
+    fid = db.add_folder(old_dir, name="birds")
+    db.conn.execute("UPDATE folders SET status = 'missing' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_key = developed_folder_key(old_dir)
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG_0001.jpg").write_bytes(b"developed-bytes")
+
+    cfg.save({"darktable_output_dir": str(developed)})
+
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{fid}/relocate", json={"path": new_dir})
+    assert resp.status_code == 200
+
+    new_key = developed_folder_key(new_dir)
+    assert old_key != new_key
+    assert not (developed / old_key).exists(), "old developed subdir should be gone"
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed-bytes"
+
+
+def test_api_folder_relocate_rebases_cascaded_child_developed_dirs(app_and_db, tmp_path):
+    """Cascaded child folders must also have their developed subdirs rebased."""
+    import config as cfg
+    from export import developed_folder_key
+
+    app, db = app_and_db
+
+    old_parent = str(tmp_path / "old_parent")
+    new_parent = str(tmp_path / "new_parent")
+    old_child = old_parent + "/child"
+    new_child = new_parent + "/child"
+    os.makedirs(new_child)
+
+    pfid = db.add_folder(old_parent, name="parent")
+    cfid = db.add_folder(old_child, name="child", parent_id=pfid)
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id IN (?, ?)", (pfid, cfid)
+    )
+    db.conn.commit()
+
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_child_key = developed_folder_key(old_child)
+    (developed / old_child_key).mkdir()
+    (developed / old_child_key / "IMG_0002.jpg").write_bytes(b"child-developed")
+
+    cfg.save({"darktable_output_dir": str(developed)})
+
+    client = app.test_client()
+    resp = client.post(f"/api/folders/{pfid}/relocate", json={"path": new_parent})
+    assert resp.status_code == 200
+
+    new_child_key = developed_folder_key(new_child)
+    assert old_child_key != new_child_key
+    assert not (developed / old_child_key).exists()
+    assert (developed / new_child_key / "IMG_0002.jpg").read_bytes() == b"child-developed"
+
+
 def test_api_folder_relocate_merge(app_and_db, tmp_path):
     """POST /api/folders/<id>/relocate merges into existing folder when paths conflict."""
     app, db = app_and_db

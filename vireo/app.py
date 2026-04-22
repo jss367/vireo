@@ -869,10 +869,31 @@ def create_app(db_path, thumb_cache_dir=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
+        # Capture the old path before the DB rewrite so we can rebase the
+        # corresponding darktable output subdir on disk. Developed outputs
+        # are nested under developed_folder_key(folder_path), so a path
+        # change invalidates the old key and would silently regress export
+        # to RAW until the user re-developed.
+        old_row = db.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
         try:
             cascaded = db.relocate_folder(folder_id, new_path)
         except ValueError as e:
             return json_error(str(e), 409)
+
+        import config as cfg
+        from export import relocate_developed_dir
+        effective_cfg = db.get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+        if developed_dir and old_path:
+            relocate_developed_dir(developed_dir, old_path, new_path)
+            for child in cascaded:
+                relocate_developed_dir(
+                    developed_dir, child["old_path"], child["new_path"]
+                )
         return jsonify({
             "status": "ok",
             "cascaded": cascaded,
