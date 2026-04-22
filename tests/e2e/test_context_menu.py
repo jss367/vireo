@@ -101,3 +101,27 @@ def test_coerce_selection_outside_replaces(live_server, page):
     assert out["size"] == 1
     assert out["has99"] is True
     assert out["result"] == [99]
+
+
+def test_coerce_selection_string_ids(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    out = page.evaluate("""() => {
+        const sel = new Set(["1", "2", "3"]);
+        const result = coerceSelectionOnContext(sel, "2");
+        return { size: sel.size, result: Array.from(result).sort() };
+    }""")
+    assert out["size"] == 3
+    assert out["result"] == ["1", "2", "3"]
+
+
+def test_coerce_selection_null_id_noop(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    out = page.evaluate("""() => {
+        const sel = new Set(["a", "b"]);
+        const result = coerceSelectionOnContext(sel, null);
+        return { size: sel.size, result: Array.from(result).sort() };
+    }""")
+    assert out["size"] == 2
+    assert out["result"] == ["a", "b"]
