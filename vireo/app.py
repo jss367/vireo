@@ -544,7 +544,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/v1/health")
     def api_v1_health():
-        return jsonify({"status": "ok"})
+        # The "service" field is a Vireo-specific marker the single-instance
+        # guard's probe checks for. An unrelated local service that happens
+        # to return 200 on /api/v1/health (catch-all) would not carry it,
+        # so Vireo can distinguish a live peer from a port-reusing stranger.
+        from runtime import SERVICE_MARKER
+        return jsonify({"service": SERVICE_MARKER, "status": "ok"})
 
     @app.route("/api/v1/version")
     def api_v1_version():

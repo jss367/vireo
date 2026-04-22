@@ -161,7 +161,8 @@ class _HealthHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
+        # Carry the Vireo service marker the probe validates.
+        self.wfile.write(b'{"service":"vireo","status":"ok"}')
 
     def log_message(self, *a, **kw):  # silence
         pass
@@ -341,6 +342,52 @@ def test_guard_booting_peer_preserves_runtime_json(tmp_path, monkeypatch):
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+class _CatchAll200Handler(http.server.BaseHTTPRequestHandler):
+    """Simulates an unrelated local service that returns 200 for everything,
+    including /api/v1/health — but without the Vireo service marker."""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+
+    def log_message(self, *a, **kw):  # silence
+        pass
+
+
+def _start_fake_catchall_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _CatchAll200Handler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server, port
+
+
+def test_guard_unrelated_200_without_service_marker_is_stale(tmp_path, monkeypatch):
+    """Codex P2 regression: a 200 alone is not proof of a live Vireo peer —
+    an unrelated local service that happens to bind Vireo's old port and
+    returns 200 for /api/v1/health would falsely cause `already_running`.
+    The probe now also validates a Vireo-specific service marker in the
+    response body.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    server, port = _start_fake_catchall_server()
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": port, "pid": 55555, "token": "anything",
+        }))
+        from runtime import check_single_instance
+        status, _info = check_single_instance()
+        assert status == "proceed"
+        assert not runtime_path.exists()
+    finally:
+        server.shutdown()
 
 
 def test_guard_unrelated_404_service_is_stale_and_proceeds(tmp_path, monkeypatch):

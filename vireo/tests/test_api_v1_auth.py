@@ -19,7 +19,7 @@ def test_api_v1_correct_token_accepted(app_and_db):
     token = app.config["API_TOKEN"]
     resp = client.get("/api/v1/health", headers={"X-Vireo-Token": token})
     assert resp.status_code == 200
-    assert resp.get_json() == {"status": "ok"}
+    assert resp.get_json() == {"service": "vireo", "status": "ok"}
 
 
 def test_internal_api_does_not_require_token(app_and_db):
