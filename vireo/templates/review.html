@@ -1153,6 +1153,10 @@ var grmState = { groupId: null, model: null, items: [], picks: new Set(), reject
 function openGroupReview(groupId, model) {
   grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
   _grmLoupeLocked = false;
+  // Reset zoom state so a high zoom from a prior burst doesn't leak into this modal.
+  _grmZoomLevel = 4;
+  _grmLastX = 50;
+  _grmLastY = 50;
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
 }
@@ -1334,16 +1338,26 @@ function _grmApplyZoom() {
   });
 }
 
-function _grmMaxZoom() {
-  // Per selected photo: ceil(sourceWidth / cardDisplayWidth) reaches true 1:1.
-  // Falls back to 12 (the historical cap) when dimensions are unknown so we
-  // never zoom less than before.
+function _grmOneToOneScale() {
+  // Cards use object-fit: cover in a 3:2 box, so the on-screen base scale is
+  // max(boxW/imgW, boxH/imgH). The CSS transform factor that makes one source
+  // pixel equal one screen pixel is the inverse: min(imgW/boxW, imgH/boxH).
+  // Using width only would overshoot for images wider than 3:2 and undershoot
+  // for taller ones — misleading pixel detail either way.
   var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
   var sample = document.querySelector('.grm-card img');
-  if (item && item.width && sample && sample.offsetWidth) {
-    return Math.max(12, Math.ceil(item.width / sample.offsetWidth));
-  }
-  return 12;
+  if (!item || !item.width || !item.height) return null;
+  if (!sample || !sample.offsetWidth || !sample.offsetHeight) return null;
+  return Math.min(item.width / sample.offsetWidth, item.height / sample.offsetHeight);
+}
+
+function _grmMaxZoom() {
+  // Per selected photo, cap at the factor that reaches true 1:1. Falls back to
+  // 12 (the historical cap) when dimensions are unknown so we never zoom less
+  // than before.
+  var factor = _grmOneToOneScale();
+  if (factor == null) return 12;
+  return Math.max(12, Math.ceil(factor));
 }
 
 function grmLoupeToggleLock(e) {
@@ -1389,12 +1403,10 @@ function grmLoupeZoom(e) {
 
 function grmSnapOneToOne() {
   // Lightroom-style 1:1: zoom factor that makes one source pixel == one screen pixel.
-  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
-  if (!item || !item.width) return;
-  var sample = document.querySelector('.grm-card img');
-  if (!sample || !sample.offsetWidth) return;
+  var factor = _grmOneToOneScale();
+  if (factor == null) return;
   _grmUpgradeStripToOriginal();
-  _grmZoomLevel = Math.max(1, Math.round(item.width / sample.offsetWidth));
+  _grmZoomLevel = Math.max(1, Math.round(factor));
   _grmApplyZoom();
 }
 
