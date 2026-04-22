@@ -248,7 +248,7 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None):
+def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None, scope=None):
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -256,8 +256,18 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     companion JPEG (RAW+JPEG pair), the companion is used as the extraction
     source because the in-camera JPEG is higher quality than extracting from
     the RAW.
+
+    ``scope`` restricts which folders are considered:
+      * ``None`` (default) — library-wide backfill (every missing WC).
+      * list/tuple of folder paths — only photos whose folder equals one of
+        the paths or lives under one of them are eligible.
+      * empty list/tuple — no-op (used by callers that want an explicit
+        "scan matched nothing" signal instead of backfilling everything).
     """
     import config as cfg
+
+    if scope is not None and len(scope) == 0:
+        return
 
     user_cfg = cfg.load()
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
@@ -279,6 +289,15 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
             "     AND (p.width > ? OR p.height > ?))"
         )
         params.extend([wc_max_size, wc_max_size])
+
+    scope_clause = ""
+    if scope is not None:
+        scope_terms = []
+        for p in scope:
+            scope_terms.append("(f.path = ? OR f.path LIKE ?)")
+            params.extend([str(p), str(p) + os.sep + "%"])
+        scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
+
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
@@ -291,6 +310,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                p.extension IN ({placeholders})
                {jpeg_clause}
            )
+           {scope_clause}
         """,
         params,
     ).fetchall()
@@ -659,9 +679,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     try:
         _pair_raw_jpeg_companions(db)
 
-        # Extract working copies for RAW photos (after pairing so companion is known)
+        # Extract working copies for RAW photos (after pairing so companion is known).
+        # Scope to the folders the caller just scanned so a fresh import doesn't
+        # trigger library-wide backfill for every pre-existing large JPEG.
         if vireo_dir:
-            _extract_working_copies(db, vireo_dir, progress_callback, status_callback)
+            if restrict_dirs is not None:
+                wc_scope = [str(d) for d in restrict_dirs]
+            else:
+                wc_scope = [str(root_path)]
+            _extract_working_copies(
+                db, vireo_dir, progress_callback, status_callback, scope=wc_scope,
+            )
     except BaseException:
         db.conn.rollback()
         raise
