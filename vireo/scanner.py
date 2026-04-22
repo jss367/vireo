@@ -6,7 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -629,11 +629,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         if workers > 1:
             mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
-                yield from zip(
-                    files_to_process,
-                    pool.map(_compute_file_features, paths_to_extract),
-                    strict=True,
-                )
+                # Bounded in-flight window instead of pool.map(): on Python
+                # 3.11 Executor.map eagerly submits every input, so on a
+                # 200k-file scan we would hold 200k queued futures in RAM.
+                # A few submissions per worker is enough to keep them fed
+                # while the main thread drains results in order.
+                max_in_flight = workers * 4
+                pending = deque()
+                inputs = zip(files_to_process, paths_to_extract, strict=True)
+                for image_path, path_str in inputs:
+                    pending.append((image_path, pool.submit(_compute_file_features, path_str)))
+                    if len(pending) >= max_in_flight:
+                        done_path, done_fut = pending.popleft()
+                        yield done_path, done_fut.result()
+                while pending:
+                    done_path, done_fut = pending.popleft()
+                    yield done_path, done_fut.result()
         else:
             for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
                 yield image_path, _compute_file_features(path_str)
