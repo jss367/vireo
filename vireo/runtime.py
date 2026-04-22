@@ -4,6 +4,7 @@ Writes `~/.vireo/runtime.json` so external callers can discover the running
 instance (port, auth token, PID). Also provides the single-instance guard.
 """
 
+import contextlib
 import json
 import os
 from datetime import UTC, datetime
@@ -34,3 +35,20 @@ def write_runtime_json(
     tmp.write_text(json.dumps(payload, indent=2))
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def read_runtime_json() -> dict | None:
+    """Return runtime.json contents, or None if missing / malformed."""
+    path = _runtime_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def delete_runtime_json() -> None:
+    """Remove runtime.json if present. Idempotent."""
+    with contextlib.suppress(FileNotFoundError):
+        _runtime_path().unlink()
