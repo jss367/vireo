@@ -259,8 +259,11 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
 
     ``scope`` restricts which folders are considered:
       * ``None`` (default) — library-wide backfill (every missing WC).
-      * list/tuple of folder paths — only photos whose folder equals one of
-        the paths or lives under one of them are eligible.
+      * list/tuple of entries — only folders matching an entry are eligible.
+        Each entry is either:
+          - a path string → matches the folder and every descendant (subtree);
+          - a ``(path, "exact")`` tuple → matches the folder only;
+          - a ``(path, "subtree")`` tuple → explicit form of the string case.
       * empty list/tuple — no-op (used by callers that want an explicit
         "scan matched nothing" signal instead of backfilling everything).
     """
@@ -293,9 +296,22 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     scope_clause = ""
     if scope is not None:
         scope_terms = []
-        for p in scope:
-            scope_terms.append("(f.path = ? OR f.path LIKE ?)")
-            params.extend([str(p), str(p) + os.sep + "%"])
+        for entry in scope:
+            if isinstance(entry, tuple):
+                path, mode = entry
+            else:
+                path, mode = entry, "subtree"
+            path = str(path)
+            if mode == "exact":
+                scope_terms.append("f.path = ?")
+                params.append(path)
+            else:
+                # Subtree match. Escape `_`, `%`, and the escape char itself
+                # so literal wildcards in folder names don't leak into
+                # unrelated siblings (e.g. `2024_06` matching `2024A06`).
+                esc = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                scope_terms.append("(f.path = ? OR f.path LIKE ? ESCAPE '\\')")
+                params.extend([path, esc + os.sep + "%"])
         scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
 
     rows = db.conn.execute(
@@ -682,9 +698,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # Extract working copies for RAW photos (after pairing so companion is known).
         # Scope to the folders the caller just scanned so a fresh import doesn't
         # trigger library-wide backfill for every pre-existing large JPEG.
+        # Match-mode mirrors what scan() actually traversed: restrict_dirs and
+        # non-recursive scans only touch direct children, so the scope uses an
+        # exact-folder match; a recursive walk from `root` matches the subtree.
         if vireo_dir:
             if restrict_dirs is not None:
-                wc_scope = [str(d) for d in restrict_dirs]
+                wc_scope = [(str(d), "exact") for d in restrict_dirs]
+            elif not recursive:
+                wc_scope = [(str(root_path), "exact")]
             else:
                 wc_scope = [str(root_path)]
             _extract_working_copies(

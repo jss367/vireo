@@ -190,6 +190,87 @@ def test_extract_working_copies_empty_scope_is_noop(tmp_path, monkeypatch):
     assert row["working_copy_path"] is None
 
 
+def test_extract_working_copies_scope_escapes_like_wildcards(tmp_path, monkeypatch):
+    """An underscore in a scope path must not match unrelated siblings.
+
+    SQLite LIKE treats `_` and `%` as wildcards. Without escaping, scoping to
+    ``/photos/2024_06`` would also match a sibling like ``/photos/2024A06``.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import _extract_working_copies
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    wanted = tmp_path / "2024_06"
+    wanted.mkdir()
+    # Sibling whose path would match the naive `2024_06/%` pattern because `_`
+    # is a LIKE wildcard. Both folders end in a directory separator boundary
+    # so the tail matches a single arbitrary character.
+    sibling = tmp_path / "2024A06"
+    sibling.mkdir()
+    (sibling / "sub").mkdir()
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+    wanted_id = _seed_large_jpeg(db, wanted, "w.jpg")
+    sibling_sub = sibling / "sub"
+    sibling_id = _seed_large_jpeg(db, sibling_sub, "s.jpg")
+
+    _extract_working_copies(db, str(vireo_dir), scope=[str(wanted)])
+
+    assert (vireo_dir / "working" / f"{wanted_id}.jpg").exists()
+    assert not (vireo_dir / "working" / f"{sibling_id}.jpg").exists(), (
+        "wildcard `_` in wanted path leaked into sibling match"
+    )
+
+
+def test_scan_non_recursive_scopes_working_copies_to_root_only(tmp_path, monkeypatch):
+    """scan(..., recursive=False) must not backfill working copies in subfolders.
+
+    Regression: without honoring `recursive`, the derived scope used a subtree
+    match that touched photos the caller explicitly chose not to walk.
+    """
+    import config as cfg
+    from db import Database
+    from scanner import scan
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({**cfg.DEFAULTS, "working_copy_max_size": 1000, "working_copy_quality": 90})
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "test.db"))
+
+    root = tmp_path / "scan"
+    root.mkdir()
+    # A large JPEG sitting at the scan root (on disk + to-be-scanned).
+    _make_jpeg(str(root / "top.jpg"), 2000, 1500)
+
+    # A pre-existing subfolder photo already in the DB that the caller does
+    # NOT want touched because `recursive=False`.
+    sub = root / "sub"
+    sub.mkdir()
+    sub_id = _seed_large_jpeg(db, sub, "in_sub.jpg")
+
+    scan(str(root), db, recursive=False, vireo_dir=str(vireo_dir))
+
+    top_row = db.conn.execute(
+        "SELECT id, working_copy_path FROM photos WHERE filename='top.jpg'"
+    ).fetchone()
+    assert top_row is not None
+    assert top_row["working_copy_path"] == f"working/{top_row['id']}.jpg"
+
+    # Subfolder photo is outside the non-recursive scan; must NOT be touched.
+    assert not (vireo_dir / "working" / f"{sub_id}.jpg").exists()
+    sub_wc = db.conn.execute(
+        "SELECT working_copy_path FROM photos WHERE id=?", (sub_id,)
+    ).fetchone()["working_copy_path"]
+    assert sub_wc is None
+
+
 def test_scan_scopes_working_copies_to_scan_root(tmp_path, monkeypatch):
     """scan() with a root only extracts working copies for photos under that root.
 
