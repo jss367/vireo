@@ -59,4 +59,19 @@ def classify_miss(row, siblings, config):
             if median > 0 and subject_size * 10 < median:
                 clipped = True
 
-    return {"no_subject": False, "clipped": clipped, "oof": False}
+    subject_t = row.get("subject_tenengrad") or 0.0
+    bg_t = row.get("bg_tenengrad") or 0.0
+
+    oof = False
+    ratio_bad = bg_t > 0 and (subject_t / bg_t) < config["miss_oof_ratio"]
+    # Absolute floor: below this, subject sharpness is motion-blur level.
+    # Value chosen empirically to match reject_focus behavior.
+    SHARPNESS_FLOOR = 10.0
+    floor_bad = subject_t < SHARPNESS_FLOOR
+
+    if in_burst:
+        oof = ratio_bad or floor_bad
+    else:
+        oof = ratio_bad and floor_bad
+
+    return {"no_subject": False, "clipped": clipped, "oof": oof}

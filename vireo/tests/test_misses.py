@@ -79,3 +79,32 @@ def test_clipped_when_bbox_much_smaller_than_burst_median():
     siblings = [_row(subject_size=0.08), _row(subject_size=0.10)]  # 8%, 10%
     flags = classify_miss(row, siblings=siblings, config=DEFAULT_CONFIG)
     assert flags["clipped"] is True
+
+
+def test_oof_when_background_sharper_than_subject_in_burst():
+    from misses import classify_miss
+    row = _row(subject_tenengrad=20.0, bg_tenengrad=80.0)  # ratio 0.25
+    siblings = [_row(), _row()]
+    flags = classify_miss(row, siblings=siblings, config=DEFAULT_CONFIG)
+    assert flags["oof"] is True
+
+
+def test_not_oof_when_ratio_above_threshold():
+    from misses import classify_miss
+    row = _row(subject_tenengrad=60.0, bg_tenengrad=80.0)  # ratio 0.75
+    flags = classify_miss(row, siblings=[_row()], config=DEFAULT_CONFIG)
+    assert flags["oof"] is False
+
+
+def test_oof_singleton_requires_both_ratio_and_floor():
+    """Singleton: ratio alone isn't enough — need absolute floor too."""
+    from misses import classify_miss
+    # Ratio is bad (0.25) but subject is still sharp in absolute terms.
+    row = _row(subject_tenengrad=200.0, bg_tenengrad=800.0)
+    flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
+    assert flags["oof"] is False
+
+    # Ratio is bad AND subject is below absolute floor.
+    row = _row(subject_tenengrad=5.0, bg_tenengrad=20.0)
+    flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
+    assert flags["oof"] is True
