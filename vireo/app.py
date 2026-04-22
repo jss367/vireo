@@ -5251,6 +5251,13 @@ def create_app(db_path, thumb_cache_dir=None):
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
+            # restrict_dirs narrows the post-ingest scan to just the subfolders
+            # that received files, instead of walking the full destination
+            # tree. Populated in the copy branch from ingest_result's
+            # copied_paths (parent dirs) and duplicate_folders. Left as None
+            # for copy=false so scan-in-place keeps its original full-tree
+            # behavior.
+            restrict_dirs = None
 
             # Define steps based on whether we're copying
             steps = []
@@ -5290,7 +5297,40 @@ def create_app(db_path, thumb_cache_dir=None):
                     skip_paths=exclude_paths or None,
                 )
                 copied_paths = ingest_result.get("copied_paths", [])
+                duplicate_folders = ingest_result.get("duplicate_folders", [])
                 scan_target = destination
+
+                # Build restrict_dirs from the folders ingest actually touched
+                # so the post-ingest scan doesn't re-walk the entire
+                # destination tree. Without this, importing ~2k RAWs into a
+                # populated library caused scanner.scan to enumerate tens of
+                # thousands of already-indexed files (observed: 59k). Mirrors
+                # the same pattern in pipeline_job.py. Only paths under the
+                # normalized destination are included; ".." tricks cannot
+                # escape. If nothing was copied and no duplicate folders were
+                # reported, restrict_dirs stays an empty list — scanner.scan
+                # then has no directories to enumerate, which matches intent
+                # (there is nothing new to index).
+                dest_normalized = Path(os.path.normpath(destination))
+
+                def _under_destination(path_str):
+                    try:
+                        return Path(os.path.normpath(path_str)).is_relative_to(
+                            dest_normalized
+                        )
+                    except ValueError:
+                        return False
+
+                restrict_set = set()
+                for cp in copied_paths:
+                    parent = str(Path(cp).parent)
+                    if _under_destination(parent):
+                        restrict_set.add(parent)
+                for folder in duplicate_folders:
+                    if _under_destination(folder):
+                        restrict_set.add(folder)
+                restrict_dirs = sorted(restrict_set)
+
                 runner.update_step(job["id"], "ingest", status="completed",
                                    summary=f"{ingest_result.get('copied', 0)} copied")
 
@@ -5308,7 +5348,20 @@ def create_app(db_path, thumb_cache_dir=None):
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
             try:
-                do_scan(scan_target, thread_db, progress_callback=scan_cb, skip_paths=exclude_paths or None, vireo_dir=vireo_dir)
+                # copy=false: scan_target is the source and restrict_dirs is
+                #   None, so scanner walks the full source tree (unchanged).
+                # copy=true: scan_target is the destination (folder hierarchy
+                #   root, for parent-folder chain creation), but restrict_dirs
+                #   narrows enumeration to only the subfolders ingest wrote
+                #   into. An empty list means "nothing new to scan" — a no-op
+                #   inside scanner.scan.
+                do_scan(
+                    scan_target, thread_db,
+                    progress_callback=scan_cb,
+                    skip_paths=exclude_paths or None,
+                    vireo_dir=vireo_dir,
+                    restrict_dirs=restrict_dirs,
+                )
             finally:
                 # scanner.scan commits photo rows incrementally, so even a mid-scan
                 # failure can leave DB state that invalidates cached new-image counts.
