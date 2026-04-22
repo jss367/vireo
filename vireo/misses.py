@@ -13,6 +13,12 @@ no_subject is exclusive — when it's true, clipped/oof can't be evaluated
 and both return False.
 """
 
+import logging
+from collections import defaultdict
+from datetime import datetime
+
+log = logging.getLogger(__name__)
+
 
 def classify_miss(row, siblings, config):
     """Return {'no_subject': bool, 'clipped': bool, 'oof': bool}.
@@ -75,3 +81,66 @@ def classify_miss(row, siblings, config):
         oof = ratio_bad and floor_bad
 
     return {"no_subject": False, "clipped": clipped, "oof": oof}
+
+
+def compute_misses_for_workspace(db, pipeline_config):
+    """Compute and persist miss flags for every scanned photo in the workspace.
+
+    Reads per-photo features from `photos`, groups by `burst_id`, calls
+    classify_miss for each photo with its siblings as context, then writes
+    the three flags and a timestamp in a single batch.
+
+    Singletons (burst_id IS NULL) are evaluated alone, which triggers the
+    stricter singleton thresholds inside classify_miss.
+    """
+    if not pipeline_config.get("miss_enabled", True):
+        log.info("Miss detection disabled via miss_enabled=false")
+        return 0
+
+    rows = db.conn.execute(
+        "SELECT id, burst_id, detection_conf, subject_size, crop_complete, "
+        "       subject_tenengrad, bg_tenengrad "
+        "FROM photos"
+    ).fetchall()
+
+    by_burst = defaultdict(list)
+    singletons = []
+    for r in rows:
+        d = dict(r)
+        if d["burst_id"]:
+            by_burst[d["burst_id"]].append(d)
+        else:
+            singletons.append(d)
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    updates = []
+
+    for burst_rows in by_burst.values():
+        for row in burst_rows:
+            siblings = [s for s in burst_rows if s["id"] != row["id"]]
+            flags = classify_miss(row, siblings, pipeline_config)
+            updates.append((
+                int(flags["no_subject"]),
+                int(flags["clipped"]),
+                int(flags["oof"]),
+                now,
+                row["id"],
+            ))
+
+    for row in singletons:
+        flags = classify_miss(row, siblings=[], config=pipeline_config)
+        updates.append((
+            int(flags["no_subject"]),
+            int(flags["clipped"]),
+            int(flags["oof"]),
+            now,
+            row["id"],
+        ))
+
+    db.conn.executemany(
+        "UPDATE photos SET miss_no_subject=?, miss_clipped=?, miss_oof=?, "
+        "miss_computed_at=? WHERE id=?",
+        updates,
+    )
+    db.conn.commit()
+    return len(updates)

@@ -108,3 +108,60 @@ def test_oof_singleton_requires_both_ratio_and_floor():
     row = _row(subject_tenengrad=5.0, bg_tenengrad=20.0)
     flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
     assert flags["oof"] is True
+
+
+def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
+    """Integration test: real DB, synthetic photo rows, verify flags written."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    # Database.__init__ auto-creates a "Default" workspace and sets it active.
+
+    # Insert a folder for the photos.
+    folder_id = db.add_folder("/tmp/fake")
+
+    # Two photos in the same burst — one keeper, one lost-framing miss.
+    p_keeper = db.add_photo(
+        folder_id,
+        "k.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+        timestamp="2026-04-22T10:00:00",
+    )
+    p_miss = db.add_photo(
+        folder_id,
+        "m.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=2.0,
+        timestamp="2026-04-22T10:00:00",
+    )
+    # Hand-write pipeline features + shared burst_id.
+    db.conn.executemany(
+        "UPDATE photos SET burst_id=?, detection_conf=?, subject_size=?, "
+        "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        [
+            ("B1", 0.95, 0.08,  1.0, 80.0, 40.0, p_keeper),
+            ("B1", 0.95, 0.005, 1.0, 80.0, 40.0, p_miss),
+        ],
+    )
+    db.conn.commit()
+
+    compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+
+    keeper = dict(db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+        "FROM photos WHERE id=?", (p_keeper,)
+    ).fetchone())
+    miss = dict(db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+        "FROM photos WHERE id=?", (p_miss,)
+    ).fetchone())
+
+    assert keeper["miss_clipped"] == 0
+    assert miss["miss_clipped"] == 1
+    assert keeper["miss_computed_at"] is not None
+    assert miss["miss_computed_at"] is not None
