@@ -59,13 +59,20 @@ def test_api_v1_shutdown_token_only(app_and_db, monkeypatch):
     client = app.test_client()
     token = app.config["API_TOKEN"]
 
-    # Don't actually send SIGTERM during tests — stub os.kill.
-    import os as _os
-    killed = []
-    monkeypatch.setattr(_os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    # Replace threading.Timer with a no-op so the scheduled SIGTERM never
+    # fires and kills the pytest process after monkeypatch teardown. The
+    # endpoint's public contract is the HTTP response; we don't need to
+    # verify the actual kill side-effect here.
+    import threading as _threading
+
+    class _NoopTimer:
+        def __init__(self, *_a, **_kw):
+            pass
+        def start(self):
+            pass
+
+    monkeypatch.setattr(_threading, "Timer", _NoopTimer)
 
     resp = client.post("/api/v1/shutdown", headers={"X-Vireo-Token": token})
     assert resp.status_code == 200
     assert resp.get_json()["status"] == "shutting_down"
-    # The shutdown timer runs in a thread with a 0.5s delay; we don't need to
-    # wait for it here — the response is the contract.
