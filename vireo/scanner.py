@@ -248,7 +248,32 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
-def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None):
+def _subtree_like_pattern(path, sep=None):
+    """Build a SQLite LIKE parameter that matches ``path`` + any descendant.
+
+    Intended for use with ``LIKE ? ESCAPE '\\'``. Escapes ``\\``, ``%``, and
+    ``_`` inside the path and the separator, so literal wildcards in folder
+    names don't leak into sibling matches and — critically on Windows — the
+    trailing backslash separator doesn't turn the appended ``%`` into a
+    literal character.
+
+    Trailing separators on the input are collapsed to exactly one before the
+    wildcard. Without this, ``"/photos/"`` and the filesystem root ``"/"``
+    produce ``"//%"``, which matches nothing.
+    """
+    if sep is None:
+        sep = os.sep
+
+    while path.endswith(sep):
+        path = path[: -len(sep)]
+
+    def _escape(s):
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    return _escape(path) + _escape(sep) + "%"
+
+
+def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None, scope=None):
     """Extract working copies for all RAW photos missing one.
 
     For each RAW photo without a working_copy_path, extract a JPEG working
@@ -256,8 +281,21 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     companion JPEG (RAW+JPEG pair), the companion is used as the extraction
     source because the in-camera JPEG is higher quality than extracting from
     the RAW.
+
+    ``scope`` restricts which folders are considered:
+      * ``None`` (default) — library-wide backfill (every missing WC).
+      * list/tuple of entries — only folders matching an entry are eligible.
+        Each entry is either:
+          - a path string → matches the folder and every descendant (subtree);
+          - a ``(path, "exact")`` tuple → matches the folder only;
+          - a ``(path, "subtree")`` tuple → explicit form of the string case.
+      * empty list/tuple — no-op (used by callers that want an explicit
+        "scan matched nothing" signal instead of backfilling everything).
     """
     import config as cfg
+
+    if scope is not None and len(scope) == 0:
+        return
 
     user_cfg = cfg.load()
     wc_max_size = user_cfg.get("working_copy_max_size", 4096)
@@ -279,6 +317,30 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
             "     AND (p.width > ? OR p.height > ?))"
         )
         params.extend([wc_max_size, wc_max_size])
+
+    scope_clause = ""
+    if scope is not None:
+        scope_terms = []
+        for entry in scope:
+            if isinstance(entry, tuple):
+                path, mode = entry
+            else:
+                path, mode = entry, "subtree"
+            path = str(path)
+            if mode == "exact":
+                scope_terms.append("f.path = ?")
+                params.append(path)
+            else:
+                # Subtree match. The LIKE pattern needs to escape `_`, `%`,
+                # and the escape char itself — both in the path and in the
+                # separator — so (a) literal wildcards in folder names don't
+                # leak into siblings (`2024_06` matching `2024A06`) and
+                # (b) the Windows `\` separator doesn't turn the trailing
+                # `%` into a literal under ESCAPE '\\'.
+                scope_terms.append("(f.path = ? OR f.path LIKE ? ESCAPE '\\')")
+                params.extend([path, _subtree_like_pattern(path)])
+        scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
+
     rows = db.conn.execute(
         f"""
         SELECT p.id, p.filename, p.companion_path, p.working_copy_path,
@@ -291,6 +353,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                p.extension IN ({placeholders})
                {jpeg_clause}
            )
+           {scope_clause}
         """,
         params,
     ).fetchall()
@@ -659,9 +722,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     try:
         _pair_raw_jpeg_companions(db)
 
-        # Extract working copies for RAW photos (after pairing so companion is known)
+        # Extract working copies for RAW photos (after pairing so companion is known).
+        # Scope to the folders the caller just scanned so a fresh import doesn't
+        # trigger library-wide backfill for every pre-existing large JPEG.
+        # Match-mode mirrors what scan() actually traversed: restrict_dirs and
+        # non-recursive scans only touch direct children, so the scope uses an
+        # exact-folder match; a recursive walk from `root` matches the subtree.
         if vireo_dir:
-            _extract_working_copies(db, vireo_dir, progress_callback, status_callback)
+            if restrict_dirs is not None:
+                wc_scope = [(str(d), "exact") for d in restrict_dirs]
+            elif not recursive:
+                wc_scope = [(str(root_path), "exact")]
+            else:
+                wc_scope = [str(root_path)]
+            _extract_working_copies(
+                db, vireo_dir, progress_callback, status_callback, scope=wc_scope,
+            )
     except BaseException:
         db.conn.rollback()
         raise
