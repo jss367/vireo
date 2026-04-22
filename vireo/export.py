@@ -147,6 +147,15 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             developed_dir,
             developed_index,
         )
+        # Guard against silent downscaling: darktable's develop job can
+        # write the output at --width=N, so a developed file may be
+        # smaller than the original. If it can't satisfy the requested
+        # export size, fall through to the working-copy / original
+        # source.
+        if source_path and not _developed_can_satisfy_size(
+            source_path, photo, max_size
+        ):
+            source_path = None
         if not source_path:
             use_wc = bool(max_size) and max_size <= wc_max
             source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
@@ -226,6 +235,43 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
 
 
 _PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+
+
+def _developed_can_satisfy_size(dev_path, photo, max_size):
+    """Return True if the developed file is large enough for this export.
+
+    The develop job may have written a downscaled output (`--width` is
+    honored by darktable-cli), so preferring it unconditionally would
+    silently ship a smaller image than the user asked for. This guard
+    compares the developed file's long edge against:
+
+      * the requested `max_size` when resize is in effect, or
+      * the original photo's stored dimensions when a full-resolution
+        export is requested.
+
+    If we can't determine the required size (no max_size and no stored
+    dimensions on the photo row), fall back to preferring the developed
+    output so the primary "ship the perfected render" feature keeps
+    working for libraries scanned before the dimension columns were
+    populated.
+    """
+    from PIL import Image
+
+    try:
+        with Image.open(dev_path) as img:
+            dev_long = max(img.size)
+    except Exception:
+        return True
+    if max_size is not None:
+        return dev_long >= max_size
+    try:
+        original_w = photo["width"]
+        original_h = photo["height"]
+    except (KeyError, IndexError):
+        return True
+    if original_w and original_h:
+        return dev_long >= max(original_w, original_h)
+    return True
 
 
 def developed_folder_key(folder_path):

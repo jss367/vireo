@@ -1058,6 +1058,108 @@ def test_move_folder_rebases_configured_developed_dir(tmp_path):
     assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed-bytes"
 
 
+def test_export_skips_smaller_developed_for_full_res(export_env):
+    """Full-res export must not silently use a down-scaled developed file.
+
+    Regression: export_photos preferred the developed file whenever one
+    existed, but `/api/jobs/develop` lets users pass `--width`, which
+    writes a smaller JPEG/TIFF. A subsequent full-resolution export
+    (max_size unset) would silently ship that smaller file instead of
+    decoding the full-resolution original, dropping resolution without
+    warning.
+    """
+    env = export_env
+    # Record the original's true dimensions so the size-aware guard can
+    # detect that the developed file is smaller than the original. In
+    # production this is populated by the scan job.
+    env["db"].conn.execute(
+        "UPDATE photos SET width = ?, height = ? WHERE id = ?",
+        (800, 600, env["p1"]),
+    )
+    env["db"].conn.commit()
+
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    # Smaller than the 800x600 original the fixture writes to disk.
+    Image.new("RGB", (200, 150), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}"},
+    )
+
+    assert result["exported"] == 1
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as out:
+        assert out.size == (800, 600), (
+            f"full-res export should ship the 800x600 original, not the "
+            f"200x150 developed file; got {out.size}"
+        )
+
+
+def test_export_skips_developed_when_max_size_exceeds_developed_dims(export_env):
+    """Export with max_size larger than the developed file's long edge skips it.
+
+    If the developed output can't satisfy the requested max_size, using
+    it silently downscales the output below the user's requested cap.
+    """
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    # Developed long-edge is 200; user asks for max_size=400.
+    Image.new("RGB", (200, 150), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    result = export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 400},
+    )
+
+    assert result["exported"] == 1
+    with Image.open(os.path.join(env["dest"], "bird1.jpg")) as out:
+        # Original (800x600) resized to max=400 → 400x300.
+        # Developed would have silently capped at 200x150.
+        assert max(out.size) == 400, (
+            f"expected 400 long edge (from 800x600 original), got {out.size}"
+        )
+
+
+def test_export_uses_developed_when_max_size_fits(export_env):
+    """Resize exports still use developed when it can satisfy max_size.
+
+    Guardrail for the primary feature: resize workflows with max_size
+    <= developed's long edge must ship the perfected rendering.
+    """
+    env = export_env
+    developed_dir = env["src"] / "developed"
+    developed_dir.mkdir()
+    Image.new("RGB", (600, 450), color=(10, 200, 40)).save(
+        str(developed_dir / "bird1.jpg"), "JPEG", quality=95,
+    )
+
+    export_photos(
+        db=env["db"],
+        vireo_dir=env["vireo_dir"],
+        photo_ids=[env["p1"]],
+        destination=env["dest"],
+        options={"naming_template": "{original}", "max_size": 300},
+    )
+
+    r, g, b = _avg_rgb(os.path.join(env["dest"], "bird1.jpg"))
+    assert g > r and g > b, (
+        f"expected green-dominant (developed used for fitting resize), "
+        f"got rgb=({r},{g},{b})"
+    )
+
+
 def test_relocate_developed_dir_merges_into_existing_target(tmp_path):
     """When target exists, merge source files in; don't strand them at old key.
 
