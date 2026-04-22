@@ -240,3 +240,14 @@ def test_guard_peer_returning_500_is_conflict(tmp_path, monkeypatch):
         assert runtime_path.exists()
     finally:
         server.shutdown()
+
+
+def test_generate_token_is_random_and_urlsafe():
+    from runtime import generate_token
+    a = generate_token()
+    b = generate_token()
+    assert a != b
+    assert len(a) >= 32
+    # URL-safe base64: only alphanumerics and -_
+    import re
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", a)

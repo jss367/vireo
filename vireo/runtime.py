@@ -7,6 +7,7 @@ instance (port, auth token, PID). Also provides the single-instance guard.
 import contextlib
 import json
 import os
+import secrets
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -96,3 +97,8 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
     # Probe failed — peer is dead. Clean up and proceed.
     delete_runtime_json()
     return ("proceed", None)
+
+
+def generate_token() -> str:
+    """Return a URL-safe random token suitable for API auth."""
+    return secrets.token_urlsafe(32)
