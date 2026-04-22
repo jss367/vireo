@@ -1397,7 +1397,9 @@ function grmLoupeMove(e) {
   _grmLastX = ((e.clientX - rect.left) / rect.width) * 100;
   _grmLastY = ((e.clientY - rect.top) / rect.height) * 100;
 
-  _grmUpgradeStripToOriginal();
+  // No upgrade here: plain hover shouldn't trigger a burst of full-res fetches
+  // for every strip card. Upgrade only when the user expresses zoom intent via
+  // the wheel or the 1:1 snap key.
   _grmApplyZoom();
 }
 
