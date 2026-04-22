@@ -7936,6 +7936,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def stats_redirect():
         return redirect("/dashboard")
 
+    # --- /api/v1/* aliases over the stable subset of /api/* ---
+    # These are the endpoints advertised to external callers in docs/headless-api.md.
+    # Keep this list tight — expanding it locks the surface.
+    _V1_ALIASES = [
+        # (v1 path, existing endpoint name, methods)
+        ("/api/v1/photos", "api_photos", ["GET"]),
+        ("/api/v1/photos/<int:photo_id>", "api_photo_detail", ["GET"]),
+        ("/api/v1/collections", "api_collections", ["GET"]),
+        ("/api/v1/collections/<int:collection_id>/photos",
+         "api_collection_photos", ["GET"]),
+        ("/api/v1/workspaces", "api_get_workspaces", ["GET"]),
+        ("/api/v1/workspaces/<int:ws_id>/activate",
+         "api_activate_workspace", ["POST"]),
+        ("/api/v1/keywords", "api_keywords", ["GET"]),
+    ]
+
+    for v1_path, endpoint_name, methods in _V1_ALIASES:
+        view = app.view_functions.get(endpoint_name)
+        if view is None:
+            raise RuntimeError(
+                f"Cannot alias {v1_path}: endpoint '{endpoint_name}' not registered"
+            )
+        app.add_url_rule(
+            v1_path,
+            endpoint=f"v1_{endpoint_name}",
+            view_func=view,
+            methods=methods,
+        )
+
     return app
 
 
