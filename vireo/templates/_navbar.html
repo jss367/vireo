@@ -1024,6 +1024,41 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
+
+/* Shared right-click context menu */
+.vireo-ctx-menu {
+  position: fixed; z-index: 1000;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px; padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  font-size: 13px; color: var(--text-primary);
+  user-select: none;
+}
+.vireo-ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; cursor: pointer;
+}
+.vireo-ctx-item:hover:not(.vireo-ctx-disabled) {
+  background: var(--bg-tertiary);
+}
+.vireo-ctx-disabled {
+  color: var(--text-tertiary); cursor: default;
+}
+.vireo-ctx-sep {
+  height: 1px; background: var(--border-secondary);
+  margin: 4px 0;
+}
+.vireo-ctx-chips {
+  display: flex; gap: 4px; padding: 6px 12px;
+}
+.vireo-ctx-chip {
+  flex: 0 0 auto; padding: 2px 6px; border-radius: 4px;
+  cursor: pointer; line-height: 1;
+}
+.vireo-ctx-chip:hover { background: var(--bg-tertiary); }
+.vireo-ctx-chip.is-active { background: var(--accent); color: white; }
 </style>
 
 <nav class="navbar">
@@ -1154,6 +1189,87 @@ function sendReport() {
     btn.textContent = 'Send Report';
   });
 }
+
+/* Shared right-click context menu component. */
+(function(){
+  let _ctxEl = null;
+  let _ctxDismiss = null;
+
+  window.closeContextMenu = function(){
+    if (_ctxEl) { _ctxEl.remove(); _ctxEl = null; }
+    document.removeEventListener('mousedown', _outside, true);
+    document.removeEventListener('keydown', _keydown, true);
+    window.removeEventListener('blur', closeContextMenu);
+    window.removeEventListener('scroll', closeContextMenu, true);
+    if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
+  };
+
+  function _outside(e){
+    if (_ctxEl && !_ctxEl.contains(e.target)) closeContextMenu();
+  }
+  function _keydown(e){
+    if (e.key === 'Escape') { e.preventDefault(); closeContextMenu(); }
+  }
+
+  function _renderItem(item){
+    if (item.separator) {
+      const s = document.createElement('div');
+      s.className = 'vireo-ctx-sep';
+      return s;
+    }
+    if (item.chips) {
+      const row = document.createElement('div');
+      row.className = 'vireo-ctx-chips';
+      item.chips.forEach(c => {
+        const b = document.createElement('span');
+        b.className = 'vireo-ctx-chip' + (c.active ? ' is-active' : '');
+        b.textContent = c.label;
+        if (c.title) b.title = c.title;
+        b.addEventListener('click', ev => {
+          ev.stopPropagation();
+          closeContextMenu();
+          try { c.onClick && c.onClick(); } catch(err){ console.error(err); }
+        });
+        row.appendChild(b);
+      });
+      return row;
+    }
+    const d = document.createElement('div');
+    d.className = 'vireo-ctx-item' + (item.disabled ? ' vireo-ctx-disabled' : '');
+    d.textContent = item.label;
+    if (item.disabled && item.disabledHint) d.title = item.disabledHint;
+    if (!item.disabled) {
+      d.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeContextMenu();
+        try { item.onClick && item.onClick(); } catch(err){ console.error(err); }
+      });
+    }
+    return d;
+  }
+
+  window.openContextMenu = function(event, items, opts){
+    closeContextMenu();
+    const menu = document.createElement('div');
+    menu.className = 'vireo-ctx-menu';
+    items.forEach(it => menu.appendChild(_renderItem(it)));
+    document.body.appendChild(menu);
+    // Clamp to viewport.
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const rect = menu.getBoundingClientRect();
+    let x = event.clientX, y = event.clientY;
+    if (x + rect.width  > vw) x = Math.max(0, vw - rect.width  - 4);
+    if (y + rect.height > vh) y = Math.max(0, vh - rect.height - 4);
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    _ctxEl = menu;
+    _ctxDismiss = (opts && opts.onDismiss) || null;
+    document.addEventListener('mousedown', _outside, true);
+    document.addEventListener('keydown', _keydown, true);
+    window.addEventListener('blur', closeContextMenu);
+    window.addEventListener('scroll', closeContextMenu, true);
+  };
+})();
 </script>
 
 <!-- Missing Folders Banner -->
