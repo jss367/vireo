@@ -8024,21 +8024,39 @@ def main():
             port = s.getsockname()[1]
 
     from runtime import (
-        check_single_instance,
+        acquire_single_instance,
         delete_runtime_json,
         generate_token,
+        release_single_instance,
         write_runtime_json,
     )
 
-    status, info = check_single_instance()
+    # Atomically reserve the single-instance slot BEFORE any heavy
+    # initialization. Reserving up-front (rather than writing runtime.json
+    # at the end of startup) closes the race where two near-simultaneous
+    # launches both see an empty slot and both start serving.
+    status, info = acquire_single_instance(pid=os.getpid())
     if status == "conflict":
         import sys as _sys
         _sys.stderr.write(json.dumps({
             "error": "already_running",
-            "port": info["port"],
-            "pid": info["pid"],
+            "port": info.get("port"),
+            "pid": info.get("pid"),
         }) + "\n")
         raise SystemExit(1)
+
+    # Register cleanup immediately after acquiring the slot so a crash
+    # during initialization still releases the reservation lock and any
+    # runtime.json we may have written.
+    import atexit
+    import signal as _signal
+
+    def _cleanup_runtime_state():
+        delete_runtime_json()
+        release_single_instance()
+
+    atexit.register(_cleanup_runtime_state)
+    _signal.signal(_signal.SIGTERM, lambda *_: (_cleanup_runtime_state(), os._exit(0)))
 
     api_token = generate_token()
     mode = "headless" if args.headless else "gui"
@@ -8079,9 +8097,6 @@ def main():
 
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    import atexit
-    import signal as _signal
-
     # Look up the running version from package metadata (same fallback chain as /api/version).
     try:
         from importlib.metadata import version as pkg_version
@@ -8089,12 +8104,13 @@ def main():
     except Exception:
         ver = "0.0.0"
 
+    # Finalize runtime.json, replacing the reservation marker with the full
+    # payload now that the port and token are known. Cleanup handlers were
+    # registered immediately after `acquire_single_instance` above.
     write_runtime_json(
         port=port, pid=os.getpid(), version=ver, db_path=args.db,
         token=api_token, mode=mode,
     )
-    atexit.register(delete_runtime_json)
-    _signal.signal(_signal.SIGTERM, lambda *_: (delete_runtime_json(), os._exit(0)))
 
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 

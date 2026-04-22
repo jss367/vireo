@@ -1,10 +1,14 @@
 """Runtime discovery file for the Vireo sidecar.
 
 Writes `~/.vireo/runtime.json` so external callers can discover the running
-instance (port, auth token, PID). Also provides the single-instance guard.
+instance (port, auth token, PID). Also provides the single-instance guard,
+including an atomic reservation step (via a separate lock file) so two
+near-simultaneous launches cannot both observe an empty slot and both
+start serving.
 """
 
 import contextlib
+import errno
 import json
 import os
 import secrets
@@ -16,6 +20,10 @@ from pathlib import Path
 
 def _runtime_path() -> Path:
     return Path(os.path.expanduser("~/.vireo/runtime.json"))
+
+
+def _lock_path() -> Path:
+    return Path(os.path.expanduser("~/.vireo/runtime.lock"))
 
 
 def write_runtime_json(
@@ -57,12 +65,39 @@ def delete_runtime_json() -> None:
         _runtime_path().unlink()
 
 
+def _pid_alive(pid) -> bool:
+    """Best-effort liveness check for a PID from another process.
+
+    On Unix, `os.kill(pid, 0)` raises ProcessLookupError when the pid is
+    gone. On Windows, os.kill with signal 0 is not fully portable; fall
+    back to treating unknown errors as "alive" so the guard errs on the
+    side of refusing to start a second instance.
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it.
+        return True
+    except OSError:
+        return True
+
+
 def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | None]:
     """Check whether another Vireo instance is healthy on the advertised port.
 
     Returns:
         ("proceed", None)  — no peer found, or stale file cleaned up.
-        ("conflict", info) — healthy peer. `info` has keys `port`, `pid`.
+        ("conflict", info) — live peer. `info` has keys `port`, `pid`.
+
+    The probe requires a 200 from `/api/v1/health` (with the token from
+    runtime.json) to classify the peer as alive. Non-200 responses — 401,
+    404, 500, etc. — are treated as stale: the port may have been reused
+    by an unrelated local service, so we clean the file and proceed.
     """
     data = read_runtime_json()
     if data is None:
@@ -73,6 +108,7 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
 
     port = data.get("port")
     token = data.get("token", "")
+    pid = data.get("pid")
     if not isinstance(port, int) or not isinstance(token, str):
         delete_runtime_json()
         return ("proceed", None)
@@ -83,20 +119,106 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
             headers={"X-Vireo-Token": token},
         )
         with urllib.request.urlopen(req, timeout=probe_timeout_s) as resp:
-            # Any HTTP response means something is bound to the port. Treat as
-            # an alive peer regardless of status — a stale token or a transient
-            # 5xx is still "do not start a second instance".
-            _ = resp.status
-            return ("conflict", {"port": port, "pid": data.get("pid")})
+            if resp.status == 200:
+                return ("conflict", {"port": port, "pid": pid})
+            # Any other 2xx is unexpected from our own health endpoint; fall
+            # through to the stale path.
     except urllib.error.HTTPError:
-        # Got a non-2xx status. Peer is alive.
-        return ("conflict", {"port": port, "pid": data.get("pid")})
+        # Non-2xx (401, 404, 500, ...) — either the port was reused by an
+        # unrelated service, or our own peer is answering but the token
+        # doesn't match (shouldn't happen under correct writes). Either way,
+        # treat as stale and clean up so startup can proceed.
+        pass
     except (urllib.error.URLError, TimeoutError, OSError):
+        # Connection refused / timeout — peer is dead.
         pass
 
-    # Probe failed — peer is dead. Clean up and proceed.
     delete_runtime_json()
     return ("proceed", None)
+
+
+def acquire_single_instance(
+    pid: int, probe_timeout_s: float = 0.5, max_retries: int = 5
+) -> tuple[str, dict | None]:
+    """Atomically reserve the single-instance slot via a lock file.
+
+    Creates `~/.vireo/runtime.lock` with `O_CREAT | O_EXCL`, writing the
+    caller's PID. This closes the race where two near-simultaneous
+    launches both call `check_single_instance`, both see no runtime.json,
+    and both start serving before either has written one. Only one
+    process can win the O_EXCL create; the other returns "conflict".
+
+    The lock file is separate from runtime.json to keep runtime.json's
+    external contract clean — it still either does not exist or contains
+    the full payload of a running instance.
+
+    Returns:
+        ("acquired", None) — caller holds the lock. Must call
+            `release_single_instance` on shutdown (e.g. via atexit /
+            SIGTERM handlers).
+        ("conflict", info) — a peer is alive; caller must not start.
+
+    If a stale `runtime.lock` is found (holder PID no longer alive), it
+    is removed and the caller retries. If a live `runtime.json` peer is
+    found, we return conflict regardless of lock state.
+    """
+    lock_path = _lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for _attempt in range(max_retries):
+        # First, probe runtime.json for a live peer. A healthy peer always
+        # wins, even if the lock happens to be missing.
+        status, info = check_single_instance(probe_timeout_s=probe_timeout_s)
+        if status == "conflict":
+            return ("conflict", info)
+
+        # No live peer — try to atomically claim the lock.
+        try:
+            fd = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            # Another process holds (or left) the lock. Decide liveness by
+            # the PID written inside.
+            holder_pid = _read_lock_holder(lock_path)
+            if _pid_alive(holder_pid):
+                return ("conflict", {"port": None, "pid": holder_pid})
+            # Stale lock — remove and retry.
+            with contextlib.suppress(FileNotFoundError):
+                lock_path.unlink()
+            continue
+        except OSError as e:
+            if e.errno == errno.EEXIST:
+                continue
+            raise
+
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(str(pid))
+            return ("acquired", None)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                lock_path.unlink()
+            raise
+
+    # Exhausted retries — some other process keeps winning the race. Treat
+    # as a conflict rather than looping forever.
+    return ("conflict", {"port": None, "pid": None})
+
+
+def release_single_instance() -> None:
+    """Remove the reservation lock file. Idempotent."""
+    with contextlib.suppress(FileNotFoundError):
+        _lock_path().unlink()
+
+
+def _read_lock_holder(lock_path: Path) -> int:
+    try:
+        return int(lock_path.read_text().strip())
+    except (OSError, ValueError):
+        return 0
 
 
 def generate_token() -> str:

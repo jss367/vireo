@@ -187,6 +187,17 @@ class _Always500Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class _Always404Handler(http.server.BaseHTTPRequestHandler):
+    """Simulates an unrelated local HTTP service that reused our port."""
+
+    def do_GET(self):
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *a, **kw):  # silence
+        pass
+
+
 def _start_fake_500_server():
     server = http.server.HTTPServer(("127.0.0.1", 0), _Always500Handler)
     port = server.server_address[1]
@@ -195,11 +206,21 @@ def _start_fake_500_server():
     return server, port
 
 
-def test_guard_bad_token_401_is_conflict_not_proceed(tmp_path, monkeypatch):
-    """A peer that responds 401 (stale token) must be treated as alive.
+def _start_fake_404_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Always404Handler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server, port
 
-    Regression: HTTPError subclasses URLError, so a naive except clause
-    swallowed 401/500 responses and misclassified a running peer as dead.
+
+def test_guard_401_is_stale_and_proceeds(tmp_path, monkeypatch):
+    """A peer that responds 401 must be treated as stale, not a live Vireo.
+
+    The token in runtime.json is always the one our own writer emitted for
+    the running instance, so a 401 implies the port was reused by an
+    unrelated local service (or state drift). Refusing to start on any
+    HTTP response caused a false `already_running` in that case.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
@@ -211,18 +232,15 @@ def test_guard_bad_token_401_is_conflict_not_proceed(tmp_path, monkeypatch):
             "port": port, "pid": 77777, "token": "WRONG-TOKEN",
         }))
         from runtime import check_single_instance
-        status, info = check_single_instance()
-        assert status == "conflict"
-        assert info["port"] == port
-        assert info["pid"] == 77777
-        # Critically: the runtime.json must NOT be deleted.
-        assert runtime_path.exists()
+        status, _info = check_single_instance()
+        assert status == "proceed"
+        assert not runtime_path.exists()
     finally:
         server.shutdown()
 
 
-def test_guard_peer_returning_500_is_conflict(tmp_path, monkeypatch):
-    """A peer responding 500 must be treated as alive — any HTTP response counts."""
+def test_guard_peer_returning_500_is_stale_and_proceeds(tmp_path, monkeypatch):
+    """A 500 response is not proof of a live Vireo peer — treat as stale."""
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
@@ -233,11 +251,29 @@ def test_guard_peer_returning_500_is_conflict(tmp_path, monkeypatch):
             "port": port, "pid": 88888, "token": "anything",
         }))
         from runtime import check_single_instance
-        status, info = check_single_instance()
-        assert status == "conflict"
-        assert info["port"] == port
-        assert info["pid"] == 88888
-        assert runtime_path.exists()
+        status, _info = check_single_instance()
+        assert status == "proceed"
+        assert not runtime_path.exists()
+    finally:
+        server.shutdown()
+
+
+def test_guard_unrelated_404_service_is_stale_and_proceeds(tmp_path, monkeypatch):
+    """If the advertised port is now answered by an unrelated HTTP service,
+    treat runtime.json as stale so Vireo can start on a fresh port."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    server, port = _start_fake_404_server()
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": port, "pid": 66666, "token": "anything",
+        }))
+        from runtime import check_single_instance
+        status, _info = check_single_instance()
+        assert status == "proceed"
+        assert not runtime_path.exists()
     finally:
         server.shutdown()
 
@@ -251,3 +287,149 @@ def test_generate_token_is_random_and_urlsafe():
     # URL-safe base64: only alphanumerics and -_
     import re
     assert re.fullmatch(r"[A-Za-z0-9_-]+", a)
+
+
+# ---------------------------------------------------------------------------
+# acquire_single_instance — atomic reservation via runtime.lock
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_on_empty_slot_creates_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    from runtime import acquire_single_instance
+    status, info = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+    assert info is None
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    assert lock_path.exists()
+    assert lock_path.read_text().strip() == str(os.getpid())
+    # External runtime.json must not be created by the reservation step.
+    assert not (tmp_path / ".vireo" / "runtime.json").exists()
+
+
+def test_acquire_conflicts_with_healthy_peer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    server, port = _start_fake_server("goodtoken")
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": port, "pid": 12345, "token": "goodtoken",
+        }))
+        from runtime import acquire_single_instance
+        status, info = acquire_single_instance(pid=os.getpid())
+        assert status == "conflict"
+        assert info["port"] == port
+        assert info["pid"] == 12345
+        # The live peer's runtime.json must not have been touched.
+        assert runtime_path.exists()
+    finally:
+        server.shutdown()
+
+
+def test_acquire_replaces_stale_runtime_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    # Port 1 is not bound by anything listening — probe will fail.
+    runtime_path.write_text(_json.dumps({
+        "port": 1, "pid": 99999, "token": "stale",
+    }))
+
+    from runtime import acquire_single_instance
+    status, _info = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+    # Stale runtime.json was cleaned up by the probe.
+    assert not runtime_path.exists()
+    assert (tmp_path / ".vireo" / "runtime.lock").exists()
+
+
+def test_acquire_conflicts_with_lock_from_live_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text(str(os.getpid()))  # live PID
+
+    from runtime import acquire_single_instance
+    status, info = acquire_single_instance(pid=os.getpid() + 1)
+    assert status == "conflict"
+    assert info["pid"] == os.getpid()
+    # Lock must still exist — we did not steal it.
+    assert lock_path.exists()
+
+
+def test_acquire_clears_stale_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text("0")  # PID 0 is never a real process
+
+    from runtime import acquire_single_instance
+    status, _info = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+    # The stale lock was replaced by ours.
+    assert lock_path.read_text().strip() == str(os.getpid())
+
+
+def test_acquire_handles_garbage_lock_contents(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text("not a pid")
+
+    from runtime import acquire_single_instance
+    status, _info = acquire_single_instance(pid=os.getpid())
+    assert status == "acquired"
+
+
+def test_release_single_instance_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    from runtime import release_single_instance
+    release_single_instance()
+    assert not lock_path.exists()
+    release_single_instance()  # second call must not raise
+
+
+def test_acquire_is_atomic_across_concurrent_calls(tmp_path, monkeypatch):
+    """Two threads racing to acquire: exactly one wins, the other conflicts."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    from runtime import acquire_single_instance
+
+    results = []
+    errors = []
+    start = threading.Event()
+
+    def worker():
+        start.wait()
+        try:
+            # Both workers pass our own PID so the loser's probe of the
+            # winner's PID classifies the holder as alive.
+            results.append(acquire_single_instance(pid=os.getpid()))
+        except Exception as e:  # pragma: no cover — shouldn't happen
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert not errors
+    statuses = sorted(s for s, _ in results)
+    assert statuses == ["acquired", "conflict"]
