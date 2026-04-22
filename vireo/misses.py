@@ -15,7 +15,7 @@ and both return False.
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 
 log = logging.getLogger(__name__)
 
@@ -41,23 +41,28 @@ def classify_miss(row, siblings, config):
         config["miss_bbox_area_min"] if in_burst
         else config["miss_bbox_area_min_singleton"]
     )
-    subject_size = row.get("subject_size") or 0.0
+    # NULL quality features mean the pipeline hasn't measured them yet;
+    # absence of evidence is not evidence of a miss. Each signal below
+    # only fires when its required feature is actually present.
+    subject_size = row.get("subject_size")
     crop_complete = row.get("crop_complete")
 
     clipped = False
     # Absolute: bbox too small to be usable.
-    if subject_size < bbox_area_min:
+    if subject_size is not None and subject_size < bbox_area_min:
         clipped = True
     # crop_complete < 0.6 signals the mask touches a frame edge (matches
     # the existing reject_crop_complete default in pipeline config).
     if crop_complete is not None and crop_complete < 0.60:
         clipped = True
     # Burst context: this frame's bbox is an order of magnitude smaller
-    # than its siblings' median — the photographer lost framing.
-    if in_burst:
+    # than its siblings' median — the photographer lost framing. Only
+    # evaluate when both this row and its siblings have a measured size
+    # (zero is a legitimate measurement, so filter by `is not None`).
+    if in_burst and subject_size is not None:
         sibling_sizes = [
             s.get("subject_size") for s in siblings
-            if s.get("subject_size")
+            if s.get("subject_size") is not None
         ]
         if sibling_sizes:
             import statistics
@@ -65,20 +70,22 @@ def classify_miss(row, siblings, config):
             if median > 0 and subject_size * 10 < median:
                 clipped = True
 
-    subject_t = row.get("subject_tenengrad") or 0.0
-    bg_t = row.get("bg_tenengrad") or 0.0
+    subject_t = row.get("subject_tenengrad")
+    bg_t = row.get("bg_tenengrad")
 
     oof = False
-    ratio_bad = bg_t > 0 and (subject_t / bg_t) < config["miss_oof_ratio"]
-    # Absolute floor: below this, subject sharpness is motion-blur level.
-    # Value chosen empirically to match reject_focus behavior.
-    SHARPNESS_FLOOR = 10.0
-    floor_bad = subject_t < SHARPNESS_FLOOR
+    # Only evaluate OOF when both Tenengrad features are measured.
+    if subject_t is not None and bg_t is not None:
+        ratio_bad = bg_t > 0 and (subject_t / bg_t) < config["miss_oof_ratio"]
+        # Absolute floor: below this, subject sharpness is motion-blur level.
+        # Value chosen empirically to match reject_focus behavior.
+        SHARPNESS_FLOOR = 10.0
+        floor_bad = subject_t < SHARPNESS_FLOOR
 
-    if in_burst:
-        oof = ratio_bad or floor_bad
-    else:
-        oof = ratio_bad and floor_bad
+        if in_burst:
+            oof = ratio_bad or floor_bad
+        else:
+            oof = ratio_bad and floor_bad
 
     return {"no_subject": False, "clipped": clipped, "oof": oof}
 
@@ -112,7 +119,7 @@ def compute_misses_for_workspace(db, pipeline_config):
         else:
             singletons.append(d)
 
-    now = datetime.utcnow().isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     updates = []
 
     for burst_rows in by_burst.values():

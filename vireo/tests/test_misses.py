@@ -110,6 +110,50 @@ def test_oof_singleton_requires_both_ratio_and_floor():
     assert flags["oof"] is True
 
 
+def test_no_spurious_flags_when_quality_features_missing():
+    """Detection passed but quality pipeline hasn't populated features yet.
+
+    A row with detection_conf above threshold but NULL subject_size /
+    crop_complete / subject_tenengrad / bg_tenengrad means we haven't
+    measured those features. We must NOT flag clipped/oof on absence of
+    evidence — covers both singleton and in-burst evaluation.
+    """
+    from misses import classify_miss
+
+    # Singleton: detection passed, no quality features measured.
+    row = _row(
+        detection_conf=0.9,
+        subject_size=None,
+        crop_complete=None,
+        subject_tenengrad=None,
+        bg_tenengrad=None,
+    )
+    flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
+    assert flags == {"no_subject": False, "clipped": False, "oof": False}
+
+    # In-burst: two photos, both with detection passed but no quality
+    # features measured. Siblings with no subject_size must not poison
+    # the burst-median check.
+    row_a = _row(
+        detection_conf=0.9,
+        subject_size=None,
+        crop_complete=None,
+        subject_tenengrad=None,
+        bg_tenengrad=None,
+    )
+    row_b = _row(
+        detection_conf=0.9,
+        subject_size=None,
+        crop_complete=None,
+        subject_tenengrad=None,
+        bg_tenengrad=None,
+    )
+    flags_a = classify_miss(row_a, siblings=[row_b], config=DEFAULT_CONFIG)
+    flags_b = classify_miss(row_b, siblings=[row_a], config=DEFAULT_CONFIG)
+    assert flags_a == {"no_subject": False, "clipped": False, "oof": False}
+    assert flags_b == {"no_subject": False, "clipped": False, "oof": False}
+
+
 def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     """Integration test: real DB, synthetic photo rows, verify flags written."""
     import config as cfg
