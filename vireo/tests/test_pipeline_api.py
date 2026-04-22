@@ -2,7 +2,9 @@
 import os
 import shutil
 import tempfile
+import time
 from datetime import datetime
+from unittest.mock import patch
 
 import pytest
 from app import create_app
@@ -357,3 +359,141 @@ def test_destination_preview_rejects_absolute_template(setup, tmp_path):
             "folder_template": "/tmp/%Y",
         })
         assert resp.status_code == 400
+
+
+def _wait_for_job(client, job_id, timeout=30.0):
+    """Poll the job-status endpoint until the job completes or fails."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get(f"/api/jobs/{job_id}")
+        data = resp.get_json()
+        if data["status"] in ("completed", "failed"):
+            return data
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
+
+
+def test_import_full_copy_restricts_scan_to_new_subfolders(setup, tmp_path, monkeypatch):
+    """Regression: importing with copy=true into a destination that already
+    contains a large unrelated subtree must NOT walk the whole destination.
+
+    Bug: ``api_job_import_full`` used ``scan_target = destination`` with no
+    restriction, so after copying ~2.2k RAWs into two dated subfolders the
+    scanner walked the full 59k-file destination tree. Fix: pass
+    ``restrict_dirs`` to ``scanner.scan`` derived from
+    ``ingest_result["copied_paths"]`` so only the touched folders are
+    re-enumerated. This test patches scanner.scan to capture the call and
+    asserts the unrelated subtree stays out of ``restrict_dirs``.
+    """
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Destination already has an unrelated subtree — this is the "59k files"
+    # case in miniature. It MUST NOT end up in restrict_dirs.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    unrelated = dest / "2019" / "2019-01-01"
+    unrelated.mkdir(parents=True)
+    for i in range(3):
+        Image.new("RGB", (50, 50), "blue").save(str(unrelated / f"old_{i}.jpg"))
+
+    # Source is a fresh folder of new photos stamped with 2024 mtime so
+    # ingest routes them into new YYYY/YYYY-MM-DD subfolders.
+    src = tmp_path / "source"
+    src.mkdir()
+    for i in range(2):
+        fpath = src / f"new_{i}.jpg"
+        Image.new("RGB", (60, 60), "red").save(str(fpath))
+        mtime = datetime(2024, 6, 15, 12, 0, 0).timestamp()
+        os.utime(str(fpath), (mtime, mtime))
+
+    # Patch scanner.scan where app.py looks it up at runtime. app.py does
+    # ``from scanner import scan as do_scan`` inside the job's work(), so the
+    # target is the ``scanner`` module's attribute.
+    import scanner as scanner_mod
+    calls = []
+    original = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        calls.append({
+            "root": str(root),
+            "restrict_dirs": kwargs.get("restrict_dirs"),
+        })
+        return original(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/import-full", json={
+                "source": str(src),
+                "destination": str(dest),
+                "copy": True,
+            })
+            assert resp.status_code == 200
+            job_id = resp.get_json()["job_id"]
+            status = _wait_for_job(c, job_id)
+            assert status["status"] == "completed", status
+
+    assert calls, "scanner.scan was not invoked"
+    call = calls[-1]
+    assert call["root"] == str(dest), (
+        f"scan root should be destination for folder hierarchy, got {call['root']!r}"
+    )
+    restrict = call["restrict_dirs"]
+    assert restrict is not None, (
+        "restrict_dirs should be populated from copied_paths so the scanner "
+        "doesn't re-walk the entire destination tree after ingest."
+    )
+    restrict_set = {os.path.normpath(d) for d in restrict}
+    assert os.path.normpath(str(unrelated)) not in restrict_set, (
+        f"Unrelated pre-existing folder {unrelated!r} must not be scanned; "
+        f"restrict_dirs={restrict_set!r}"
+    )
+    # The new dated folder (2024/2024-06-15) is what ingest created — it
+    # should be the only thing we re-scan.
+    expected_new = dest / "2024" / "2024-06-15"
+    assert os.path.normpath(str(expected_new)) in restrict_set, (
+        f"Expected new folder {expected_new!r} in restrict_dirs; got {restrict_set!r}"
+    )
+
+
+def test_import_full_copy_false_still_scans_source_root(setup, tmp_path, monkeypatch):
+    """copy=false path must be unchanged: scan the source root with no
+    restrict_dirs so scan-in-place still walks the whole tree."""
+    app, _ = setup
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    src = tmp_path / "source"
+    sub = src / "nested"
+    sub.mkdir(parents=True)
+    Image.new("RGB", (40, 40), "green").save(str(sub / "a.jpg"))
+
+    import scanner as scanner_mod
+    calls = []
+    original = scanner_mod.scan
+
+    def tracking_scan(root, *args, **kwargs):
+        calls.append({
+            "root": str(root),
+            "restrict_dirs": kwargs.get("restrict_dirs"),
+        })
+        return original(root, *args, **kwargs)
+
+    with patch.object(scanner_mod, "scan", tracking_scan):
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/import-full", json={
+                "source": str(src),
+                "copy": False,
+            })
+            assert resp.status_code == 200
+            job_id = resp.get_json()["job_id"]
+            status = _wait_for_job(c, job_id)
+            assert status["status"] == "completed", status
+
+    assert calls, "scanner.scan was not invoked"
+    call = calls[-1]
+    assert call["root"] == str(src), (
+        f"copy=false should scan source, got {call['root']!r}"
+    )
+    assert call["restrict_dirs"] is None, (
+        f"copy=false must leave restrict_dirs unset; got {call['restrict_dirs']!r}"
+    )
