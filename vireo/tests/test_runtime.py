@@ -176,3 +176,67 @@ def test_guard_malformed_file_is_cleaned_and_proceeds(tmp_path, monkeypatch):
     status, info = check_single_instance()
     assert status == "proceed"
     assert not (tmp_path / ".vireo" / "runtime.json").exists()
+
+
+class _Always500Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(500)
+        self.end_headers()
+
+    def log_message(self, *a, **kw):  # silence
+        pass
+
+
+def _start_fake_500_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Always500Handler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server, port
+
+
+def test_guard_bad_token_401_is_conflict_not_proceed(tmp_path, monkeypatch):
+    """A peer that responds 401 (stale token) must be treated as alive.
+
+    Regression: HTTPError subclasses URLError, so a naive except clause
+    swallowed 401/500 responses and misclassified a running peer as dead.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    server, port = _start_fake_server("goodtoken")
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": port, "pid": 77777, "token": "WRONG-TOKEN",
+        }))
+        from runtime import check_single_instance
+        status, info = check_single_instance()
+        assert status == "conflict"
+        assert info["port"] == port
+        assert info["pid"] == 77777
+        # Critically: the runtime.json must NOT be deleted.
+        assert runtime_path.exists()
+    finally:
+        server.shutdown()
+
+
+def test_guard_peer_returning_500_is_conflict(tmp_path, monkeypatch):
+    """A peer responding 500 must be treated as alive — any HTTP response counts."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    server, port = _start_fake_500_server()
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": port, "pid": 88888, "token": "anything",
+        }))
+        from runtime import check_single_instance
+        status, info = check_single_instance()
+        assert status == "conflict"
+        assert info["port"] == port
+        assert info["pid"] == 88888
+        assert runtime_path.exists()
+    finally:
+        server.shutdown()

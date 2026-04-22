@@ -72,7 +72,7 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
 
     port = data.get("port")
     token = data.get("token", "")
-    if not isinstance(port, int):
+    if not isinstance(port, int) or not isinstance(token, str):
         delete_runtime_json()
         return ("proceed", None)
 
@@ -82,8 +82,14 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
             headers={"X-Vireo-Token": token},
         )
         with urllib.request.urlopen(req, timeout=probe_timeout_s) as resp:
-            if resp.status == 200:
-                return ("conflict", {"port": port, "pid": data.get("pid")})
+            # Any HTTP response means something is bound to the port. Treat as
+            # an alive peer regardless of status — a stale token or a transient
+            # 5xx is still "do not start a second instance".
+            _ = resp.status
+            return ("conflict", {"port": port, "pid": data.get("pid")})
+    except urllib.error.HTTPError:
+        # Got a non-2xx status. Peer is alive.
+        return ("conflict", {"port": port, "pid": data.get("pid")})
     except (urllib.error.URLError, TimeoutError, OSError):
         pass
 
