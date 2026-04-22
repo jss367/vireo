@@ -1345,10 +1345,26 @@ function _grmOneToOneScale() {
   // Using width only would overshoot for images wider than 3:2 and undershoot
   // for taller ones — misleading pixel detail either way.
   var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
-  var sample = document.querySelector('.grm-card img');
   if (!item || !item.width || !item.height) return null;
+  // Prefer the selected photo's img so naturalWidth/Height (if loaded) reflect
+  // the axes the browser actually paints.
+  var sample = document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"] img')
+             || document.querySelector('.grm-card img');
   if (!sample || !sample.offsetWidth || !sample.offsetHeight) return null;
-  return Math.min(item.width / sample.offsetWidth, item.height / sample.offsetHeight);
+  // Stored item.width/height are pre-EXIF-orientation (same as in
+  // _lbRecomputeNativeZoom). For 90°-rotated JPEGs the browser swaps axes on
+  // render, so comparing stored aspect against the loaded image's aspect tells
+  // us whether to swap the stored dims before computing the 1:1 factor.
+  var imgW = item.width, imgH = item.height;
+  if (sample.naturalWidth && sample.naturalHeight) {
+    var storedAspect = item.width / item.height;
+    var renderedAspect = sample.naturalWidth / sample.naturalHeight;
+    if (Math.abs(storedAspect - renderedAspect) > Math.abs((1 / storedAspect) - renderedAspect)) {
+      imgW = item.height;
+      imgH = item.width;
+    }
+  }
+  return Math.min(imgW / sample.offsetWidth, imgH / sample.offsetHeight);
 }
 
 function _grmMaxZoom() {
