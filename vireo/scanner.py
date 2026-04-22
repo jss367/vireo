@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
@@ -17,6 +18,16 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+
+# scan() runs inside JobRunner/pipeline_job background threads, so the
+# default POSIX "fork" start method is unsafe here: forking a
+# multithreaded process can deadlock. Prefer "forkserver" (POSIX, cheap)
+# and fall back to "spawn" (universal).
+_SCAN_MP_METHOD = (
+    "forkserver"
+    if "forkserver" in multiprocessing.get_all_start_methods()
+    else "spawn"
+)
 
 
 def compute_file_hash(file_path, chunk_size=65536):
@@ -613,7 +624,8 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
         )
     if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
             features = list(pool.map(_compute_file_features, paths_to_extract))
     else:
         features = [_compute_file_features(p) for p in paths_to_extract]
