@@ -98,6 +98,13 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
     runtime.json) to classify the peer as alive. Non-200 responses — 401,
     404, 500, etc. — are treated as stale: the port may have been reused
     by an unrelated local service, so we clean the file and proceed.
+
+    Connection-level failures (refused/timeout) are ambiguous: the peer
+    may be dead, or it may be a peer still booting that wrote
+    runtime.json but hasn't started listening yet. We disambiguate via
+    the PID — a live PID means "booting or transient", and we must not
+    delete runtime.json under the running peer, because that would
+    break external discovery even though the peer is still running.
     """
     data = read_runtime_json()
     if data is None:
@@ -130,8 +137,14 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
         # treat as stale and clean up so startup can proceed.
         pass
     except (urllib.error.URLError, TimeoutError, OSError):
-        # Connection refused / timeout — peer is dead.
-        pass
+        # Connection refused / timeout. If the advertised PID is still
+        # alive, this is almost certainly a peer that wrote runtime.json
+        # and is still booting (or briefly paused). Preserve runtime.json
+        # so external callers can still discover it once HTTP is up, and
+        # report conflict to the caller.
+        if _pid_alive(pid):
+            return ("conflict", {"port": port, "pid": pid})
+        # PID dead — peer is gone, file is stale.
 
     delete_runtime_json()
     return ("proceed", None)

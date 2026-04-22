@@ -156,9 +156,11 @@ def test_guard_stale_file_is_cleaned_and_proceeds(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
-    # Port 1 is almost certainly not bound by anything listening.
+    # Port 1 is almost certainly not bound by anything listening. PID 0 is
+    # treated as unconditionally dead by the liveness check, so the guard
+    # must classify this file as stale.
     (tmp_path / ".vireo" / "runtime.json").write_text(_json.dumps({
-        "port": 1, "pid": 99999, "token": "x",
+        "port": 1, "pid": 0, "token": "x",
     }))
 
     from runtime import check_single_instance
@@ -258,6 +260,34 @@ def test_guard_peer_returning_500_is_stale_and_proceeds(tmp_path, monkeypatch):
         server.shutdown()
 
 
+def test_guard_booting_peer_preserves_runtime_json(tmp_path, monkeypatch):
+    """A peer that wrote runtime.json but isn't listening on HTTP yet must
+    not have its runtime.json deleted — that would break discovery for
+    external callers even though the peer is still running.
+
+    Reproduce by pointing runtime.json at a port where nobody is
+    listening (probe will fail with connection-refused) while recording
+    a live PID. The guard should report conflict and keep the file.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    runtime_path.write_text(_json.dumps({
+        "port": 1,  # nothing listening → connection refused
+        "pid": os.getpid(),  # live PID → peer is booting, not dead
+        "token": "anything",
+    }))
+
+    from runtime import check_single_instance
+    status, info = check_single_instance()
+    assert status == "conflict"
+    assert info["port"] == 1
+    assert info["pid"] == os.getpid()
+    # The live peer's runtime.json must remain intact.
+    assert runtime_path.exists()
+
+
 def test_guard_unrelated_404_service_is_stale_and_proceeds(tmp_path, monkeypatch):
     """If the advertised port is now answered by an unrelated HTTP service,
     treat runtime.json as stale so Vireo can start on a fresh port."""
@@ -336,9 +366,11 @@ def test_acquire_replaces_stale_runtime_json(tmp_path, monkeypatch):
     os.makedirs(tmp_path / ".vireo")
 
     runtime_path = tmp_path / ".vireo" / "runtime.json"
-    # Port 1 is not bound by anything listening — probe will fail.
+    # Port 1 is not bound by anything listening — probe will fail. PID 0
+    # is unconditionally dead, so the guard must classify the file as
+    # stale rather than treating it as a booting peer.
     runtime_path.write_text(_json.dumps({
-        "port": 1, "pid": 99999, "token": "stale",
+        "port": 1, "pid": 0, "token": "stale",
     }))
 
     from runtime import acquire_single_instance
@@ -347,6 +379,37 @@ def test_acquire_replaces_stale_runtime_json(tmp_path, monkeypatch):
     # Stale runtime.json was cleaned up by the probe.
     assert not runtime_path.exists()
     assert (tmp_path / ".vireo" / "runtime.lock").exists()
+
+
+def test_acquire_preserves_runtime_json_when_peer_is_booting(tmp_path, monkeypatch):
+    """When `acquire_single_instance` finds a runtime.json whose HTTP
+    probe fails (connection refused) but whose PID is still alive, it
+    must report conflict without wiping the peer's runtime.json.
+
+    Regression for the race where a second process starts while the
+    first is mid-boot: the first process has written runtime.json and
+    holds runtime.lock but hasn't opened its HTTP port yet.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    runtime_path.write_text(_json.dumps({
+        "port": 1,  # nothing listening
+        "pid": os.getpid(),  # peer is alive, just not serving yet
+        "token": "anything",
+    }))
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text(str(os.getpid()))
+
+    from runtime import acquire_single_instance
+    status, info = acquire_single_instance(pid=os.getpid() + 1)
+    assert status == "conflict"
+    assert info["pid"] == os.getpid()
+    # External discovery must still work — do not delete the peer's file.
+    assert runtime_path.exists()
+    # Lock must be preserved too.
+    assert lock_path.exists()
 
 
 def test_acquire_conflicts_with_lock_from_live_pid(tmp_path, monkeypatch):
