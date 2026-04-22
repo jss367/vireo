@@ -103,7 +103,12 @@ var WORKSPACE_SCOPE = '__workspace__';
 async function loadHighlights() {
   var params = new URLSearchParams();
   var folderSelect = document.getElementById('folderSelect');
-  if (folderSelect.value === WORKSPACE_SCOPE) {
+  // First load runs before the dropdown is populated (folderSelect.value is
+  // empty). The code below will prepend WORKSPACE_SCOPE as the first option
+  // and it becomes the default selection, so send scope=workspace up front
+  // to keep the data aligned with the option the user will see selected.
+  var firstLoad = folderSelect.options.length === 0;
+  if (folderSelect.value === WORKSPACE_SCOPE || firstLoad) {
     params.set('scope', 'workspace');
   } else if (folderSelect.value) {
     params.set('folder_id', folderSelect.value);
