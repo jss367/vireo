@@ -1,6 +1,55 @@
 import json
 import os
 import stat
+import subprocess
+import sys
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_lock_state():
+    """Ensure each test starts with a clean flock / module-global state.
+
+    The single-instance guard keeps the lock fd on a module global so
+    the kernel-managed flock persists across function calls within a
+    process. In tests, that state leaks between test cases, so we
+    release any held flock before and after each test.
+    """
+    import runtime  # noqa: PLC0415
+    runtime.release_single_instance()
+    yield
+    runtime.release_single_instance()
+
+
+def _spawn_flock_holder(lock_path):
+    """Spawn a subprocess that takes an exclusive fcntl.flock on lock_path
+    and holds it until killed. Returns the Popen handle; caller must
+    terminate it in a finally block.
+
+    Used to simulate a real live-peer flock holder in tests. We cannot
+    simply write to the lock file, because the guard now trusts the
+    kernel-managed flock, not the PID bytes inside the file.
+    """
+    code = (
+        "import fcntl, os, sys, time;"
+        f"fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR, 0o600);"
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB);"
+        "os.ftruncate(fd, 0);"
+        "os.write(fd, str(os.getpid()).encode());"
+        "sys.stdout.write(str(os.getpid()) + '\\n');"
+        "sys.stdout.flush();"
+        "time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    # Wait for the holder to signal ready (its PID on stdout).
+    line = proc.stdout.readline().decode().strip()
+    assert line.isdigit(), f"holder did not signal ready: {line!r}"
+    return proc, int(line)
 
 
 def test_write_runtime_json_atomic_and_locked_down(tmp_path, monkeypatch):
@@ -265,31 +314,33 @@ def test_guard_booting_peer_preserves_runtime_json(tmp_path, monkeypatch):
     not have its runtime.json deleted — that would break discovery for
     external callers even though the peer is still running.
 
-    Reproduce by pointing runtime.json at a port where nobody is
-    listening (probe will fail with connection-refused) while recording
-    a live PID and a matching `runtime.lock` (the booting peer holds
-    its reservation lock). The guard should report conflict and keep
-    the file.
+    The guard trusts the kernel-managed flock to decide whether the peer
+    is alive. We simulate the booting peer by spawning a subprocess that
+    actually holds the flock while the HTTP port is unbound.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
-    runtime_path = tmp_path / ".vireo" / "runtime.json"
-    runtime_path.write_text(_json.dumps({
-        "port": 1,  # nothing listening → connection refused
-        "pid": os.getpid(),  # live PID → peer is booting, not dead
-        "token": "anything",
-    }))
-    # A real booting peer has acquired runtime.lock with its PID.
-    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid()))
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    holder, holder_pid = _spawn_flock_holder(lock_path)
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": 1,  # nothing listening → connection refused
+            "pid": holder_pid,
+            "token": "anything",
+        }))
 
-    from runtime import check_single_instance
-    status, info = check_single_instance()
-    assert status == "conflict"
-    assert info["port"] == 1
-    assert info["pid"] == os.getpid()
-    # The live peer's runtime.json must remain intact.
-    assert runtime_path.exists()
+        from runtime import check_single_instance
+        status, info = check_single_instance()
+        assert status == "conflict"
+        assert info["port"] == 1
+        assert info["pid"] == holder_pid
+        # The live peer's runtime.json must remain intact.
+        assert runtime_path.exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
 def test_guard_unrelated_404_service_is_stale_and_proceeds(tmp_path, monkeypatch):
@@ -316,11 +367,11 @@ def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
     tmp_path, monkeypatch
 ):
     """Codex P1 regression: when a 2nd process probes during the 1st
-    instance's startup window (PID written but Flask not listening yet),
-    the probe raises connection-refused. Previously, check_single_instance
-    deleted the live instance's runtime.json, breaking discovery. With
-    the fix, we preserve the file when the holder PID is alive *and*
-    `runtime.lock` confirms the same PID.
+    instance's startup window (runtime.json written but Flask not
+    listening yet), the probe raises connection-refused. Previously,
+    check_single_instance deleted the live instance's runtime.json,
+    breaking discovery. With the fix we trust the kernel flock: a held
+    flock means a live Vireo peer, so preserve the file and conflict.
     """
     import socket as _socket
 
@@ -333,33 +384,40 @@ def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
     refused_port = sock.getsockname()[1]
     sock.close()
 
-    runtime_path = tmp_path / ".vireo" / "runtime.json"
-    runtime_path.write_text(_json.dumps({
-        "port": refused_port,
-        "pid": os.getpid(),  # definitely alive
-        "token": "any",
-    }))
-    # A real booting peer holds the matching reservation lock.
-    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid()))
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    holder, holder_pid = _spawn_flock_holder(lock_path)
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": refused_port,
+            "pid": holder_pid,
+            "token": "any",
+        }))
 
-    from runtime import check_single_instance
-    status, info = check_single_instance(probe_timeout_s=0.2)
-    assert status == "conflict"
-    assert info["port"] == refused_port
-    assert info["pid"] == os.getpid()
-    # Critically: file is NOT deleted while the holder is alive.
-    assert runtime_path.exists()
+        from runtime import check_single_instance
+        status, info = check_single_instance(probe_timeout_s=0.2)
+        assert status == "conflict"
+        assert info["port"] == refused_port
+        assert info["pid"] == holder_pid
+        # Critically: file is NOT deleted while the flock is held.
+        assert runtime_path.exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
-def test_guard_deletes_runtime_json_when_probe_fails_and_lock_missing(
+def test_guard_deletes_runtime_json_when_probe_fails_and_lock_unheld(
     tmp_path, monkeypatch
 ):
-    """Codex P2 regression: PID liveness alone is not proof of a Vireo
-    peer — after a SIGKILL crash, the recorded PID can be recycled by
-    an unrelated process. If runtime.lock is missing while runtime.json
-    points to a port that refuses connections, we must treat the file
-    as stale (and clean it up) rather than pinning `already_running`
-    indefinitely.
+    """Self-healing regression (Codex P2): if runtime.json is stale after
+    a hard crash — recorded PID may even have been recycled — but no
+    process holds the flock, the guard must classify the file as stale
+    and clean it up so the next startup can proceed.
+
+    Before the flock-based guard, check_single_instance trusted `pid_alive`
+    alone, and a recycled PID would cause conflict indefinitely. With
+    the flock-based guard, the kernel releases the flock when the crashed
+    process dies, so "unheld flock" reliably means "stale".
     """
     import socket as _socket
 
@@ -371,81 +429,19 @@ def test_guard_deletes_runtime_json_when_probe_fails_and_lock_missing(
     refused_port = sock.getsockname()[1]
     sock.close()
 
+    # Leftover lock file from crashed process — no live flock on it.
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    lock_path.write_text(str(os.getpid()))  # PID looks alive, but no flock
+
     runtime_path = tmp_path / ".vireo" / "runtime.json"
     runtime_path.write_text(_json.dumps({
         "port": refused_port,
-        "pid": os.getpid(),  # alive, but not Vireo (no matching lock)
+        "pid": os.getpid(),  # would fool a naive PID check
         "token": "any",
     }))
-    # Crucially: no runtime.lock — recycled PID, not a real peer.
-    assert not (tmp_path / ".vireo" / "runtime.lock").exists()
 
     from runtime import check_single_instance
     status, _info = check_single_instance(probe_timeout_s=0.2)
-    assert status == "proceed"
-    assert not runtime_path.exists()
-
-
-def test_guard_deletes_runtime_json_when_probe_fails_and_lock_pid_mismatches(
-    tmp_path, monkeypatch
-):
-    """Codex P2 regression (variant): runtime.lock exists but holds a
-    different PID than runtime.json — strong evidence runtime.json is
-    stale (e.g., partial cleanup state). Treat as stale.
-    """
-    import socket as _socket
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    os.makedirs(tmp_path / ".vireo")
-
-    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    refused_port = sock.getsockname()[1]
-    sock.close()
-
-    runtime_path = tmp_path / ".vireo" / "runtime.json"
-    runtime_path.write_text(_json.dumps({
-        "port": refused_port,
-        "pid": os.getpid(),  # alive
-        "token": "any",
-    }))
-    # Lock claims a different (live) PID — could not be the same Vireo.
-    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid() + 1))
-
-    from runtime import check_single_instance
-    status, _info = check_single_instance(probe_timeout_s=0.2)
-    assert status == "proceed"
-    assert not runtime_path.exists()
-
-
-def test_guard_deletes_runtime_json_when_probe_fails_and_holder_dead(
-    tmp_path, monkeypatch
-):
-    """Counterpart to the above: a dead-holder stale file is still cleaned up."""
-    import socket as _socket
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    os.makedirs(tmp_path / ".vireo")
-
-    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    refused_port = sock.getsockname()[1]
-    sock.close()
-
-    runtime_path = tmp_path / ".vireo" / "runtime.json"
-    # PID 1 on macOS/Linux is launchd/init — always alive. Use a high,
-    # implausible PID instead; pair with ProcessLookupError via direct mock.
-    # Simplest: patch _pid_alive via monkeypatch.
-    import runtime
-    monkeypatch.setattr(runtime, "_pid_alive", lambda _p: False)
-
-    runtime_path.write_text(_json.dumps({
-        "port": refused_port,
-        "pid": 99999,
-        "token": "any",
-    }))
-
-    status, _info = runtime.check_single_instance(probe_timeout_s=0.2)
     assert status == "proceed"
     assert not runtime_path.exists()
 
@@ -525,48 +521,86 @@ def test_acquire_replaces_stale_runtime_json(tmp_path, monkeypatch):
 
 def test_acquire_preserves_runtime_json_when_peer_is_booting(tmp_path, monkeypatch):
     """When `acquire_single_instance` finds a runtime.json whose HTTP
-    probe fails (connection refused) but whose PID is still alive, it
-    must report conflict without wiping the peer's runtime.json.
+    probe fails (connection refused) but another process holds the
+    flock, it must report conflict without wiping the peer's files.
 
     Regression for the race where a second process starts while the
-    first is mid-boot: the first process has written runtime.json and
-    holds runtime.lock but hasn't opened its HTTP port yet.
+    first is mid-boot: the first process has taken the flock and
+    written runtime.json but hasn't opened its HTTP port yet.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
-    runtime_path = tmp_path / ".vireo" / "runtime.json"
-    runtime_path.write_text(_json.dumps({
-        "port": 1,  # nothing listening
-        "pid": os.getpid(),  # peer is alive, just not serving yet
-        "token": "anything",
-    }))
     lock_path = tmp_path / ".vireo" / "runtime.lock"
-    lock_path.write_text(str(os.getpid()))
+    holder, holder_pid = _spawn_flock_holder(lock_path)
+    try:
+        runtime_path = tmp_path / ".vireo" / "runtime.json"
+        runtime_path.write_text(_json.dumps({
+            "port": 1,  # nothing listening
+            "pid": holder_pid,
+            "token": "anything",
+        }))
 
-    from runtime import acquire_single_instance
-    status, info = acquire_single_instance(pid=os.getpid() + 1)
-    assert status == "conflict"
-    assert info["pid"] == os.getpid()
-    # External discovery must still work — do not delete the peer's file.
-    assert runtime_path.exists()
-    # Lock must be preserved too.
-    assert lock_path.exists()
+        from runtime import acquire_single_instance
+        status, info = acquire_single_instance(pid=os.getpid())
+        assert status == "conflict"
+        assert info["pid"] == holder_pid
+        # External discovery must still work — do not delete the peer's file.
+        assert runtime_path.exists()
+        # Lock file must be preserved too.
+        assert lock_path.exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
-def test_acquire_conflicts_with_lock_from_live_pid(tmp_path, monkeypatch):
+def test_acquire_conflicts_with_held_flock(tmp_path, monkeypatch):
+    """If another process holds the flock on runtime.lock, acquire must
+    report conflict. We spawn a real flock holder rather than planting
+    a text file, because the guard trusts the kernel-managed lock, not
+    the PID bytes inside the file (which would be vulnerable to PID
+    recycling after an unclean crash)."""
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
 
     lock_path = tmp_path / ".vireo" / "runtime.lock"
-    lock_path.write_text(str(os.getpid()))  # live PID
+    holder, holder_pid = _spawn_flock_holder(lock_path)
+    try:
+        from runtime import acquire_single_instance
+        status, info = acquire_single_instance(pid=os.getpid())
+        assert status == "conflict"
+        assert info["pid"] == holder_pid
+        # Lock must still exist — we did not steal it.
+        assert lock_path.exists()
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
-    from runtime import acquire_single_instance
-    status, info = acquire_single_instance(pid=os.getpid() + 1)
-    assert status == "conflict"
-    assert info["pid"] == os.getpid()
-    # Lock must still exist — we did not steal it.
-    assert lock_path.exists()
+
+def test_acquire_self_heals_after_crash_with_pid_recycling(tmp_path, monkeypatch):
+    """Self-healing regression (Codex P2): after an unclean crash the
+    lock file persists, but the kernel releases the flock. Even if the
+    dead PID has been recycled to an unrelated process, the next startup
+    must reclaim the slot. The file-level liveness check alone would
+    falsely conflict here — only the kernel-managed flock gets this right.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    lock_path = tmp_path / ".vireo" / "runtime.lock"
+    # Simulate a crashed process's leftover lock file. PID bytes look
+    # alive (we use our own PID — the test process), but no flock is
+    # held on the file.
+    lock_path.write_text(str(os.getpid()))
+
+    from runtime import acquire_single_instance, release_single_instance
+    try:
+        status, _info = acquire_single_instance(pid=os.getpid())
+        assert status == "acquired"
+        # Our PID is now recorded in the lock file.
+        assert lock_path.read_text().strip() == str(os.getpid())
+    finally:
+        release_single_instance()
 
 
 def test_acquire_clears_stale_lock(tmp_path, monkeypatch):

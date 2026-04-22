@@ -2,9 +2,11 @@
 
 Writes `~/.vireo/runtime.json` so external callers can discover the running
 instance (port, auth token, PID). Also provides the single-instance guard,
-including an atomic reservation step (via a separate lock file) so two
-near-simultaneous launches cannot both observe an empty slot and both
-start serving.
+anchored to an `fcntl.flock` on `~/.vireo/runtime.lock`. The kernel
+releases the flock when the owning process dies, so the guard is
+self-healing after unclean crashes (SIGKILL, power loss, OOM) — the next
+startup reclaims the slot without manual cleanup, even if the dead PID
+has been recycled by an unrelated process.
 """
 
 import contextlib
@@ -17,6 +19,12 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+try:
+    import fcntl  # POSIX only
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
 
 def _runtime_path() -> Path:
     return Path(os.path.expanduser("~/.vireo/runtime.json"))
@@ -24,6 +32,13 @@ def _runtime_path() -> Path:
 
 def _lock_path() -> Path:
     return Path(os.path.expanduser("~/.vireo/runtime.lock"))
+
+
+# Module-global FD. When this process owns the single-instance slot, we
+# hold an exclusive fcntl.flock on the lock file via this FD. Keeping
+# the FD open is what keeps the lock held; closing it (or the process
+# dying) releases it.
+_lock_fd: int | None = None
 
 
 def write_runtime_json(
@@ -87,6 +102,40 @@ def _pid_alive(pid) -> bool:
         return True
 
 
+def _is_lock_held_by_peer() -> bool:
+    """Return True if another process currently holds the runtime flock.
+
+    Opens the lock file and attempts a non-blocking exclusive flock. If
+    we can acquire it, nobody else holds it (we release immediately and
+    report no peer). If flock raises BlockingIOError / EAGAIN, another
+    process holds the lock — and since the kernel releases flocks on
+    process exit, that other process is definitely alive, regardless
+    of PID reuse.
+
+    On platforms without fcntl (Windows) we fall back to the PID stored
+    in the lock file as a best-effort signal.
+    """
+    lock_path = _lock_path()
+    if not lock_path.exists():
+        return False
+    if not _HAS_FCNTL:
+        return _pid_alive(_read_lock_holder(lock_path))
+    try:
+        fd = os.open(str(lock_path), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            return True
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
 def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | None]:
     """Check whether another Vireo instance is healthy on the advertised port.
 
@@ -94,21 +143,16 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
         ("proceed", None)  — no peer found, or stale file cleaned up.
         ("conflict", info) — live peer. `info` has keys `port`, `pid`.
 
-    The probe requires a 200 from `/api/v1/health` (with the token from
-    runtime.json) to classify the peer as alive. Non-200 responses — 401,
+    A 200 from `/api/v1/health` (with the token from runtime.json)
+    definitively classifies the peer as alive. Non-200 responses — 401,
     404, 500, etc. — are treated as stale: the port may have been reused
-    by an unrelated local service, so we clean the file and proceed.
+    by an unrelated local service.
 
     Connection-level failures (refused/timeout) are ambiguous: the peer
-    may be dead, or it may be a peer still booting that wrote
-    runtime.json but hasn't started listening yet. PID liveness alone is
-    not strong enough — after a SIGKILL crash the recorded PID can be
-    recycled by an unrelated process, which would otherwise pin
-    `already_running` forever without cleanup. So we additionally require
-    that `runtime.lock` exists and its holder PID matches runtime.json's
-    PID; only a live Vireo sidecar holds the matching lock. If the lock
-    is missing, holds a different PID, or the PID is dead, runtime.json
-    is treated as stale.
+    may be dead, or it may be a peer still booting that wrote runtime.json
+    before Flask bound. We disambiguate via the flock — a held lock means
+    a live owner (kernel-guaranteed, PID-recycling-proof), an unheld lock
+    means the owner crashed and runtime.json is stale.
     """
     data = read_runtime_json()
     if data is None:
@@ -139,21 +183,13 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
         # answering our health contract. Treat as stale.
         pass
     except (urllib.error.URLError, TimeoutError, OSError):
-        # Connection refused / timeout. To distinguish a booting Vireo peer
-        # from a stale advertisement whose PID was recycled by an unrelated
-        # process, require BOTH that the advertised PID is alive AND that
-        # `runtime.lock` is held by the same PID. A live Vireo always holds
-        # the matching lock; an unrelated PID-recycler does not.
-        if (
-            isinstance(pid, int)
-            and _pid_alive(pid)
-            and _read_lock_holder(_lock_path()) == pid
-        ):
-            # Preserve runtime.json so external callers can still discover
-            # the peer once HTTP comes up.
+        # Connection refused / timeout. Trust the kernel-managed flock,
+        # not the raw PID — a live flock means a live Vireo peer (possibly
+        # still booting), while an unheld flock means the previous owner
+        # is gone and runtime.json is stale, even if the PID happens to
+        # have been recycled by an unrelated process.
+        if _is_lock_held_by_peer():
             return ("conflict", {"port": port, "pid": pid})
-        # Either PID is dead, lock is missing, or lock holder PID does not
-        # match — runtime.json is stale.
 
     delete_runtime_json()
     return ("proceed", None)
@@ -162,44 +198,90 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
 def acquire_single_instance(
     pid: int, probe_timeout_s: float = 0.5, max_retries: int = 5
 ) -> tuple[str, dict | None]:
-    """Atomically reserve the single-instance slot via a lock file.
+    """Atomically reserve the single-instance slot via fcntl.flock.
 
-    Creates `~/.vireo/runtime.lock` with `O_CREAT | O_EXCL`, writing the
-    caller's PID. This closes the race where two near-simultaneous
-    launches both call `check_single_instance`, both see no runtime.json,
-    and both start serving before either has written one. Only one
-    process can win the O_EXCL create; the other returns "conflict".
+    Opens `~/.vireo/runtime.lock` and takes an exclusive, non-blocking
+    fcntl.flock. Only one process can hold the flock at a time, so the
+    guard both (a) closes the boot race where two near-simultaneous
+    launches both see an empty runtime.json and both start serving, and
+    (b) self-heals after unclean crashes — the kernel releases the lock
+    when the owning process dies, so the next startup can reclaim it
+    even if the dead PID has been recycled.
 
-    The lock file is separate from runtime.json to keep runtime.json's
-    external contract clean — it still either does not exist or contains
-    the full payload of a running instance.
+    The PID written inside the lock file is diagnostic only; liveness is
+    determined by the flock, not by reading the file.
 
     Returns:
         ("acquired", None) — caller holds the lock. Must call
             `release_single_instance` on shutdown (e.g. via atexit /
-            SIGTERM handlers).
+            SIGTERM handlers) to release the flock and unlink the file.
         ("conflict", info) — a peer is alive; caller must not start.
 
-    If a stale `runtime.lock` is found (holder PID no longer alive), it
-    is removed and the caller retries. If a live `runtime.json` peer is
-    found, we return conflict regardless of lock state.
+    On platforms without fcntl (Windows), falls back to an
+    `O_CREAT | O_EXCL` + PID-liveness approach, which provides the same
+    boot-race protection but not the crash-self-healing guarantee.
     """
+    global _lock_fd
     lock_path = _lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if not _HAS_FCNTL:
+        return _acquire_without_flock(pid, probe_timeout_s, max_retries)
+
     for _attempt in range(max_retries):
-        # First, probe runtime.json for a live peer. A healthy peer always
-        # wins, even if the lock happens to be missing.
+        # A healthy peer detected via runtime.json always wins, even if
+        # the flock happens to be unheld at this instant.
         status, info = check_single_instance(probe_timeout_s=probe_timeout_s)
         if status == "conflict":
             return ("conflict", info)
 
-        # Publish the lock atomically with its PID payload. We write the PID
-        # to a per-caller temp file first, then use os.link to move it into
-        # place — os.link fails if the destination exists, and the file is
-        # never observable in an empty state. This closes the race where a
-        # concurrent caller sees a freshly-created empty lock file, reads
-        # PID=0, classifies it as stale, and unlinks the winner's lock.
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            continue
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            # Another process holds the lock — a real peer is alive
+            # (kernel-guaranteed).
+            holder_pid = _read_lock_holder(lock_path)
+            os.close(fd)
+            return ("conflict", {"port": None, "pid": holder_pid})
+
+        # Lock acquired. Write our PID for diagnostics, then keep the FD
+        # open so the flock persists until release / process exit.
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, str(pid).encode())
+        except OSError:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            continue
+
+        _lock_fd = fd
+        return ("acquired", None)
+
+    return ("conflict", {"port": None, "pid": None})
+
+
+def _acquire_without_flock(
+    pid: int, probe_timeout_s: float, max_retries: int
+) -> tuple[str, dict | None]:
+    """Non-flock fallback for platforms without fcntl (Windows).
+
+    Uses atomic hardlink publishing (os.link) so the lock file is never
+    observable in an empty state, then classifies staleness by PID
+    liveness. Does not self-heal from crash + PID-recycling (the core
+    weakness Codex P2 flagged); that path needs a kernel-managed lock.
+    """
+    lock_path = _lock_path()
+    for _attempt in range(max_retries):
+        status, info = check_single_instance(probe_timeout_s=probe_timeout_s)
+        if status == "conflict":
+            return ("conflict", info)
+
         tmp = lock_path.parent / f"runtime.lock.tmp.{os.getpid()}.{pid}"
         try:
             tmp.write_text(str(pid))
@@ -207,13 +289,9 @@ def acquire_single_instance(
             try:
                 os.link(str(tmp), str(lock_path))
             except FileExistsError:
-                # Another process holds (or left) the lock.
                 holder_pid = _read_lock_holder(lock_path)
                 if _pid_alive(holder_pid):
                     return ("conflict", {"port": None, "pid": holder_pid})
-                # Stale lock — remove and retry. If someone else won the
-                # unlink/recreate race in the meantime, the next loop
-                # iteration will observe their live lock and conflict.
                 with contextlib.suppress(FileNotFoundError):
                     lock_path.unlink()
                 continue
@@ -227,13 +305,19 @@ def acquire_single_instance(
             with contextlib.suppress(FileNotFoundError):
                 tmp.unlink()
 
-    # Exhausted retries — some other process keeps winning the race. Treat
-    # as a conflict rather than looping forever.
     return ("conflict", {"port": None, "pid": None})
 
 
 def release_single_instance() -> None:
-    """Remove the reservation lock file. Idempotent."""
+    """Release the flock, close the FD, and unlink the lock file. Idempotent."""
+    global _lock_fd
+    if _lock_fd is not None:
+        if _HAS_FCNTL:
+            with contextlib.suppress(OSError):
+                fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(_lock_fd)
+        _lock_fd = None
     with contextlib.suppress(FileNotFoundError):
         _lock_path().unlink()
 
