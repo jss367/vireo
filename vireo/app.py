@@ -375,12 +375,16 @@ def _enforce_preview_cache_quota_at_startup(app):
             pass
 
 
-def create_app(db_path, thumb_cache_dir=None):
+def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
     Args:
         db_path: path to the SQLite database
         thumb_cache_dir: path to thumbnail cache directory
+        api_token: optional token required on /api/v1/* requests via the
+            ``X-Vireo-Token`` header. When ``None`` (default), all /api/v1/*
+            traffic is rejected with 401 — the token is expected to be
+            supplied by ``main()`` after calling ``runtime.generate_token``.
     """
     app = Flask(
         __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
@@ -389,6 +393,7 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
         "~/.vireo/thumbnails"
     )
+    app.config["API_TOKEN"] = api_token
 
     _migrate_legacy_preview_cache(app)
     _enforce_preview_cache_quota_at_startup(app)
@@ -521,8 +526,24 @@ def create_app(db_path, thumb_cache_dir=None):
                         variant, e,
                     )
 
+    @app.before_request
+    def _enforce_api_v1_token():
+        if not request.path.startswith("/api/v1/"):
+            return None
+        expected = app.config.get("API_TOKEN")
+        if not expected:
+            # No token configured → deny all v1 traffic.
+            return json_error("API token not configured", 401)
+        if request.headers.get("X-Vireo-Token") != expected:
+            return json_error("Invalid or missing X-Vireo-Token", 401)
+        return None
+
     @app.route("/api/health")
     def api_health():
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/v1/health")
+    def api_v1_health():
         return jsonify({"status": "ok"})
 
     @app.route("/api/models/status")
