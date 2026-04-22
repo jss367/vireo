@@ -75,3 +75,29 @@ def test_context_menu_chip_row_renders_and_fires(live_server, page):
     chips.nth(1).click()
     expect(menu).to_be_hidden()
     assert page.evaluate("window.__ctx_chip") == "b"
+
+
+def test_coerce_selection_inside_keeps_set(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    out = page.evaluate("""() => {
+        const sel = new Set([1, 2, 3]);
+        const result = coerceSelectionOnContext(sel, 2);
+        return { size: sel.size, has1: sel.has(1), has2: sel.has(2), has3: sel.has(3), result: Array.from(result) };
+    }""")
+    assert out["size"] == 3
+    assert out["has1"] and out["has2"] and out["has3"]
+    assert sorted(out["result"]) == [1, 2, 3]
+
+
+def test_coerce_selection_outside_replaces(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    out = page.evaluate("""() => {
+        const sel = new Set([1, 2, 3]);
+        const result = coerceSelectionOnContext(sel, 99);
+        return { size: sel.size, has99: sel.has(99), result: Array.from(result) };
+    }""")
+    assert out["size"] == 1
+    assert out["has99"] is True
+    assert out["result"] == [99]

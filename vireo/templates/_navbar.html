@@ -1269,6 +1269,14 @@ function sendReport() {
     document.addEventListener('keydown', _keydown, true);
     window.addEventListener('blur', closeContextMenu);
   };
+
+  window.coerceSelectionOnContext = function(selectionSet, clickedId){
+    if (!selectionSet.has(clickedId)) {
+      selectionSet.clear();
+      selectionSet.add(clickedId);
+    }
+    return Array.from(selectionSet);
+  };
 })();
 </script>
 
