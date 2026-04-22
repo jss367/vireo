@@ -1,8 +1,10 @@
 """Photo export with resize, quality control, and template-based naming."""
 
+import hashlib
 import logging
 import os
 import re
+import shutil
 
 from image_loader import load_image
 
@@ -73,6 +75,20 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             working_copy_max_size: int -- the cap used when generating
                 working copies (default 4096); used to decide whether
                 the working copy can satisfy the requested max_size.
+            developed_dir: str -- optional path to darktable-developed
+                outputs (mirrors darktable_output_dir config). Export
+                prefers a developed JPG/TIFF at
+                <developed_dir>/<path_key>/<stem>.<ext> (or at the
+                default <folder>/developed/<stem>.<ext>) over
+                re-decoding the RAW. `path_key` is a stable hash of the
+                source folder's path (see `developed_folder_key`), so the
+                per-folder nesting matches the develop job's write
+                convention, keeps lookups one-to-one when two source
+                folders share a basename, and survives SQLite row-id
+                reuse after folder deletion. As a legacy fallback,
+                <developed_dir>/<stem>.<ext> is also probed so libraries
+                developed before the per-folder nesting convention was
+                introduced still pick up their developed outputs.
         progress_cb: optional callback(current, total, current_file)
 
     Returns:
@@ -88,6 +104,7 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
         wc_max = int(options.get("working_copy_max_size", 4096))
     except (ValueError, TypeError):
         wc_max = 4096
+    developed_dir = options.get("developed_dir") or ""
 
     os.makedirs(destination, exist_ok=True)
 
@@ -102,6 +119,13 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
     exported = 0
     errors = []
 
+    # Per-export cache of developed-directory scans. Keyed by directory
+    # path; each value is the (stem, ext_lower) → absolute-path map that
+    # _find_developed_output would otherwise rebuild for every photo.
+    # Large exports routinely probe the same directory N times; caching
+    # keeps that cost O(1) per photo after the first hit.
+    developed_index = _DevelopedDirIndex()
+
     for i, pid in enumerate(photo_ids):
         photo = photos_map.get(pid)
         if not photo:
@@ -110,11 +134,31 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
                 progress_cb(i + 1, len(photo_ids), "")
             continue
 
-        # Resolve source path.  Use the working copy only when resizing to
-        # a size the working copy can satisfy (i.e. max_size <= wc cap).
-        # Otherwise use the original to avoid silent downscaling.
-        use_wc = bool(max_size) and max_size <= wc_max
-        source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
+        # Resolve source path.  Precedence:
+        #   1. darktable-developed output ("perfected" rendering) — takes
+        #      priority over RAW so Export ships what the user sees after
+        #      Develop, not a fresh libraw decode of the RAW.
+        #   2. working copy when resizing to a size it can satisfy.
+        #   3. original file (default; also used for full-res exports).
+        folder_path = folders.get(photo["folder_id"], "")
+        source_path = _find_developed_output(
+            photo["filename"],
+            folder_path,
+            developed_dir,
+            developed_index,
+        )
+        # Guard against silent downscaling: darktable's develop job can
+        # write the output at --width=N, so a developed file may be
+        # smaller than the original. If it can't satisfy the requested
+        # export size, fall through to the working-copy / original
+        # source.
+        if source_path and not _developed_can_satisfy_size(
+            source_path, photo, max_size
+        ):
+            source_path = None
+        if not source_path:
+            use_wc = bool(max_size) and max_size <= wc_max
+            source_path = _resolve_source(photo, vireo_dir, folders, use_working_copy=use_wc)
         if not source_path or not os.path.isfile(source_path):
             errors.append(f"{photo['filename']}: source file missing")
             if progress_cb:
@@ -188,6 +232,243 @@ def export_photos(db, vireo_dir, photo_ids, destination, options=None, progress_
             progress_cb(i + 1, len(photo_ids), photo["filename"])
 
     return {"exported": exported, "errors": errors, "destination": destination}
+
+
+_PREFERRED_DEVELOPED_EXTS = ("jpg", "jpeg", "tiff", "tif")
+
+
+def _developed_can_satisfy_size(dev_path, photo, max_size):
+    """Return True if the developed file is large enough for this export.
+
+    The develop job may have written a downscaled output (`--width` is
+    honored by darktable-cli), so preferring it unconditionally would
+    silently ship a smaller image than the user asked for. This guard
+    compares the developed file's long edge against:
+
+      * the requested `max_size` when resize is in effect, or
+      * the original photo's stored dimensions when a full-resolution
+        export is requested.
+
+    If we can't determine the required size (no max_size and no stored
+    dimensions on the photo row), fall back to preferring the developed
+    output so the primary "ship the perfected render" feature keeps
+    working for libraries scanned before the dimension columns were
+    populated.
+    """
+    from PIL import Image
+
+    try:
+        with Image.open(dev_path) as img:
+            dev_long = max(img.size)
+    except Exception:
+        return True
+    if max_size is not None:
+        return dev_long >= max_size
+    try:
+        original_w = photo["width"]
+        original_h = photo["height"]
+    except (KeyError, IndexError):
+        return True
+    if original_w and original_h:
+        return dev_long >= max(original_w, original_h)
+    return True
+
+
+def developed_folder_key(folder_path):
+    """Return a stable filesystem-safe key for the given source folder path.
+
+    Derived from the folder's canonical path rather than its SQLite row id
+    so the key survives folder churn. `folders.id` is an INTEGER PRIMARY
+    KEY, which SQLite happily reuses after a row is deleted, and
+    `delete_folder` does not clean the external developed directory. Using
+    the row id as an on-disk key therefore risked a freshly-added folder
+    silently inheriting stale developed files left on disk by a deleted
+    folder whose id it reused. Hashing the path sidesteps that entirely:
+    distinct paths always get distinct keys, and a re-scan of the same
+    path resolves to the same key (so its existing developed outputs are
+    correctly picked up again).
+
+    Because the key is derived from the *current* path, any operation
+    that rewrites a folder's path (e.g. `/api/jobs/move-folder`) must
+    also rebase the corresponding developed subdirectory on disk — see
+    `relocate_developed_dir` for the rebase helper used by move.
+    """
+    if not folder_path:
+        return ""
+    return hashlib.sha1(folder_path.encode("utf-8")).hexdigest()[:16]
+
+
+def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
+    """Rebase a folder's developed-output subdir after its path changes.
+
+    The configured `darktable_output_dir` layout is flat, so each source
+    folder is nested under `developed_folder_key(folder_path)`. That key
+    is path-derived for safety against SQLite row-id reuse, but it means
+    a folder move (which rewrites `folders.path`) orphans the old
+    subdirectory. Without this rebase, export would silently fall back
+    to re-decoding the RAW for every previously-developed photo in the
+    moved folder.
+
+    Returns True if a directory was renamed, False otherwise (no
+    developed_dir configured, nothing to move, or the target already
+    exists — in the last case the caller can decide what to do). Never
+    raises; failures are logged and treated as a no-op so a filesystem
+    hiccup here doesn't also fail the folder move.
+    """
+    if not developed_dir or not old_folder_path or not new_folder_path:
+        return False
+    if old_folder_path == new_folder_path:
+        return False
+    old_key = developed_folder_key(old_folder_path)
+    new_key = developed_folder_key(new_folder_path)
+    if not old_key or not new_key or old_key == new_key:
+        return False
+    old_subdir = os.path.join(developed_dir, old_key)
+    new_subdir = os.path.join(developed_dir, new_key)
+    if not os.path.isdir(old_subdir):
+        return False
+    if os.path.exists(new_subdir):
+        # Target already exists — this is the merge case (e.g.
+        # `/api/folders/<id>/relocate` routing through
+        # `db._merge_into_existing`). Move individual files into the
+        # target so reassigned photos still resolve to their developed
+        # render instead of being stranded under the old key. On
+        # filename collision the target wins, matching the DB merge's
+        # drop-source-on-collision policy.
+        try:
+            for name in os.listdir(old_subdir):
+                src_file = os.path.join(old_subdir, name)
+                dst_file = os.path.join(new_subdir, name)
+                if os.path.exists(dst_file):
+                    if os.path.isdir(src_file) and not os.path.islink(src_file):
+                        shutil.rmtree(src_file)
+                    else:
+                        os.remove(src_file)
+                else:
+                    os.rename(src_file, dst_file)
+            os.rmdir(old_subdir)
+            return True
+        except OSError as exc:
+            log.warning(
+                "Failed to merge developed dir %s into %s: %s",
+                old_subdir, new_subdir, exc,
+            )
+            return False
+    try:
+        os.rename(old_subdir, new_subdir)
+        return True
+    except OSError as exc:
+        log.warning(
+            "Failed to relocate developed dir %s -> %s: %s",
+            old_subdir, new_subdir, exc,
+        )
+        return False
+
+
+class _DevelopedDirIndex:
+    """Lazy, per-export cache of directory listings for developed lookups.
+
+    Each directory is scanned with os.listdir once and indexed as
+    (exact stem, lowercased ext) → absolute path. Subsequent lookups
+    against the same directory are O(1), which avoids turning the
+    per-photo probe into quadratic work on large exports where many
+    photos share a developed directory.
+    """
+
+    def __init__(self):
+        self._cache = {}
+
+    def lookup(self, base, stem):
+        entries = self._cache.get(base)
+        if entries is None:
+            entries = {}
+            try:
+                names = os.listdir(base)
+            except OSError:
+                names = []
+            # Stem match must be case-sensitive to avoid collisions
+            # between photos whose names differ only by case. Extension
+            # match is case-insensitive so developed files written as
+            # .JPG / .TIFF are still picked up.
+            #
+            # When two files in the same directory share a stem and
+            # differ only by extension case (e.g. bird1.jpg vs bird1.JPG
+            # on a case-sensitive filesystem), prefer the file whose
+            # extension is already the canonical lowercase form — that's
+            # what the develop job writes when `darktable_output_format`
+            # is left at its default — and break any remaining ties by
+            # iterating sorted(names) so the winner is stable across
+            # runs rather than depending on os.listdir order.
+            for name in sorted(names):
+                ent_stem, ent_ext = os.path.splitext(name)
+                raw_ext = ent_ext[1:] if ent_ext.startswith(".") else ent_ext
+                ext_key = raw_ext.lower()
+                key = (ent_stem, ext_key)
+                existing = entries.get(key)
+                if existing is None:
+                    entries[key] = os.path.join(base, name)
+                    continue
+                existing_ext = os.path.splitext(existing)[1][1:]
+                if raw_ext == ext_key and existing_ext != ext_key:
+                    entries[key] = os.path.join(base, name)
+            self._cache[base] = entries
+        for ext in _PREFERRED_DEVELOPED_EXTS:
+            path = entries.get((stem, ext))
+            if path and os.path.isfile(path):
+                return path
+        return None
+
+
+def _find_developed_output(filename, folder_path, developed_dir, index=None):
+    """Return the path to a darktable-developed output for this photo, or None.
+
+    Lookup locations are probed in order:
+
+      * <developed_dir>/<path_key>/<stem>.<ext> — matches how the develop
+        job writes when darktable_output_dir is configured (the flat
+        output dir is nested per source-folder so basename collisions
+        stay one-to-one). `path_key` is derived from the folder path
+        rather than its SQLite row id, so the on-disk key survives row
+        deletion without risking a reused id silently inheriting stale
+        outputs — see `developed_folder_key`.
+      * <folder_path>/developed/<stem>.<ext> — the default develop-job
+        location, naturally disambiguated because each source folder has
+        its own developed/ subdir.
+      * <developed_dir>/<stem>.<ext> — legacy flat layout used by older
+        versions of the develop job. Probed last so that any new
+        folder-scoped output wins, but kept so libraries developed before
+        the per-folder nesting convention still light up their developed
+        render on export.
+
+    Extensions are matched case-insensitively so exports still pick up
+    developed files written with uppercase extensions — e.g. IMG_0001.JPG
+    — which can happen on case-sensitive filesystems when
+    darktable_output_format is configured with uppercase, or for files
+    placed manually. Stems are matched case-sensitively so that two photos
+    whose filenames differ only by case (e.g. Bird1.CR3 and bird1.CR3 in
+    the same folder on a case-sensitive filesystem) resolve to distinct
+    developed files.
+
+    JPG is preferred over TIFF when both exist.
+
+    Pass `index` (a _DevelopedDirIndex) to amortize directory scans
+    across many photos in the same export.
+    """
+    stem = os.path.splitext(filename)[0]
+    candidates = []
+    if developed_dir and folder_path:
+        candidates.append(os.path.join(developed_dir, developed_folder_key(folder_path)))
+    if folder_path:
+        candidates.append(os.path.join(folder_path, "developed"))
+    if developed_dir:
+        candidates.append(developed_dir)
+    if index is None:
+        index = _DevelopedDirIndex()
+    for base in candidates:
+        hit = index.lookup(base, stem)
+        if hit:
+            return hit
+    return None
 
 
 def _resolve_source(photo, vireo_dir, folders, use_working_copy=False):

@@ -869,10 +869,31 @@ def create_app(db_path, thumb_cache_dir=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
+        # Capture the old path before the DB rewrite so we can rebase the
+        # corresponding darktable output subdir on disk. Developed outputs
+        # are nested under developed_folder_key(folder_path), so a path
+        # change invalidates the old key and would silently regress export
+        # to RAW until the user re-developed.
+        old_row = db.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (folder_id,)
+        ).fetchone()
+        old_path = old_row["path"] if old_row else ""
+
         try:
             cascaded = db.relocate_folder(folder_id, new_path)
         except ValueError as e:
             return json_error(str(e), 409)
+
+        import config as cfg
+        from export import relocate_developed_dir
+        effective_cfg = db.get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+        if developed_dir and old_path:
+            relocate_developed_dir(developed_dir, old_path, new_path)
+            for child in cascaded:
+                relocate_developed_dir(
+                    developed_dir, child["old_path"], child["new_path"]
+                )
         return jsonify({
             "status": "ok",
             "cascaded": cascaded,
@@ -5113,6 +5134,9 @@ def create_app(db_path, thumb_cache_dir=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         effective_cfg = db.get_effective_config(cfg.load())
         wc_max_size = effective_cfg.get("working_copy_max_size", 4096)
+        # Pass the configured darktable output dir so export prefers the
+        # perfected render over a fresh libraw decode of the RAW.
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         def work(job):
             from export import export_photos
@@ -5147,6 +5171,7 @@ def create_app(db_path, thumb_cache_dir=None):
                     "max_size": max_size,
                     "quality": quality,
                     "working_copy_max_size": wc_max_size,
+                    "developed_dir": developed_dir,
                 },
                 progress_cb=progress_cb,
             )
@@ -5179,6 +5204,10 @@ def create_app(db_path, thumb_cache_dir=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        import config as cfg
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+
         def work(job):
             from move import move_folder
 
@@ -5203,6 +5232,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 folder_id=folder_id,
                 destination=destination,
                 progress_cb=progress_cb,
+                developed_dir=developed_dir,
             )
 
         job_id = runner.start(
@@ -6196,6 +6226,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         def work(job):
             from develop import develop_photo, output_path_for_photo
+            from export import developed_folder_key
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -6219,8 +6250,17 @@ def create_app(db_path, thumb_cache_dir=None):
                 folder_path = folders.get(photo["folder_id"], "")
                 input_path = os.path.join(folder_path, photo["filename"])
 
-                # Determine output directory: configured, or "developed" subfolder next to originals
-                out_dir = output_dir if output_dir else os.path.join(folder_path, "developed")
+                # Determine output directory. The per-folder "developed/" default
+                # is naturally disambiguated (one dir per source folder). The
+                # globally configured dir is flat, so nest each photo under a
+                # stable key derived from the source folder's path (not its row
+                # id — SQLite reuses those after deletion, which would silently
+                # cross-wire new folders onto stale developed files left on
+                # disk by a previously-deleted folder).
+                if output_dir:
+                    out_dir = os.path.join(output_dir, developed_folder_key(folder_path))
+                else:
+                    out_dir = os.path.join(folder_path, "developed")
                 out_path = output_path_for_photo(photo["filename"], out_dir, output_format)
 
                 result = develop_photo(

@@ -168,7 +168,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
     return {"moved": moved, "errors": errors, "destination_folder_id": dest_folder_id}
 
 
-def move_folder(db, folder_id, destination, progress_cb=None):
+def move_folder(db, folder_id, destination, progress_cb=None, developed_dir=""):
     """Move an entire folder (and subfolders) to a destination.
 
     The folder is placed inside the destination, preserving its name.
@@ -179,6 +179,13 @@ def move_folder(db, folder_id, destination, progress_cb=None):
         folder_id: ID of the source folder
         destination: absolute path to parent destination directory
         progress_cb: optional callback(current, total, filename)
+        developed_dir: optional path to the configured
+            `darktable_output_dir`. When set, the folder's developed
+            subdirectory — nested under a hash of its source path, see
+            `export.developed_folder_key` — is rebased to match the new
+            path after the move. Without this, exports silently fall
+            back to RAW for every previously-developed photo in the
+            moved folder.
 
     Returns dict with keys: moved (int), errors (list of str)
     """
@@ -237,6 +244,32 @@ def move_folder(db, folder_id, destination, progress_cb=None):
     # old folder becomes orphan on disk rather than DB pointing to deleted paths)
     db.move_folder_path(folder_id, dest_path)
     db.update_folder_counts()
+
+    # Rebase any developed-output subdirs nested under the configured
+    # darktable_output_dir. `developed_folder_key` hashes the folder's
+    # path, so the DB update above just invalidated the old subdir's
+    # implicit key — rename it on disk to match the new path, and cascade
+    # to any descendant folders whose paths also shifted.
+    if developed_dir:
+        from export import relocate_developed_dir
+        relocate_developed_dir(developed_dir, src_path, dest_path)
+        # SQL LIKE treats `_` and `%` (and the escape char) as wildcards,
+        # all of which are valid POSIX path characters. Without a strict
+        # prefix guard, an unrelated folder like `/dXst/birds/fake` would
+        # match a pattern like `/d_st/birds/%` and feed a bogus computed
+        # old_path into relocate_developed_dir, mis-rebasing the wrong
+        # developed subdir. Filter results by a literal prefix check.
+        descendant_rows = db.conn.execute(
+            "SELECT path FROM folders WHERE path LIKE ?",
+            (dest_path + "/%",),
+        ).fetchall()
+        prefix = dest_path + "/"
+        for row in descendant_rows:
+            new_child = row["path"]
+            if not new_child.startswith(prefix):
+                continue
+            old_child = src_path + new_child[len(dest_path):]
+            relocate_developed_dir(developed_dir, old_child, new_child)
 
     # Delete originals
     log.info("Verification passed, deleting originals: %s", src_path)
