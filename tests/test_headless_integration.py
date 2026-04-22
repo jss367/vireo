@@ -172,3 +172,37 @@ def test_stale_runtime_json_is_replaced(headless_home, tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def test_shutdown_endpoint_removes_runtime_json(headless_home, tmp_path):
+    db = tmp_path / "vireo.db"
+    port = _free_port()
+    proc = _spawn(headless_home, db, port)
+    try:
+        runtime = headless_home / ".vireo" / "runtime.json"
+        data = _wait_for_runtime(runtime)
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/shutdown",
+            method="POST",
+            headers={"X-Vireo-Token": data["token"]},
+        )
+        urllib.request.urlopen(req, timeout=3).read()
+
+        # Wait for the process to exit (shutdown timer + signal).
+        proc.wait(timeout=10)
+        assert proc.returncode == 0 or proc.returncode is not None
+
+        # runtime.json should be gone.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and runtime.exists():
+            time.sleep(0.1)
+        assert not runtime.exists(), "runtime.json still present after shutdown"
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
