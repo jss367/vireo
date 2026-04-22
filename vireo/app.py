@@ -7983,11 +7983,21 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without opening a browser; write runtime.json and enable "
+             "the /api/v1 API. Use this when invoking the sidecar directly "
+             "from scripts or agents.",
+    )
+    parser.add_argument(
         "--load-taxonomy",
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
     )
     args = parser.parse_args()
+
+    if args.headless:
+        args.no_browser = True
 
     if args.load_taxonomy:
         from db import Database
@@ -8013,14 +8023,29 @@ def main():
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
 
-    # Write the port file when random port was requested (for Tauri to discover)
-    if args.port == 0:
-        port_file = os.path.join(os.path.expanduser("~/.vireo"), "port")
-        with open(port_file, "w") as f:
-            f.write(str(port))
-        log.info("Random port %d written to %s", port, port_file)
+    from runtime import (
+        check_single_instance,
+        delete_runtime_json,
+        generate_token,
+        write_runtime_json,
+    )
 
-    app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
+    status, info = check_single_instance()
+    if status == "conflict":
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "already_running",
+            "port": info["port"],
+            "pid": info["pid"],
+        }) + "\n")
+        raise SystemExit(1)
+
+    api_token = generate_token()
+    mode = "headless" if args.headless else "gui"
+
+    app = create_app(
+        db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
+    )
 
     # Startup banner
     import config as cfg
@@ -8053,6 +8078,23 @@ def main():
                     time.sleep(0.1)
 
         threading.Thread(target=_open_browser, daemon=True).start()
+
+    import atexit
+    import signal as _signal
+
+    # Look up the running version from package metadata (same fallback chain as /api/version).
+    try:
+        from importlib.metadata import version as pkg_version
+        ver = pkg_version("vireo")
+    except Exception:
+        ver = "0.0.0"
+
+    write_runtime_json(
+        port=port, pid=os.getpid(), version=ver, db_path=args.db,
+        token=api_token, mode=mode,
+    )
+    atexit.register(delete_runtime_json)
+    _signal.signal(_signal.SIGTERM, lambda *_: (delete_runtime_json(), os._exit(0)))
 
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 
