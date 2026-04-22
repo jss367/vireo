@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import subprocess
+import sys
 import time
 import webbrowser
 from datetime import UTC
@@ -1230,6 +1231,44 @@ def create_app(db_path, thumb_cache_dir=None):
             db.remove_color_label(photo_id)
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
+    @app.route("/api/files/reveal", methods=["POST"])
+    def api_files_reveal():
+        """Reveal a photo in the OS file manager (Finder / Explorer / xdg-open).
+
+        Body: {"photo_id": <int>}
+        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if the
+        subprocess failed to launch; 404 if the photo id is unknown; 400 if
+        photo_id is missing from the body.
+        """
+        body = request.get_json(silent=True) or {}
+        pid = body.get("photo_id")
+        if pid is None:
+            return json_error("photo_id required")
+        db = _get_db()
+        photo = db.get_photo(int(pid))
+        if not photo:
+            return json_error("photo not found", 404)
+        folder_row = db.conn.execute(
+            "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+        ).fetchone()
+        folder_path = folder_row["path"] if folder_row else ""
+        if not folder_path or not photo["filename"]:
+            return jsonify({"ok": False, "reason": "no path"})
+        path = os.path.join(folder_path, photo["filename"])
+        try:
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", path], timeout=5, check=False)
+            elif sys.platform.startswith("win"):
+                subprocess.run(
+                    ["explorer", f"/select,{path}"], timeout=5, check=False
+                )
+            else:
+                parent = os.path.dirname(path) or path
+                subprocess.run(["xdg-open", parent], timeout=5, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
