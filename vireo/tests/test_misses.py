@@ -48,3 +48,34 @@ def test_no_subject_excludes_other_categories():
     assert flags["no_subject"] is True
     assert flags["clipped"] is False
     assert flags["oof"] is False
+
+
+def test_clipped_when_bbox_too_small_singleton():
+    from misses import classify_miss
+    row = _row(subject_size=0.001)  # 0.1% — below singleton 0.2%
+    flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
+    assert flags["clipped"] is True
+
+
+def test_not_clipped_when_bbox_small_but_above_singleton_threshold():
+    from misses import classify_miss
+    row = _row(subject_size=0.003)  # 0.3% — above singleton 0.2%
+    flags = classify_miss(row, siblings=[], config=DEFAULT_CONFIG)
+    assert flags["clipped"] is False
+
+
+def test_clipped_when_crop_complete_below_reject_threshold_in_burst():
+    from misses import classify_miss
+    row = _row(crop_complete=0.40)  # touches edge
+    siblings = [_row(crop_complete=1.0), _row(crop_complete=1.0)]
+    flags = classify_miss(row, siblings=siblings, config=DEFAULT_CONFIG)
+    assert flags["clipped"] is True
+
+
+def test_clipped_when_bbox_much_smaller_than_burst_median():
+    """Burst context: this frame's bbox is <10% of sibling median → miss."""
+    from misses import classify_miss
+    row = _row(subject_size=0.005)        # 0.5%
+    siblings = [_row(subject_size=0.08), _row(subject_size=0.10)]  # 8%, 10%
+    flags = classify_miss(row, siblings=siblings, config=DEFAULT_CONFIG)
+    assert flags["clipped"] is True

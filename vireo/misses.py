@@ -31,4 +31,32 @@ def classify_miss(row, siblings, config):
     detection_conf = row.get("detection_conf") or 0.0
     if detection_conf < conf_threshold:
         return {"no_subject": True, "clipped": False, "oof": False}
-    return {"no_subject": False, "clipped": False, "oof": False}
+    bbox_area_min = (
+        config["miss_bbox_area_min"] if in_burst
+        else config["miss_bbox_area_min_singleton"]
+    )
+    subject_size = row.get("subject_size") or 0.0
+    crop_complete = row.get("crop_complete")
+
+    clipped = False
+    # Absolute: bbox too small to be usable.
+    if subject_size < bbox_area_min:
+        clipped = True
+    # crop_complete < 0.6 signals the mask touches a frame edge (matches
+    # the existing reject_crop_complete default in pipeline config).
+    if crop_complete is not None and crop_complete < 0.60:
+        clipped = True
+    # Burst context: this frame's bbox is an order of magnitude smaller
+    # than its siblings' median — the photographer lost framing.
+    if in_burst:
+        sibling_sizes = [
+            s.get("subject_size") for s in siblings
+            if s.get("subject_size")
+        ]
+        if sibling_sizes:
+            import statistics
+            median = statistics.median(sibling_sizes)
+            if median > 0 and subject_size * 10 < median:
+                clipped = True
+
+    return {"no_subject": False, "clipped": clipped, "oof": False}
