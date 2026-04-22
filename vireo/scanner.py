@@ -1,10 +1,12 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
+import contextlib
 import hashlib
 import json
 import logging
 import os
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,47 @@ def compute_file_hash(file_path, chunk_size=65536):
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _compute_file_features(path_str):
+    """Compute (phash, file_hash) for one image.
+
+    Module-level so ProcessPoolExecutor can pickle it. Mirrors the
+    best-effort behavior the main scan loop used to have inline: any
+    failure yields None for that field rather than raising.
+    """
+    phash = None
+    with contextlib.suppress(Exception), Image.open(path_str) as img:
+        phash = str(imagehash.phash(img))
+    file_hash = None
+    with contextlib.suppress(Exception):
+        file_hash = compute_file_hash(path_str)
+    return phash, file_hash
+
+
+def _resolve_worker_count(files_to_process):
+    """Decide how many workers to use for feature computation.
+
+    Returns 1 (sequential) when the batch is tiny or config disables
+    parallelism; otherwise honors ``scan_workers`` (0 = auto, cap at
+    cpu_count and batch size).
+    """
+    n = len(files_to_process)
+    if n < 8:
+        return 1
+    try:
+        import config as cfg
+        configured = int(cfg.get("scan_workers") or 0)
+    except Exception:
+        configured = 0
+    if configured == 1:
+        return 1
+    cpu = os.cpu_count() or 1
+    if configured <= 0:
+        workers = cpu
+    else:
+        workers = min(configured, cpu)
+    return max(1, min(workers, n))
 
 
 def _import_keywords_for_photo(db, photo_id, xmp_path_str):
@@ -560,7 +603,22 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
 
-    for image_path in files_to_process:
+    # Compute phash + file_hash in parallel across all files that need
+    # processing. These are the two per-file operations that actually read
+    # every byte of the image; everything else in the loop is cheap DB or
+    # dict work. Order is preserved so results zip 1:1 with files_to_process.
+    workers = _resolve_worker_count(files_to_process)
+    if paths_to_extract and status_callback:
+        status_callback(
+            f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
+        )
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            features = list(pool.map(_compute_file_features, paths_to_extract))
+    else:
+        features = [_compute_file_features(p) for p in paths_to_extract]
+
+    for image_path, (phash, file_hash) in zip(files_to_process, features, strict=True):
         folder_id = _ensure_folder(image_path.parent)
 
         # File stats
@@ -620,22 +678,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         longitude = composite.get("GPSLongitude")
         if longitude is None:
             longitude = exif_group.get("GPSLongitude")
-
-        # Compute perceptual hash (computed, not from EXIF)
-        phash = None
-        try:
-            with Image.open(str(image_path)) as img:
-                phash = str(imagehash.phash(img))
-        except Exception:
-            log.debug("Could not compute pHash for %s", image_path)
-
-        # Compute file hash for duplicate detection
-        file_hash = None
-        try:
-            file_hash = compute_file_hash(str(image_path))
-        except Exception:
-            log.debug("Could not compute file hash for %s", image_path)
-
 
         photo_id = db.add_photo(
             folder_id=folder_id,
