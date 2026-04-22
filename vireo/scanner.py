@@ -617,20 +617,28 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # Compute phash + file_hash in parallel across all files that need
     # processing. These are the two per-file operations that actually read
     # every byte of the image; everything else in the loop is cheap DB or
-    # dict work. Order is preserved so results zip 1:1 with files_to_process.
+    # dict work. Results stream in order, so workers keep computing the tail
+    # while the main thread commits the head — no O(n) buffer of features.
     workers = _resolve_worker_count(files_to_process)
     if paths_to_extract and status_callback:
         status_callback(
             f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
         )
-    if workers > 1:
-        mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
-        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
-            features = list(pool.map(_compute_file_features, paths_to_extract))
-    else:
-        features = [_compute_file_features(p) for p in paths_to_extract]
 
-    for image_path, (phash, file_hash) in zip(files_to_process, features, strict=True):
+    def _iter_features():
+        if workers > 1:
+            mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+                yield from zip(
+                    files_to_process,
+                    pool.map(_compute_file_features, paths_to_extract),
+                    strict=True,
+                )
+        else:
+            for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
+                yield image_path, _compute_file_features(path_str)
+
+    for image_path, (phash, file_hash) in _iter_features():
         folder_id = _ensure_folder(image_path.parent)
 
         # File stats
