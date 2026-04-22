@@ -546,6 +546,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_v1_health():
         return jsonify({"status": "ok"})
 
+    @app.route("/api/v1/version")
+    def api_v1_version():
+        return api_version()  # reuse existing implementation
+
+    @app.route("/api/v1/shutdown", methods=["POST"])
+    def api_v1_shutdown():
+        import signal
+        import threading
+
+        def _shutdown():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.5, _shutdown).start()
+        return jsonify({"status": "shutting_down"})
+
     @app.route("/api/models/status")
     def api_models_status():
         """Lightweight model readiness check for first-launch detection."""
