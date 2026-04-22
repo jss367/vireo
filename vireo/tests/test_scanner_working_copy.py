@@ -217,6 +217,19 @@ def test_subtree_like_pattern_escapes_literal_wildcards():
     assert _subtree_like_pattern("/a/50%off", sep="/") == "/a/50\\%off/%"
 
 
+def test_subtree_like_pattern_normalizes_trailing_separator():
+    """Trailing separator in the scope path must not produce a double separator.
+
+    Before this guard, `/photos/` produced `"//%"` and the root path `"/"`
+    produced `"//%"` — neither matches any real descendant path.
+    """
+    from scanner import _subtree_like_pattern
+    assert _subtree_like_pattern("/photos/", sep="/") == "/photos/%"
+    assert _subtree_like_pattern("/photos///", sep="/") == "/photos/%"
+    assert _subtree_like_pattern("/", sep="/") == "/%"
+    assert _subtree_like_pattern("C:\\a\\", sep="\\") == "C:\\\\a\\\\%"
+
+
 def test_extract_working_copies_scope_escapes_like_wildcards(tmp_path, monkeypatch):
     """An underscore in a scope path must not match unrelated siblings.
 

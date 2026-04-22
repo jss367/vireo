@@ -256,9 +256,16 @@ def _subtree_like_pattern(path, sep=None):
     names don't leak into sibling matches and — critically on Windows — the
     trailing backslash separator doesn't turn the appended ``%`` into a
     literal character.
+
+    Trailing separators on the input are collapsed to exactly one before the
+    wildcard. Without this, ``"/photos/"`` and the filesystem root ``"/"``
+    produce ``"//%"``, which matches nothing.
     """
     if sep is None:
         sep = os.sep
+
+    while path.endswith(sep):
+        path = path[: -len(sep)]
 
     def _escape(s):
         return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
