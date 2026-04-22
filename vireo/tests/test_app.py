@@ -2346,6 +2346,119 @@ def test_highlights_save(app_and_db):
     assert "Highlights - save_test" in names
 
 
+def test_highlights_scope_workspace_blends_folders(app_and_db):
+    """GET /api/highlights?scope=workspace draws candidates from every
+    folder in the active workspace, so a shoot split across multiple dated
+    folders produces one combined highlight pool."""
+    app, db = app_and_db
+    client = app.test_client()
+    f1 = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-15', '2024-01-15', 'ok')"
+    ).lastrowid
+    f2 = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/shoot/2024-01-16', '2024-01-16', 'ok')"
+    ).lastrowid
+    for fid in (f1, f2):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (db._ws_id(), fid),
+        )
+    # 3 photos in each folder with strong quality scores.
+    for fid, prefix in [(f1, "a"), (f2, "b")]:
+        for i in range(3):
+            db.conn.execute(
+                "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+                "VALUES (?, ?, ?, 'none')",
+                (fid, f"{prefix}{i}.jpg", 0.9 - i * 0.01),
+            )
+    db.conn.commit()
+
+    resp = client.get("/api/highlights?scope=workspace&count=6&max_per_species=10")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    filenames = {p["filename"] for p in data["photos"]}
+    # All six photos across both folders are eligible and selected. The
+    # fixture photos lack quality scores so they do not show up here.
+    assert filenames == {"a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg", "b1.jpg", "b2.jpg"}
+    # scope=workspace blends candidates from every folder visible in the
+    # active workspace, which the API advertises via meta.scope.
+    assert data["scope"] == "workspace"
+    assert data["meta"]["eligible"] == 6
+
+
+def test_highlights_scope_workspace_isolates_other_workspaces(app_and_db):
+    """Folders in a non-active workspace must not leak into the scope=workspace pool."""
+    app, db = app_and_db
+    client = app.test_client()
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+
+    # Folder in the active workspace.
+    f_active = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/active', 'active', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (active_ws, f_active),
+    )
+    # Folder only in the other workspace.
+    f_other = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/other', 'other', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (other_ws, f_other),
+    )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'keep.jpg', 0.8, 'none')",
+        (f_active,),
+    )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'leaked.jpg', 0.95, 'none')",
+        (f_other,),
+    )
+    db.conn.commit()
+
+    resp = client.get("/api/highlights?scope=workspace&count=10&max_per_species=10")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    filenames = {p["filename"] for p in data["photos"]}
+    assert "leaked.jpg" not in filenames
+    assert filenames == {"keep.jpg"}
+
+
+def test_highlights_folder_scope_still_works(app_and_db):
+    """Regression: omitting scope (or passing a folder_id) still filters by folder."""
+    app, db = app_and_db
+    client = app.test_client()
+    f1 = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/a', 'a', 'ok')"
+    ).lastrowid
+    f2 = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
+    ).lastrowid
+    for fid in (f1, f2):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (db._ws_id(), fid),
+        )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_a.jpg', 0.8, 'none')",
+        (f1,),
+    )
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) VALUES (?, 'only_b.jpg', 0.9, 'none')",
+        (f2,),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={f1}&count=10&max_per_species=10")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    filenames = {p["filename"] for p in data["photos"]}
+    assert filenames == {"only_a.jpg"}
+
+
 def test_api_import_folder_preview(app_and_db, tmp_path):
     """POST /api/import/folder-preview returns file discovery results."""
     app, db = app_and_db

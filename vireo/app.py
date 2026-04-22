@@ -1755,10 +1755,18 @@ def create_app(db_path, thumb_cache_dir=None):
                 "photos": [],
                 "meta": {"total_in_folder": 0, "eligible": 0, "species_breakdown": {}},
                 "folders": [],
+                "scope": "folder",
             })
 
+        # scope=workspace blends candidates from every folder in the active
+        # workspace. This matches how photoshoots land in Vireo: a single
+        # shoot often spans multiple dated folders (YYYY-MM-DD subfolders),
+        # so one folder != one shoot.
+        scope = request.args.get("scope", "folder")
         folder_id = request.args.get("folder_id", type=int)
-        if folder_id is None:
+        if scope == "workspace":
+            folder_id = None
+        elif folder_id is None:
             folder_id = folders[0]["id"]  # Most recent
 
         count = request.args.get("count", type=int)
@@ -1800,6 +1808,7 @@ def create_app(db_path, thumb_cache_dir=None):
                 "avg_quality": round(sum(p.get("quality_score", 0) for p in selected) / max(len(selected), 1), 2),
             },
             "folders": [{"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]} for f in folders],
+            "scope": "workspace" if folder_id is None else "folder",
         })
 
     @app.route("/api/highlights/save", methods=["POST"])

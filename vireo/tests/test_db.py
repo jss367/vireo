@@ -3243,6 +3243,78 @@ def test_get_highlights_candidates_excludes_rejected(tmp_path):
     assert results[0]["filename"] == "good.jpg"
 
 
+def test_get_highlights_candidates_workspace_wide(tmp_path):
+    """folder_id=None pulls candidates from every folder in the active workspace.
+
+    A photoshoot commonly spans multiple dated folders (Vireo auto-organizes
+    imports by EXIF capture date). Passing folder_id=None blends all of them.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Two sibling folders, both in the active workspace, each with a scored photo.
+    f1 = db.add_folder('/shoot/2024-01-15', name='2024-01-15')
+    f2 = db.add_folder('/shoot/2024-01-16', name='2024-01-16')
+    p1 = db.add_photo(folder_id=f1, filename='day1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=f2, filename='day2.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)", (p1, p2))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=None, min_quality=0.0)
+    filenames = {r["filename"] for r in results}
+    assert filenames == {"day1.jpg", "day2.jpg"}
+
+
+def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
+    """folder_id=None must not leak photos from folders in other workspaces."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+    # Folder in the active workspace.
+    f_active = db.add_folder('/active', name='active')
+    # Folder only in the other workspace.
+    f_other = db.add_folder('/other', name='other')
+    db.remove_workspace_folder(active_ws, f_other)
+    db.add_workspace_folder(other_ws, f_other)
+    p_active = db.add_photo(folder_id=f_active, filename='a.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_other = db.add_photo(folder_id=f_other, filename='b.jpg', extension='.jpg',
+                           file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)",
+                    (p_active, p_other))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=None, min_quality=0.0)
+    filenames = {r["filename"] for r in results}
+    assert filenames == {"a.jpg"}
+
+
+def test_get_highlights_candidates_workspace_wide_respects_min_quality_and_rejected(tmp_path):
+    """Workspace-wide pool still honors min_quality and excludes rejected photos."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    f1 = db.add_folder('/a', name='a')
+    f2 = db.add_folder('/b', name='b')
+    # Above threshold in f1; below threshold in f2; rejected in f1.
+    p_keep = db.add_photo(folder_id=f1, filename='keep.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    p_low = db.add_photo(folder_id=f2, filename='low.jpg', extension='.jpg',
+                         file_size=100, file_mtime=2.0)
+    p_reject = db.add_photo(folder_id=f1, filename='reject.jpg', extension='.jpg',
+                            file_size=100, file_mtime=3.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id = ?", (p_keep,))
+    db.conn.execute("UPDATE photos SET quality_score = 0.2 WHERE id = ?", (p_low,))
+    db.conn.execute("UPDATE photos SET quality_score = 0.9, flag = 'rejected' WHERE id = ?",
+                    (p_reject,))
+    db.conn.commit()
+
+    results = db.get_highlights_candidates(folder_id=None, min_quality=0.5)
+    filenames = [r["filename"] for r in results]
+    assert filenames == ["keep.jpg"]
+
+
 # --- Folders with quality data ---
 
 

@@ -96,10 +96,23 @@ function escapeAttr(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Sentinel dropdown value that means "aggregate across every folder in the
+// active workspace" (one shoot often spans multiple dated subfolders).
+var WORKSPACE_SCOPE = '__workspace__';
+
 async function loadHighlights() {
   var params = new URLSearchParams();
   var folderSelect = document.getElementById('folderSelect');
-  if (folderSelect.value) params.set('folder_id', folderSelect.value);
+  // First load runs before the dropdown is populated (folderSelect.value is
+  // empty). The code below will prepend WORKSPACE_SCOPE as the first option
+  // and it becomes the default selection, so send scope=workspace up front
+  // to keep the data aligned with the option the user will see selected.
+  var firstLoad = folderSelect.options.length === 0;
+  if (folderSelect.value === WORKSPACE_SCOPE || firstLoad) {
+    params.set('scope', 'workspace');
+  } else if (folderSelect.value) {
+    params.set('folder_id', folderSelect.value);
+  }
   params.set('count', document.getElementById('countSlider').value);
   params.set('max_per_species', document.getElementById('speciesSlider').value);
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
@@ -109,8 +122,13 @@ async function loadHighlights() {
   currentPhotos = data.photos;
   currentFolders = data.folders;
 
-  // Populate folder dropdown on first load
+  // Populate folder dropdown on first load. A "whole workspace" entry leads
+  // the list so users can pick it without hunting through folder names.
   if (!folderSelect.options.length) {
+    var wsOpt = document.createElement('option');
+    wsOpt.value = WORKSPACE_SCOPE;
+    wsOpt.textContent = 'All folders in this workspace';
+    folderSelect.appendChild(wsOpt);
     data.folders.forEach(function(f) {
       var opt = document.createElement('option');
       opt.value = f.id;
