@@ -53,3 +53,25 @@ def test_context_menu_escape_closes(live_server, page):
     """)
     page.keyboard.press("Escape")
     expect(page.locator(".vireo-ctx-menu")).to_be_hidden()
+
+
+def test_context_menu_chip_row_renders_and_fires(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate("""() => {
+        window.__ctx_chip = null;
+        openContextMenu({clientX: 100, clientY: 100}, [
+            { chips: [
+                {label: 'A', onClick: () => window.__ctx_chip = 'a'},
+                {label: 'B', onClick: () => window.__ctx_chip = 'b'},
+            ] },
+        ]);
+    }""")
+    from playwright.sync_api import expect
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+    chips = menu.locator(".vireo-ctx-chip")
+    assert chips.count() == 2
+    chips.nth(1).click()
+    expect(menu).to_be_hidden()
+    assert page.evaluate("window.__ctx_chip") == "b"

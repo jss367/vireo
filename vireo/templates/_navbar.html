@@ -1027,7 +1027,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 
 /* Shared right-click context menu */
 .vireo-ctx-menu {
-  position: fixed; z-index: 1000;
+  position: fixed; z-index: 99999;
   background: var(--bg-secondary);
   border: 1px solid var(--border-secondary);
   border-radius: 6px; padding: 4px 0;
@@ -1200,7 +1200,6 @@ function sendReport() {
     document.removeEventListener('mousedown', _outside, true);
     document.removeEventListener('keydown', _keydown, true);
     window.removeEventListener('blur', closeContextMenu);
-    window.removeEventListener('scroll', closeContextMenu, true);
     if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
   };
 
@@ -1252,6 +1251,7 @@ function sendReport() {
     closeContextMenu();
     const menu = document.createElement('div');
     menu.className = 'vireo-ctx-menu';
+    menu.style.visibility = 'hidden';
     items.forEach(it => menu.appendChild(_renderItem(it)));
     document.body.appendChild(menu);
     // Clamp to viewport.
@@ -1262,12 +1262,12 @@ function sendReport() {
     if (y + rect.height > vh) y = Math.max(0, vh - rect.height - 4);
     menu.style.left = x + 'px';
     menu.style.top  = y + 'px';
+    menu.style.visibility = 'visible';
     _ctxEl = menu;
     _ctxDismiss = (opts && opts.onDismiss) || null;
     document.addEventListener('mousedown', _outside, true);
     document.addEventListener('keydown', _keydown, true);
     window.addEventListener('blur', closeContextMenu);
-    window.addEventListener('scroll', closeContextMenu, true);
   };
 })();
 </script>
