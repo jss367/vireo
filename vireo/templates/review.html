@@ -1148,10 +1148,10 @@ function updateThumbSize(val) {
 }
 
 /* ==================== Group Review Modal ==================== */
-var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
 
 function openGroupReview(groupId, model) {
-  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
   _grmLoupeLocked = false;
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
@@ -1212,8 +1212,13 @@ function renderGroupModal() {
     var sharp = it.subject_sharpness != null ? Math.round(it.subject_sharpness) : (it.sharpness != null ? Math.round(it.sharpness) : '-');
     var confPct = Math.round((it.confidence || 0) * 100);
 
+    // Once the user has zoomed, serve full-resolution originals so pixel-peeping
+    // and 1:1 inspection actually show sensor detail instead of an upscaled 400px thumbnail.
+    var src = grmState.upgraded
+      ? '/photos/' + it.photo_id + '/original'
+      : '/thumbnails/' + it.photo_id + '.jpg';
     return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '" onclick="grmSelect(' + it.photo_id + ')">' +
-      '<img src="/thumbnails/' + it.photo_id + '.jpg" loading="lazy">' +
+      '<img src="' + src + '" loading="lazy">' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
@@ -1305,6 +1310,41 @@ function renderLoupePreds(item) {
 
 var _grmZoomLevel = 4;
 var _grmLoupeLocked = false;
+var _grmLastX = 50, _grmLastY = 50;
+
+function _grmUpgradeStripToOriginal() {
+  // Swap every strip card from the 400px thumbnail to the full-resolution
+  // original so zoom actually reveals sensor detail. Idempotent per modal open.
+  if (grmState.upgraded) return;
+  grmState.upgraded = true;
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    var pid = card.getAttribute('data-photo-id');
+    var img = card.querySelector('img');
+    if (pid && img) img.src = '/photos/' + pid + '/original';
+  });
+}
+
+function _grmApplyZoom() {
+  document.getElementById('grmCrosshairH').style.top = _grmLastY + '%';
+  document.getElementById('grmCrosshairV').style.left = _grmLastX + '%';
+  document.querySelectorAll('.grm-card img').forEach(function(img) {
+    img.style.transformOrigin = _grmLastX + '% ' + _grmLastY + '%';
+    img.style.transform = 'scale(' + _grmZoomLevel + ')';
+    img.parentElement.classList.add('zoomed');
+  });
+}
+
+function _grmMaxZoom() {
+  // Per selected photo: ceil(sourceWidth / cardDisplayWidth) reaches true 1:1.
+  // Falls back to 12 (the historical cap) when dimensions are unknown so we
+  // never zoom less than before.
+  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+  var sample = document.querySelector('.grm-card img');
+  if (item && item.width && sample && sample.offsetWidth) {
+    return Math.max(12, Math.ceil(item.width / sample.offsetWidth));
+  }
+  return 12;
+}
 
 function grmLoupeToggleLock(e) {
   _grmLoupeLocked = !_grmLoupeLocked;
@@ -1324,33 +1364,38 @@ function grmLoupeMove(e) {
   if (_grmLoupeLocked) return;
 
   var rect = e.currentTarget.getBoundingClientRect();
-  var x = ((e.clientX - rect.left) / rect.width) * 100;
-  var y = ((e.clientY - rect.top) / rect.height) * 100;
+  _grmLastX = ((e.clientX - rect.left) / rect.width) * 100;
+  _grmLastY = ((e.clientY - rect.top) / rect.height) * 100;
 
-  // Update crosshairs
-  document.getElementById('grmCrosshairH').style.top = y + '%';
-  document.getElementById('grmCrosshairV').style.left = x + '%';
-
-  // Zoom all strip thumbnails to the same position
-  document.querySelectorAll('.grm-card img').forEach(function(img) {
-    img.style.transformOrigin = x + '% ' + y + '%';
-    img.style.transform = 'scale(' + _grmZoomLevel + ')';
-    img.parentElement.classList.add('zoomed');
-  });
+  _grmUpgradeStripToOriginal();
+  _grmApplyZoom();
 }
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  var max = _grmMaxZoom();
   if (e.deltaY < 0) {
-    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+    _grmZoomLevel = Math.min(max, _grmZoomLevel + 1);
   } else {
     _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
   }
-  // Re-trigger the move to update zoom (even if locked)
-  var wasLocked = _grmLoupeLocked;
-  _grmLoupeLocked = false;
-  grmLoupeMove(e);
-  _grmLoupeLocked = wasLocked;
+  _grmUpgradeStripToOriginal();
+  // Update origin from the wheel event even when locked so zoom follows cursor.
+  var rect = e.currentTarget.getBoundingClientRect();
+  _grmLastX = ((e.clientX - rect.left) / rect.width) * 100;
+  _grmLastY = ((e.clientY - rect.top) / rect.height) * 100;
+  _grmApplyZoom();
+}
+
+function grmSnapOneToOne() {
+  // Lightroom-style 1:1: zoom factor that makes one source pixel == one screen pixel.
+  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+  if (!item || !item.width) return;
+  var sample = document.querySelector('.grm-card img');
+  if (!sample || !sample.offsetWidth) return;
+  _grmUpgradeStripToOriginal();
+  _grmZoomLevel = Math.max(1, Math.round(item.width / sample.offsetWidth));
+  _grmApplyZoom();
 }
 
 function grmLoupeReset() {
@@ -1486,6 +1531,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
 });
 
 </script>
@@ -1526,7 +1572,7 @@ document.addEventListener('keydown', function(e) {
     <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>
