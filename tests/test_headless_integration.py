@@ -129,3 +129,46 @@ def test_second_spawn_refuses_with_already_running(headless_home, tmp_path):
         except subprocess.TimeoutExpired:
             first.kill()
             first.wait()
+
+
+def test_stale_runtime_json_is_replaced(headless_home, tmp_path):
+    # Plant a stale runtime.json pointing at an unused port.
+    stale = {
+        "port": 1,  # almost certainly not bound
+        "pid": 999999,
+        "token": "stale",
+        "version": "0.0.0",
+        "db_path": "/nowhere",
+        "mode": "headless",
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    runtime = headless_home / ".vireo" / "runtime.json"
+    runtime.write_text(json.dumps(stale))
+
+    db = tmp_path / "vireo.db"
+    port = _free_port()
+    proc = _spawn(headless_home, db, port)
+    try:
+        # Poll for the new contents (different port).
+        deadline = time.monotonic() + 20
+        data = None
+        while time.monotonic() < deadline:
+            if runtime.exists():
+                try:
+                    candidate = json.loads(runtime.read_text())
+                    if candidate.get("port") == port:
+                        data = candidate
+                        break
+                except json.JSONDecodeError:
+                    pass
+            time.sleep(0.1)
+        assert data is not None, "runtime.json was not refreshed"
+        assert data["pid"] == proc.pid
+        assert data["token"] != "stale"
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
