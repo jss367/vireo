@@ -190,6 +190,33 @@ def test_extract_working_copies_empty_scope_is_noop(tmp_path, monkeypatch):
     assert row["working_copy_path"] is None
 
 
+def test_subtree_like_pattern_posix():
+    """Unix separator: LIKE pattern is the path followed by `/%`."""
+    from scanner import _subtree_like_pattern
+    assert _subtree_like_pattern("/photos/2024", sep="/") == "/photos/2024/%"
+
+
+def test_subtree_like_pattern_windows_escapes_separator():
+    r"""On Windows, the trailing `\` must be escape-doubled so `%` remains the
+    wildcard under ``LIKE ? ESCAPE '\'`` — otherwise subtree matching silently
+    matches only the exact folder.
+
+    Input path `C:\a\b` with sep `\`:
+      * every literal `\` in the path is doubled → `C:\\a\\b`
+      * the trailing separator is also doubled → `\\`
+      * the wildcard `%` is appended unescaped.
+    """
+    from scanner import _subtree_like_pattern
+    assert _subtree_like_pattern("C:\\a\\b", sep="\\") == "C:\\\\a\\\\b\\\\%"
+
+
+def test_subtree_like_pattern_escapes_literal_wildcards():
+    """`_` and `%` inside folder names are escaped so they match literally."""
+    from scanner import _subtree_like_pattern
+    assert _subtree_like_pattern("/a/2024_06", sep="/") == "/a/2024\\_06/%"
+    assert _subtree_like_pattern("/a/50%off", sep="/") == "/a/50\\%off/%"
+
+
 def test_extract_working_copies_scope_escapes_like_wildcards(tmp_path, monkeypatch):
     """An underscore in a scope path must not match unrelated siblings.
 

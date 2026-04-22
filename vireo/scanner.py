@@ -248,6 +248,24 @@ def _pair_raw_jpeg_companions(db):
     db.conn.commit()
 
 
+def _subtree_like_pattern(path, sep=None):
+    """Build a SQLite LIKE parameter that matches ``path`` + any descendant.
+
+    Intended for use with ``LIKE ? ESCAPE '\\'``. Escapes ``\\``, ``%``, and
+    ``_`` inside the path and the separator, so literal wildcards in folder
+    names don't leak into sibling matches and — critically on Windows — the
+    trailing backslash separator doesn't turn the appended ``%`` into a
+    literal character.
+    """
+    if sep is None:
+        sep = os.sep
+
+    def _escape(s):
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    return _escape(path) + _escape(sep) + "%"
+
+
 def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callback=None, scope=None):
     """Extract working copies for all RAW photos missing one.
 
@@ -306,12 +324,14 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                 scope_terms.append("f.path = ?")
                 params.append(path)
             else:
-                # Subtree match. Escape `_`, `%`, and the escape char itself
-                # so literal wildcards in folder names don't leak into
-                # unrelated siblings (e.g. `2024_06` matching `2024A06`).
-                esc = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                # Subtree match. The LIKE pattern needs to escape `_`, `%`,
+                # and the escape char itself — both in the path and in the
+                # separator — so (a) literal wildcards in folder names don't
+                # leak into siblings (`2024_06` matching `2024A06`) and
+                # (b) the Windows `\` separator doesn't turn the trailing
+                # `%` into a literal under ESCAPE '\\'.
                 scope_terms.append("(f.path = ? OR f.path LIKE ? ESCAPE '\\')")
-                params.extend([path, esc + os.sep + "%"])
+                params.extend([path, _subtree_like_pattern(path)])
         scope_clause = " AND (" + " OR ".join(scope_terms) + ")"
 
     rows = db.conn.execute(
