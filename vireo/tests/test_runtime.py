@@ -308,6 +308,75 @@ def test_guard_unrelated_404_service_is_stale_and_proceeds(tmp_path, monkeypatch
         server.shutdown()
 
 
+def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
+    tmp_path, monkeypatch
+):
+    """Codex P1 regression: when a 2nd process probes during the 1st
+    instance's startup window (PID written but Flask not listening yet),
+    the probe raises connection-refused. Previously, check_single_instance
+    deleted the live instance's runtime.json, breaking discovery. With
+    the fix, we preserve the file if the holder PID is alive and return
+    conflict.
+    """
+    import socket as _socket
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    # Reserve a port then close it so the probe gets connection-refused.
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    refused_port = sock.getsockname()[1]
+    sock.close()
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    runtime_path.write_text(_json.dumps({
+        "port": refused_port,
+        "pid": os.getpid(),  # definitely alive
+        "token": "any",
+    }))
+
+    from runtime import check_single_instance
+    status, info = check_single_instance(probe_timeout_s=0.2)
+    assert status == "conflict"
+    assert info["port"] == refused_port
+    assert info["pid"] == os.getpid()
+    # Critically: file is NOT deleted while the holder is alive.
+    assert runtime_path.exists()
+
+
+def test_guard_deletes_runtime_json_when_probe_fails_and_holder_dead(
+    tmp_path, monkeypatch
+):
+    """Counterpart to the above: a dead-holder stale file is still cleaned up."""
+    import socket as _socket
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    refused_port = sock.getsockname()[1]
+    sock.close()
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    # PID 1 on macOS/Linux is launchd/init — always alive. Use a high,
+    # implausible PID instead; pair with ProcessLookupError via direct mock.
+    # Simplest: patch _pid_alive via monkeypatch.
+    import runtime
+    monkeypatch.setattr(runtime, "_pid_alive", lambda _p: False)
+
+    runtime_path.write_text(_json.dumps({
+        "port": refused_port,
+        "pid": 99999,
+        "token": "any",
+    }))
+
+    status, _info = runtime.check_single_instance(probe_timeout_s=0.2)
+    assert status == "proceed"
+    assert not runtime_path.exists()
+
+
 def test_generate_token_is_random_and_urlsafe():
     from runtime import generate_token
     a = generate_token()

@@ -131,10 +131,8 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
             # Any other 2xx is unexpected from our own health endpoint; fall
             # through to the stale path.
     except urllib.error.HTTPError:
-        # Non-2xx (401, 404, 500, ...) — either the port was reused by an
-        # unrelated service, or our own peer is answering but the token
-        # doesn't match (shouldn't happen under correct writes). Either way,
-        # treat as stale and clean up so startup can proceed.
+        # Non-2xx (401, 404, 500, ...) — port is held by something that isn't
+        # answering our health contract. Treat as stale.
         pass
     except (urllib.error.URLError, TimeoutError, OSError):
         # Connection refused / timeout. If the advertised PID is still
@@ -185,36 +183,38 @@ def acquire_single_instance(
         if status == "conflict":
             return ("conflict", info)
 
-        # No live peer — try to atomically claim the lock.
+        # Publish the lock atomically with its PID payload. We write the PID
+        # to a per-caller temp file first, then use os.link to move it into
+        # place — os.link fails if the destination exists, and the file is
+        # never observable in an empty state. This closes the race where a
+        # concurrent caller sees a freshly-created empty lock file, reads
+        # PID=0, classifies it as stale, and unlinks the winner's lock.
+        tmp = lock_path.parent / f"runtime.lock.tmp.{os.getpid()}.{pid}"
         try:
-            fd = os.open(
-                str(lock_path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                0o600,
-            )
-        except FileExistsError:
-            # Another process holds (or left) the lock. Decide liveness by
-            # the PID written inside.
-            holder_pid = _read_lock_holder(lock_path)
-            if _pid_alive(holder_pid):
-                return ("conflict", {"port": None, "pid": holder_pid})
-            # Stale lock — remove and retry.
-            with contextlib.suppress(FileNotFoundError):
-                lock_path.unlink()
-            continue
-        except OSError as e:
-            if e.errno == errno.EEXIST:
+            tmp.write_text(str(pid))
+            os.chmod(tmp, 0o600)
+            try:
+                os.link(str(tmp), str(lock_path))
+            except FileExistsError:
+                # Another process holds (or left) the lock.
+                holder_pid = _read_lock_holder(lock_path)
+                if _pid_alive(holder_pid):
+                    return ("conflict", {"port": None, "pid": holder_pid})
+                # Stale lock — remove and retry. If someone else won the
+                # unlink/recreate race in the meantime, the next loop
+                # iteration will observe their live lock and conflict.
+                with contextlib.suppress(FileNotFoundError):
+                    lock_path.unlink()
                 continue
-            raise
-
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(str(pid))
-            return ("acquired", None)
-        except Exception:
+            except OSError as e:
+                if e.errno == errno.EEXIST:
+                    continue
+                raise
+            else:
+                return ("acquired", None)
+        finally:
             with contextlib.suppress(FileNotFoundError):
-                lock_path.unlink()
-            raise
+                tmp.unlink()
 
     # Exhausted retries — some other process keeps winning the race. Treat
     # as a conflict rather than looping forever.
