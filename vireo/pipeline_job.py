@@ -151,7 +151,7 @@ def _update_stages(runner, job_id, stages):
 
 def _current_phase(stages):
     """Determine the primary phase label from stage statuses."""
-    for name in ["regroup", "eye_keypoints", "extract_masks", "classify", "detect",
+    for name in ["misses", "regroup", "eye_keypoints", "extract_masks", "classify", "detect",
                  "model_loader", "previews", "thumbnails", "scan", "ingest"]:
         info = stages.get(name, {})
         if info.get("status") == "running":
@@ -202,6 +202,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
         "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
+        "misses": {"status": "pending", "count": 0, "label": "Flagging missed shots"},
     }
 
     # Normalize model_ids: prefer the explicit list, fall back to the legacy
@@ -298,6 +299,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         step_defs.append({"id": "eye_keypoints", "label": "Detect eye keypoints"})
     if not params.skip_regroup:
         step_defs.append({"id": "regroup", "label": "Group encounters"})
+        step_defs.append({"id": "misses", "label": "Flag missed shots"})
     runner.set_steps(job["id"], step_defs)
 
     result = {"stages": {}}
@@ -2237,6 +2239,47 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         _update_stages(runner, job["id"], stages)
 
+    def miss_stage():
+        """Compute miss-detection flags for the workspace after regroup.
+
+        Runs last so burst_id is available. Uses only per-photo features
+        already computed by earlier stages — no model inference.
+        """
+        if params.skip_regroup or abort.is_set() or not collection_id:
+            stages["misses"]["status"] = "skipped"
+            runner.update_step(job["id"], "misses", status="completed",
+                               summary="Skipped")
+            return
+
+        stages["misses"]["status"] = "running"
+        runner.update_step(job["id"], "misses", status="running")
+        _update_stages(runner, job["id"], stages)
+
+        try:
+            import config as cfg
+            from misses import compute_misses_for_workspace
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            n = compute_misses_for_workspace(thread_db, pipeline_cfg)
+
+            stages["misses"]["status"] = "completed"
+            stages["misses"]["count"] = n
+            runner.update_step(job["id"], "misses", status="completed",
+                               summary=f"{n} photos evaluated")
+            result["stages"]["misses"] = {"evaluated": n}
+        except Exception as e:
+            errors.append(f"[misses] Fatal: {e}")
+            log.exception("Pipeline miss-detection stage failed")
+            stages["misses"]["status"] = "failed"
+            runner.update_step(job["id"], "misses", status="failed", error=str(e))
+
+        _update_stages(runner, job["id"], stages)
+
     # --- Launch threads ---
 
     threads = {}
@@ -2289,6 +2332,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     # Phase 4: regroup (needs extract-masks + eye-keypoints output)
     if not abort.is_set():
         regroup_stage()
+
+    # Phase 5: miss detection (pure derivation from per-photo features +
+    # burst_id written by regroup). Cheap; no model inference.
+    if not abort.is_set():
+        miss_stage()
 
     cancel_watcher_stop.set()
 

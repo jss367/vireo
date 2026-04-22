@@ -368,7 +368,7 @@ def test_pipeline_stages_dict_in_progress_events(tmp_path, monkeypatch):
     assert len(stage_events) > 0
 
     # Each stages dict should have all expected stage keys
-    expected_keys = {"ingest", "scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup"}
+    expected_keys = {"ingest", "scan", "thumbnails", "previews", "model_loader", "classify", "extract_masks", "regroup", "misses"}
     for _, _, data in stage_events:
         assert expected_keys.issubset(data["stages"].keys())
 
