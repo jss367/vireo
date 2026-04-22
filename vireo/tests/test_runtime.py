@@ -84,6 +84,33 @@ def test_write_runtime_json_atomic_and_locked_down(tmp_path, monkeypatch):
     assert mode == 0o600
 
 
+def test_write_runtime_json_tmp_file_is_never_world_readable(tmp_path, monkeypatch):
+    """The temp file holding the token must be 0600 from the moment it
+    exists on disk — not only after a trailing chmod. A later
+    write_text()+chmod sequence leaves a window where a co-tenant on a
+    multi-user host can read the auth token."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    import runtime as rt
+
+    observed = {}
+    real_replace = os.replace
+
+    def spy_replace(src, dst):
+        # Inspect the tmp file's mode right before it is renamed into place.
+        observed["tmp_mode"] = stat.S_IMODE(os.stat(src).st_mode)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(rt.os, "replace", spy_replace)
+
+    rt.write_runtime_json(
+        port=1, pid=2, version="v", db_path="/x", token="secret", mode="headless"
+    )
+
+    assert observed["tmp_mode"] == 0o600
+
+
 def test_write_runtime_json_overwrites_existing(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")

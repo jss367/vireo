@@ -75,9 +75,20 @@ def write_runtime_json(
         "token": token,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
-    # Write then chmod before replace, so the target is never world-readable.
-    tmp.write_text(json.dumps(payload, indent=2))
-    os.chmod(tmp, 0o600)
+    # Create with 0600 from creation. Using write_text() + chmod leaves a
+    # window where the umask-masked default (e.g. 0644) is visible to other
+    # local users — long enough for a co-tenant to read the auth token.
+    # O_EXCL guarantees the `mode` argument is applied (an existing file
+    # from a prior crash would keep its old — possibly permissive — perms),
+    # so we unlink any leftover tmp first.
+    with contextlib.suppress(FileNotFoundError):
+        tmp.unlink()
+    data = json.dumps(payload, indent=2).encode()
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
     os.replace(tmp, path)
 
 
