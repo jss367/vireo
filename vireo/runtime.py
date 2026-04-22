@@ -7,6 +7,8 @@ instance (port, auth token, PID). Also provides the single-instance guard.
 import contextlib
 import json
 import os
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -52,3 +54,39 @@ def delete_runtime_json() -> None:
     """Remove runtime.json if present. Idempotent."""
     with contextlib.suppress(FileNotFoundError):
         _runtime_path().unlink()
+
+
+def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | None]:
+    """Check whether another Vireo instance is healthy on the advertised port.
+
+    Returns:
+        ("proceed", None)  — no peer found, or stale file cleaned up.
+        ("conflict", info) — healthy peer. `info` has keys `port`, `pid`.
+    """
+    data = read_runtime_json()
+    if data is None:
+        # Missing or malformed. If malformed, the file still exists on disk;
+        # delete it so the next caller has a clean slate.
+        delete_runtime_json()
+        return ("proceed", None)
+
+    port = data.get("port")
+    token = data.get("token", "")
+    if not isinstance(port, int):
+        delete_runtime_json()
+        return ("proceed", None)
+
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/health",
+            headers={"X-Vireo-Token": token},
+        )
+        with urllib.request.urlopen(req, timeout=probe_timeout_s) as resp:
+            if resp.status == 200:
+                return ("conflict", {"port": port, "pid": data.get("pid")})
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+
+    # Probe failed — peer is dead. Clean up and proceed.
+    delete_runtime_json()
+    return ("proceed", None)
