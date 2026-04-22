@@ -101,10 +101,14 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
 
     Connection-level failures (refused/timeout) are ambiguous: the peer
     may be dead, or it may be a peer still booting that wrote
-    runtime.json but hasn't started listening yet. We disambiguate via
-    the PID — a live PID means "booting or transient", and we must not
-    delete runtime.json under the running peer, because that would
-    break external discovery even though the peer is still running.
+    runtime.json but hasn't started listening yet. PID liveness alone is
+    not strong enough — after a SIGKILL crash the recorded PID can be
+    recycled by an unrelated process, which would otherwise pin
+    `already_running` forever without cleanup. So we additionally require
+    that `runtime.lock` exists and its holder PID matches runtime.json's
+    PID; only a live Vireo sidecar holds the matching lock. If the lock
+    is missing, holds a different PID, or the PID is dead, runtime.json
+    is treated as stale.
     """
     data = read_runtime_json()
     if data is None:
@@ -135,14 +139,21 @@ def check_single_instance(probe_timeout_s: float = 0.5) -> tuple[str, dict | Non
         # answering our health contract. Treat as stale.
         pass
     except (urllib.error.URLError, TimeoutError, OSError):
-        # Connection refused / timeout. If the advertised PID is still
-        # alive, this is almost certainly a peer that wrote runtime.json
-        # and is still booting (or briefly paused). Preserve runtime.json
-        # so external callers can still discover it once HTTP is up, and
-        # report conflict to the caller.
-        if _pid_alive(pid):
+        # Connection refused / timeout. To distinguish a booting Vireo peer
+        # from a stale advertisement whose PID was recycled by an unrelated
+        # process, require BOTH that the advertised PID is alive AND that
+        # `runtime.lock` is held by the same PID. A live Vireo always holds
+        # the matching lock; an unrelated PID-recycler does not.
+        if (
+            isinstance(pid, int)
+            and _pid_alive(pid)
+            and _read_lock_holder(_lock_path()) == pid
+        ):
+            # Preserve runtime.json so external callers can still discover
+            # the peer once HTTP comes up.
             return ("conflict", {"port": port, "pid": pid})
-        # PID dead — peer is gone, file is stale.
+        # Either PID is dead, lock is missing, or lock holder PID does not
+        # match — runtime.json is stale.
 
     delete_runtime_json()
     return ("proceed", None)

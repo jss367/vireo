@@ -267,7 +267,9 @@ def test_guard_booting_peer_preserves_runtime_json(tmp_path, monkeypatch):
 
     Reproduce by pointing runtime.json at a port where nobody is
     listening (probe will fail with connection-refused) while recording
-    a live PID. The guard should report conflict and keep the file.
+    a live PID and a matching `runtime.lock` (the booting peer holds
+    its reservation lock). The guard should report conflict and keep
+    the file.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
@@ -278,6 +280,8 @@ def test_guard_booting_peer_preserves_runtime_json(tmp_path, monkeypatch):
         "pid": os.getpid(),  # live PID → peer is booting, not dead
         "token": "anything",
     }))
+    # A real booting peer has acquired runtime.lock with its PID.
+    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid()))
 
     from runtime import check_single_instance
     status, info = check_single_instance()
@@ -315,8 +319,8 @@ def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
     instance's startup window (PID written but Flask not listening yet),
     the probe raises connection-refused. Previously, check_single_instance
     deleted the live instance's runtime.json, breaking discovery. With
-    the fix, we preserve the file if the holder PID is alive and return
-    conflict.
+    the fix, we preserve the file when the holder PID is alive *and*
+    `runtime.lock` confirms the same PID.
     """
     import socket as _socket
 
@@ -335,6 +339,8 @@ def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
         "pid": os.getpid(),  # definitely alive
         "token": "any",
     }))
+    # A real booting peer holds the matching reservation lock.
+    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid()))
 
     from runtime import check_single_instance
     status, info = check_single_instance(probe_timeout_s=0.2)
@@ -343,6 +349,73 @@ def test_guard_preserves_runtime_json_when_probe_fails_and_holder_alive(
     assert info["pid"] == os.getpid()
     # Critically: file is NOT deleted while the holder is alive.
     assert runtime_path.exists()
+
+
+def test_guard_deletes_runtime_json_when_probe_fails_and_lock_missing(
+    tmp_path, monkeypatch
+):
+    """Codex P2 regression: PID liveness alone is not proof of a Vireo
+    peer — after a SIGKILL crash, the recorded PID can be recycled by
+    an unrelated process. If runtime.lock is missing while runtime.json
+    points to a port that refuses connections, we must treat the file
+    as stale (and clean it up) rather than pinning `already_running`
+    indefinitely.
+    """
+    import socket as _socket
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    refused_port = sock.getsockname()[1]
+    sock.close()
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    runtime_path.write_text(_json.dumps({
+        "port": refused_port,
+        "pid": os.getpid(),  # alive, but not Vireo (no matching lock)
+        "token": "any",
+    }))
+    # Crucially: no runtime.lock — recycled PID, not a real peer.
+    assert not (tmp_path / ".vireo" / "runtime.lock").exists()
+
+    from runtime import check_single_instance
+    status, _info = check_single_instance(probe_timeout_s=0.2)
+    assert status == "proceed"
+    assert not runtime_path.exists()
+
+
+def test_guard_deletes_runtime_json_when_probe_fails_and_lock_pid_mismatches(
+    tmp_path, monkeypatch
+):
+    """Codex P2 regression (variant): runtime.lock exists but holds a
+    different PID than runtime.json — strong evidence runtime.json is
+    stale (e.g., partial cleanup state). Treat as stale.
+    """
+    import socket as _socket
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    refused_port = sock.getsockname()[1]
+    sock.close()
+
+    runtime_path = tmp_path / ".vireo" / "runtime.json"
+    runtime_path.write_text(_json.dumps({
+        "port": refused_port,
+        "pid": os.getpid(),  # alive
+        "token": "any",
+    }))
+    # Lock claims a different (live) PID — could not be the same Vireo.
+    (tmp_path / ".vireo" / "runtime.lock").write_text(str(os.getpid() + 1))
+
+    from runtime import check_single_instance
+    status, _info = check_single_instance(probe_timeout_s=0.2)
+    assert status == "proceed"
+    assert not runtime_path.exists()
 
 
 def test_guard_deletes_runtime_json_when_probe_fails_and_holder_dead(
