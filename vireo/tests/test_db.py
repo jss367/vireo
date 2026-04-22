@@ -3824,3 +3824,16 @@ def test_preview_cache_oldest_first(tmp_path):
 
     rows = db.preview_cache_oldest_first()
     assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]
+
+
+def test_miss_columns_present(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+        "FROM photos LIMIT 0"
+    ).description
+    names = {c[0] for c in row}
+    assert names == {
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
+    }

@@ -423,6 +423,15 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN eye_conf REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN eye_tenengrad REAL")
 
+        # Miss detection flags (derived from detection + quality + burst context)
+        try:
+            self.conn.execute("SELECT miss_no_subject FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_no_subject INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_clipped INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_oof INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_computed_at TEXT")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
