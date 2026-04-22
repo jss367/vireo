@@ -93,3 +93,39 @@ def test_headless_spawn_writes_runtime_and_serves_health(headless_home, tmp_path
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+def test_second_spawn_refuses_with_already_running(headless_home, tmp_path):
+    db = tmp_path / "vireo.db"
+    first_port = _free_port()
+    first = _spawn(headless_home, db, first_port)
+    try:
+        runtime = headless_home / ".vireo" / "runtime.json"
+        _wait_for_runtime(runtime)
+
+        second_port = _free_port()
+        second = _spawn(headless_home, db, second_port)
+        out, err = second.communicate(timeout=15)
+
+        assert second.returncode != 0, "second instance should have exited"
+        err_text = err.decode()
+        # The guard writes a machine-readable JSON line to stderr.
+        last_line = [ln for ln in err_text.strip().splitlines() if ln.startswith("{")]
+        assert last_line, f"no JSON error in stderr: {err_text!r}"
+        payload = json.loads(last_line[-1])
+        assert payload["error"] == "already_running"
+        assert payload["port"] == first_port
+
+        # First instance must still be healthy.
+        data = json.loads(runtime.read_text())
+        resp = _http_get(
+            f"http://127.0.0.1:{first_port}/api/v1/health", data["token"],
+        )
+        assert resp.status == 200
+    finally:
+        first.send_signal(signal.SIGTERM)
+        try:
+            first.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            first.kill()
+            first.wait()
