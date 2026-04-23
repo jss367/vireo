@@ -842,6 +842,98 @@ def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch)
     )
 
 
+def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatch):
+    """Ingest progress must not move backward at source folder boundaries.
+
+    Copy mode with sources=[folderA, folderB] calls do_ingest() once per
+    folder. Each call reports (current, total) local to that folder. The
+    weighted overall bar reads stages["ingest"]["count"]/.total, so if
+    those get overwritten rather than accumulated, overall progress
+    rewinds each time a new source starts — the exact regression the
+    scan accumulator already prevents. Same treatment needed for ingest.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    src_a = tmp_path / "srcA"
+    src_a.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "blue").save(str(src_a / f"a{i:02d}.jpg"))
+    src_b = tmp_path / "srcB"
+    src_b.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "red").save(str(src_b / f"b{i:02d}.jpg"))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    runner = JobRunner()
+    ingest_counts = []
+    ingest_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            ingest_info = stages.get("ingest") or {}
+            if ingest_info.get("status") == "running":
+                ingest_counts.append(ingest_info.get("count") or 0)
+                ingest_totals.append(ingest_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(src_a), str(src_b)],
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-ingest-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(ingest_counts) > 0, "Expected at least one running ingest progress event"
+    for i in range(1, len(ingest_counts)):
+        assert ingest_counts[i] >= ingest_counts[i - 1], (
+            f"ingest count moved backward: {ingest_counts[i - 1]} -> "
+            f"{ingest_counts[i]} at event {i}; full sequence={ingest_counts}"
+        )
+    for i in range(1, len(ingest_totals)):
+        assert ingest_totals[i] >= ingest_totals[i - 1], (
+            f"ingest total moved backward: {ingest_totals[i - 1]} -> "
+            f"{ingest_totals[i]} at event {i}; full sequence={ingest_totals}"
+        )
+    assert ingest_totals[-1] >= 10, (
+        f"final ingest total should cover both sources (>=10), got {ingest_totals[-1]}"
+    )
+
+
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
     import config as cfg

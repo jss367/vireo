@@ -574,16 +574,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
                 from ingest import ingest as do_ingest
 
+                # Same accumulator pattern as scan_acc: do_ingest() is called
+                # once per source folder, with (current, total) local to each
+                # call. Without accumulation, overall progress rewinds at each
+                # source boundary.
+                ingest_acc = {"prior": 0, "last_total": 0}
+
                 def ingest_cb(current, total, filename):
-                    stages["ingest"]["count"] = current
-                    stages["ingest"]["total"] = total
+                    ingest_acc["last_total"] = total
+                    cum_current = ingest_acc["prior"] + current
+                    cum_total = ingest_acc["prior"] + total
+                    stages["ingest"]["count"] = cum_current
+                    stages["ingest"]["total"] = cum_total
                     runner.update_step(job["id"], "ingest",
                                        current_file=filename,
-                                       progress={"current": current, "total": total})
+                                       progress={"current": cum_current, "total": cum_total})
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "ingest", "Importing photos",
                         current_file=filename,
                     ))
+
+                def advance_ingest_acc():
+                    ingest_acc["prior"] += ingest_acc["last_total"]
+                    ingest_acc["last_total"] = 0
 
             if params.destination:
                 # Copy mode: ingest all sources first, then scan destination
@@ -598,18 +611,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 total_copied = 0
                 total_skipped = 0
                 for src_folder in sources:
-                    result_info = do_ingest(
-                        source_dir=src_folder,
-                        destination_dir=params.destination,
-                        db=thread_db,
-                        file_types=params.file_types,
-                        folder_template=params.folder_template,
-                        skip_duplicates=params.skip_duplicates,
-                        progress_callback=ingest_cb,
-                        extra_known_hashes=accumulated_hashes,
-                        skip_paths=params.exclude_paths,
-                        recursive=params.recursive,
-                    )
+                    try:
+                        result_info = do_ingest(
+                            source_dir=src_folder,
+                            destination_dir=params.destination,
+                            db=thread_db,
+                            file_types=params.file_types,
+                            folder_template=params.folder_template,
+                            skip_duplicates=params.skip_duplicates,
+                            progress_callback=ingest_cb,
+                            extra_known_hashes=accumulated_hashes,
+                            skip_paths=params.exclude_paths,
+                            recursive=params.recursive,
+                        )
+                    finally:
+                        advance_ingest_acc()
                     all_copied_paths.extend(result_info.get("copied_paths", []))
                     all_duplicate_folders.update(result_info.get("duplicate_folders", []))
                     total_copied += result_info.get("copied", 0)
