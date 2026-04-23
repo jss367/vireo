@@ -79,6 +79,28 @@ def test_folder_rescan_missing_path_returns_400(app_and_db, tmp_path, monkeypatc
         assert "no longer exists" in resp.get_json().get("error", "")
 
 
+def test_folder_rescan_rejects_folder_outside_active_workspace(app_and_db, tmp_path):
+    """A folder that exists globally but is NOT linked to the active
+    workspace must 404 — otherwise a rescan would pollute the active
+    workspace with scan output (add_folder auto-links any discovered
+    subfolders) from an unrelated folder.
+    """
+    app, db = app_and_db
+    real_dir = tmp_path / "other-ws"
+    real_dir.mkdir()
+    # Create a second workspace, add the folder while it's active, then
+    # switch back so the folder is only linked to the other workspace.
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    folder_id = db.add_folder(str(real_dir), name="other-ws")
+    db.set_active_workspace(default_ws)
+
+    with app.test_client() as c:
+        resp = c.post(f"/api/folders/{folder_id}/rescan", json={})
+        assert resp.status_code == 404
+
+
 def test_folder_rescan_job_config_includes_folder_path(app_and_db, tmp_path):
     """The queued job's config carries the folder path so the work
     function can target the right directory."""

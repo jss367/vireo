@@ -2306,8 +2306,12 @@ function closeLightbox(e) {
  * sits in _navbar.html alongside the overlay. Rating / color / flag / reveal
  * helpers (`setRatingFor`, `setColorLabelFor`, `setFlagFor`, `findSimilar`,
  * `openInEditor`, `revealPhoto`, `copyPhotoPaths`) are defined on pages that
- * carry a photo grid (browse.html). On pages without those helpers, the
- * corresponding menu items are omitted so clicking them can never throw.
+ * carry a photo grid (browse.html). On /review, there is no selection model
+ * but per-photo `setReviewRating` / `setReviewFlag` helpers exist and the
+ * rating/flag chips fall through to them. Color labels are not part of the
+ * review workflow, so the color row is omitted when `setColorLabelFor` is
+ * absent. Any still-missing helper becomes a silent no-op so clicking can
+ * never throw.
  */
 function buildLightboxContextMenu(pid) {
   var has = function(name) { return typeof window[name] === 'function'; };
@@ -2316,7 +2320,10 @@ function buildLightboxContextMenu(pid) {
     return {
       label: n === 0 ? '\u2606' : String(n),
       title: n === 0 ? 'No rating' : 'Rate ' + n,
-      onClick: function() { if (has('setRatingFor')) window.setRatingFor(pid, n); },
+      onClick: function() {
+        if (has('setRatingFor')) window.setRatingFor(pid, n);
+        else if (has('setReviewRating')) window.setReviewRating(pid, n);
+      },
     };
   };
   var colorChip = function(c, icon, title) {
@@ -2328,26 +2335,31 @@ function buildLightboxContextMenu(pid) {
   var flagChip = function(f, icon, title) {
     return {
       label: icon, title: title,
-      onClick: function() { if (has('setFlagFor')) window.setFlagFor(pid, f); },
+      onClick: function() {
+        if (has('setFlagFor')) window.setFlagFor(pid, f);
+        else if (has('setReviewFlag')) window.setReviewFlag(pid, f);
+      },
     };
   };
 
   var items = [
     { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
-    { chips: [
+  ];
+  if (has('setColorLabelFor')) {
+    items.push({ chips: [
       colorChip(null, '\u25CB', 'No color'),
       colorChip('red', '\u25CF', 'Red'),
       colorChip('yellow', '\u25CF', 'Yellow'),
       colorChip('green', '\u25CF', 'Green'),
       colorChip('blue', '\u25CF', 'Blue'),
-    ] },
-    { chips: [
-      flagChip('flagged', '\u2691', 'Flag as pick'),
-      flagChip('rejected', '\u2715', 'Reject'),
-      flagChip('none', '\u25CB', 'Unflag'),
-    ] },
-    { separator: true },
-  ];
+    ] });
+  }
+  items.push({ chips: [
+    flagChip('flagged', '\u2691', 'Flag as pick'),
+    flagChip('rejected', '\u2715', 'Reject'),
+    flagChip('none', '\u25CB', 'Unflag'),
+  ] });
+  items.push({ separator: true });
 
   if (has('findSimilar')) {
     items.push({ label: 'Find Similar',

@@ -4932,7 +4932,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
         Body (optional): {"incremental": bool}
         Returns: {"job_id": "scan-..."} on success; 404 if the folder id
-        is unknown.
+        is unknown or not linked to the active workspace.
         """
         body = request.get_json(silent=True) or {}
         incremental = bool(body.get("incremental", False))
@@ -4940,10 +4940,21 @@ def create_app(db_path, thumb_cache_dir=None):
         folder = db.get_folder(folder_id)
         if not folder:
             return json_error("folder not found", 404)
+        # Folders are global but scans emit workspace-scoped data (predictions,
+        # pending_changes). Reject rescans of folders the active workspace has
+        # no claim on — otherwise a stale UI or crafted request could pollute
+        # this workspace with scan output from an unrelated folder, and
+        # add_folder's auto-link would silently attach it.
+        active_ws = db._active_workspace_id
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (active_ws, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
         root = folder["path"]
         if not os.path.isdir(root):
             return json_error(f"folder path no longer exists: {root}")
-        active_ws = db._active_workspace_id
         runner = app._job_runner
 
         work = _build_scan_work(root, incremental, active_ws)
