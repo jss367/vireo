@@ -102,13 +102,20 @@ def write_runtime_json(
 
 
 def read_runtime_json() -> dict | None:
-    """Return runtime.json contents, or None if missing / malformed."""
+    """Return runtime.json contents, or None if missing / malformed.
+
+    Non-UTF-8 bytes, JSON errors, and I/O errors are all treated as
+    malformed — callers clean up the file as stale rather than aborting
+    startup. `read_bytes()` + explicit `utf-8` decode lets us catch
+    UnicodeDecodeError, which `read_text()` does not surface to the
+    (OSError, JSONDecodeError) handler.
+    """
     path = _runtime_path()
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        return json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 
@@ -324,6 +331,12 @@ def acquire_single_instance(
 
         # Lock acquired. Write our PID for diagnostics, then keep the FD
         # open so the lock persists until release / process exit.
+        # A failure here is a real filesystem fault (ENOSPC, EIO, …).
+        # Don't swallow it and retry — retrying won't help, and falling
+        # through to `("conflict", ...)` would let main() misreport the
+        # fault as already_running. Release the lock we just took so
+        # other processes can proceed, then let the OSError bubble up;
+        # main() converts it to `{"error": "startup_failed", ...}`.
         try:
             os.lseek(fd, 0, os.SEEK_SET)
             os.ftruncate(fd, 0)
@@ -331,7 +344,7 @@ def acquire_single_instance(
         except OSError:
             _release_lock(fd)
             os.close(fd)
-            continue
+            raise
 
         _lock_fd = fd
         return ("acquired", None)

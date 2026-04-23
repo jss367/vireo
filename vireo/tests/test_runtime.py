@@ -156,6 +156,20 @@ def test_read_runtime_json_malformed_returns_none(tmp_path, monkeypatch):
     assert read_runtime_json() is None
 
 
+def test_read_runtime_json_non_utf8_returns_none(tmp_path, monkeypatch):
+    """A corrupted runtime.json containing non-UTF-8 bytes must be treated
+    as malformed and cleaned up, NOT raise UnicodeDecodeError out of
+    startup and block launching until the user manually deletes it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+    # 0xff / 0xfe / 0xfd are invalid as a UTF-8 start byte.
+    (tmp_path / ".vireo" / "runtime.json").write_bytes(b"\xff\xfe\xfd")
+
+    from runtime import read_runtime_json
+
+    assert read_runtime_json() is None
+
+
 def test_delete_runtime_json_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     os.makedirs(tmp_path / ".vireo")
@@ -722,6 +736,30 @@ def test_acquire_surfaces_lock_open_errors_not_conflict(tmp_path, monkeypatch):
 
     with pytest.raises(PermissionError):
         rt.acquire_single_instance(pid=os.getpid())
+
+
+def test_acquire_surfaces_diag_write_failure_not_conflict(tmp_path, monkeypatch):
+    """If writing the diagnostic PID into runtime.lock fails (ENOSPC, EIO),
+    acquire_single_instance must surface the OSError — not swallow it and
+    retry, which would eventually return ('conflict', ...) and cause
+    main() to misreport a filesystem fault as already_running."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    os.makedirs(tmp_path / ".vireo")
+
+    import runtime as rt
+
+    def boom(*_a, **_kw):
+        raise OSError(28, "simulated ENOSPC")
+
+    # Only ftruncate raises — os.open, os.lseek still work, so the lock
+    # is actually acquired before the failing diagnostic write.
+    monkeypatch.setattr(rt.os, "ftruncate", boom)
+
+    with pytest.raises(OSError):
+        rt.acquire_single_instance(pid=os.getpid())
+
+    # Lock must not remain held by this process — a subsequent acquire
+    # (with ftruncate restored by monkeypatch teardown) must succeed.
 
 
 def test_release_single_instance_is_idempotent(tmp_path, monkeypatch):
