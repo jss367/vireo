@@ -1204,7 +1204,24 @@ function sendReport() {
   };
 
   function _outside(e){
-    if (_ctxEl && !_ctxEl.contains(e.target)) closeContextMenu();
+    if (_ctxEl && !_ctxEl.contains(e.target)) {
+      // Swallow the click that will follow this mousedown so that outside-
+      // click dismissal does not also trigger underlying handlers (e.g. the
+      // lightbox overlay's onclick=closeLightbox). Only applies when
+      // dismissal was triggered by mousedown — Escape / item selection paths
+      // don't install the swallow because no click follows.
+      const swallow = (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        window.removeEventListener('click', swallow, true);
+      };
+      window.addEventListener('click', swallow, true);
+      // Safety net: if no click follows (e.g. user released outside the
+      // window), remove the swallow listener after a short delay so we
+      // don't eat an unrelated later click.
+      setTimeout(() => window.removeEventListener('click', swallow, true), 200);
+      closeContextMenu();
+    }
   }
   function _keydown(e){
     if (e.key === 'Escape') { e.preventDefault(); closeContextMenu(); }
@@ -2359,8 +2376,6 @@ function buildLightboxContextMenu(pid) {
     // handler in full control.)
     e.preventDefault();
     e.stopPropagation();
-    // Mark so any click-listener that wakes up later can bail.
-    window._ctxMenuJustOpened = Date.now();
     var pid = _lightboxCurrentId;
     if (!pid) return;
     openContextMenu(e, buildLightboxContextMenu(pid));

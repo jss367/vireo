@@ -129,3 +129,32 @@ def test_lightbox_rating_chip_applies(live_server, page):
         f"(photos.find(p => p.id === {pid}) || {{}}).rating === 2",
         timeout=3000,
     )
+
+
+def test_outside_click_dismiss_swallows_next_click(live_server, page):
+    """Outside-click dismissal of the context menu must swallow the click.
+
+    If the click propagates after `_outside` tears the menu down, any
+    underlying handler (e.g. the lightbox overlay's `onclick=closeLightbox`)
+    would fire unexpectedly. We install a body-level click listener,
+    dismiss the menu by clicking outside it, and assert the listener never
+    saw the click.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+    page.evaluate(
+        """() => {
+            window.__outside_click_count = 0;
+            document.body.addEventListener('click', () => {
+                window.__outside_click_count++;
+            }, false);
+            openContextMenu({clientX: 100, clientY: 100},
+                [{label: 'X', onClick: () => {}}]);
+        }"""
+    )
+    expect(page.locator('.vireo-ctx-menu')).to_be_visible()
+    page.mouse.click(500, 500)
+    expect(page.locator('.vireo-ctx-menu')).to_be_hidden()
+    # The outside click should have been swallowed before reaching body.
+    count = page.evaluate("window.__outside_click_count")
+    assert count == 0, f"outside-click-to-dismiss reached body (count={count})"
