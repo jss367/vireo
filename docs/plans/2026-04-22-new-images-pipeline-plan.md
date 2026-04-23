@@ -613,12 +613,17 @@ snapshot_photo_ids: set[int] | None = None
 if snapshot_paths is not None:
     db_resolver = Database(db_path)
     db_resolver.set_active_workspace(workspace_id)
+    # Match on (folder_path, filename) tuples — concatenating with a
+    # hardcoded '/' would mismatch Windows paths captured via os.path.join.
+    pairs = [os.path.split(p) for p in snapshot_paths]
+    values = ",".join("(?, ?)" for _ in pairs)
+    flat = tuple(v for pair in pairs for v in pair)
     rows = db_resolver.conn.execute(f"""
         SELECT p.id
         FROM photos p
         JOIN folders f ON f.id = p.folder_id
-        WHERE (f.path || '/' || p.filename) IN ({",".join("?" * len(snapshot_paths))})
-    """, snapshot_paths).fetchall()
+        WHERE (f.path, p.filename) IN (VALUES {values})
+    """, flat).fetchall()
     snapshot_photo_ids = {r["id"] for r in rows}
     db_resolver.close()
     missing = len(snapshot_paths) - len(snapshot_photo_ids)
@@ -691,10 +696,28 @@ Expected: FAIL.
 
 **Step 3: Add `source_snapshot_id` to the handler**
 
-In `vireo/app.py`'s `api_job_pipeline`, where it builds `PipelineParams`:
+In `vireo/app.py`'s `api_job_pipeline`:
+
+1. Read the new field and extend the presence guard so a snapshot-only
+   payload is not rejected by the existing `source / sources / collection_id`
+   check.
+2. Resolve the snapshot synchronously and return 404 for stale IDs — a 200
+   followed by an async job failure gives clients nothing to act on.
+3. Thread the value into `PipelineParams`.
 
 ```python
 source_snapshot_id = body.get("source_snapshot_id")
+if not source and not sources and not collection_id and not source_snapshot_id:
+    return json_error(
+        "source, sources, collection_id, or source_snapshot_id required"
+    )
+
+if source_snapshot_id is not None:
+    if _get_db().get_new_images_snapshot(source_snapshot_id) is None:
+        return json_error(
+            f"source_snapshot_id {source_snapshot_id} not found",
+            status=404,
+        )
 ...
 params = PipelineParams(
     ...

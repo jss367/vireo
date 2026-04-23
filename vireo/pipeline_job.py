@@ -192,7 +192,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 f"snapshot {params.source_snapshot_id} not found"
             )
         snapshot_paths = list(snap["file_paths"])
-        scan_roots = sorted({os.path.dirname(p) for p in snapshot_paths})
+        # Collapse to the minimal non-overlapping ancestor set: if the
+        # snapshot has files at both /root/a.jpg and /root/sub/b.jpg the
+        # naive derived roots (/root, /root/sub) would make the scanner walk
+        # /root/sub twice — once on its own, once as a descendant of /root.
+        candidate_roots = sorted({os.path.dirname(p) for p in snapshot_paths}, key=len)
+        scan_roots: list[str] = []
+        for cand in candidate_roots:
+            if any(cand.startswith(kept + os.sep) for kept in scan_roots):
+                continue
+            scan_roots.append(cand)
+        scan_roots.sort()
         # Override any source/sources/collection_id the caller passed; the
         # snapshot is the single source of truth for what to scan.
         params.sources = scan_roots

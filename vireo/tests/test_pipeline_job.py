@@ -4309,3 +4309,62 @@ def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
         f"late (post-snapshot) file must NOT be classified, got "
         f"{classified_names}"
     )
+
+
+def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatch):
+    """When the snapshot contains files at both a folder and a nested subfolder
+    (e.g. /root/a.jpg and /root/sub/b.jpg), deriving scan roots naively would
+    produce overlapping paths (/root and /root/sub). The scanner would then
+    walk the subtree twice. params.sources must be collapsed to the minimal
+    non-overlapping ancestor set."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    root = tmp_path / "root"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    db.add_folder(str(root))
+    db.add_folder(str(sub))
+
+    top_path = root / "a.jpg"
+    sub_path = sub / "b.jpg"
+    _drop_jpeg(str(root), "a.jpg")
+    _drop_jpeg(str(sub), "b.jpg")
+
+    snap_id = db.create_new_images_snapshot([str(top_path), str(sub_path)])
+
+    # Spy on scanner.scan to count how many distinct roots it walks.
+    import scanner as scanner_mod
+    scan_calls = []
+    original_scan = scanner_mod.scan
+
+    def spy_scan(root_path, db_, **kwargs):
+        scan_calls.append(root_path)
+        return original_scan(root_path, db_, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", spy_scan)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The nested path is a descendant of the top path; the scanner walks root
+    # recursively, so sub must NOT be re-scanned as a separate root.
+    assert str(root) in scan_calls, f"top root must be scanned, got {scan_calls}"
+    assert str(sub) not in scan_calls, (
+        f"sub is a descendant of root and must not be scanned separately, "
+        f"got {scan_calls}"
+    )

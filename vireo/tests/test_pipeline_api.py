@@ -547,3 +547,23 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
         assert captured["source_snapshot_id"] == snap_id
     finally:
         pipeline_job.run_pipeline_job = original
+
+
+def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
+    """A pipeline request with a non-existent source_snapshot_id must be
+    rejected synchronously with 404 rather than accepted and failing later
+    on the worker thread with a generic job error. This gives the client
+    an actionable response at request time."""
+    app, db_path = setup
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": 99999,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 404, (
+            f"stale snapshot id must be rejected synchronously, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )

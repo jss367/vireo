@@ -6646,6 +6646,17 @@ def create_app(db_path, thumb_cache_dir=None):
         if not source and not sources and not collection_id and not source_snapshot_id:
             return json_error("source, sources, collection_id, or source_snapshot_id required")
 
+        # Resolve the snapshot synchronously so clients get 404 at request
+        # time instead of a 200 followed by an asynchronous job failure.
+        if (
+            source_snapshot_id is not None
+            and _get_db().get_new_images_snapshot(source_snapshot_id) is None
+        ):
+            return json_error(
+                f"source_snapshot_id {source_snapshot_id} not found",
+                status=404,
+            )
+
         # Validate all source directories exist
         if sources:
             for s in sources:
