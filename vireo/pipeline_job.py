@@ -699,22 +699,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         if snapshot_paths is not None:
             resolver_db = Database(db_path)
             resolver_db.set_active_workspace(workspace_id)
-            # Chunk the IN () query to stay under SQLite's bound-param
-            # limit on very large snapshots. The join uses
-            # (folders.path || '/' || photos.filename) so we match on
-            # the exact absolute path the snapshot captured.
+            # Split each snapshot path into (dirname, basename) and match on
+            # the two columns directly. Concatenating with a hardcoded '/'
+            # would mismatch Windows paths captured via os.path.join, where
+            # both the snapshot and folders.path use backslash separators.
+            pairs = [os.path.split(p) for p in snapshot_paths]
             resolved: set[int] = set()
-            _CHUNK = 900
-            paths_list = list(snapshot_paths)
-            for i in range(0, len(paths_list), _CHUNK):
-                chunk = paths_list[i : i + _CHUNK]
-                placeholders = ",".join("?" * len(chunk))
+            # 2 placeholders per pair; cap below SQLite's default 999-param
+            # limit (pre-3.32) with headroom.
+            _CHUNK = 400
+            for i in range(0, len(pairs), _CHUNK):
+                chunk = pairs[i : i + _CHUNK]
+                values = ",".join("(?, ?)" for _ in chunk)
+                flat_params = tuple(v for pair in chunk for v in pair)
                 rows = resolver_db.conn.execute(
                     f"""SELECT p.id
                           FROM photos p
                           JOIN folders f ON f.id = p.folder_id
-                         WHERE (f.path || '/' || p.filename) IN ({placeholders})""",
-                    tuple(chunk),
+                         WHERE (f.path, p.filename) IN (VALUES {values})""",
+                    flat_params,
                 ).fetchall()
                 resolved.update(r["id"] for r in rows)
             snapshot_photo_ids = resolved
