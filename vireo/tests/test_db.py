@@ -3837,3 +3837,49 @@ def test_new_cache_tables_exist(tmp_path):
     assert 'classifier_runs' in tables
     assert 'labels_fingerprints' in tables
     assert 'prediction_review' in tables
+
+
+def test_record_detector_run_and_lookup(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    db._active_workspace_id = db.create_workspace("WS")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    # Initially: no runs recorded
+    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+    assert db.get_detector_run_photo_ids("megadetector-v6") == {photo_id}
+
+    # Re-recording is idempotent / updates box_count
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=3)
+    row = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id=? AND detector_model=?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert row["box_count"] == 3
+
+
+def test_detector_run_is_not_workspace_scoped(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    db._active_workspace_id = ws_a
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=2)
+
+    db._active_workspace_id = ws_b
+    assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")

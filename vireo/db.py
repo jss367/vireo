@@ -3857,6 +3857,33 @@ class Database:
 
     # -- Detections --
 
+    def record_detector_run(self, photo_id, detector_model, box_count):
+        """Record that `detector_model` was run on `photo_id`.
+
+        Global across workspaces — the output is a pure function of (photo, model).
+        """
+        self.conn.execute(
+            """INSERT INTO detector_runs (photo_id, detector_model, box_count)
+               VALUES (?, ?, ?)
+               ON CONFLICT(photo_id, detector_model)
+               DO UPDATE SET box_count = excluded.box_count,
+                             run_at = datetime('now')""",
+            (photo_id, detector_model, box_count),
+        )
+        self.conn.commit()
+
+    def get_detector_run_photo_ids(self, detector_model):
+        """Return the set of photo_ids where `detector_model` has run.
+
+        Includes empty-scene photos (box_count=0) — which is the whole point:
+        without this, we'd re-run the model forever on photos with no animals.
+        """
+        rows = self.conn.execute(
+            "SELECT photo_id FROM detector_runs WHERE detector_model = ?",
+            (detector_model,),
+        ).fetchall()
+        return {r["photo_id"] for r in rows}
+
     def save_detections(self, photo_id, detections, detector_model=None):
         """Store detection bounding boxes for a photo.
 
