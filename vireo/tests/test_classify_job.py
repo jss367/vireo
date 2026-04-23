@@ -230,7 +230,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
 
     mock_db = MagicMock()
     # Photo 1 already has detections in the database
-    mock_db.get_existing_detection_photo_ids.return_value = {1}
+    mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -269,7 +269,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
-    mock_db.get_existing_detection_photo_ids.return_value = {1}
+    mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -299,7 +299,7 @@ def test_detect_subjects_skips_weight_download_for_empty_reclassify(tmp_path):
     job = _make_job()
 
     mock_db = MagicMock()
-    mock_db.get_existing_detection_photo_ids.return_value = set()
+    mock_db.get_detector_run_photo_ids.return_value = set()
 
     with patch("detector.ensure_megadetector_weights") as mock_ensure:
         _detect_subjects(
@@ -532,6 +532,47 @@ def test_detect_batch_returns_all_detections(tmp_path):
     assert detection_map[1][1]["id"] == 102
     assert detection_map[1][1]["box_x"] == 0.5
     mock_db.save_detections.assert_called_once()
+
+
+def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
+    """A photo with no animals is recorded in detector_runs; rerun skips detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "empty.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+
+    call_count = {"n": 0}
+    def fake_detect(image_path):
+        call_count["n"] += 1
+        return []  # no animals
+
+    monkeypatch.setattr("classify_job.detect_animals", fake_detect)
+    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+
+    import classify_job
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "empty.jpg"}]
+    folders = {folder_id: "/tmp/p"}
+
+    # First call: runs detection
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1
+
+    # Second call: should skip because detector_runs has the row
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
 
 def test_classify_photos_iterates_over_detections(tmp_path):

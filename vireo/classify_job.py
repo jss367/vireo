@@ -206,7 +206,11 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
 
-            # Skip if already detected (unless reclassifying)
+            # Skip if already detected (unless reclassifying). After the
+            # detector_runs migration, `already_detected_ids` includes
+            # empty-scene photos (box_count=0) — we must not re-invoke
+            # MegaDetector for them either. Either the detector produced
+            # rows (reuse them) or it ran and found nothing (skip entirely).
             if not reclassify and photo["id"] in already_detected_ids:
                 # Prefer cached detections from an earlier model in this
                 # same pipeline run so that model 2+ is bound to the
@@ -220,7 +224,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         detected += 1
                     processed_ids.add(photo["id"])
                     continue
-                existing_dets = db.get_detections(photo["id"])
+                # Pull cached rows if any; an empty result means this photo
+                # was scanned and had no animals, which is still a skip.
+                # (Task 20 will add a min_conf filter to get_detections.)
+                try:
+                    existing_dets = db.get_detections(photo["id"])
+                except Exception:
+                    existing_dets = []
                 if existing_dets:
                     det_list = []
                     for d in existing_dets:
@@ -235,8 +245,8 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         })
                     detection_map[photo["id"]] = det_list
                     detected += 1
-                    processed_ids.add(photo["id"])
-                    continue
+                processed_ids.add(photo["id"])
+                continue
 
             # Resolve workspace-effective threshold lazily on first actual
             # detection call so a batch where every photo hits the
@@ -260,7 +270,7 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
                 # Store ALL detections in the database
                 det_ids = db.save_detections(
-                    photo["id"], detections, detector_model="MegaDetector"
+                    photo["id"], detections, detector_model="megadetector-v6"
                 )
 
                 # Build detection list with database IDs
@@ -283,7 +293,22 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # pre-run detection rows for this photo rather than leaving them in
                 # place and allowing future non-reclassify runs to reuse them.
                 processed_ids.add(photo["id"])
+            else:
+                # Intentionally clear any stale rows for this (photo, model) and
+                # record the run with box_count=0 below so reruns skip.
+                db.save_detections(
+                    photo["id"], [], detector_model="megadetector-v6"
+                )
 
+            # Record the detector run for BOTH cases — boxes-found and
+            # empty-scene. Without this, empty-scene photos would have no
+            # detections row AND no detector_runs row, so the skip check on
+            # the next pass would miss and MegaDetector would re-run forever.
+            db.record_detector_run(
+                photo["id"], "megadetector-v6", box_count=len(detections)
+            )
+
+            if detections:
                 # Use highest-confidence detection as primary for quality scoring
                 primary = get_primary_detection(detections)
                 if primary:
@@ -353,9 +378,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     total = len(photos)
 
     # Resolve cached-detection state before running MegaDetector so we can skip
-    # the weight download entirely when every photo already has a detection row.
+    # the weight download entirely when every photo already has a detector_runs
+    # row (including empty-scene rows with box_count=0).
     already_detected_ids = (
-        db.get_existing_detection_photo_ids() if not reclassify else set()
+        db.get_detector_run_photo_ids("megadetector-v6") if not reclassify else set()
     )
 
     if detect_animals is not None and get_primary_detection is not None:
