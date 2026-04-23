@@ -180,6 +180,22 @@ def test_duplicates_scenario(userfirst_env):
         pytest.fail(f"duplicates scenario reported bugs:\n{msg}")
 
 
+def test_misses_scenario(userfirst_env):
+    from vireo.testing.userfirst.harness import vireo_session
+    from vireo.testing.userfirst.scenarios import misses
+    from vireo.testing.userfirst.seeds import misses_seed
+
+    with vireo_session(name="misses", seed=misses_seed) as session:
+        misses.run(session)
+
+    report = session.report
+    if report.has_bugs():
+        msg = "\n".join(
+            f"  [{f.kind}] {f.message} {f.context}" for f in report.findings
+        )
+        pytest.fail(f"misses scenario reported bugs:\n{msg}")
+
+
 def test_map_geo_scenario(userfirst_env):
     from vireo.testing.userfirst.harness import vireo_session
     from vireo.testing.userfirst.scenarios import map_geo
