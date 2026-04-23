@@ -69,3 +69,7 @@ ML models are downloaded automatically from HuggingFace on first use.
 ```bash
 python -m pytest tests/ vireo/tests/ -q
 ```
+
+## Scripting & automation
+
+Vireo exposes a small stable HTTP API under `/api/v1` for scripts and agents. A running instance advertises its port and auth token via `~/.vireo/runtime.json`. See [docs/headless-api.md](docs/headless-api.md) for discovery, spawning a headless instance, authentication, and a worked `curl` example.

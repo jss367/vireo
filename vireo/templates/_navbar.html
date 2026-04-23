@@ -1033,6 +1033,41 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 /* When the missing-folders banner is visible above, new-images stacks
    naturally in document flow — both are non-fixed block-level elements. */
+
+/* Shared right-click context menu */
+.vireo-ctx-menu {
+  position: fixed; z-index: 99999;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px; padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  font-size: 13px; color: var(--text-primary);
+  user-select: none;
+}
+.vireo-ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; cursor: pointer;
+}
+.vireo-ctx-item:hover:not(.vireo-ctx-disabled) {
+  background: var(--bg-tertiary);
+}
+.vireo-ctx-disabled {
+  color: var(--text-tertiary); cursor: default;
+}
+.vireo-ctx-sep {
+  height: 1px; background: var(--border-secondary);
+  margin: 4px 0;
+}
+.vireo-ctx-chips {
+  display: flex; gap: 4px; padding: 6px 12px;
+}
+.vireo-ctx-chip {
+  flex: 0 0 auto; padding: 2px 6px; border-radius: 4px;
+  cursor: pointer; line-height: 1;
+}
+.vireo-ctx-chip:hover { background: var(--bg-tertiary); }
+.vireo-ctx-chip.is-active { background: var(--accent); color: white; }
 </style>
 
 <nav class="navbar">
@@ -1163,6 +1198,120 @@ function sendReport() {
     btn.textContent = 'Send Report';
   });
 }
+
+/* Shared right-click context menu component. */
+(function(){
+  let _ctxEl = null;
+  let _ctxDismiss = null;
+
+  window.closeContextMenu = function(){
+    if (_ctxEl) { _ctxEl.remove(); _ctxEl = null; }
+    document.removeEventListener('mousedown', _outside, true);
+    document.removeEventListener('keydown', _keydown, true);
+    window.removeEventListener('blur', closeContextMenu);
+    if (_ctxDismiss) { const f = _ctxDismiss; _ctxDismiss = null; f(); }
+  };
+
+  function _outside(e){
+    if (_ctxEl && !_ctxEl.contains(e.target)) {
+      // Swallow the click that will follow this mousedown so that outside-
+      // click dismissal does not also trigger underlying handlers (e.g. the
+      // lightbox overlay's onclick=closeLightbox). Only applies when
+      // dismissal was triggered by mousedown — Escape / item selection paths
+      // don't install the swallow because no click follows.
+      const swallow = (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        window.removeEventListener('click', swallow, true);
+      };
+      window.addEventListener('click', swallow, true);
+      // Safety net: if no click follows (e.g. user released outside the
+      // window), remove the swallow listener after a short delay so we
+      // don't eat an unrelated later click.
+      setTimeout(() => window.removeEventListener('click', swallow, true), 200);
+      closeContextMenu();
+    }
+  }
+  function _keydown(e){
+    if (e.key === 'Escape') {
+      // Stop propagation in the capture phase so page-level Escape handlers
+      // (e.g. browse.html's clearSelection, lightbox close) don't also fire.
+      // The user dismissed the menu, not the underlying surface.
+      e.preventDefault();
+      e.stopPropagation();
+      closeContextMenu();
+    }
+  }
+
+  function _renderItem(item){
+    if (item.separator) {
+      const s = document.createElement('div');
+      s.className = 'vireo-ctx-sep';
+      return s;
+    }
+    if (item.chips) {
+      const row = document.createElement('div');
+      row.className = 'vireo-ctx-chips';
+      item.chips.forEach(c => {
+        const b = document.createElement('span');
+        b.className = 'vireo-ctx-chip' + (c.active ? ' is-active' : '');
+        b.textContent = c.label;
+        if (c.title) b.title = c.title;
+        b.addEventListener('click', ev => {
+          ev.stopPropagation();
+          closeContextMenu();
+          try { c.onClick && c.onClick(); } catch(err){ console.error(err); }
+        });
+        row.appendChild(b);
+      });
+      return row;
+    }
+    const d = document.createElement('div');
+    d.className = 'vireo-ctx-item' + (item.disabled ? ' vireo-ctx-disabled' : '');
+    d.textContent = item.label;
+    if (item.disabled && item.disabledHint) d.title = item.disabledHint;
+    if (!item.disabled) {
+      d.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeContextMenu();
+        try { item.onClick && item.onClick(); } catch(err){ console.error(err); }
+      });
+    }
+    return d;
+  }
+
+  window.openContextMenu = function(event, items, opts){
+    closeContextMenu();
+    const menu = document.createElement('div');
+    menu.className = 'vireo-ctx-menu';
+    menu.style.visibility = 'hidden';
+    items.forEach(it => menu.appendChild(_renderItem(it)));
+    document.body.appendChild(menu);
+    // Clamp to viewport.
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const rect = menu.getBoundingClientRect();
+    let x = event.clientX, y = event.clientY;
+    if (x + rect.width  > vw) x = Math.max(0, vw - rect.width  - 4);
+    if (y + rect.height > vh) y = Math.max(0, vh - rect.height - 4);
+    menu.style.left = x + 'px';
+    menu.style.top  = y + 'px';
+    menu.style.visibility = 'visible';
+    _ctxEl = menu;
+    _ctxDismiss = (opts && opts.onDismiss) || null;
+    document.addEventListener('mousedown', _outside, true);
+    document.addEventListener('keydown', _keydown, true);
+    window.addEventListener('blur', closeContextMenu);
+  };
+
+  window.coerceSelectionOnContext = function(selectionSet, clickedId){
+    if (clickedId == null) return Array.from(selectionSet);
+    if (!selectionSet.has(clickedId)) {
+      selectionSet.clear();
+      selectionSet.add(clickedId);
+    }
+    return Array.from(selectionSet);
+  };
+})();
 </script>
 
 <!-- Missing Folders Banner -->
@@ -2104,6 +2253,8 @@ function toggleLightboxZoom(e) {
   var DRAG_THRESHOLD = 5;
 
   document.addEventListener('mousedown', function(e) {
+    // Right-click (button 2) opens the context menu — never start a pan.
+    if (e.button !== 0) return;
     var wrap = document.getElementById('lightboxWrap');
     if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
@@ -2158,6 +2309,107 @@ function closeLightbox(e) {
   if (detContainer) detContainer.innerHTML = '';
   document.body.style.overflow = '';
 }
+
+/* ---------- Lightbox right-click context menu ----------
+ * The lightbox is shared across pages (browse, review, etc.), so the menu
+ * sits in _navbar.html alongside the overlay. Rating / color / flag / reveal
+ * helpers (`setRatingFor`, `setColorLabelFor`, `setFlagFor`, `findSimilar`,
+ * `openInEditor`, `revealPhoto`, `copyPhotoPaths`) are defined on pages that
+ * carry a photo grid (browse.html). On /review, there is no selection model
+ * but per-photo `setReviewRating` / `setReviewFlag` helpers exist and the
+ * rating/flag chips fall through to them. Color labels are not part of the
+ * review workflow, so the color row is omitted when `setColorLabelFor` is
+ * absent. Any still-missing helper becomes a silent no-op so clicking can
+ * never throw.
+ */
+function buildLightboxContextMenu(pid) {
+  var has = function(name) { return typeof window[name] === 'function'; };
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() {
+        if (has('setRatingFor')) window.setRatingFor(pid, n);
+        else if (has('setReviewRating')) window.setReviewRating(pid, n);
+      },
+    };
+  };
+  var colorChip = function(c, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { if (has('setColorLabelFor')) window.setColorLabelFor(pid, c); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() {
+        if (has('setFlagFor')) window.setFlagFor(pid, f);
+        else if (has('setReviewFlag')) window.setReviewFlag(pid, f);
+      },
+    };
+  };
+
+  var items = [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+  ];
+  if (has('setColorLabelFor')) {
+    items.push({ chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+    ] });
+  }
+  items.push({ chips: [
+    flagChip('flagged', '\u2691', 'Flag as pick'),
+    flagChip('rejected', '\u2715', 'Reject'),
+    flagChip('none', '\u25CB', 'Unflag'),
+  ] });
+  items.push({ separator: true });
+
+  if (has('findSimilar')) {
+    items.push({ label: 'Find Similar',
+      onClick: function() { window.findSimilar(pid); } });
+  }
+  if (has('openInEditor')) {
+    items.push({ label: 'Open in Editor',
+      onClick: function() { window.openInEditor([pid]); } });
+  }
+  if (has('revealPhoto')) {
+    items.push({ label: 'Reveal in Finder/Folder',
+      onClick: function() { window.revealPhoto(pid); } });
+  }
+  if (has('copyPhotoPaths')) {
+    items.push({ label: 'Copy Path',
+      onClick: function() { window.copyPhotoPaths([pid]); } });
+  }
+
+  items.push({ separator: true });
+  items.push({ label: 'Close Lightbox',
+    onClick: function() { closeLightbox(); } });
+
+  return items;
+}
+
+(function() {
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  img.addEventListener('contextmenu', function(e) {
+    // Stop the event before the browser's native menu or the wrap's
+    // mousedown pan handler can react. (contextmenu fires after mousedown
+    // in Chromium; stopPropagation + preventDefault together keep our
+    // handler in full control.)
+    e.preventDefault();
+    e.stopPropagation();
+    var pid = _lightboxCurrentId;
+    if (!pid) return;
+    openContextMenu(e, buildLightboxContextMenu(pid));
+  });
+})();
+
 /* ---------- Delete Confirmation ---------- */
 var _deletePhotoIds = [];
 var _deleteCallback = null;

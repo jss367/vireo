@@ -401,13 +401,43 @@
     background: var(--bg-tertiary, #14374E);
     border-radius: 6px;
     overflow: hidden;
-    cursor: pointer;
+    cursor: grab;
     border: 2px solid transparent;
     transition: border-color 0.15s;
+    position: relative;
   }
   .grm-card:hover { border-color: var(--text-ghost, #555); }
   .grm-card.selected { border-color: var(--accent, #24E5CA); }
   .grm-card.ai-best { border-color: var(--warning, #f0c040); }
+  .grm-card.dragging { cursor: grabbing; }
+  .grm-card.dragging img { pointer-events: none; }
+  .grm-card.has-offset::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent, #24E5CA);
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+    z-index: 3;
+  }
+  .grm-reset-offsets-btn {
+    display: none;
+    margin: 6px 12px 0;
+    background: var(--bg-tertiary, #14374E);
+    color: var(--text-muted, #888);
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    align-self: center;
+  }
+  .grm-reset-offsets-btn.visible { display: inline-block; }
+  .grm-reset-offsets-btn:hover { color: var(--text-primary, #E0F0F0); }
   .grm-card img {
     width: 100%;
     aspect-ratio: 3/2;
@@ -1140,6 +1170,199 @@ document.addEventListener('keydown', function(e) {
   else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0].id); }
 });
 
+/* ---------- Right-click context menu ----------
+ * The review grid has no multi-select — the menu always targets the single
+ * card under the cursor. Rating / flag chips POST directly to the batch
+ * endpoints so they don't depend on helpers that only exist on browse.html.
+ */
+function setReviewRating(photoId, rating) {
+  safeFetch('/api/batch/rating', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: [photoId], rating: rating }),
+  }, { toast: false }).catch(function() {});
+}
+
+function setReviewFlag(photoId, flag) {
+  safeFetch('/api/batch/flag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: [photoId], flag: flag }),
+  }, { toast: false }).catch(function() {});
+}
+
+function revealReviewPhoto(photoId) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_id: photoId }),
+  }, { toast: false }).catch(function() {});
+}
+
+async function copyReviewPhotoPath(photoId) {
+  try {
+    var data = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
+    if (data && data.path) {
+      try { await navigator.clipboard.writeText(data.path); } catch(e) {}
+    }
+  } catch(e) {}
+}
+
+function openReviewLightbox(photoId, filename) {
+  // Build the same photoList the grid click handler builds, so arrow-key
+  // navigation inside the lightbox walks the current review grid.
+  var seen = {};
+  var photoList = [];
+  var thumbs = document.getElementById('grid').querySelectorAll('img[data-photo-id]');
+  for (var i = 0; i < thumbs.length; i++) {
+    var pid = parseInt(thumbs[i].dataset.photoId, 10);
+    if (seen[pid]) continue;
+    seen[pid] = true;
+    photoList.push({ id: pid, filename: thumbs[i].dataset.filename || '' });
+  }
+  openLightbox(photoId, filename || '', photoList);
+}
+
+function buildReviewCardContextMenu(pred) {
+  var photoId = pred.photo_id;
+  var predId = pred.id;
+  var species = pred.group_id ? getConsensusSpecies(pred) : pred.species;
+  var speciesLabel = species || 'species';
+  var pending = pred.status === 'pending';
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() { setReviewRating(photoId, n); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { setReviewFlag(photoId, f); },
+    };
+  };
+
+  var items = [];
+  items.push({
+    label: 'Accept as "' + speciesLabel + '"',
+    disabled: !pending,
+    disabledHint: pending ? undefined : 'Already resolved',
+    onClick: function() { acceptPrediction(predId); },
+  });
+  items.push({
+    label: 'Not "' + speciesLabel + '"',
+    disabled: !pending,
+    disabledHint: pending ? undefined : 'Already resolved',
+    onClick: function() { rejectPrediction(predId); },
+  });
+  items.push({ separator: true });
+  items.push({ chips: [0, 1, 2, 3, 4, 5].map(rateChip) });
+  items.push({ chips: [
+    flagChip('flagged', '\u2691', 'Flag as pick'),
+    flagChip('rejected', '\u2715', 'Reject'),
+    flagChip('none', '\u25CB', 'Unflag'),
+  ] });
+  items.push({ separator: true });
+  items.push({
+    label: 'Open in Lightbox',
+    onClick: function() { openReviewLightbox(photoId, pred.filename); },
+  });
+  items.push({
+    label: 'Reveal in Finder/Folder',
+    onClick: function() { revealReviewPhoto(photoId); },
+  });
+  items.push({
+    label: 'Copy Path',
+    onClick: function() { copyReviewPhotoPath(photoId); },
+  });
+  return items;
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.card[data-pred-id]');
+  if (!card) return;
+  // Only hijack contextmenu for cards that live inside the review grid —
+  // the burst-group modal and other surfaces handle their own menus.
+  var grid = document.getElementById('grid');
+  if (!grid || !grid.contains(card)) return;
+  e.preventDefault();
+  var predId = parseInt(card.dataset.predId, 10);
+  var pred = predictions.find(function(p) { return p.id === predId; });
+  if (!pred) return;
+  if (typeof openContextMenu !== 'function') return;
+  openContextMenu(e, buildReviewCardContextMenu(pred));
+});
+
+/* ---------- Burst group modal context menu ----------
+ * The grm-card selector (.grm-card[data-photo-id]) does NOT collide with
+ * the review grid's .card[data-pred-id] handler above — different class
+ * names, different closest() matches.
+ *
+ * Critical: grmMovePick / grmMoveReject / grmMoveCandidate / grmRemoveFromGroup
+ * all operate on grmState.selected. On right-click we MUST force-set
+ * grmState.selected to the clicked card's photo_id before opening the menu.
+ * We assign directly (not via grmSelect, which toggles) so a right-click on
+ * a non-selected card doesn't deselect it.
+ */
+function buildBurstGroupContextMenu(photoId, filename) {
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() { setReviewRating(photoId, n); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { setReviewFlag(photoId, f); },
+    };
+  };
+  return [
+    { label: '\u2B06  Move to Picks',      onClick: function() { grmMovePick(); } },
+    { label: '\u2B07  Move to Rejects',    onClick: function() { grmMoveReject(); } },
+    { label: '\u2423  Move to Candidates', onClick: function() { grmMoveCandidate(); } },
+    { separator: true },
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+        flagChip('flagged', '\u2691', 'Flag as pick'),
+        flagChip('rejected', '\u2715', 'Reject'),
+        flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+    { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
+    { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
+    { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
+    { separator: true },
+    { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
+  ];
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.grm-card[data-photo-id]');
+  if (!card) return;
+  // Only fire when the burst modal is actually open — the handler is on
+  // document and grm-cards never exist outside #grmOverlay, but belt-and-
+  // suspenders against any future render path that reuses the class.
+  var overlay = document.getElementById('grmOverlay');
+  if (!overlay || !overlay.classList.contains('open')) return;
+  e.preventDefault();
+  var photoId = parseInt(card.dataset.photoId, 10);
+  if (!photoId) return;
+  var item = grmState.items.find(function(it) { return it.photo_id === photoId; });
+  var filename = item ? item.filename : '';
+  // Force-select the right-clicked card so move/remove actions target it.
+  // Assign directly rather than calling grmSelect() — that helper toggles
+  // selection, which would deselect when right-clicking the already-selected
+  // card.
+  grmState.selected = photoId;
+  renderGroupModal();
+  if (typeof openContextMenu !== 'function') return;
+  openContextMenu(e, buildBurstGroupContextMenu(photoId, filename));
+});
+
 /* ---------- Settings ---------- */
 function updateThumbSize(val) {
   thumbSize = parseInt(val, 10);
@@ -1148,17 +1371,28 @@ function updateThumbSize(val) {
 }
 
 /* ==================== Group Review Modal ==================== */
-var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
 
 function openGroupReview(groupId, model) {
-  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
   _grmLoupeLocked = false;
+  // Reset zoom state so a high zoom from a prior burst doesn't leak into this modal.
+  _grmZoomLevel = 4;
+  _grmOffsets = {};
+  _grmDragging = null;
+  _grmSuppressNextClick = false;
+  _grmLoupeLastX = 50;
+  _grmLoupeLastY = 50;
+  grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
 }
 
 function closeGroupReview() {
   document.getElementById('grmOverlay').classList.remove('open');
+  _grmOffsets = {};
+  _grmDragging = null;
+  grmRefreshResetAllVisibility();
 }
 
 async function loadGroupData(groupId) {
@@ -1212,8 +1446,16 @@ function renderGroupModal() {
     var sharp = it.subject_sharpness != null ? Math.round(it.subject_sharpness) : (it.sharpness != null ? Math.round(it.sharpness) : '-');
     var confPct = Math.round((it.confidence || 0) * 100);
 
-    return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '" onclick="grmSelect(' + it.photo_id + ')">' +
-      '<img src="/thumbnails/' + it.photo_id + '.jpg" loading="lazy">' +
+    // Once the user has zoomed, serve full-resolution originals so pixel-peeping
+    // and 1:1 inspection actually show sensor detail instead of an upscaled 400px thumbnail.
+    var src = grmState.upgraded
+      ? '/photos/' + it.photo_id + '/original'
+      : '/thumbnails/' + it.photo_id + '.jpg';
+    return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '"' +
+      ' onmousedown="grmCardMouseDown(event)"' +
+      ' onclick="grmCardClick(event, ' + it.photo_id + ')"' +
+      ' ondblclick="grmCardDblClick(event)">' +
+      '<img src="' + src + '" loading="lazy" draggable="false">' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
@@ -1256,6 +1498,16 @@ function renderGroupModal() {
   }
 
   document.getElementById('grmCount').textContent = pickItems.length + ' picks, ' + rejectItems.length + ' rejects, ' + candidateItems.length + ' unsorted';
+
+  // Re-apply offset indicators and — if the loupe is currently zoomed — the
+  // per-card transforms, since innerHTML wipes them on every re-render.
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    _grmUpdateIndicator(card);
+  });
+  if (_grmLoupeLocked) {
+    _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+  }
+  grmRefreshResetAllVisibility();
 }
 
 function grmSelect(photoId) {
@@ -1305,6 +1557,69 @@ function renderLoupePreds(item) {
 
 var _grmZoomLevel = 4;
 var _grmLoupeLocked = false;
+// Per-photo pan offsets, in pre-scale CSS pixels of the thumbnail img box.
+// Because we apply `scale(z) translate(tx, ty)`, the translate is in the
+// unscaled coordinate space, which is a fixed fraction of the underlying
+// image — so offsets remain correct as zoom level changes.
+var _grmOffsets = {};
+var _grmDragging = null;
+var _grmSuppressNextClick = false;
+// Latest cursor position over the loupe image (in %), used as the transform
+// origin when zoom is applied outside a mouse event (e.g. wheel after drag,
+// 1:1 snap, drag-induced re-apply). Initialized to centre so pre-hover zoom
+// actions still render sensibly.
+var _grmLoupeLastX = 50;
+var _grmLoupeLastY = 50;
+
+function _grmUpgradeStripToOriginal() {
+  // Swap every strip card from the 400px thumbnail to the full-resolution
+  // original so zoom actually reveals sensor detail. Idempotent per modal open.
+  if (grmState.upgraded) return;
+  grmState.upgraded = true;
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    var pid = card.getAttribute('data-photo-id');
+    var img = card.querySelector('img');
+    if (pid && img) img.src = '/photos/' + pid + '/original';
+  });
+}
+
+function _grmOneToOneScale() {
+  // Cards use object-fit: cover in a 3:2 box, so the on-screen base scale is
+  // max(boxW/imgW, boxH/imgH). The CSS transform factor that makes one source
+  // pixel equal one screen pixel is the inverse: min(imgW/boxW, imgH/boxH).
+  // Using width only would overshoot for images wider than 3:2 and undershoot
+  // for taller ones — misleading pixel detail either way.
+  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+  if (!item || !item.width || !item.height) return null;
+  // Prefer the selected photo's img so naturalWidth/Height (if loaded) reflect
+  // the axes the browser actually paints.
+  var sample = document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"] img')
+             || document.querySelector('.grm-card img');
+  if (!sample || !sample.offsetWidth || !sample.offsetHeight) return null;
+  // Stored item.width/height are pre-EXIF-orientation (same as in
+  // _lbRecomputeNativeZoom). For 90°-rotated JPEGs the browser swaps axes on
+  // render, so comparing stored aspect against the loaded image's aspect tells
+  // us whether to swap the stored dims before computing the 1:1 factor.
+  var imgW = item.width, imgH = item.height;
+  if (sample.naturalWidth && sample.naturalHeight) {
+    var storedAspect = item.width / item.height;
+    var renderedAspect = sample.naturalWidth / sample.naturalHeight;
+    if (Math.abs(storedAspect - renderedAspect) > Math.abs((1 / storedAspect) - renderedAspect)) {
+      imgW = item.height;
+      imgH = item.width;
+    }
+  }
+  return Math.min(imgW / sample.offsetWidth, imgH / sample.offsetHeight);
+}
+
+function _grmMaxZoom() {
+  // Per selected photo, cap at the factor that reaches true 1:1. Falls back to
+  // 12 (the historical cap) when dimensions are unknown so we never zoom less
+  // than before.
+  var factor = _grmOneToOneScale();
+  if (factor == null) return 12;
+  return Math.max(12, Math.ceil(factor));
+}
 
 function grmLoupeToggleLock(e) {
   _grmLoupeLocked = !_grmLoupeLocked;
@@ -1326,40 +1641,182 @@ function grmLoupeMove(e) {
   var rect = e.currentTarget.getBoundingClientRect();
   var x = ((e.clientX - rect.left) / rect.width) * 100;
   var y = ((e.clientY - rect.top) / rect.height) * 100;
+  _grmLoupeLastX = x;
+  _grmLoupeLastY = y;
 
   // Update crosshairs
   document.getElementById('grmCrosshairH').style.top = y + '%';
   document.getElementById('grmCrosshairV').style.left = x + '%';
 
-  // Zoom all strip thumbnails to the same position
-  document.querySelectorAll('.grm-card img').forEach(function(img) {
+  // No upgrade here: plain hover shouldn't trigger a burst of full-res fetches
+  // for every strip card. Upgrade only when the user expresses zoom intent via
+  // the wheel or the 1:1 snap key.
+  _grmApplyAllCardTransforms(x, y);
+}
+
+function _grmApplyAllCardTransforms(x, y) {
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    var img = card.querySelector('img');
+    if (!img) return;
+    var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
     img.style.transformOrigin = x + '% ' + y + '%';
-    img.style.transform = 'scale(' + _grmZoomLevel + ')';
-    img.parentElement.classList.add('zoomed');
+    img.style.transform = 'scale(' + _grmZoomLevel + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
+    card.classList.add('zoomed');
   });
+}
+
+function _grmApplyCardTransform(card) {
+  var img = card.querySelector('img');
+  if (!img) return;
+  var off = _grmOffsets[card.dataset.photoId] || { tx: 0, ty: 0 };
+  if (card.classList.contains('zoomed')) {
+    img.style.transform = 'scale(' + _grmZoomLevel + ') translate(' + off.tx + 'px, ' + off.ty + 'px)';
+  }
 }
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  var max = _grmMaxZoom();
   if (e.deltaY < 0) {
-    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+    _grmZoomLevel = Math.min(max, _grmZoomLevel + 1);
   } else {
     _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
   }
-  // Re-trigger the move to update zoom (even if locked)
-  var wasLocked = _grmLoupeLocked;
-  _grmLoupeLocked = false;
-  grmLoupeMove(e);
-  _grmLoupeLocked = wasLocked;
+  _grmUpgradeStripToOriginal();
+  // Update origin from the wheel event even when locked so zoom follows cursor.
+  var rect = e.currentTarget.getBoundingClientRect();
+  _grmLoupeLastX = ((e.clientX - rect.left) / rect.width) * 100;
+  _grmLoupeLastY = ((e.clientY - rect.top) / rect.height) * 100;
+  document.getElementById('grmCrosshairH').style.top = _grmLoupeLastY + '%';
+  document.getElementById('grmCrosshairV').style.left = _grmLoupeLastX + '%';
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+}
+
+function grmSnapOneToOne() {
+  // Lightroom-style 1:1: zoom factor that makes one source pixel == one screen pixel.
+  var factor = _grmOneToOneScale();
+  if (factor == null) return;
+  _grmUpgradeStripToOriginal();
+  _grmZoomLevel = Math.max(1, Math.round(factor));
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
 function grmLoupeReset() {
   if (_grmLoupeLocked) return;
+  if (_grmDragging) return;
   document.querySelectorAll('.grm-card img').forEach(function(img) {
     img.style.transform = '';
     img.style.transformOrigin = '';
     img.parentElement.classList.remove('zoomed');
   });
+}
+
+function grmCardMouseDown(e) {
+  if (e.button !== 0) return;
+  var card = e.currentTarget;
+  var photoId = card.dataset.photoId;
+  var cur = _grmOffsets[photoId] || { tx: 0, ty: 0 };
+  _grmDragging = {
+    card: card,
+    photoId: photoId,
+    startX: e.clientX,
+    startY: e.clientY,
+    origTx: cur.tx,
+    origTy: cur.ty,
+    moved: false,
+  };
+  document.addEventListener('mousemove', grmCardMouseMove);
+  document.addEventListener('mouseup', grmCardMouseUp);
+  e.preventDefault();
+}
+
+function grmCardMouseMove(e) {
+  if (!_grmDragging) return;
+  // If the primary button is no longer held (e.g. mouseup fired outside the
+  // window and was missed), end the drag instead of continuing to mutate
+  // offsets from passive cursor motion.
+  if ((e.buttons & 1) === 0) {
+    grmCardMouseUp(e);
+    return;
+  }
+  var dx = e.clientX - _grmDragging.startX;
+  var dy = e.clientY - _grmDragging.startY;
+  if (!_grmDragging.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    _grmDragging.moved = true;
+    _grmDragging.card.classList.add('dragging');
+  }
+  if (!_grmDragging.moved) return;
+  var z = Math.max(1, _grmZoomLevel);
+  var newTx = _grmDragging.origTx + dx / z;
+  var newTy = _grmDragging.origTy + dy / z;
+  _grmOffsets[_grmDragging.photoId] = { tx: newTx, ty: newTy };
+  _grmApplyCardTransform(_grmDragging.card);
+  _grmUpdateIndicator(_grmDragging.card);
+}
+
+function grmCardMouseUp(e) {
+  if (!_grmDragging) return;
+  var moved = _grmDragging.moved;
+  var card = _grmDragging.card;
+  card.classList.remove('dragging');
+  document.removeEventListener('mousemove', grmCardMouseMove);
+  document.removeEventListener('mouseup', grmCardMouseUp);
+  _grmDragging = null;
+  // Only suppress the trailing click when the release is inside the dragged
+  // card — that's the only case where a `click` will fire on the card and
+  // need to be swallowed. Off-card releases produce no card click, so
+  // setting the flag would eat the user's next real selection.
+  if (moved && e && e.target && card.contains(e.target)) {
+    _grmSuppressNextClick = true;
+  }
+  grmRefreshResetAllVisibility();
+}
+
+function grmCardClick(e, photoId) {
+  if (_grmSuppressNextClick) {
+    _grmSuppressNextClick = false;
+    return;
+  }
+  grmSelect(photoId);
+}
+
+function grmCardDblClick(e) {
+  var card = e.currentTarget;
+  var photoId = card.dataset.photoId;
+  if (!_grmOffsets[photoId]) return;
+  delete _grmOffsets[photoId];
+  _grmUpdateIndicator(card);
+  _grmApplyCardTransform(card);
+  grmRefreshResetAllVisibility();
+  e.stopPropagation();
+}
+
+function grmResetAllOffsets() {
+  _grmOffsets = {};
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    _grmUpdateIndicator(card);
+    _grmApplyCardTransform(card);
+  });
+  grmRefreshResetAllVisibility();
+}
+
+function _grmUpdateIndicator(card) {
+  var off = _grmOffsets[card.dataset.photoId];
+  if (off && (off.tx !== 0 || off.ty !== 0)) {
+    card.classList.add('has-offset');
+  } else {
+    card.classList.remove('has-offset');
+  }
+}
+
+function grmRefreshResetAllVisibility() {
+  var hasAny = false;
+  for (var k in _grmOffsets) {
+    var o = _grmOffsets[k];
+    if (o && (o.tx !== 0 || o.ty !== 0)) { hasAny = true; break; }
+  }
+  var btn = document.getElementById('grmResetAllOffsets');
+  if (btn) btn.classList.toggle('visible', hasAny);
 }
 
 function _grmGetZone(photoId) {
@@ -1486,6 +1943,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
 });
 
 </script>
@@ -1519,6 +1977,7 @@ document.addEventListener('keydown', function(e) {
         <div class="grm-loupe-crosshair-v" id="grmCrosshairV"></div>
       </div>
       <div class="grm-loupe-info" id="grmLoupeInfo">Select a photo to preview. Hover to compare sharpness across all frames.</div>
+      <button type="button" class="grm-reset-offsets-btn" id="grmResetAllOffsets" onclick="grmResetAllOffsets()">Reset pan offsets</button>
       <div class="grm-loupe-preds" id="grmLoupePreds"></div>
     </div>
   </div>
@@ -1526,7 +1985,7 @@ document.addEventListener('keydown', function(e) {
     <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>

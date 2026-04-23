@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import subprocess
+import sys
 import time
 import webbrowser
 from datetime import UTC
@@ -376,12 +377,16 @@ def _enforce_preview_cache_quota_at_startup(app):
             pass
 
 
-def create_app(db_path, thumb_cache_dir=None):
+def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
     Args:
         db_path: path to the SQLite database
         thumb_cache_dir: path to thumbnail cache directory
+        api_token: optional token required on /api/v1/* requests via the
+            ``X-Vireo-Token`` header. When ``None`` (default), all /api/v1/*
+            traffic is rejected with 401 — the token is expected to be
+            supplied by ``main()`` after calling ``runtime.generate_token``.
     """
     app = Flask(
         __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
@@ -390,6 +395,7 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
         "~/.vireo/thumbnails"
     )
+    app.config["API_TOKEN"] = api_token
 
     _migrate_legacy_preview_cache(app)
     _enforce_preview_cache_quota_at_startup(app)
@@ -522,9 +528,45 @@ def create_app(db_path, thumb_cache_dir=None):
                         variant, e,
                     )
 
+    @app.before_request
+    def _enforce_api_v1_token():
+        if not request.path.startswith("/api/v1/"):
+            return None
+        expected = app.config.get("API_TOKEN")
+        if not expected:
+            # No token configured → deny all v1 traffic.
+            return json_error("API token not configured", 401)
+        if request.headers.get("X-Vireo-Token") != expected:
+            return json_error("Invalid or missing X-Vireo-Token", 401)
+        return None
+
     @app.route("/api/health")
     def api_health():
         return jsonify({"status": "ok"})
+
+    @app.route("/api/v1/health")
+    def api_v1_health():
+        # The "service" field is a Vireo-specific marker the single-instance
+        # guard's probe checks for. An unrelated local service that happens
+        # to return 200 on /api/v1/health (catch-all) would not carry it,
+        # so Vireo can distinguish a live peer from a port-reusing stranger.
+        from runtime import SERVICE_MARKER
+        return jsonify({"service": SERVICE_MARKER, "status": "ok"})
+
+    @app.route("/api/v1/version")
+    def api_v1_version():
+        return api_version()  # reuse existing implementation
+
+    @app.route("/api/v1/shutdown", methods=["POST"])
+    def api_v1_shutdown():
+        import signal
+        import threading
+
+        def _shutdown():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.5, _shutdown).start()
+        return jsonify({"status": "shutting_down"})
 
     @app.route("/api/models/status")
     def api_models_status():
@@ -860,6 +902,31 @@ def create_app(db_path, thumb_cache_dir=None):
             "missing": [dict(f) for f in missing],
         })
 
+    @app.route("/api/folders/<int:folder_id>", methods=["GET"])
+    def api_folder_get(folder_id):
+        """Return a single folder's id, name, and path.
+
+        Powers the folder-tree context menu's "Copy Path" action. A lean
+        response on purpose: callers that want the richer tree data already
+        have /api/folders for that. Scoped to the active workspace so
+        absolute paths from folders hidden in this workspace don't leak.
+        """
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        return jsonify({
+            "id": folder["id"],
+            "name": folder["name"],
+            "path": folder["path"],
+        })
+
     @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
     def api_folder_relocate(folder_id):
         db = _get_db()
@@ -1039,6 +1106,11 @@ def create_app(db_path, thumb_cache_dir=None):
             "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
         ).fetchone()
         if folder:
+            # Full on-disk path: mirrors the folder-join logic in
+            # api_files_reveal. Exposed so the browse-grid "Copy Path"
+            # right-click action can read a real filesystem path from the
+            # detail response.
+            result["path"] = os.path.join(folder["path"], photo["filename"])
             xmp_path = os.path.join(
                 folder["path"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -1053,6 +1125,7 @@ def create_app(db_path, thumb_cache_dir=None):
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path
         else:
+            result["path"] = ""
             result["xmp_exists"] = False
             result["xmp_keywords"] = []
             result["xmp_path"] = ""
@@ -1231,6 +1304,104 @@ def create_app(db_path, thumb_cache_dir=None):
             db.remove_color_label(photo_id)
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
+    @app.route("/api/files/reveal", methods=["POST"])
+    def api_files_reveal():
+        """Reveal a photo or folder in the OS file manager.
+
+        Body: {"photo_id": <int>} OR {"folder_id": <int>}
+
+        Photo reveals select the file in its parent directory (macOS ``open
+        -R``, Windows ``explorer /select,``, Linux ``xdg-open <parent dir>``).
+        Folder reveals open the folder itself (macOS ``open -R <dir>``,
+        Windows ``explorer <dir>``, Linux ``xdg-open <dir>``) — this differs
+        from the photo case on Windows where we deliberately skip ``/select,``
+        so the user sees the folder's contents rather than its parent.
+
+        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if
+        the subprocess failed to launch; 404 if the id is unknown; 400 if
+        neither id was provided or either is malformed.
+        """
+        body = request.get_json(silent=True) or {}
+        pid_raw = body.get("photo_id")
+        fid_raw = body.get("folder_id")
+
+        if pid_raw is None and fid_raw is None:
+            return json_error("photo_id or folder_id required")
+
+        db = _get_db()
+        is_folder = False
+        path = ""
+
+        if pid_raw is not None:
+            try:
+                pid_int = int(pid_raw)
+            except (TypeError, ValueError):
+                return json_error("photo_id must be an integer")
+            # verify_workspace=True enforces that the photo's folder is
+            # linked to the active workspace — otherwise this endpoint would
+            # expose absolute filesystem paths for photos hidden from the
+            # current workspace.
+            photo = db.get_photo(pid_int, verify_workspace=True)
+            if not photo:
+                return json_error("photo not found", 404)
+            folder_row = db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            folder_path = folder_row["path"] if folder_row else ""
+            if not folder_path or not photo["filename"]:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = os.path.join(folder_path, photo["filename"])
+        else:
+            try:
+                fid_int = int(fid_raw)
+            except (TypeError, ValueError):
+                return json_error("folder_id must be an integer")
+            folder = db.get_folder(fid_int)
+            if not folder:
+                return json_error("folder not found", 404)
+            # Reject reveal for folders not linked to the active workspace,
+            # matching the photo branch's verify_workspace gate.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (db._active_workspace_id, fid_int),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
+            folder_path = folder["path"]
+            if not folder_path:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = folder_path
+            is_folder = True
+
+        try:
+            if sys.platform == "darwin":
+                # "open -R <dir>" reveals the folder inside its parent; that's
+                # the right behavior for folder reveals too, consistent with
+                # how Finder treats folder-targeted reveal.
+                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+            elif sys.platform.startswith("win"):
+                if is_folder:
+                    # Open the folder itself so the user sees its contents.
+                    subprocess.run(["explorer", path], timeout=5, check=False)
+                else:
+                    subprocess.run(
+                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    )
+            else:
+                # xdg-open on a file has inconsistent behavior across desktops
+                # (some open the image viewer, not the file manager), so for
+                # photo reveals we open the parent directory instead. Passing
+                # a directory to xdg-open opens the folder in the file manager,
+                # which is exactly what we want for folder reveals.
+                target = path if is_folder else (os.path.dirname(path) or path)
+                # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
+                # so a crafted leading-dash path can't be parsed as a flag.
+                target = os.path.abspath(target)
+                subprocess.run(["xdg-open", target], timeout=5, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
@@ -1679,6 +1850,20 @@ def create_app(db_path, thumb_cache_dir=None):
         db.delete_collection(collection_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
+    def api_update_collection(collection_id):
+        """Rename a collection. Body: {"name": "..."}."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return json_error("name required")
+        try:
+            db.rename_collection(collection_id, name)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True})
+
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
     def api_collection_add_photos(collection_id):
         """Add photos to a static collection by appending to its photo_ids rule."""
@@ -1722,6 +1907,16 @@ def create_app(db_path, thumb_cache_dir=None):
         )
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
+
+    @app.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
+    def api_collection_duplicate(collection_id):
+        """Duplicate a collection within the active workspace. Returns {id}."""
+        db = _get_db()
+        try:
+            new_id = db.duplicate_collection(collection_id)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True, "id": new_id})
 
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
@@ -4675,32 +4870,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
     # -- Job API routes --
 
-    @app.route("/api/jobs/scan", methods=["POST"])
-    def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+    def _build_scan_work(root, incremental, active_ws):
+        """Build the background work function for a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
-        import tempfile
-
+        Shared by ``POST /api/jobs/scan`` and
+        ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
+        same scan + thumbnail pipeline as a full scan.
+        """
         import config as cfg
 
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
-
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from scanner import scan as do_scan
@@ -4808,8 +4987,83 @@ def create_app(db_path, thumb_cache_dir=None):
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
+        return work
+
+    @app.route("/api/jobs/scan", methods=["POST"])
+    def api_job_scan():
+        body = request.get_json(silent=True) or {}
+        root = body.get("root", "")
+        incremental = body.get("incremental", False)
+        if not root:
+            return json_error("root path required")
+        if not os.path.isdir(root):
+            return json_error(f"directory not found: {root}")
+
+        # Remember this scan root (skip temp directories from tests)
+        import tempfile
+
+        import config as cfg
+
+        tmp_prefix = os.path.realpath(tempfile.gettempdir())
+        if not os.path.realpath(root).startswith(tmp_prefix):
+            user_cfg = cfg.load()
+            roots = user_cfg.get("scan_roots", [])
+            if root not in roots:
+                roots.insert(0, root)
+                user_cfg["scan_roots"] = roots
+                cfg.save(user_cfg)
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        work = _build_scan_work(root, incremental, active_ws)
+
         job_id = runner.start(
             "scan", work, config={"root": root, "incremental": incremental},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
+    def api_folder_rescan(folder_id):
+        """Queue a scan job scoped to the given folder's path.
+
+        Body (optional): {"incremental": bool}
+        Returns: {"job_id": "scan-..."} on success; 404 if the folder id
+        is unknown or not linked to the active workspace.
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = bool(body.get("incremental", False))
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        # Folders are global but scans emit workspace-scoped data (predictions,
+        # pending_changes). Reject rescans of folders the active workspace has
+        # no claim on — otherwise a stale UI or crafted request could pollute
+        # this workspace with scan output from an unrelated folder, and
+        # add_folder's auto-link would silently attach it.
+        active_ws = db._active_workspace_id
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (active_ws, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        root = folder["path"]
+        if not os.path.isdir(root):
+            return json_error(f"folder path no longer exists: {root}")
+        runner = app._job_runner
+
+        work = _build_scan_work(root, incremental, active_ws)
+
+        job_id = runner.start(
+            "scan", work,
+            config={
+                "root": root,
+                "incremental": incremental,
+                "folder_id": folder_id,
+            },
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
@@ -7963,6 +8217,35 @@ def create_app(db_path, thumb_cache_dir=None):
     def stats_redirect():
         return redirect("/dashboard")
 
+    # --- /api/v1/* aliases over the stable subset of /api/* ---
+    # These are the endpoints advertised to external callers in docs/headless-api.md.
+    # Keep this list tight — expanding it locks the surface.
+    _V1_ALIASES = [
+        # (v1 path, existing endpoint name, methods)
+        ("/api/v1/photos", "api_photos", ["GET"]),
+        ("/api/v1/photos/<int:photo_id>", "api_photo_detail", ["GET"]),
+        ("/api/v1/collections", "api_collections", ["GET"]),
+        ("/api/v1/collections/<int:collection_id>/photos",
+         "api_collection_photos", ["GET"]),
+        ("/api/v1/workspaces", "api_get_workspaces", ["GET"]),
+        ("/api/v1/workspaces/<int:ws_id>/activate",
+         "api_activate_workspace", ["POST"]),
+        ("/api/v1/keywords", "api_keywords", ["GET"]),
+    ]
+
+    for v1_path, endpoint_name, methods in _V1_ALIASES:
+        view = app.view_functions.get(endpoint_name)
+        if view is None:
+            raise RuntimeError(
+                f"Cannot alias {v1_path}: endpoint '{endpoint_name}' not registered"
+            )
+        app.add_url_rule(
+            v1_path,
+            endpoint=f"v1_{endpoint_name}",
+            view_func=view,
+            methods=methods,
+        )
+
     return app
 
 
@@ -7981,11 +8264,21 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without opening a browser; write runtime.json and enable "
+             "the /api/v1 API. Use this when invoking the sidecar directly "
+             "from scripts or agents.",
+    )
+    parser.add_argument(
         "--load-taxonomy",
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
     )
     args = parser.parse_args()
+
+    if args.headless:
+        args.no_browser = True
 
     if args.load_taxonomy:
         from db import Database
@@ -8011,14 +8304,59 @@ def main():
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
 
-    # Write the port file when random port was requested (for Tauri to discover)
-    if args.port == 0:
-        port_file = os.path.join(os.path.expanduser("~/.vireo"), "port")
-        with open(port_file, "w") as f:
-            f.write(str(port))
-        log.info("Random port %d written to %s", port, port_file)
+    from runtime import (
+        acquire_single_instance,
+        delete_runtime_json,
+        generate_token,
+        release_single_instance,
+        write_runtime_json,
+    )
 
-    app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
+    # Atomically reserve the single-instance slot BEFORE any heavy
+    # initialization. Reserving up-front (rather than writing runtime.json
+    # at the end of startup) closes the race where two near-simultaneous
+    # launches both see an empty slot and both start serving.
+    try:
+        status, info = acquire_single_instance(pid=os.getpid())
+    except OSError as e:
+        # Filesystem fault opening the lock file (unreadable ~/.vireo,
+        # permission denied, etc). Surface the real cause rather than
+        # misreporting as already_running — the two need different
+        # remediation.
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "startup_failed",
+            "reason": str(e),
+        }) + "\n")
+        raise SystemExit(2) from e
+    if status == "conflict":
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "already_running",
+            "port": info.get("port"),
+            "pid": info.get("pid"),
+        }) + "\n")
+        raise SystemExit(1)
+
+    # Register cleanup immediately after acquiring the slot so a crash
+    # during initialization still releases the reservation lock and any
+    # runtime.json we may have written.
+    import atexit
+    import signal as _signal
+
+    def _cleanup_runtime_state():
+        delete_runtime_json()
+        release_single_instance()
+
+    atexit.register(_cleanup_runtime_state)
+    _signal.signal(_signal.SIGTERM, lambda *_: (_cleanup_runtime_state(), os._exit(0)))
+
+    api_token = generate_token()
+    mode = "headless" if args.headless else "gui"
+
+    app = create_app(
+        db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
+    )
 
     # Startup banner
     import config as cfg
@@ -8051,6 +8389,31 @@ def main():
                     time.sleep(0.1)
 
         threading.Thread(target=_open_browser, daemon=True).start()
+
+    # Look up the running version using the same fallback chain as
+    # /api/version: package metadata, then pyproject.toml, then "0.0.0".
+    # In source/dev runs where importlib.metadata is missing but
+    # pyproject.toml is present, runtime.json must agree with
+    # /api/v1/version — external callers use it to make compatibility
+    # decisions and a bare "0.0.0" would mislead them.
+    try:
+        from importlib.metadata import version as pkg_version
+        ver = pkg_version("vireo")
+    except Exception:
+        import tomllib
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                ver = tomllib.load(f)["project"]["version"]
+        except Exception:
+            ver = "0.0.0"
+
+    # Finalize runtime.json, replacing the reservation marker with the full
+    # payload now that the port and token are known. Cleanup handlers were
+    # registered immediately after `acquire_single_instance` above.
+    write_runtime_json(
+        port=port, pid=os.getpid(), version=ver, db_path=args.db,
+        token=api_token, mode=mode,
+    )
 
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 

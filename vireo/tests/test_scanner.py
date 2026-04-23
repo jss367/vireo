@@ -1185,3 +1185,55 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
     assert row["width"] == 160
     assert row["height"] == 120
     assert all(image_path not in batch for batch in called_with)
+
+
+def test_resolve_worker_count_tiny_batch_is_sequential():
+    """Batches below 8 files always use 1 worker."""
+    from scanner import _resolve_worker_count
+    assert _resolve_worker_count(list(range(7))) == 1
+
+
+def test_resolve_worker_count_capped_by_batch_size(monkeypatch):
+    """Worker count never exceeds the batch size."""
+    import config as cfg
+    import scanner
+
+    monkeypatch.setattr(cfg, "get", lambda _k: 0)
+    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 32)
+    # 10 files on a 32-core box should top out at 10 workers.
+    assert scanner._resolve_worker_count(list(range(10))) == 10
+
+
+def test_resolve_worker_count_clamps_to_windows_limit(monkeypatch):
+    """On Windows, ProcessPoolExecutor rejects max_workers > 61, so clamp."""
+    import config as cfg
+    import scanner
+
+    monkeypatch.setattr(cfg, "get", lambda _k: 0)
+    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.sys, "platform", "win32")
+    # Batch is large enough that it wouldn't otherwise clamp the count.
+    workers = scanner._resolve_worker_count(list(range(200)))
+    assert workers == scanner._WINDOWS_MAX_WORKERS == 61
+
+
+def test_resolve_worker_count_clamps_configured_value_on_windows(monkeypatch):
+    """Explicit scan_workers above 61 is still clamped on Windows."""
+    import config as cfg
+    import scanner
+
+    monkeypatch.setattr(cfg, "get", lambda _k: 96)
+    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.sys, "platform", "win32")
+    assert scanner._resolve_worker_count(list(range(200))) == 61
+
+
+def test_resolve_worker_count_no_windows_cap_on_posix(monkeypatch):
+    """The 61-worker cap must not apply on non-Windows platforms."""
+    import config as cfg
+    import scanner
+
+    monkeypatch.setattr(cfg, "get", lambda _k: 0)
+    monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(scanner.sys, "platform", "linux")
+    assert scanner._resolve_worker_count(list(range(200))) == 128
