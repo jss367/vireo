@@ -1178,16 +1178,18 @@ function updateThumbSize(val) {
 }
 
 /* ==================== Group Review Modal ==================== */
-var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+var grmState = { groupId: null, model: null, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
 
 function openGroupReview(groupId, model) {
-  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null };
+  grmState = { groupId: groupId, model: model, items: [], picks: new Set(), rejects: new Set(), removed: new Set(), selected: null, upgraded: false };
   _grmLoupeLocked = false;
+  // Reset zoom state so a high zoom from a prior burst doesn't leak into this modal.
+  _grmZoomLevel = 4;
   _grmOffsets = {};
   _grmDragging = null;
   _grmSuppressNextClick = false;
-  _grmLoupeLastX = null;
-  _grmLoupeLastY = null;
+  _grmLoupeLastX = 50;
+  _grmLoupeLastY = 50;
   grmRefreshResetAllVisibility();
   document.getElementById('grmOverlay').classList.add('open');
   loadGroupData(groupId);
@@ -1251,11 +1253,16 @@ function renderGroupModal() {
     var sharp = it.subject_sharpness != null ? Math.round(it.subject_sharpness) : (it.sharpness != null ? Math.round(it.sharpness) : '-');
     var confPct = Math.round((it.confidence || 0) * 100);
 
+    // Once the user has zoomed, serve full-resolution originals so pixel-peeping
+    // and 1:1 inspection actually show sensor detail instead of an upscaled 400px thumbnail.
+    var src = grmState.upgraded
+      ? '/photos/' + it.photo_id + '/original'
+      : '/thumbnails/' + it.photo_id + '.jpg';
     return '<div class="' + cls + '" data-photo-id="' + it.photo_id + '" data-pred-id="' + it.id + '"' +
       ' onmousedown="grmCardMouseDown(event)"' +
       ' onclick="grmCardClick(event, ' + it.photo_id + ')"' +
       ' ondblclick="grmCardDblClick(event)">' +
-      '<img src="/thumbnails/' + it.photo_id + '.jpg" loading="lazy" draggable="false">' +
+      '<img src="' + src + '" loading="lazy" draggable="false">' +
       '<div class="grm-card-info">' +
         '<div class="grm-card-species">' + escapeHtml(it.species || '') + ' <span style="font-weight:400;color:var(--text-dim,#888);">' + confPct + '%</span></div>' +
         '<div class="grm-card-scores">Q: <span class="score-val">' + qScore + '</span> S: <span class="score-val">' + sharp + '</span></div>' +
@@ -1304,7 +1311,7 @@ function renderGroupModal() {
   document.querySelectorAll('.grm-card').forEach(function(card) {
     _grmUpdateIndicator(card);
   });
-  if (_grmLoupeLocked && _grmLoupeLastX !== null) {
+  if (_grmLoupeLocked) {
     _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
   }
   grmRefreshResetAllVisibility();
@@ -1364,10 +1371,62 @@ var _grmLoupeLocked = false;
 var _grmOffsets = {};
 var _grmDragging = null;
 var _grmSuppressNextClick = false;
-// Latest cursor position over the loupe image, used to re-apply transforms
-// during a drag even though the cursor is no longer on the loupe.
-var _grmLoupeLastX = null;
-var _grmLoupeLastY = null;
+// Latest cursor position over the loupe image (in %), used as the transform
+// origin when zoom is applied outside a mouse event (e.g. wheel after drag,
+// 1:1 snap, drag-induced re-apply). Initialized to centre so pre-hover zoom
+// actions still render sensibly.
+var _grmLoupeLastX = 50;
+var _grmLoupeLastY = 50;
+
+function _grmUpgradeStripToOriginal() {
+  // Swap every strip card from the 400px thumbnail to the full-resolution
+  // original so zoom actually reveals sensor detail. Idempotent per modal open.
+  if (grmState.upgraded) return;
+  grmState.upgraded = true;
+  document.querySelectorAll('.grm-card').forEach(function(card) {
+    var pid = card.getAttribute('data-photo-id');
+    var img = card.querySelector('img');
+    if (pid && img) img.src = '/photos/' + pid + '/original';
+  });
+}
+
+function _grmOneToOneScale() {
+  // Cards use object-fit: cover in a 3:2 box, so the on-screen base scale is
+  // max(boxW/imgW, boxH/imgH). The CSS transform factor that makes one source
+  // pixel equal one screen pixel is the inverse: min(imgW/boxW, imgH/boxH).
+  // Using width only would overshoot for images wider than 3:2 and undershoot
+  // for taller ones — misleading pixel detail either way.
+  var item = grmState.items.find(function(it) { return it.photo_id === grmState.selected; });
+  if (!item || !item.width || !item.height) return null;
+  // Prefer the selected photo's img so naturalWidth/Height (if loaded) reflect
+  // the axes the browser actually paints.
+  var sample = document.querySelector('.grm-card[data-photo-id="' + grmState.selected + '"] img')
+             || document.querySelector('.grm-card img');
+  if (!sample || !sample.offsetWidth || !sample.offsetHeight) return null;
+  // Stored item.width/height are pre-EXIF-orientation (same as in
+  // _lbRecomputeNativeZoom). For 90°-rotated JPEGs the browser swaps axes on
+  // render, so comparing stored aspect against the loaded image's aspect tells
+  // us whether to swap the stored dims before computing the 1:1 factor.
+  var imgW = item.width, imgH = item.height;
+  if (sample.naturalWidth && sample.naturalHeight) {
+    var storedAspect = item.width / item.height;
+    var renderedAspect = sample.naturalWidth / sample.naturalHeight;
+    if (Math.abs(storedAspect - renderedAspect) > Math.abs((1 / storedAspect) - renderedAspect)) {
+      imgW = item.height;
+      imgH = item.width;
+    }
+  }
+  return Math.min(imgW / sample.offsetWidth, imgH / sample.offsetHeight);
+}
+
+function _grmMaxZoom() {
+  // Per selected photo, cap at the factor that reaches true 1:1. Falls back to
+  // 12 (the historical cap) when dimensions are unknown so we never zoom less
+  // than before.
+  var factor = _grmOneToOneScale();
+  if (factor == null) return 12;
+  return Math.max(12, Math.ceil(factor));
+}
 
 function grmLoupeToggleLock(e) {
   _grmLoupeLocked = !_grmLoupeLocked;
@@ -1396,6 +1455,9 @@ function grmLoupeMove(e) {
   document.getElementById('grmCrosshairH').style.top = y + '%';
   document.getElementById('grmCrosshairV').style.left = x + '%';
 
+  // No upgrade here: plain hover shouldn't trigger a burst of full-res fetches
+  // for every strip card. Upgrade only when the user expresses zoom intent via
+  // the wheel or the 1:1 snap key.
   _grmApplyAllCardTransforms(x, y);
 }
 
@@ -1421,16 +1483,29 @@ function _grmApplyCardTransform(card) {
 
 function grmLoupeZoom(e) {
   e.preventDefault();
+  var max = _grmMaxZoom();
   if (e.deltaY < 0) {
-    _grmZoomLevel = Math.min(12, _grmZoomLevel + 1);
+    _grmZoomLevel = Math.min(max, _grmZoomLevel + 1);
   } else {
     _grmZoomLevel = Math.max(1, _grmZoomLevel - 1);
   }
-  // Re-trigger the move to update zoom (even if locked)
-  var wasLocked = _grmLoupeLocked;
-  _grmLoupeLocked = false;
-  grmLoupeMove(e);
-  _grmLoupeLocked = wasLocked;
+  _grmUpgradeStripToOriginal();
+  // Update origin from the wheel event even when locked so zoom follows cursor.
+  var rect = e.currentTarget.getBoundingClientRect();
+  _grmLoupeLastX = ((e.clientX - rect.left) / rect.width) * 100;
+  _grmLoupeLastY = ((e.clientY - rect.top) / rect.height) * 100;
+  document.getElementById('grmCrosshairH').style.top = _grmLoupeLastY + '%';
+  document.getElementById('grmCrosshairV').style.left = _grmLoupeLastX + '%';
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
+}
+
+function grmSnapOneToOne() {
+  // Lightroom-style 1:1: zoom factor that makes one source pixel == one screen pixel.
+  var factor = _grmOneToOneScale();
+  if (factor == null) return;
+  _grmUpgradeStripToOriginal();
+  _grmZoomLevel = Math.max(1, Math.round(factor));
+  _grmApplyAllCardTransforms(_grmLoupeLastX, _grmLoupeLastY);
 }
 
 function grmLoupeReset() {
@@ -1675,6 +1750,7 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+  if (e.key === '1') { grmSnapOneToOne(); e.preventDefault(); return; }
 });
 
 </script>
@@ -1716,7 +1792,7 @@ document.addEventListener('keydown', function(e) {
     <label style="font-size:12px;color:var(--text-muted,#888);">Consensus species:</label>
     <input type="text" id="grmSpecies" style="background:var(--bg-input,#14374E);color:var(--text-primary,#E0F0F0);border:1px solid var(--border-secondary,#1A4560);border-radius:4px;padding:6px 10px;font-size:13px;width:200px;">
     <button onclick="grmRemoveFromGroup()" style="background:var(--bg-tertiary,#14374E);color:var(--text-muted,#888);border:none;border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">Remove from group</button>
-    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
+    <span class="grm-hint">↑↓ move zone &nbsp; ←→ navigate &nbsp; Space = unsort &nbsp; Del = remove &nbsp; 1 = 1:1 zoom &nbsp; Click preview to lock/unlock zoom &nbsp; Drag a thumbnail to pan it; double-click to reset</span>
     <button onclick="grmApply()" class="btn-batch-accept" style="margin-left:auto;padding:8px 20px;border:none;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;">Apply & Close</button>
   </div>
 </div>

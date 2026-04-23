@@ -3593,7 +3593,7 @@ class Database:
             """SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence, p.filename, p.timestamp, p.sharpness,
                       p.quality_score, p.subject_sharpness, p.subject_size,
-                      p.rating, p.flag
+                      p.rating, p.flag, p.width, p.height
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
