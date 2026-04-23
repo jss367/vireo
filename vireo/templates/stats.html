@@ -31,6 +31,26 @@ body { padding-bottom: 36px; }
 .hour-bar .bar-fill { background: #a78bfa; }
 .quality-bar .bar-fill { background: #f97316; }
 .pred-bar .bar-fill { background: #38bdf8; }
+.cov-bar .bar-fill { background: var(--accent); }
+.cov-bar .bar-label { width: 160px; }
+.cov-pct { width: 44px; color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; text-align: right; }
+.cov-count { width: 110px; color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 11px; }
+.folder-row { padding: 8px 0; border-bottom: 1px solid var(--border-primary); font-size: 12px; }
+.folder-row .fpath {
+  color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; margin-right: 12px;
+}
+.folder-row .fcount { color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.folder-row .fhead { display: flex; align-items: center; margin-bottom: 6px; cursor: pointer; }
+.folder-row .fchevron { color: var(--text-ghost); margin-right: 4px; font-size: 10px; width: 10px; display: inline-block; }
+.folder-cov-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 16px; padding: 4px 0 2px 14px;
+}
+.folder-cov-grid .bar-row { margin-bottom: 2px; font-size: 11px; }
+.folder-cov-grid .bar-label { width: 110px; }
+.folder-cov-grid .bar-track { height: 10px; }
+.folder-cov-grid .cov-pct { width: 38px; font-size: 11px; }
 
 .grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 @media (max-width: 768px) { .grid-2col { grid-template-columns: 1fr; } }
@@ -130,6 +150,15 @@ body { padding-bottom: 36px; }
     <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
   </div>
 
+  <!-- Processing Coverage -->
+  <div class="section">
+    <div class="section-title">Processing Coverage</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+      How much of this workspace has gone through each pipeline stage.
+    </div>
+    <div id="coverageChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
+  </div>
+
   <!-- Top Species -->
   <div class="section">
     <div class="section-title">Top Species</div>
@@ -219,6 +248,81 @@ body { padding-bottom: 36px; }
 loadStats();
 loadStoragePanel();
 loadDashboard();
+loadCoverage();
+
+// Order matches the pipeline roughly: ingest → metadata → pixel ops → AI → review.
+var COVERAGE_FIELDS = [
+  {key: 'timestamp',         label: 'EXIF timestamp'},
+  {key: 'exif',              label: 'EXIF data'},
+  {key: 'gps',               label: 'GPS coordinates'},
+  {key: 'file_hash',         label: 'File hash (SHA-256)'},
+  {key: 'phash',             label: 'Perceptual hash'},
+  {key: 'thumbnail',         label: 'Thumbnail'},
+  {key: 'working_copy',      label: 'Working copy (JPG)'},
+  {key: 'detected',          label: 'Subject detection'},
+  {key: 'mask',              label: 'Subject mask'},
+  {key: 'subject_sharpness', label: 'Subject sharpness'},
+  {key: 'bg_sharpness',      label: 'Background sharpness'},
+  {key: 'eye',               label: 'Eye detection'},
+  {key: 'quality',           label: 'Quality score'},
+  {key: 'dino_embedding',    label: 'DINO embedding'},
+  {key: 'label_embedding',   label: 'Label embedding'},
+  {key: 'classified',        label: 'Classification'},
+  {key: 'burst',             label: 'Burst grouping'},
+  {key: 'rating',            label: 'Rated (\u2605+)'},
+];
+
+var _coverageFolders = null;
+
+async function loadCoverage() {
+  var container = document.getElementById('coverageChart');
+  try {
+    var data = await safeFetch('/api/coverage', {}, { toast: false });
+    _coverageFolders = data.folders || [];
+    renderCoverage(container, data.overall || {total: 0});
+  } catch(e) {
+    container.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load coverage.</span>';
+  }
+}
+
+function renderCoverage(container, stats) {
+  var total = stats.total || 0;
+  if (total === 0) {
+    container.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No photos in this workspace.</span>';
+    return;
+  }
+  var html = '';
+  COVERAGE_FIELDS.forEach(function(f) {
+    var count = stats[f.key] || 0;
+    var pct = Math.round((count / total) * 100);
+    html += '<div class="bar-row cov-bar">' +
+      '<span class="bar-label">' + f.label + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="cov-pct">' + pct + '%</span>' +
+      '<span class="cov-count">' + count.toLocaleString() + ' / ' + total.toLocaleString() + '</span>' +
+    '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function renderFolderCoverage(folder) {
+  var total = folder.total || 0;
+  if (total === 0) {
+    return '<div style="padding:4px 0 6px 14px;font-size:11px;color:var(--text-ghost);">No photos in this folder.</div>';
+  }
+  var html = '<div class="folder-cov-grid">';
+  COVERAGE_FIELDS.forEach(function(f) {
+    var count = folder[f.key] || 0;
+    var pct = Math.round((count / total) * 100);
+    html += '<div class="bar-row cov-bar">' +
+      '<span class="bar-label" title="' + f.label + ' \u2014 ' + count.toLocaleString() + ' / ' + total.toLocaleString() + '">' + f.label + '</span>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="cov-pct">' + pct + '%</span>' +
+    '</div>';
+  });
+  html += '</div>';
+  return html;
+}
 
 async function loadStats() {
   try {
@@ -477,27 +581,42 @@ async function toggleFolderDetail() {
   panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">Loading...</span>';
   folderOpen = true;
   try {
-    var folders = await safeFetch('/api/folders', {}, { toast: false });
-    if (folders.length === 0) {
-      panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders scanned yet.</span>';
-      return;
+    // Coverage endpoint already carries per-folder totals + stage counts, so
+    // we don't need a separate /api/folders fetch here.
+    if (_coverageFolders === null) {
+      var data = await safeFetch('/api/coverage', {}, { toast: false });
+      _coverageFolders = data.folders || [];
     }
-    var html = '';
-    folders.forEach(function(f) {
-      if (f.photo_count === 0) return;
-      html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-primary);font-size:12px;">' +
-        '<span style="color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-right:12px;" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.path) + '</span>' +
-        '<span style="color:var(--text-dim);font-variant-numeric:tabular-nums;flex-shrink:0;">' + f.photo_count.toLocaleString() + ' photos</span>' +
-      '</div>';
-    });
-    if (!html) {
+    var folders = (_coverageFolders || []).filter(function(f) { return (f.total || 0) > 0; });
+    if (folders.length === 0) {
       panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">No folders with photos.</span>';
       return;
     }
+    var html = '';
+    folders.forEach(function(f, i) {
+      var fid = 'fcov_' + i;
+      html += '<div class="folder-row">' +
+        '<div class="fhead" onclick="toggleFolderCov(\'' + fid + '\', this)">' +
+          '<span class="fchevron">\u25B8</span>' +
+          '<span class="fpath" title="' + escapeHtml(f.path) + '">' + escapeHtml(f.path) + '</span>' +
+          '<span class="fcount">' + (f.total || 0).toLocaleString() + ' photos</span>' +
+        '</div>' +
+        '<div id="' + fid + '" style="display:none;">' + renderFolderCoverage(f) + '</div>' +
+      '</div>';
+    });
     panel.innerHTML = html;
   } catch(e) {
     panel.innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load folders.</span>';
   }
+}
+
+function toggleFolderCov(id, head) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var open = el.style.display !== 'none';
+  el.style.display = open ? 'none' : 'block';
+  var chevron = head.querySelector('.fchevron');
+  if (chevron) chevron.textContent = open ? '\u25B8' : '\u25BE';
 }
 
 var pendingOpen = false;
