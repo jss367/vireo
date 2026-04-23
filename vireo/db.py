@@ -1134,6 +1134,19 @@ class Database:
         ).fetchall()
         return [r["id"] for r in rows]
 
+    def get_folder(self, folder_id):
+        """Return a single folder row by id, or None if not found.
+
+        Not scoped to the active workspace — callers that need workspace
+        scoping should additionally verify membership via
+        ``workspace_folders``.
+        """
+        return self.conn.execute(
+            "SELECT id, path, name, parent_id, status, photo_count "
+            "FROM folders WHERE id = ?",
+            (folder_id,),
+        ).fetchone()
+
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 

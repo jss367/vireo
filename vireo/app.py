@@ -4680,32 +4680,16 @@ def create_app(db_path, thumb_cache_dir=None):
 
     # -- Job API routes --
 
-    @app.route("/api/jobs/scan", methods=["POST"])
-    def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+    def _build_scan_work(root, incremental, active_ws):
+        """Build the background work function for a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
-        import tempfile
-
+        Shared by ``POST /api/jobs/scan`` and
+        ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
+        same scan + thumbnail pipeline as a full scan.
+        """
         import config as cfg
 
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
-
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from scanner import scan as do_scan
@@ -4813,8 +4797,70 @@ def create_app(db_path, thumb_cache_dir=None):
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
+        return work
+
+    @app.route("/api/jobs/scan", methods=["POST"])
+    def api_job_scan():
+        body = request.get_json(silent=True) or {}
+        root = body.get("root", "")
+        incremental = body.get("incremental", False)
+        if not root:
+            return json_error("root path required")
+        if not os.path.isdir(root):
+            return json_error(f"directory not found: {root}")
+
+        # Remember this scan root (skip temp directories from tests)
+        import tempfile
+
+        import config as cfg
+
+        tmp_prefix = os.path.realpath(tempfile.gettempdir())
+        if not os.path.realpath(root).startswith(tmp_prefix):
+            user_cfg = cfg.load()
+            roots = user_cfg.get("scan_roots", [])
+            if root not in roots:
+                roots.insert(0, root)
+                user_cfg["scan_roots"] = roots
+                cfg.save(user_cfg)
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        work = _build_scan_work(root, incremental, active_ws)
+
         job_id = runner.start(
             "scan", work, config={"root": root, "incremental": incremental},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
+    def api_folder_rescan(folder_id):
+        """Queue a scan job scoped to the given folder's path.
+
+        Body (optional): {"incremental": bool}
+        Returns: {"job_id": "scan-..."} on success; 404 if the folder id
+        is unknown.
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = bool(body.get("incremental", False))
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        root = folder["path"]
+        active_ws = db._active_workspace_id
+        runner = app._job_runner
+
+        work = _build_scan_work(root, incremental, active_ws)
+
+        job_id = runner.start(
+            "scan", work,
+            config={
+                "root": root,
+                "incremental": incremental,
+                "folder_id": folder_id,
+            },
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
