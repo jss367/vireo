@@ -966,7 +966,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         the first model) and the classify stage (for each subsequent model in
         a multi-model run).
         """
-        from classify_job import _load_labels
+        from classify_job import (
+            _load_labels,
+            _record_labels_fingerprint,
+            _resolve_label_sources,
+        )
+        from labels_fingerprint import compute_fingerprint
         from models import _classify_model_state
 
         model_str = active_model["model_str"]
@@ -982,6 +987,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             labels_files=params.labels_files,
             db=thread_db,
         )
+        # Compute a content-addressable fingerprint for the active label set
+        # and record it in the labels_fingerprints sidecar. Kept on the bundle
+        # so classify_stage can pass it to record_classifier_run for each
+        # (detection, model, fingerprint) triple.
+        fp = compute_fingerprint(labels)
+        label_sources = _resolve_label_sources(params, thread_db)
+        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
 
         # Preflight: validate the on-disk model before handing it to
         # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
@@ -1110,6 +1122,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             "model_name": model_name,
             "model_str": model_str,
             "labels": labels,
+            "labels_fingerprint": fp,
             "use_tol": use_tol,
             "active_model": active_model,
         }

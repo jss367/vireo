@@ -160,6 +160,34 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     return labels, use_tol
 
 
+def _record_labels_fingerprint(db, fingerprint, labels, sources):
+    """Populate the labels_fingerprints sidecar. Cosmetic — powers UX lookups."""
+    display = ", ".join(os.path.basename(s) for s in (sources or [])) or None
+    db.upsert_labels_fingerprint(
+        fingerprint=fingerprint,
+        display_name=display,
+        sources=sources,
+        label_count=len(labels or []),
+    )
+
+
+def _resolve_label_sources(params, db):
+    """Return list of source file paths used to build the active label set.
+
+    Mirrors the lookup order in _load_labels — but only produces the source
+    paths so the caller can stash them on the labels_fingerprints row.
+    """
+    if params.labels_files and isinstance(params.labels_files, list):
+        return list(params.labels_files)
+    if params.labels_file:
+        return [params.labels_file]
+    ws_labels = db.get_workspace_active_labels() if db else None
+    if ws_labels is not None:
+        return list(ws_labels)
+    active_sets = get_active_labels()
+    return [s.get("labels_file") for s in (active_sets or []) if s.get("labels_file")]
+
+
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
                    cached_detections=None):
@@ -1061,6 +1089,14 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             labels_files=params.labels_files,
             db=thread_db,
         )
+        # Compute a content-addressable fingerprint for the active label set.
+        # Kept in scope so downstream classifier_runs writes can record the
+        # exact (classifier_model, labels_fingerprint) that produced a result.
+        from labels_fingerprint import compute_fingerprint
+        fp = compute_fingerprint(labels)
+        label_sources = _resolve_label_sources(params, thread_db)
+        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
+
         tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
         labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
         runner.update_step(

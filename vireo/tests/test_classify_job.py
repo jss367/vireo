@@ -575,6 +575,39 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
 
+def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
+    """When a classifier runs, the labels fingerprint is upserted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+
+    from labels_fingerprint import compute_fingerprint
+    labels = ["Robin", "Sparrow"]
+    expected_fp = compute_fingerprint(labels)
+
+    import classify_job
+    classify_job._record_labels_fingerprint(
+        db, fingerprint=expected_fp, labels=labels,
+        sources=["/tmp/active.txt"],
+    )
+    row = db.conn.execute(
+        "SELECT display_name, label_count FROM labels_fingerprints WHERE fingerprint=?",
+        (expected_fp,),
+    ).fetchone()
+    assert row["label_count"] == 2
+
+
 def test_classify_photos_iterates_over_detections(tmp_path):
     """_classify_photos should classify each detection independently."""
     from unittest.mock import MagicMock, patch
