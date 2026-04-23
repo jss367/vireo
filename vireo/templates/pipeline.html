@@ -277,6 +277,7 @@ body { padding-bottom: 36px; }
 .folder-browser-breadcrumb span.current:hover { text-decoration: none; }
 .folder-browser-list {
   flex: 1; overflow-y: auto; padding: 4px 0; min-height: 200px;
+  user-select: none;
 }
 .folder-browser-item {
   display: flex; align-items: center; gap: 8px;
@@ -2961,13 +2962,22 @@ function updateCardStates() {
 
 async function browseForFolder() {
   if (typeof pickDirectory === 'function') {
-    var path = await pickDirectory('Select photo folder');
-    if (path && _sourceFolders.indexOf(path) === -1) {
-      _sourceFolders.push(path);
-      markFolderPreviewStale();
-      renderSourceFolders();
-      updateStartButton();
-      fetchFolderPreview();
+    var result = await pickDirectory('Select photo folders', { multiple: true });
+    if (result) {
+      var paths = Array.isArray(result) ? result : [result];
+      var added = false;
+      for (var i = 0; i < paths.length; i++) {
+        if (paths[i] && _sourceFolders.indexOf(paths[i]) === -1) {
+          _sourceFolders.push(paths[i]);
+          added = true;
+        }
+      }
+      if (added) {
+        markFolderPreviewStale();
+        renderSourceFolders();
+        updateStartButton();
+        fetchFolderPreview();
+      }
       return;
     }
   }
@@ -2990,6 +3000,8 @@ async function browseForDestination() {
 // ---------- Folder Browser ----------
 var _fbCurrentPath = '';
 var _fbSelectedDir = '';
+var _fbSelectedDirs = []; // source mode: all selected paths; destination mode: at most one
+var _fbSelectAnchorPath = ''; // source mode: anchor for shift-click range selection
 var _fbMode = 'destination'; // 'source' or 'destination'
 var _fbCountsAbort = null;
 var _fbCountCache = {}; // key: "path|ext1,ext2" -> count (session-scoped)
@@ -2997,7 +3009,7 @@ var _fbBrowseToken = 0; // incremented on every browseTo to stamp stale response
 
 function openFolderBrowser(mode) {
   _fbMode = mode || 'destination';
-  document.getElementById('fbTitle').textContent = _fbMode === 'source' ? 'Select Source Folder' : 'Select Destination Folder';
+  document.getElementById('fbTitle').textContent = _fbMode === 'source' ? 'Select Source Folders' : 'Select Destination Folder';
   var overlay = document.getElementById('folderBrowserOverlay');
   overlay.classList.add('active');
   document.body.style.overflow = 'hidden';
@@ -3032,7 +3044,10 @@ function browseTo(path) {
   var listEl = document.getElementById('fbList');
   listEl.innerHTML = '<div class="folder-browser-loading">Loading\u2026</div>';
   _fbSelectedDir = '';
+  _fbSelectedDirs = [];
+  _fbSelectAnchorPath = '';
   document.getElementById('fbSelectedPath').textContent = '';
+  updateFbSelectButtonLabel();
   cancelNewFolder();
   // Invalidate any in-flight photo-count request so its results don't
   // land in a now-stale list.
@@ -3055,8 +3070,15 @@ function browseTo(path) {
   }).then(function(data) {
     _fbCurrentPath = data.path;
     if (!path) _fbHomePath = data.path;
+    // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
+    // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
+    // so the first cmd/shift-click starts from a clean slate instead of
+    // silently including the unhighlighted parent folder.
     _fbSelectedDir = data.path;
+    _fbSelectedDirs = [];
+    _fbSelectAnchorPath = '';
     document.getElementById('fbSelectedPath').textContent = data.path;
+    updateFbSelectButtonLabel();
     renderBreadcrumb(data.path);
     renderFolderList(data.dirs);
   }).catch(function(err) {
@@ -3103,20 +3125,71 @@ function renderFolderList(dirs) {
   if (_fbMode === 'source') {
     fetchFolderCounts(dirs.map(function(d) { return d.path; }));
   }
-  // Event delegation: click to select, double-click to drill in
+  // Event delegation: click to select, double-click to drill in.
+  // In source mode, shift-click extends a range and cmd/ctrl-click toggles.
   listEl.onclick = function(e) {
     var item = e.target.closest('.folder-browser-item');
     if (!item) return;
     var items = listEl.querySelectorAll('.folder-browser-item');
-    for (var i = 0; i < items.length; i++) items[i].classList.remove('selected');
-    item.classList.add('selected');
-    _fbSelectedDir = item.getAttribute('data-path');
-    document.getElementById('fbSelectedPath').textContent = _fbSelectedDir;
+    var path = item.getAttribute('data-path');
+    var isSource = _fbMode === 'source';
+    var shift = isSource && e.shiftKey;
+    var toggle = isSource && (e.metaKey || e.ctrlKey);
+
+    if (shift && _fbSelectAnchorPath) {
+      var anchorIdx = -1, clickIdx = -1;
+      for (var i = 0; i < items.length; i++) {
+        var p = items[i].getAttribute('data-path');
+        if (p === _fbSelectAnchorPath) anchorIdx = i;
+        if (p === path) clickIdx = i;
+      }
+      if (anchorIdx === -1) anchorIdx = clickIdx;
+      var lo = Math.min(anchorIdx, clickIdx);
+      var hi = Math.max(anchorIdx, clickIdx);
+      _fbSelectedDirs = [];
+      for (var j = lo; j <= hi; j++) {
+        _fbSelectedDirs.push(items[j].getAttribute('data-path'));
+      }
+    } else if (toggle) {
+      var idx = _fbSelectedDirs.indexOf(path);
+      if (idx === -1) _fbSelectedDirs.push(path);
+      else _fbSelectedDirs.splice(idx, 1);
+      _fbSelectAnchorPath = path;
+    } else {
+      _fbSelectedDirs = [path];
+      _fbSelectAnchorPath = path;
+    }
+
+    var sel = {};
+    for (var k = 0; k < _fbSelectedDirs.length; k++) sel[_fbSelectedDirs[k]] = true;
+    for (var m = 0; m < items.length; m++) {
+      if (sel[items[m].getAttribute('data-path')]) items[m].classList.add('selected');
+      else items[m].classList.remove('selected');
+    }
+
+    _fbSelectedDir = _fbSelectedDirs.length ? _fbSelectedDirs[_fbSelectedDirs.length - 1] : '';
+    var label = document.getElementById('fbSelectedPath');
+    if (_fbMode === 'source' && _fbSelectedDirs.length > 1) {
+      label.textContent = _fbSelectedDirs.length + ' folders selected';
+    } else {
+      label.textContent = _fbSelectedDir;
+    }
+    updateFbSelectButtonLabel();
   };
   listEl.ondblclick = function(e) {
     var item = e.target.closest('.folder-browser-item');
     if (item) browseTo(item.getAttribute('data-path'));
   };
+}
+
+function updateFbSelectButtonLabel() {
+  var btn = document.getElementById('fbSelectBtn');
+  if (!btn) return;
+  if (_fbMode === 'source' && _fbSelectedDirs.length > 1) {
+    btn.textContent = 'Select ' + _fbSelectedDirs.length + ' folders';
+  } else {
+    btn.textContent = 'Select';
+  }
 }
 
 function applyCount(path, count) {
@@ -3174,14 +3247,22 @@ function fetchFolderCounts(paths) {
 }
 
 function selectFolder() {
-  if (!_fbSelectedDir) return;
   if (_fbMode === 'source') {
-    if (_sourceFolders.indexOf(_fbSelectedDir) === -1) {
-      _sourceFolders.push(_fbSelectedDir);
+    var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
+    if (!picks.length) return;
+    var added = false;
+    for (var i = 0; i < picks.length; i++) {
+      if (_sourceFolders.indexOf(picks[i]) === -1) {
+        _sourceFolders.push(picks[i]);
+        added = true;
+      }
+    }
+    if (added) {
       markFolderPreviewStale();
       renderSourceFolders();
     }
   } else {
+    if (!_fbSelectedDir) return;
     document.getElementById('cfgDestination').value = _fbSelectedDir;
     markFolderPreviewStale();
   }
