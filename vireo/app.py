@@ -860,6 +860,24 @@ def create_app(db_path, thumb_cache_dir=None):
             "missing": [dict(f) for f in missing],
         })
 
+    @app.route("/api/folders/<int:folder_id>", methods=["GET"])
+    def api_folder_get(folder_id):
+        """Return a single folder's id, name, and path.
+
+        Powers the folder-tree context menu's "Copy Path" action. A lean
+        response on purpose: callers that want the richer tree data already
+        have /api/folders for that.
+        """
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        return jsonify({
+            "id": folder["id"],
+            "name": folder["name"],
+            "path": folder["path"],
+        })
+
     @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
     def api_folder_relocate(folder_id):
         db = _get_db()
@@ -1241,42 +1259,83 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/files/reveal", methods=["POST"])
     def api_files_reveal():
-        """Reveal a photo in the OS file manager (Finder / Explorer / xdg-open).
+        """Reveal a photo or folder in the OS file manager.
 
-        Body: {"photo_id": <int>}
-        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if the
-        subprocess failed to launch; 404 if the photo id is unknown; 400 if
-        photo_id is missing from the body.
+        Body: {"photo_id": <int>} OR {"folder_id": <int>}
+
+        Photo reveals select the file in its parent directory (macOS ``open
+        -R``, Windows ``explorer /select,``, Linux ``xdg-open <parent dir>``).
+        Folder reveals open the folder itself (macOS ``open -R <dir>``,
+        Windows ``explorer <dir>``, Linux ``xdg-open <dir>``) — this differs
+        from the photo case on Windows where we deliberately skip ``/select,``
+        so the user sees the folder's contents rather than its parent.
+
+        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if
+        the subprocess failed to launch; 404 if the id is unknown; 400 if
+        neither id was provided or either is malformed.
         """
         body = request.get_json(silent=True) or {}
-        pid = body.get("photo_id")
-        if pid is None:
-            return json_error("photo_id required")
-        try:
-            pid_int = int(pid)
-        except (TypeError, ValueError):
-            return json_error("photo_id must be an integer")
+        pid_raw = body.get("photo_id")
+        fid_raw = body.get("folder_id")
+
+        if pid_raw is None and fid_raw is None:
+            return json_error("photo_id or folder_id required")
+
         db = _get_db()
-        photo = db.get_photo(pid_int)
-        if not photo:
-            return json_error("photo not found", 404)
-        folder_row = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
-        ).fetchone()
-        folder_path = folder_row["path"] if folder_row else ""
-        if not folder_path or not photo["filename"]:
-            return jsonify({"ok": False, "reason": "no path"})
-        path = os.path.join(folder_path, photo["filename"])
+        is_folder = False
+        path = ""
+
+        if pid_raw is not None:
+            try:
+                pid_int = int(pid_raw)
+            except (TypeError, ValueError):
+                return json_error("photo_id must be an integer")
+            photo = db.get_photo(pid_int)
+            if not photo:
+                return json_error("photo not found", 404)
+            folder_row = db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            folder_path = folder_row["path"] if folder_row else ""
+            if not folder_path or not photo["filename"]:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = os.path.join(folder_path, photo["filename"])
+        else:
+            try:
+                fid_int = int(fid_raw)
+            except (TypeError, ValueError):
+                return json_error("folder_id must be an integer")
+            folder = db.get_folder(fid_int)
+            if not folder:
+                return json_error("folder not found", 404)
+            folder_path = folder["path"]
+            if not folder_path:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = folder_path
+            is_folder = True
+
         try:
             if sys.platform == "darwin":
+                # "open -R <dir>" reveals the folder inside its parent; that's
+                # the right behavior for folder reveals too, consistent with
+                # how Finder treats folder-targeted reveal.
                 subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
             elif sys.platform.startswith("win"):
-                subprocess.run(
-                    ["explorer", f"/select,{path}"], timeout=5, check=False
-                )
+                if is_folder:
+                    # Open the folder itself so the user sees its contents.
+                    subprocess.run(["explorer", path], timeout=5, check=False)
+                else:
+                    subprocess.run(
+                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    )
             else:
-                parent = os.path.dirname(path) or path
-                subprocess.run(["xdg-open", "--", parent], timeout=5, check=False)
+                # xdg-open on a file has inconsistent behavior across desktops
+                # (some open the image viewer, not the file manager), so for
+                # photo reveals we open the parent directory instead. Passing
+                # a directory to xdg-open opens the folder in the file manager,
+                # which is exactly what we want for folder reveals.
+                target = path if is_folder else (os.path.dirname(path) or path)
+                subprocess.run(["xdg-open", "--", target], timeout=5, check=False)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})

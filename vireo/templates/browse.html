@@ -3044,6 +3044,56 @@ document.addEventListener('contextmenu', function(e) {
   openContextMenu(e, buildPhotoContextMenu(ids));
 });
 
+/* ---------- Folder tree context menu ---------- */
+function revealFolder(fid) {
+  // Fire-and-forget: user-visible feedback is the OS file manager opening.
+  // Server logs any failure via the reason field on the response body.
+  fetch('/api/files/reveal', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_id: fid}),
+  }).catch(function(err) { console.error('revealFolder failed', err); });
+}
+
+async function copyFolderPath(fid) {
+  try {
+    var resp = await fetch('/api/folders/' + fid);
+    if (!resp.ok) return;
+    var folder = await resp.json();
+    if (folder && folder.path) {
+      await navigator.clipboard.writeText(folder.path);
+    }
+  } catch (err) {
+    console.error('copyFolderPath failed', err);
+  }
+}
+
+function rescanFolder(fid) {
+  fetch('/api/folders/' + fid + '/rescan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  }).catch(function(err) { console.error('rescanFolder failed', err); });
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-folder-id]');
+  if (!ti) return;
+  // Don't fire if the right-click landed on another context menu.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  var fid = parseInt(ti.dataset.folderId, 10);
+  if (isNaN(fid)) return;
+  openContextMenu(e, [
+    { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
+    { separator: true },
+    { label: 'Reveal in Finder/Folder', onClick: function() { revealFolder(fid); } },
+    { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
+    { separator: true },
+    { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
+  ]);
+});
+
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
 (async function() {
   var params = new URLSearchParams(window.location.search);
