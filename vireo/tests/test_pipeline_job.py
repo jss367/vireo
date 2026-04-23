@@ -2159,6 +2159,120 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     )
 
 
+def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
+    """A photo with no animals, recorded in detector_runs, must not be
+    re-detected on a subsequent non-reclassify pipeline run.
+
+    Mirrors test_classify_job.test_detect_batch_skips_empty_photo_on_rerun
+    but drives through run_pipeline_job's detect_stage so we exercise the
+    pipeline's own already_detected seeding (which must use
+    get_detector_run_photo_ids, not the legacy get_existing_detection_photo_ids
+    shim that misses empty-scene photos).
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "empty.jpg")
+
+    # Simulate a prior run where MegaDetector scanned the photo and found
+    # NOTHING — there are no detection rows, but detector_runs records the
+    # scan so the next pipeline pass can skip re-invoking the detector.
+    db.save_detections(photo_id, [], detector_model="megadetector-v6")
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Remove the legacy shim so the pipeline must call
+    # get_detector_run_photo_ids directly. If pipeline still uses the
+    # legacy name (via getattr) it will fall through to the default
+    # `lambda: set()` and miss our empty-scene photo.
+    monkeypatch.delattr(Database, "get_existing_detection_photo_ids")
+
+    # Capture what already_detected_ids the pipeline passes to _detect_batch.
+    # If the pipeline seeds correctly from get_detector_run_photo_ids, our
+    # empty-scene photo will appear in already_detected_ids — meaning the
+    # real _detect_batch would skip re-invoking MegaDetector for it.
+    detect_calls = []
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        detect_calls.append({
+            "already_detected_ids": frozenset(already_detected_ids or set()),
+            "batch_ids": [p["id"] for p in batch],
+        })
+        # Simulate the real _detect_batch's skip behaviour: if the photo
+        # is already in already_detected_ids, don't re-"detect" it.
+        processed = {p["id"] for p in batch}
+        return {}, 0, processed
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    # Patch classify_stage's prediction-photo lookup so classify_stage
+    # doesn't trip on pre-existing schema issues in other migrations.
+    # (This test focuses narrowly on detect_stage's already_detected seed.)
+    monkeypatch.setattr(
+        Database, "get_existing_prediction_photo_ids",
+        lambda self, model_name: set(),
+    )
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        reclassify=False,  # non-reclassify: must honour detector_runs skip
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # classify_stage may still fail against pre-migration schema bits that
+    # this task doesn't own. We only need detect_stage to have run.
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert detect_calls, "expected detect_stage to call _detect_batch"
+    first_call = detect_calls[0]
+    assert photo_id in first_call["already_detected_ids"], (
+        f"Empty-scene photo {photo_id} was recorded in detector_runs but "
+        f"pipeline did not seed it into already_detected_ids "
+        f"(got {set(first_call['already_detected_ids'])!r}). "
+        f"detect_stage must seed from get_detector_run_photo_ids "
+        f"('megadetector-v6'), not the legacy "
+        f"get_existing_detection_photo_ids shim which misses empty-scene photos."
+    )
+
+
 def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
     tmp_path, monkeypatch
 ):

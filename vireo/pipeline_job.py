@@ -1283,8 +1283,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # history): start with an empty already_detected so EVERY photo
             # is re-detected; snapshot pre-run detection IDs so we can purge
             # them after this detect pass completes. On a non-reclassify run,
-            # pre-seed already_detected from the DB so _detect_batch reuses
-            # rows instead of re-invoking MegaDetector.
+            # pre-seed already_detected from detector_runs so _detect_batch
+            # reuses rows instead of re-invoking MegaDetector — including
+            # empty-scene photos (box_count=0) which would otherwise be
+            # re-detected forever by a legacy detections-only seed.
             if params.reclassify:
                 already_detected: set = set()
                 photo_ids_list = [p["id"] for p in photos]
@@ -1293,9 +1295,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 )(photo_ids_list)
             else:
                 already_detected = set(
-                    getattr(
-                        thread_db, "get_existing_detection_photo_ids", lambda: set()
-                    )()
+                    thread_db.get_detector_run_photo_ids("megadetector-v6")
                 )
                 pre_run_det_ids = {}
             detect_state["pre_run_det_ids"] = pre_run_det_ids
