@@ -497,3 +497,53 @@ def test_import_full_copy_false_still_scans_source_root(setup, tmp_path, monkeyp
     assert call["restrict_dirs"] is None, (
         f"copy=false must leave restrict_dirs unset; got {call['restrict_dirs']!r}"
     )
+
+
+def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
+    """POST /api/jobs/pipeline should propagate source_snapshot_id from the
+    request body into the PipelineParams passed to run_pipeline_job."""
+    app, db_path = setup
+
+    # Create a snapshot in the active workspace so the request body references
+    # a real id (run_pipeline_job itself is spied — we only assert what gets
+    # passed to it).
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    # The handler does ``from pipeline_job import PipelineParams, run_pipeline_job``
+    # inside the request, so patching the attribute on the module swaps what
+    # the handler's local binding will see on next request.
+    import threading
+
+    import pipeline_job
+    captured = {}
+    called = threading.Event()
+    original = pipeline_job.run_pipeline_job
+
+    def spy_run(job, runner, db_path_arg, ws_id, params):
+        captured["source_snapshot_id"] = params.source_snapshot_id
+        called.set()
+
+    pipeline_job.run_pipeline_job = spy_run
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "source_snapshot_id": snap_id,
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, resp.get_json()
+
+        # JobRunner runs work() on a worker thread; wait briefly for spy to fire.
+        assert called.wait(timeout=5.0), "run_pipeline_job spy was not invoked"
+        assert captured["source_snapshot_id"] == snap_id
+    finally:
+        pipeline_job.run_pipeline_job = original

@@ -6641,9 +6641,10 @@ def create_app(db_path, thumb_cache_dir=None):
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
+        source_snapshot_id = body.get("source_snapshot_id")
 
-        if not source and not sources and not collection_id:
-            return json_error("source, sources, or collection_id required")
+        if not source and not sources and not collection_id and not source_snapshot_id:
+            return json_error("source, sources, collection_id, or source_snapshot_id required")
 
         # Validate all source directories exist
         if sources:
@@ -6667,6 +6668,7 @@ def create_app(db_path, thumb_cache_dir=None):
             collection_id=collection_id,
             source=source,
             sources=sources,
+            source_snapshot_id=source_snapshot_id,
             destination=destination,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
