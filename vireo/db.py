@@ -734,6 +734,31 @@ class Database:
             )
             self.conn.commit()
 
+        # Backfill prediction_review from legacy per-prediction review columns.
+        # Must run before the detections.workspace_id drop (Task 9) so we can route
+        # each prediction to the correct workspace.
+        pred_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(predictions)"
+        ).fetchall()}
+        review_exists = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM prediction_review"
+        ).fetchone()["n"]
+        if "status" in pred_cols and review_exists == 0:
+            self.conn.execute("""
+                INSERT OR IGNORE INTO prediction_review
+                    (prediction_id, workspace_id, status, reviewed_at,
+                     individual, group_id, vote_count, total_votes)
+                SELECT p.id, d.workspace_id,
+                       COALESCE(p.status, 'pending'),
+                       p.reviewed_at, p.individual, p.group_id,
+                       p.vote_count, p.total_votes
+                FROM predictions p
+                JOIN detections d ON d.id = p.detection_id
+                WHERE d.workspace_id IS NOT NULL
+                  AND COALESCE(p.status, 'pending') <> 'pending'
+            """)
+            self.conn.commit()
+
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")

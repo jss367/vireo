@@ -4011,3 +4011,58 @@ def test_migration_backfills_detector_runs(tmp_path):
     ).fetchone()
     assert run is not None
     assert run["box_count"] == 1
+
+
+def test_migration_backfills_prediction_review(tmp_path):
+    """Approved/rejected predictions get prediction_review rows in the right workspace."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT,
+            status TEXT DEFAULT 'pending', reviewed_at TEXT,
+            individual TEXT, group_id TEXT,
+            vote_count INTEGER, total_votes INTEGER,
+            created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1'),
+                   (200, 10, 2, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't2');
+        INSERT INTO predictions (id, detection_id, species, model, status, individual)
+            VALUES (1, 100, 'Robin', 'bioclip-2', 'approved', 'Ruby'),
+                   (2, 200, 'Robin', 'bioclip-2', 'rejected', NULL);
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    rows = db.conn.execute(
+        "SELECT prediction_id, workspace_id, status, individual "
+        "FROM prediction_review ORDER BY workspace_id"
+    ).fetchall()
+    # After Task 9 dedupes detections, both predictions point to the canonical
+    # detection, so we should have two review rows — one per workspace.
+    assert len(rows) == 2
+    ws_statuses = {r["workspace_id"]: (r["status"], r["individual"]) for r in rows}
+    assert ws_statuses[1] == ("approved", "Ruby")
+    assert ws_statuses[2] == ("rejected", None)
