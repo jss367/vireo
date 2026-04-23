@@ -2220,6 +2220,8 @@ function toggleLightboxZoom(e) {
   var DRAG_THRESHOLD = 5;
 
   document.addEventListener('mousedown', function(e) {
+    // Right-click (button 2) opens the context menu — never start a pan.
+    if (e.button !== 0) return;
     var wrap = document.getElementById('lightboxWrap');
     if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
@@ -2274,6 +2276,97 @@ function closeLightbox(e) {
   if (detContainer) detContainer.innerHTML = '';
   document.body.style.overflow = '';
 }
+
+/* ---------- Lightbox right-click context menu ----------
+ * The lightbox is shared across pages (browse, review, etc.), so the menu
+ * sits in _navbar.html alongside the overlay. Rating / color / flag / reveal
+ * helpers (`setRatingFor`, `setColorLabelFor`, `setFlagFor`, `findSimilar`,
+ * `openInEditor`, `revealPhoto`, `copyPhotoPaths`) are defined on pages that
+ * carry a photo grid (browse.html). On pages without those helpers, the
+ * corresponding menu items are omitted so clicking them can never throw.
+ */
+function buildLightboxContextMenu(pid) {
+  var has = function(name) { return typeof window[name] === 'function'; };
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() { if (has('setRatingFor')) window.setRatingFor(pid, n); },
+    };
+  };
+  var colorChip = function(c, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { if (has('setColorLabelFor')) window.setColorLabelFor(pid, c); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { if (has('setFlagFor')) window.setFlagFor(pid, f); },
+    };
+  };
+
+  var items = [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+    ] },
+    { chips: [
+      flagChip('flagged', '\u2691', 'Flag as pick'),
+      flagChip('rejected', '\u2715', 'Reject'),
+      flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+  ];
+
+  if (has('findSimilar')) {
+    items.push({ label: 'Find Similar',
+      onClick: function() { window.findSimilar(pid); } });
+  }
+  if (has('openInEditor')) {
+    items.push({ label: 'Open in Editor',
+      onClick: function() { window.openInEditor([pid]); } });
+  }
+  if (has('revealPhoto')) {
+    items.push({ label: 'Reveal in Finder/Folder',
+      onClick: function() { window.revealPhoto(pid); } });
+  }
+  if (has('copyPhotoPaths')) {
+    items.push({ label: 'Copy Path',
+      onClick: function() { window.copyPhotoPaths([pid]); } });
+  }
+
+  items.push({ separator: true });
+  items.push({ label: 'Close Lightbox',
+    onClick: function() { closeLightbox(); } });
+
+  return items;
+}
+
+(function() {
+  var img = document.getElementById('lightboxImg');
+  if (!img) return;
+  img.addEventListener('contextmenu', function(e) {
+    // Stop the event before the browser's native menu or the wrap's
+    // mousedown pan handler can react. (contextmenu fires after mousedown
+    // in Chromium; stopPropagation + preventDefault together keep our
+    // handler in full control.)
+    e.preventDefault();
+    e.stopPropagation();
+    // Mark so any click-listener that wakes up later can bail.
+    window._ctxMenuJustOpened = Date.now();
+    var pid = _lightboxCurrentId;
+    if (!pid) return;
+    openContextMenu(e, buildLightboxContextMenu(pid));
+  });
+})();
+
 /* ---------- Delete Confirmation ---------- */
 var _deletePhotoIds = [];
 var _deleteCallback = null;
