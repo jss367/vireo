@@ -4346,6 +4346,20 @@ class Database:
         )
         self.conn.commit()
 
+    def rename_collection(self, collection_id, new_name):
+        """Rename a collection within the active workspace.
+
+        Raises ``ValueError`` if the collection isn't in the active workspace.
+        """
+        ws = self._ws_id()
+        cur = self.conn.execute(
+            "UPDATE collections SET name = ? WHERE id = ? AND workspace_id = ?",
+            (new_name, collection_id, ws),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("collection not found")
+        self.conn.commit()
+
     def duplicate_collection(self, collection_id):
         """Copy a collection (name + rules) within the active workspace.
 

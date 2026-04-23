@@ -1172,7 +1172,7 @@ function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
     var count = c.photo_count != null ? c.photo_count : '';
-    html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
+    html += '<div class="tree-item" data-collection-id="' + c.id + '" onclick="filterByCollection(' + c.id + ')">' +
       '<span>' + escapeHtml(c.name) + '</span>' +
       '<span class="count">' + count + '</span></div>';
   });
@@ -1332,10 +1332,14 @@ async function loadCollectionCounts() {
     var countsById = {};
     data.forEach(function(c) { countsById[c.id] = c.photo_count; });
     items.forEach(function(el) {
-      var onclick = el.getAttribute('onclick') || '';
-      var m = onclick.match(/filterByCollection\((\d+)\)/);
-      if (m) {
-        var id = parseInt(m[1], 10);
+      var id = parseInt(el.dataset.collectionId, 10);
+      if (isNaN(id)) {
+        // Fallback for any stragglers without data-collection-id.
+        var onclick = el.getAttribute('onclick') || '';
+        var m = onclick.match(/filterByCollection\((\d+)\)/);
+        if (m) id = parseInt(m[1], 10);
+      }
+      if (!isNaN(id)) {
         var span = el.querySelector('.count');
         if (span && countsById[id] != null) span.textContent = countsById[id];
       }
@@ -3091,6 +3095,83 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
+  ]);
+});
+
+/* ---------- Collection sidebar context menu ---------- */
+async function renameCollection(cid, currentName) {
+  var next = window.prompt('Rename collection', currentName || '');
+  if (next === null) return;             // user cancelled
+  next = next.trim();
+  if (!next || next === currentName) return;
+  try {
+    await safeFetch('/api/collections/' + cid, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: next}),
+    });
+  } catch (err) {
+    console.error('renameCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function duplicateCollection(cid) {
+  try {
+    await safeFetch('/api/collections/' + cid + '/duplicate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+  } catch (err) {
+    console.error('duplicateCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function deleteCollectionById(cid, name) {
+  if (!window.confirm('Delete collection "' + (name || '') + '"?')) return;
+  try {
+    await safeFetch('/api/collections/' + cid, { method: 'DELETE' });
+  } catch (err) {
+    console.error('deleteCollectionById failed', err);
+    return;
+  }
+  // If we were filtering by the deleted collection, clear the filter.
+  if (activeCollectionId === cid) {
+    activeCollectionId = null;
+    resetAndLoad();
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-collection-id]');
+  if (!ti) return;
+  // Don't fire inside another menu, and don't collide with folder-tree delegate.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (ti.hasAttribute('data-folder-id')) return;
+  e.preventDefault();
+  var cid = parseInt(ti.dataset.collectionId, 10);
+  if (isNaN(cid)) return;
+  var nameEl = ti.querySelector('span');
+  var name = nameEl ? nameEl.textContent : '';
+  openContextMenu(e, [
+    { label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } },
+    { separator: true },
+    { label: 'Rename',
+      onClick: function() { renameCollection(cid, name); } },
+    { label: 'Duplicate',
+      onClick: function() { duplicateCollection(cid); } },
+    { separator: true },
+    { label: 'Delete Collection',
+      onClick: function() { deleteCollectionById(cid, name); } },
   ]);
 });
 

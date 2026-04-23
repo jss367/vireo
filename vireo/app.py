@@ -1786,6 +1786,20 @@ def create_app(db_path, thumb_cache_dir=None):
         db.delete_collection(collection_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
+    def api_update_collection(collection_id):
+        """Rename a collection. Body: {"name": "..."}."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return json_error("name required")
+        try:
+            db.rename_collection(collection_id, name)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True})
+
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
     def api_collection_add_photos(collection_id):
         """Add photos to a static collection by appending to its photo_ids rule."""
