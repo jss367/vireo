@@ -3063,8 +3063,12 @@ function browseTo(path) {
   }).then(function(data) {
     _fbCurrentPath = data.path;
     if (!path) _fbHomePath = data.path;
+    // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
+    // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
+    // so the first cmd/shift-click starts from a clean slate instead of
+    // silently including the unhighlighted parent folder.
     _fbSelectedDir = data.path;
-    _fbSelectedDirs = [data.path];
+    _fbSelectedDirs = [];
     _fbSelectAnchorPath = '';
     document.getElementById('fbSelectedPath').textContent = data.path;
     updateFbSelectButtonLabel();
