@@ -3078,7 +3078,7 @@ function rescanFolder(fid) {
   fetch('/api/folders/' + fid + '/rescan', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: '{}',
+    body: JSON.stringify({incremental: true}),
   }).catch(function(err) { console.error('rescanFolder failed', err); });
 }
 

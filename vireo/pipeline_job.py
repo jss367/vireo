@@ -32,6 +32,7 @@ class PipelineParams:
     collection_id: int | None = None
     source: str | None = None
     sources: list | None = None
+    source_snapshot_id: int | None = None
     destination: str | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
@@ -155,6 +156,7 @@ STAGE_WEIGHTS = {
     "extract_masks": 10,
     "eye_keypoints": 15,
     "regroup": 6,
+    "misses": 4,
 }
 
 
@@ -239,6 +241,28 @@ def _current_phase(stages):
     return "Pipeline"
 
 
+def _collapse_scan_roots(paths):
+    """Reduce ``paths`` to the minimal non-overlapping ancestor set.
+
+    Descendants of a kept path are dropped (the scanner walks recursively).
+    The filesystem root needs special handling because ``'/' + os.sep``
+    is ``'//'`` and would not prefix-match a child like ``/sub``.
+    """
+    candidates = sorted(set(paths), key=len)
+    kept: list[str] = []
+    for cand in candidates:
+        is_descendant = False
+        for k in kept:
+            prefix = k if k.endswith(os.sep) else k + os.sep
+            if cand.startswith(prefix):
+                is_descendant = True
+                break
+        if not is_descendant:
+            kept.append(cand)
+    kept.sort()
+    return kept
+
+
 def run_pipeline_job(job, runner, db_path, workspace_id, params):
     """Execute streaming pipeline. Called by JobRunner in a background thread.
 
@@ -255,6 +279,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     job["_start_time"] = time.time()
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
+
+    # Snapshot-scoped pipelines: load the snapshot up front so scan targets
+    # are derived from the captured file paths (not a folder the user picked
+    # later). Raises if the snapshot has been garbage-collected — the API
+    # layer is expected to return 404 before this job ever runs, but we fail
+    # loud here to avoid silently running an unbounded scan.
+    snapshot_paths: list[str] | None = None
+    if params.source_snapshot_id is not None:
+        db_ro = Database(db_path)
+        db_ro.set_active_workspace(workspace_id)
+        snap = db_ro.get_new_images_snapshot(params.source_snapshot_id)
+        if snap is None:
+            raise ValueError(
+                f"snapshot {params.source_snapshot_id} not found"
+            )
+        snapshot_paths = list(snap["file_paths"])
+        # Collapse to the minimal non-overlapping ancestor set: if the
+        # snapshot has files at both /root/a.jpg and /root/sub/b.jpg the
+        # naive derived roots (/root, /root/sub) would make the scanner walk
+        # /root/sub twice — once on its own, once as a descendant of /root.
+        scan_roots = _collapse_scan_roots(
+            [os.path.dirname(p) for p in snapshot_paths]
+        )
+        # Override any source/sources/collection_id the caller passed; the
+        # snapshot is the single source of truth for what to scan.
+        params.sources = scan_roots
+        params.source = None
+        params.collection_id = None
 
     # Bridge user-initiated cancellation (runner.cancel_job) to the local
     # abort Event so all stages that already honor `abort` stop promptly.
@@ -389,6 +441,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     collection_ready = threading.Event()
     models_ready = threading.Event()
     loaded_models = {}  # populated by model_loader thread
+    # Resolved in collection_stage once the scanner has committed photo rows.
+    # When set (i.e. snapshot-scoped runs), the collection is trimmed to this
+    # set so every downstream stage (classify, extract_masks, eye_keypoints,
+    # regroup) operates only on the files captured in the snapshot — files
+    # that landed in the folder after the snapshot are scanned (we walk the
+    # folder) but not further processed.
+    snapshot_photo_ids: set[int] | None = None
 
     skip_scan = collection_id is not None
 
@@ -752,7 +811,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
     def collection_stage():
         """Wait for scan to finish, build collection, signal classifier."""
-        nonlocal collection_id
+        nonlocal collection_id, snapshot_photo_ids
 
         if skip_scan:
             collection_ready.set()
@@ -764,6 +823,55 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if stages["scan"]["status"] in ("completed", "failed"):
                 break
             time.sleep(0.1)
+
+        # Snapshot-scoped runs: resolve the captured file paths to photo IDs
+        # now that the scanner has committed rows, and trim the collection
+        # to exactly that set. A late-arriving file (landed in the folder
+        # after the snapshot) was still scanned — we walk the whole folder —
+        # but must not be classified or scored. Any snapshot path that never
+        # resolved (file was moved/deleted between snapshot and pipeline
+        # run) is logged so an unexpectedly small collection is auditable.
+        if snapshot_paths is not None:
+            resolver_db = Database(db_path)
+            resolver_db.set_active_workspace(workspace_id)
+            # Split each snapshot path into (dirname, basename) and match on
+            # the two columns directly. Concatenating with a hardcoded '/'
+            # would mismatch Windows paths captured via os.path.join, where
+            # both the snapshot and folders.path use backslash separators.
+            pairs = [os.path.split(p) for p in snapshot_paths]
+            resolved: set[int] = set()
+            # 2 placeholders per pair; cap below SQLite's default 999-param
+            # limit (pre-3.32) with headroom.
+            _CHUNK = 400
+            for i in range(0, len(pairs), _CHUNK):
+                chunk = pairs[i : i + _CHUNK]
+                values = ",".join("(?, ?)" for _ in chunk)
+                flat_params = tuple(v for pair in chunk for v in pair)
+                rows = resolver_db.conn.execute(
+                    f"""SELECT p.id
+                          FROM photos p
+                          JOIN folders f ON f.id = p.folder_id
+                         WHERE (f.path, p.filename) IN (VALUES {values})""",
+                    flat_params,
+                ).fetchall()
+                resolved.update(r["id"] for r in rows)
+            snapshot_photo_ids = resolved
+
+            missing = len(snapshot_paths) - len(snapshot_photo_ids)
+            log.info(
+                "pipeline: snapshot %s had %d files, %d ingested, %d missing on disk",
+                params.source_snapshot_id,
+                len(snapshot_paths),
+                len(snapshot_photo_ids),
+                missing,
+            )
+
+            # Filter collected_photo_ids to the snapshot set. collected_photo_ids
+            # is only read by this stage (to build the collection); the thumbnail
+            # queue has already drained it independently.
+            collected_photo_ids[:] = [
+                pid for pid in collected_photo_ids if pid in snapshot_photo_ids
+            ]
 
         if not collected_photo_ids:
             collection_ready.set()
@@ -2319,7 +2427,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         Runs last so burst_id is available. Uses only per-photo features
         already computed by earlier stages — no model inference.
         """
-        if params.skip_regroup or abort.is_set() or not collection_id:
+        # Skip when classify was skipped: classify_miss depends on fresh
+        # detections/classifications written by the classify stage, and
+        # without them it would mass-flag "no_subject" on photos whose
+        # subjects simply weren't re-evaluated this run.
+        if (
+            params.skip_regroup
+            or params.skip_classify
+            or abort.is_set()
+            or not collection_id
+        ):
             stages["misses"]["status"] = "skipped"
             runner.update_step(job["id"], "misses", status="completed",
                                summary="Skipped")

@@ -49,6 +49,30 @@ def test_api_folders(app_and_db):
     assert '/photos/2024' in paths
 
 
+def test_api_coverage(app_and_db):
+    """GET /api/coverage returns workspace-level and per-folder coverage."""
+    app, db = app_and_db
+    # Mark one photo as having a thumbnail so at least one stage is non-zero.
+    db.conn.execute(
+        "UPDATE photos SET thumb_path = '/t/x.jpg' WHERE filename = 'bird1.jpg'"
+    )
+    db.conn.commit()
+    client = app.test_client()
+    resp = client.get('/api/coverage')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'overall' in data
+    assert 'folders' in data
+    assert data['overall']['total'] == 3
+    assert data['overall']['thumbnail'] == 1
+    # Per-folder rows carry the same keys
+    paths = {f['path']: f for f in data['folders']}
+    assert '/photos/2024' in paths
+    assert paths['/photos/2024']['total'] == 2
+    assert paths['/photos/2024']['thumbnail'] == 1  # bird1.jpg lives here
+    assert paths['/photos/2024/January']['total'] == 1
+
+
 def test_api_folder_get_returns_linked_folder(app_and_db):
     """GET /api/folders/<id> returns id/name/path for a folder in the active ws."""
     app, db = app_and_db

@@ -96,7 +96,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
                 if full in known:
                     continue
                 root_new += 1
-                if len(sample) < sample_limit:
+                if sample_limit is None or len(sample) < sample_limit:
                     sample.append(full)
 
         total += root_new

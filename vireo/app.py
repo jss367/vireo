@@ -22,6 +22,7 @@ from db import Database
 from flask import (
     Flask,
     Response,
+    abort,
     g,
     jsonify,
     make_response,
@@ -1746,6 +1747,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stats["total_photos"] = db.count_photos()
         return jsonify(stats)
 
+    @app.route("/api/coverage")
+    def api_coverage():
+        """Return per-stage processing coverage for the active workspace.
+
+        ``overall`` is the workspace-wide count for each pipeline stage, and
+        ``folders`` is a per-folder breakdown (one row per top-level folder
+        linked to the workspace). Both share the same coverage keys.
+        """
+        db = _get_db()
+        return jsonify({
+            "overall": db.get_coverage_stats(),
+            "folders": db.get_folder_coverage_stats(),
+        })
+
     @app.route("/api/sync/status")
     def api_sync_status():
         db = _get_db()
@@ -2252,6 +2267,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         payload = dict(payload)
         payload["workspace_id"] = ws_id
         return jsonify(payload)
+
+    @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
+    def api_workspace_new_images_snapshot_create():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"error": "no active workspace"}), 400
+        from new_images import count_new_images_for_workspace
+        result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+        file_paths = list(result["sample"])
+        snap_id = db.create_new_images_snapshot(file_paths)
+        folders = sorted({os.path.dirname(p) for p in file_paths})
+        return jsonify({
+            "snapshot_id": snap_id,
+            "file_count": len(file_paths),
+            "folders": folders,
+        })
+
+    @app.route(
+        "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
+        methods=["GET"],
+    )
+    def api_workspace_new_images_snapshot_get(snapshot_id):
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        snap = db.get_new_images_snapshot(snapshot_id)
+        if snap is None:
+            abort(404)
+        paths = snap["file_paths"]
+        folder_paths = sorted({os.path.dirname(p) for p in paths})
+        files_sample = paths[:5]
+        return jsonify({
+            "file_count": snap["file_count"],
+            "folder_paths": folder_paths,
+            "files_sample": files_sample,
+        })
 
     # -- Prediction API routes --
 
@@ -6918,19 +6970,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
+        source_snapshot_id = body.get("source_snapshot_id")
 
-        if not source and not sources and not collection_id:
-            return json_error("source, sources, or collection_id required")
+        if not source and not sources and not collection_id and not source_snapshot_id:
+            return json_error("source, sources, collection_id, or source_snapshot_id required")
 
-        # Validate all source directories exist
-        if sources:
-            for s in sources:
-                if not os.path.isdir(s):
-                    return json_error(f"source directory not found: {s}")
-        elif source and not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
+        # Validate type before touching SQLite. Non-integer bodies (objects,
+        # arrays, non-numeric strings, floats, bools) would otherwise reach
+        # sqlite3 parameter binding and raise ProgrammingError, surfacing as
+        # an opaque 500 instead of a clean 4xx.
+        if source_snapshot_id is not None and (
+            isinstance(source_snapshot_id, bool)
+            or not isinstance(source_snapshot_id, int)
+        ):
+            return json_error("source_snapshot_id must be an integer")
+
+        # Resolve the snapshot synchronously so clients get 404 at request
+        # time instead of a 200 followed by an asynchronous job failure.
+        if (
+            source_snapshot_id is not None
+            and _get_db().get_new_images_snapshot(source_snapshot_id) is None
+        ):
+            return json_error(
+                f"source_snapshot_id {source_snapshot_id} not found",
+                status=404,
+            )
+
+        # Validate source directories — skipped when a snapshot is present,
+        # since run_pipeline_job overrides source/sources with the snapshot's
+        # folders. Rejecting on stale placeholder paths would falsely 400 an
+        # otherwise-valid snapshot-backed run.
+        if source_snapshot_id is None:
+            if sources:
+                for s in sources:
+                    if not os.path.isdir(s):
+                        return json_error(f"source directory not found: {s}")
+            elif source and not os.path.isdir(source):
+                return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
+        # Copy-ingest ("destination") is incompatible with snapshot runs:
+        # ingest would copy entire source folders, then snapshot filtering
+        # would drop the destination-scanned photo ids, producing empty
+        # downstream stages after an expensive copy. Fail fast.
+        if destination and source_snapshot_id is not None:
+            return json_error(
+                "destination is not allowed when source_snapshot_id is set"
+            )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
@@ -6944,6 +7030,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             collection_id=collection_id,
             source=source,
             sources=sources,
+            source_snapshot_id=source_snapshot_id,
             destination=destination,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,

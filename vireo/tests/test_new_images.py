@@ -46,6 +46,23 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     assert len(result["sample"]) == 2
 
 
+def test_count_new_images_returns_all_paths_when_sample_limit_is_none(tmp_path):
+    # Set up a workspace with 10 new files on disk.
+    db = Database(str(tmp_path / "test.db"))
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    for i in range(10):
+        _touch_image(folder / f"IMG_{i:03d}.JPG")
+
+    from new_images import count_new_images_for_workspace
+    result = count_new_images_for_workspace(
+        db, db._active_workspace_id, sample_limit=None
+    )
+    assert result["new_count"] == 10
+    assert len(result["sample"]) == 10
+
+
 def test_count_new_images_no_double_counting_with_nested_linked_folders(db_with_workspace):
     """Nested subfolders auto-linked to workspace_folders must not cause double-counting."""
     db, ws_id, tmp_path = db_with_workspace

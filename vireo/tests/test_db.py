@@ -907,6 +907,117 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+# --- Cluster 2b: Coverage Stats ---
+
+def test_get_coverage_stats_empty_workspace(tmp_path):
+    """Totals are zero when the workspace has no photos at all."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    stats = db.get_coverage_stats()
+    assert stats['total'] == 0
+    for key in ('thumbnail', 'phash', 'quality', 'detected', 'classified',
+                'gps', 'file_hash', 'working_copy', 'mask', 'rating'):
+        assert stats[key] == 0, f"{key} should be 0 on empty workspace"
+
+
+def test_get_coverage_stats_counts_each_stage(tmp_path):
+    """Each pipeline stage is counted independently based on its column."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'thumb_path': '/t/1.jpg', 'phash': 'abc', 'quality_score': 0.9,
+         'latitude': 10.0, 'longitude': 20.0, 'file_hash': 'h1',
+         'working_copy_path': '/wc/1.jpg', 'mask_path': '/m/1.png',
+         'subject_tenengrad': 1.5, 'bg_tenengrad': 0.2,
+         'eye_x': 0.5, 'embedding': b'e', 'burst_id': 'b1',
+         'rating': 4, 'exif_data': '{}',
+         'timestamp': '2024-01-01T00:00:00'},
+        {'thumb_path': '/t/2.jpg', 'phash': 'def',
+         'timestamp': '2024-02-01T00:00:00'},
+        {},  # Nothing set
+    ])
+    # Add a detection + prediction for the first photo only.
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Robin', 0.95, 'test')
+
+    stats = db.get_coverage_stats()
+    assert stats['total'] == 3
+    assert stats['thumbnail'] == 2
+    assert stats['phash'] == 2
+    assert stats['quality'] == 1
+    assert stats['gps'] == 1
+    assert stats['file_hash'] == 1
+    assert stats['working_copy'] == 1
+    assert stats['mask'] == 1
+    assert stats['subject_sharpness'] == 1
+    assert stats['bg_sharpness'] == 1
+    assert stats['eye'] == 1
+    assert stats['label_embedding'] == 1
+    assert stats['burst'] == 1
+    assert stats['rating'] == 1  # rating > 0
+    assert stats['exif'] == 1
+    assert stats['timestamp'] == 2
+    assert stats['detected'] == 1
+    assert stats['classified'] == 1
+
+
+def test_coverage_stats_scoped_to_active_workspace(tmp_path):
+    """Photos and detections in other workspaces must not leak in."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace('Other')
+    db.set_active_workspace(ws1)
+    fid1 = db.add_folder('/ws1', name='ws1')
+    db.add_workspace_folder(ws1, fid1)
+    db.add_photo(folder_id=fid1, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.set_active_workspace(ws2)
+    fid2 = db.add_folder('/ws2', name='ws2')
+    db.add_workspace_folder(ws2, fid2)
+    db.add_photo(folder_id=fid2, filename='b.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid2, filename='c.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.set_active_workspace(ws1)
+    assert db.get_coverage_stats()['total'] == 1
+    db.set_active_workspace(ws2)
+    assert db.get_coverage_stats()['total'] == 2
+
+
+def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
+    """Returned rows are one per workspace folder with correct per-folder totals."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid_a = db.add_folder('/A', name='A')
+    fid_b = db.add_folder('/B', name='B')
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+    pa = db.add_photo(folder_id=fid_a, filename='1.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET thumb_path = '/t/1.jpg', "
+                    "phash = 'x' WHERE id = ?", (pa,))
+    db.add_photo(folder_id=fid_b, filename='2.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid_b, filename='3.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.conn.commit()
+
+    folders = db.get_folder_coverage_stats()
+    by_path = {f['path']: f for f in folders}
+    assert by_path['/A']['total'] == 1
+    assert by_path['/A']['thumbnail'] == 1
+    assert by_path['/A']['phash'] == 1
+    assert by_path['/B']['total'] == 2
+    assert by_path['/B']['thumbnail'] == 0
+    assert by_path['/B']['phash'] == 0
+
+
 # --- Cluster 3: Prediction Management ---
 
 def test_get_group_predictions(tmp_path):
@@ -4189,3 +4300,63 @@ def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
         "SELECT miss_clipped FROM photos WHERE id=?", (p_a,)
     ).fetchone()
     assert row["miss_clipped"] == 1
+
+
+def test_new_image_snapshots_tables_exist(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = {
+        r["name"]
+        for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "new_image_snapshots" in tables
+    assert "new_image_snapshot_files" in tables
+
+
+def test_create_and_get_new_images_snapshot(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    assert isinstance(snap_id, int)
+
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap is not None
+    assert snap["file_count"] == 2
+    assert snap["workspace_id"] == ws_id
+    assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    other_ws = db.create_workspace("Other")
+    paths = ["/tmp/a/IMG_001.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    db.set_active_workspace(other_ws)
+    assert db.get_new_images_snapshot(snap_id) is None
+
+
+def test_snapshot_deleted_with_workspace(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    throwaway_ws = db.create_workspace("Throwaway")
+    db.set_active_workspace(throwaway_ws)
+    snap_id = db.create_new_images_snapshot(["/tmp/a.jpg"])
+    db.delete_workspace(throwaway_ws)
+    row = db.conn.execute(
+        "SELECT id FROM new_image_snapshots WHERE id = ?", (snap_id,)
+    ).fetchone()
+    assert row is None
+
+
+def test_create_snapshot_empty_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    snap_id = db.create_new_images_snapshot([])
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap["file_count"] == 0
+    assert snap["file_paths"] == []
