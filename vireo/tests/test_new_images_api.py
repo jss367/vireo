@@ -143,6 +143,20 @@ def test_get_snapshot_unknown_id_returns_404(app_and_db):
         assert resp.status_code == 404
 
 
+def test_get_snapshot_oversized_id_returns_404_not_500(app_and_db):
+    """Werkzeug's <int:> converter accepts arbitrary digit strings, producing
+    Python ints larger than SQLite's signed 64-bit range. Passing those
+    straight to the DB would raise OverflowError (→ 500). Treat them as
+    "not found" rather than leaking a server error."""
+    app, db, ws_id, tmp_path = app_and_db
+    huge = 10 ** 100
+    with app.test_client() as client:
+        resp = client.get(f"/api/workspaces/active/new-images/snapshot/{huge}")
+        assert resp.status_code == 404, (
+            f"oversized snapshot id must yield 404, got {resp.status_code}"
+        )
+
+
 def test_get_snapshot_cross_workspace_returns_404(app_and_db):
     app, db, ws_id, tmp_path = app_and_db
     snap_id = db.create_new_images_snapshot(["/tmp/a.jpg"])

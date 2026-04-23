@@ -4444,7 +4444,13 @@ class Database:
 
         Isolation: a snapshot created in workspace A is invisible when workspace B
         is active. Callers treat None as 'expired / gone'.
+
+        An id outside SQLite's signed 64-bit range can't match any stored row,
+        so we short-circuit to None rather than let parameter binding raise
+        OverflowError (which would surface as a 500 to API callers).
         """
+        if not -(1 << 63) <= snapshot_id <= (1 << 63) - 1:
+            return None
         row = self.conn.execute(
             "SELECT id, workspace_id, created_at, file_count "
             "FROM new_image_snapshots WHERE id = ? AND workspace_id = ?",

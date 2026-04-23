@@ -641,6 +641,25 @@ def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
         )
 
 
+def test_pipeline_rejects_oversized_snapshot_id(setup):
+    """An integer outside SQLite's signed 64-bit range would raise
+    OverflowError during parameter binding, surfacing as a 500. The endpoint
+    must reject it cleanly before reaching SQLite."""
+    app, _ = setup
+    huge = 10 ** 100
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": huge,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert 400 <= resp.status_code < 500, (
+            f"oversized snapshot id must be rejected with 4xx, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )
+
+
 @pytest.mark.parametrize("bad_id", [{}, [], [1, 2], {"id": 3}, "abc", 1.5, True])
 def test_pipeline_rejects_non_integer_snapshot_id(setup, bad_id):
     """Malformed source_snapshot_id values (objects, arrays, non-numeric
