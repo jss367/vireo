@@ -4005,14 +4005,26 @@ class Database:
         )
         self.conn.commit()
 
-    def bulk_reject_miss_category(self, category):
+    def bulk_reject_miss_category(self, category, since=None):
         """Set flag='rejected' on every photo flagged with that miss category
-        in the active workspace and not already rejected. Returns rowcount."""
+        in the active workspace and not already rejected.
+
+        ``since`` mirrors the filter on ``list_misses``: when set, only
+        photos whose ``miss_computed_at >= since`` are rejected. This
+        keeps bulk reject scoped to the /misses view the user is looking
+        at (e.g. the current pipeline run), so older misses not shown on
+        screen aren't silently rejected. Returns rowcount.
+        """
         col = {
             "no_subject": "miss_no_subject",
             "clipped":    "miss_clipped",
             "oof":        "miss_oof",
         }[category]
+        params = [self._ws_id()]
+        since_clause = ""
+        if since:
+            since_clause = "    AND p.miss_computed_at >= ? "
+            params.append(since)
         cur = self.conn.execute(
             f"UPDATE photos SET flag='rejected' "
             f"WHERE id IN ("
@@ -4020,9 +4032,10 @@ class Database:
             f"  JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
             f"  WHERE wf.workspace_id = ? "
             f"    AND p.{col}=1 "
-            f"    AND (p.flag IS NULL OR p.flag != 'rejected')"
+            f"    AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"{since_clause}"
             f")",
-            (self._ws_id(),),
+            params,
         )
         self.conn.commit()
         return cur.rowcount

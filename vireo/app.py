@@ -2320,13 +2320,21 @@ def create_app(db_path, thumb_cache_dir=None):
     @app.route("/api/misses/reject", methods=["POST"])
     def api_misses_reject():
         """Set flag='rejected' on every photo currently flagged with the given
-        miss category. Returns {"rejected": n, "category": ...}."""
+        miss category.
+
+        Accepts an optional ``since`` ISO timestamp that mirrors the
+        ``/misses?since=...`` review-window scope; when present, only
+        photos whose miss_computed_at >= since are rejected, so the bulk
+        action matches what the user sees on screen. Returns
+        {"rejected": n, "category": ...}.
+        """
         db = _get_db()
         body = request.get_json(silent=True) or {}
         category = body.get("category")
+        since = body.get("since") or None
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
-        n = db.bulk_reject_miss_category(category)
+        n = db.bulk_reject_miss_category(category, since=since)
         return jsonify({"rejected": n, "category": category})
 
     @app.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])

@@ -17,7 +17,23 @@ import logging
 from collections import defaultdict
 from datetime import UTC, datetime
 
+import config as _cfg
+
 log = logging.getLogger(__name__)
+
+
+def _miss_threshold(config, key):
+    """Read a miss-* threshold with a defaults fallback.
+
+    Pipeline configs reaching classify_miss can be partial — e.g.
+    `/api/pipeline/config` stores only model keys under `pipeline` and
+    `Database.get_effective_config` does a shallow top-level merge.
+    Fall back to the module DEFAULTS rather than raising KeyError and
+    failing the whole pipeline job.
+    """
+    if key in config:
+        return config[key]
+    return _cfg.DEFAULTS["pipeline"][key]
 
 
 def classify_miss(row, siblings, config):
@@ -27,19 +43,21 @@ def classify_miss(row, siblings, config):
         row: dict with detection_conf, subject_size, crop_complete,
             subject_tenengrad, bg_tenengrad, burst_id.
         siblings: list of sibling rows in the same burst (excluding `row`).
-        config: dict with miss_* thresholds.
+        config: dict with miss_* thresholds. Missing keys fall back to
+            config.DEFAULTS["pipeline"] so partial pipeline configs
+            (the common case) don't crash this stage.
     """
     in_burst = bool(siblings)
-    conf_threshold = (
-        config["miss_det_confidence_burst"] if in_burst
-        else config["miss_det_confidence"]
+    conf_threshold = _miss_threshold(
+        config,
+        "miss_det_confidence_burst" if in_burst else "miss_det_confidence",
     )
     detection_conf = row.get("detection_conf") or 0.0
     if detection_conf < conf_threshold:
         return {"no_subject": True, "clipped": False, "oof": False}
-    bbox_area_min = (
-        config["miss_bbox_area_min"] if in_burst
-        else config["miss_bbox_area_min_singleton"]
+    bbox_area_min = _miss_threshold(
+        config,
+        "miss_bbox_area_min" if in_burst else "miss_bbox_area_min_singleton",
     )
     # NULL quality features mean the pipeline hasn't measured them yet;
     # absence of evidence is not evidence of a miss. Each signal below
@@ -76,7 +94,9 @@ def classify_miss(row, siblings, config):
     oof = False
     # Only evaluate OOF when both Tenengrad features are measured.
     if subject_t is not None and bg_t is not None:
-        ratio_bad = bg_t > 0 and (subject_t / bg_t) < config["miss_oof_ratio"]
+        ratio_bad = bg_t > 0 and (subject_t / bg_t) < _miss_threshold(
+            config, "miss_oof_ratio"
+        )
         # Absolute floor: below this, subject sharpness is motion-blur level.
         # Value chosen empirically to match reject_focus behavior.
         SHARPNESS_FLOOR = 10.0

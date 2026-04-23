@@ -4084,6 +4084,48 @@ def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
     assert misses[0]["detection_conf"] is None
 
 
+def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
+    """Bulk reject must honor the same `since` filter as list_misses so
+    clicking "Reject all" on /misses?since=... doesn't silently reject
+    older misses from prior pipeline runs that aren't shown on screen."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_old = db.add_photo(folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_new = db.add_photo(folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-10T00:00:00+00:00", p_old),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-22T10:00:00+00:00", p_new),
+    )
+    db.conn.commit()
+
+    # Since filter matches only the new miss.
+    n = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
+    assert n == 1
+
+    flag_old = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    flag_new = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_new,)
+    ).fetchone()["flag"]
+    assert flag_old != "rejected"
+    assert flag_new == "rejected"
+
+    # Without since, the old miss is now eligible.
+    n2 = db.bulk_reject_miss_category("clipped")
+    assert n2 == 1
+    flag_old2 = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    assert flag_old2 == "rejected"
+
+
 def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
     """With >999 flagged misses, the detections IN (...) clause would exceed
     SQLite's SQLITE_MAX_VARIABLE_NUMBER. list_misses must chunk the lookup

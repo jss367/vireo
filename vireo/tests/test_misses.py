@@ -154,6 +154,30 @@ def test_no_spurious_flags_when_quality_features_missing():
     assert flags_b == {"no_subject": False, "clipped": False, "oof": False}
 
 
+def test_classify_miss_falls_back_to_defaults_for_partial_config():
+    """Pipeline configs reaching classify_miss are often partial — e.g.
+    /api/pipeline/config stores only model keys under `pipeline` and
+    Database.get_effective_config does a shallow top-level merge. Miss
+    thresholds must fall back to config.DEFAULTS rather than raising
+    KeyError and failing the whole pipeline job."""
+    from misses import classify_miss
+
+    # Partial config: none of the miss_* thresholds are present.
+    partial = {"model": "whatever"}
+
+    # With low detection confidence and empty siblings (singleton), the
+    # default miss_det_confidence=0.25 should classify this as no_subject.
+    row = _row(detection_conf=0.10)
+    flags = classify_miss(row, siblings=[], config=partial)
+    assert flags == {"no_subject": True, "clipped": False, "oof": False}
+
+    # With good detection confidence and a tiny bbox, the default
+    # miss_bbox_area_min_singleton=0.002 should classify as clipped.
+    row = _row(subject_size=0.001)
+    flags = classify_miss(row, siblings=[], config=partial)
+    assert flags["clipped"] is True
+
+
 def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     """Integration test: real DB, synthetic photo rows, verify flags written."""
     import config as cfg

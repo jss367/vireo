@@ -532,10 +532,14 @@ async function bulkReject(cat, e) {
                'Photos are not deleted — use the existing purge flow to remove them.')) {
     return;
   }
+  // Match the /misses?since=... review-window scope so bulk reject only
+  // touches photos visible in this view, not older misses from prior runs.
+  var since = getSinceParam();
+  var body = since ? { category: cat, since: since } : { category: cat };
   var r = await fetch('/api/misses/reject', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ category: cat }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     if (typeof showToast === 'function') showToast('Bulk reject failed', 'error');
