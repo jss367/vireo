@@ -3921,3 +3921,38 @@ def test_bulk_reject_category_sets_flag_reject(tmp_path):
             "SELECT flag FROM photos WHERE id=?", (pid,)
         ).fetchone()["flag"]
         assert flag == "reject"
+
+
+def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
+    """Neither list_misses nor bulk_reject should touch photos already rejected.
+
+    The exclusion clause (flag IS NULL OR flag != 'reject') is load-bearing:
+    a photo that's already been rejected must not show up again as a miss
+    (it's done) and must not inflate the bulk-reject rowcount (it's not news).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_miss = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_already = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
+        (p_miss, p_already),
+    )
+    db.conn.execute("UPDATE photos SET flag='reject' WHERE id=?", (p_already,))
+    db.conn.commit()
+
+    listed = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_miss in listed
+    assert p_already not in listed
+
+    n = db.bulk_reject_miss_category("clipped")
+    assert n == 1  # only p_miss got rejected; p_already was already rejected
+    flag_already = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_already,)
+    ).fetchone()["flag"]
+    assert flag_already == "reject"  # unchanged
