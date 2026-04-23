@@ -736,7 +736,9 @@ class Database:
 
         # Backfill prediction_review from legacy per-prediction review columns.
         # Must run before the detections.workspace_id drop (Task 9) so we can route
-        # each prediction to the correct workspace.
+        # each prediction to the correct workspace. Legacy schemas may be missing
+        # some optional columns (reviewed_at/individual/group_id/vote_count/
+        # total_votes); substitute NULL in that case rather than erroring.
         pred_cols = {r[1] for r in self.conn.execute(
             "PRAGMA table_info(predictions)"
         ).fetchall()}
@@ -744,19 +746,111 @@ class Database:
             "SELECT COUNT(*) AS n FROM prediction_review"
         ).fetchone()["n"]
         if "status" in pred_cols and review_exists == 0:
-            self.conn.execute("""
+            def _col_or_null(name: str) -> str:
+                return f"p.{name}" if name in pred_cols else "NULL"
+            self.conn.execute(f"""
                 INSERT OR IGNORE INTO prediction_review
                     (prediction_id, workspace_id, status, reviewed_at,
                      individual, group_id, vote_count, total_votes)
                 SELECT p.id, d.workspace_id,
                        COALESCE(p.status, 'pending'),
-                       p.reviewed_at, p.individual, p.group_id,
-                       p.vote_count, p.total_votes
+                       {_col_or_null('reviewed_at')},
+                       {_col_or_null('individual')},
+                       {_col_or_null('group_id')},
+                       {_col_or_null('vote_count')},
+                       {_col_or_null('total_votes')}
                 FROM predictions p
                 JOIN detections d ON d.id = p.detection_id
                 WHERE d.workspace_id IS NOT NULL
                   AND COALESCE(p.status, 'pending') <> 'pending'
             """)
+            self.conn.commit()
+
+        # Global-detections migration: drop workspace_id from detections and dedupe
+        # identical boxes that were duplicated across workspaces. Re-point predictions
+        # at the canonical detection id.
+        #
+        # Follows the existing "create new, copy, drop old, rename" pattern used by
+        # the multi-animal migration above. Gated on the `detections` table still
+        # having a workspace_id column.
+        det_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(detections)"
+        ).fetchall()}
+        if "workspace_id" in det_cols:
+            # Pick the lowest id per group as canonical.
+            self.conn.execute("""
+                CREATE TEMP TABLE detection_canonical AS
+                SELECT MIN(id) AS canonical_id, photo_id,
+                       COALESCE(detector_model, 'megadetector-v6') AS detector_model,
+                       box_x, box_y, box_w, box_h
+                FROM detections
+                GROUP BY photo_id, COALESCE(detector_model, 'megadetector-v6'),
+                         box_x, box_y, box_w, box_h
+            """)
+            # Re-point predictions that reference a non-canonical duplicate.
+            self.conn.execute("""
+                UPDATE predictions
+                SET detection_id = (
+                    SELECT dc.canonical_id
+                    FROM detections d
+                    JOIN detection_canonical dc
+                      ON dc.photo_id       = d.photo_id
+                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
+                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
+                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
+                    WHERE d.id = predictions.detection_id
+                )
+                WHERE detection_id IN (
+                    SELECT d.id
+                    FROM detections d
+                    JOIN detection_canonical dc
+                      ON dc.photo_id       = d.photo_id
+                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
+                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
+                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
+                    WHERE d.id <> dc.canonical_id
+                )
+            """)
+            # Create new table without workspace_id
+            self.conn.execute("""
+                CREATE TABLE detections_new (
+                    id                   INTEGER PRIMARY KEY,
+                    photo_id             INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                    detector_model       TEXT NOT NULL DEFAULT 'megadetector-v6',
+                    box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+                    detector_confidence  REAL,
+                    category             TEXT,
+                    created_at           TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            self.conn.execute("""
+                INSERT INTO detections_new (id, photo_id, detector_model,
+                                            box_x, box_y, box_w, box_h,
+                                            detector_confidence, category, created_at)
+                SELECT d.id, d.photo_id,
+                       COALESCE(d.detector_model, 'megadetector-v6'),
+                       d.box_x, d.box_y, d.box_w, d.box_h,
+                       d.detector_confidence, d.category, d.created_at
+                FROM detections d
+                JOIN detection_canonical dc ON dc.canonical_id = d.id
+            """)
+            self.conn.execute("DROP TABLE detections")
+            self.conn.execute("ALTER TABLE detections_new RENAME TO detections")
+            self.conn.execute("DROP TABLE detection_canonical")
+            # Recreate the indexes (the CREATE INDEX IF NOT EXISTS at the bottom of
+            # __init__ will no-op if they already exist, but indexes tied to the
+            # dropped table are gone).
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_detections_photo ON detections(photo_id)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_detections_photo_model "
+                "ON detections(photo_id, detector_model)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_detections_conf "
+                "ON detections(photo_id, detector_confidence)"
+            )
             self.conn.commit()
 
         # Folder health status
@@ -797,10 +891,8 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_detections_photo "
             "ON detections(photo_id)"
         )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_detections_workspace "
-            "ON detections(workspace_id)"
-        )
+        # detections.workspace_id is dropped by the global-detections migration
+        # above, so we no longer create idx_detections_workspace here.
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection "
             "ON classifier_runs(detection_id)"
