@@ -4163,29 +4163,36 @@ class Database:
         )
         self.conn.commit()
 
-    def save_detections(self, photo_id, detections, detector_model=None):
-        """Store detection bounding boxes for a photo.
+    def save_detections(self, photo_id, detections, detector_model):
+        """Replace all detections for (photo_id, detector_model) with the given list.
+
+        Global: no workspace scoping. The model's output is a pure function of
+        (photo, model); any workspace re-running the same (photo, model) is a
+        bug — callers should short-circuit via `get_detector_run_photo_ids`.
 
         Args:
-            photo_id: the photo ID
-            detections: list of dicts with keys: box (dict with x,y,w,h),
-                        confidence (float), category (str)
-            detector_model: name of the detector model
-
+            photo_id: the photo
+            detections: list of dicts {box: {x,y,w,h}, confidence, category}
+            detector_model: required, e.g. "megadetector-v6"
         Returns:
-            list of detection IDs
+            list of new detection IDs (empty if detections was empty).
         """
-        ws_id = self._ws_id()
+        if detector_model is None:
+            raise ValueError("detector_model is required")
+        self.conn.execute(
+            "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
+            (photo_id, detector_model),
+        )
         ids = []
         for det in detections:
             box = det["box"]
             cur = self.conn.execute(
                 """INSERT INTO detections
-                   (photo_id, workspace_id, box_x, box_y, box_w, box_h,
-                    detector_confidence, category, detector_model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (photo_id, ws_id, box["x"], box["y"], box["w"], box["h"],
-                 det["confidence"], det.get("category", "animal"), detector_model),
+                     (photo_id, detector_model, box_x, box_y, box_w, box_h,
+                      detector_confidence, category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (photo_id, detector_model, box["x"], box["y"], box["w"], box["h"],
+                 det["confidence"], det.get("category", "animal")),
             )
             ids.append(cur.lastrowid)
         self.conn.commit()
@@ -4231,21 +4238,27 @@ class Database:
             })
         return result
 
-    def clear_detections(self, photo_id):
-        """Remove all detections (and cascaded predictions) for a photo."""
-        self.conn.execute(
-            "DELETE FROM detections WHERE photo_id = ? AND workspace_id = ?",
-            (photo_id, self._ws_id()),
-        )
+    def clear_detections(self, photo_id, detector_model=None):
+        """Remove detections (and cascaded predictions) for a photo.
+
+        Global: no workspace scoping. If `detector_model` is None, all
+        detector models for this photo are cleared; otherwise only the
+        rows for that model.
+        """
+        if detector_model is None:
+            self.conn.execute(
+                "DELETE FROM detections WHERE photo_id = ?", (photo_id,)
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
+                (photo_id, detector_model),
+            )
         self.conn.commit()
 
-    def get_existing_detection_photo_ids(self):
-        """Return set of photo_ids that already have detections in this workspace."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT photo_id FROM detections WHERE workspace_id = ?",
-            (self._ws_id(),),
-        ).fetchall()
-        return {r["photo_id"] for r in rows}
+    def get_existing_detection_photo_ids(self, detector_model="megadetector-v6"):
+        """Back-compat shim — prefer get_detector_run_photo_ids."""
+        return self.get_detector_run_photo_ids(detector_model)
 
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.

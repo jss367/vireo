@@ -2149,10 +2149,63 @@ def test_save_detections(tmp_path):
     ]
     ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
     assert len(ids) == 2
-    rows = db.conn.execute("SELECT * FROM detections WHERE photo_id = ?", (pid,)).fetchall()
+    rows = db.conn.execute(
+        "SELECT * FROM detections WHERE photo_id = ? ORDER BY id",
+        (pid,),
+    ).fetchall()
     assert len(rows) == 2
     assert rows[0]["box_x"] == 0.1
     assert rows[1]["box_x"] == 0.5
+
+
+def test_save_detections_replaces_existing(tmp_path):
+    """Second save for the same (photo, model) wipes prior rows — idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+
+    det_a = {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    det_b = {"box": {"x": 0.2, "y": 0.2, "w": 0.5, "h": 0.5}, "confidence": 0.7, "category": "animal"}
+
+    # First run: two boxes
+    ids_v1 = db.save_detections(photo_id, [det_a, det_b], detector_model="megadetector-v6")
+    assert len(ids_v1) == 2
+
+    # Second run on same (photo, model): one box — the old rows should be gone
+    ids_v2 = db.save_detections(photo_id, [det_a], detector_model="megadetector-v6")
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchall()
+    assert {r["id"] for r in rows} == set(ids_v2)
+
+
+def test_save_detections_is_global(tmp_path):
+    """Detections written in workspace A are visible when B is active — the table is global."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+
+    db._active_workspace_id = ws_a
+    db.save_detections(photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6")
+
+    db._active_workspace_id = ws_b
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ?", (photo_id,),
+    ).fetchall()
+    # Global cache: workspace B sees the row written from A
+    assert len(rows) == 1
 
 
 def test_get_detections_for_photo(tmp_path):
@@ -2233,11 +2286,11 @@ def test_clear_detections(tmp_path):
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
-    # Insert prediction via raw SQL since add_prediction is not yet refactored
-    # for the detection-based schema (Task 3)
     db.conn.execute(
-        "INSERT INTO predictions (detection_id, species, confidence, model, status) VALUES (?, ?, ?, ?, ?)",
-        (det_ids[0], "Elk", 0.9, "bioclip", "pending"),
+        """INSERT INTO predictions
+             (detection_id, classifier_model, labels_fingerprint, species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (det_ids[0], "bioclip", "legacy", "Elk", 0.9),
     )
     db.conn.commit()
     db.clear_detections(pid)
@@ -2329,7 +2382,8 @@ def test_accept_prediction_tags_photo(tmp_path):
 
 
 def test_get_existing_detection_photo_ids(tmp_path):
-    """get_existing_detection_photo_ids returns photo IDs that have detections."""
+    """get_existing_detection_photo_ids shim returns photo IDs where the default
+    detector model has run (delegates to get_detector_run_photo_ids)."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
@@ -2337,7 +2391,8 @@ def test_get_existing_detection_photo_ids(tmp_path):
     pid2 = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     db.save_detections(pid1, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
-    ], detector_model="MDV6")
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(pid1, "megadetector-v6", box_count=1)
     result = db.get_existing_detection_photo_ids()
     assert pid1 in result
     assert pid2 not in result

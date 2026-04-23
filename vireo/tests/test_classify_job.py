@@ -831,7 +831,7 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
                        file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
 
     raw_results = [{
         "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},
