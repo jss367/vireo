@@ -4084,6 +4084,45 @@ def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
     assert misses[0]["detection_conf"] is None
 
 
+def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
+    """With >999 flagged misses, the detections IN (...) clause would exceed
+    SQLite's SQLITE_MAX_VARIABLE_NUMBER. list_misses must chunk the lookup
+    so /api/misses doesn't raise ``OperationalError: too many SQL variables``
+    for workspaces with many flagged photos."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    # Insert 1100 photos, all flagged as clipped, each with one detection.
+    # This pushes the IN clause well past the default 999-var limit and would
+    # crash without chunking.
+    N = 1100
+    photo_ids = []
+    for i in range(N):
+        pid = db.add_photo(
+            folder_id, f"p{i:04d}.jpg", ".jpg",
+            file_size=100, file_mtime=float(i + 1),
+        )
+        photo_ids.append(pid)
+    db.conn.executemany(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?",
+        [(pid,) for pid in photo_ids],
+    )
+    db.conn.commit()
+    for pid in photo_ids:
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.9, "category": "animal"}],
+        )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == N
+    # Every row must have a detection attached (proving chunking visited all).
+    assert all(m["detection_conf"] == 0.9 for m in misses)
+    assert all(m["detection_box"] is not None for m in misses)
+
+
 def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
     """clear_miss_flag must refuse to touch a photo from another workspace."""
     import pytest

@@ -3957,18 +3957,24 @@ class Database:
 
         import json as _json
         photo_ids = [p["id"] for p in photos]
-        placeholders = ",".join("?" * len(photo_ids))
-        det_rows = self.conn.execute(
-            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-            f"       detector_confidence "
-            f"FROM detections "
-            f"WHERE workspace_id=? AND photo_id IN ({placeholders}) "
-            f"ORDER BY photo_id, detector_confidence DESC",
-            [ws_id, *photo_ids],
-        ).fetchall()
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # A workspace with thousands of flagged misses would otherwise raise
+        # ``OperationalError: too many SQL variables``.
+        CHUNK = 500
         primary = {}
-        for d in det_rows:
-            primary.setdefault(d["photo_id"], d)
+        for i in range(0, len(photo_ids), CHUNK):
+            chunk = photo_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            det_rows = self.conn.execute(
+                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence "
+                f"FROM detections "
+                f"WHERE workspace_id=? AND photo_id IN ({placeholders}) "
+                f"ORDER BY photo_id, detector_confidence DESC",
+                [ws_id, *chunk],
+            ).fetchall()
+            for d in det_rows:
+                primary.setdefault(d["photo_id"], d)
         for p in photos:
             d = primary.get(p["id"])
             if d is not None:
