@@ -3906,18 +3906,19 @@ class Database:
         return {r["photo_id"] for r in rows}
 
     def list_misses(self, category=None, since=None):
-        """Return photos flagged as misses, optionally filtered by category.
+        """Return photos flagged as misses in the active workspace.
 
         category: None | "no_subject" | "clipped" | "oof"
         since: optional ISO timestamp; if set, restricts to photos whose
             miss_computed_at >= since. Used by the pipeline-review step to
             scope results to the current run.
 
-        Excludes photos already flagged as rejected. Ordered by timestamp DESC.
+        Excludes photos already flagged as rejected. Scoped to folders
+        linked to the active workspace. Ordered by timestamp DESC.
         """
         if category is None:
             where = (
-                "miss_no_subject=1 OR miss_clipped=1 OR miss_oof=1"
+                "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
             )
         else:
             col = {
@@ -3925,22 +3926,25 @@ class Database:
                 "clipped":    "miss_clipped",
                 "oof":        "miss_oof",
             }[category]
-            where = f"{col}=1"
+            where = f"p.{col}=1"
 
-        params = []
+        params = [self._ws_id()]
         if since:
-            where = f"({where}) AND miss_computed_at >= ?"
+            where = f"({where}) AND p.miss_computed_at >= ?"
             params.append(since)
 
         rows = self.conn.execute(
-            f"SELECT id, folder_id, filename, timestamp, burst_id, "
-            f"       detection_box, detection_conf, subject_size, "
-            f"       crop_complete, subject_tenengrad, bg_tenengrad, "
-            f"       miss_no_subject, miss_clipped, miss_oof, "
-            f"       miss_computed_at, flag "
-            f"FROM photos WHERE ({where}) "
-            f"  AND (flag IS NULL OR flag != 'reject') "
-            f"ORDER BY timestamp DESC",
+            f"SELECT p.id, p.folder_id, p.filename, p.timestamp, p.burst_id, "
+            f"       p.detection_box, p.detection_conf, p.subject_size, "
+            f"       p.crop_complete, p.subject_tenengrad, p.bg_tenengrad, "
+            f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
+            f"       p.miss_computed_at, p.flag "
+            f"FROM photos p "
+            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"WHERE wf.workspace_id = ? "
+            f"  AND ({where}) "
+            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"ORDER BY p.timestamp DESC",
             params,
         ).fetchall()
         return [dict(r) for r in rows]
@@ -3958,16 +3962,23 @@ class Database:
         self.conn.commit()
 
     def bulk_reject_miss_category(self, category):
-        """Set flag='reject' on every photo currently flagged with that
-        miss category and not already rejected. Returns rowcount."""
+        """Set flag='rejected' on every photo flagged with that miss category
+        in the active workspace and not already rejected. Returns rowcount."""
         col = {
             "no_subject": "miss_no_subject",
             "clipped":    "miss_clipped",
             "oof":        "miss_oof",
         }[category]
         cur = self.conn.execute(
-            f"UPDATE photos SET flag='reject' "
-            f"WHERE {col}=1 AND (flag IS NULL OR flag != 'reject')"
+            f"UPDATE photos SET flag='rejected' "
+            f"WHERE id IN ("
+            f"  SELECT p.id FROM photos p "
+            f"  JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"  WHERE wf.workspace_id = ? "
+            f"    AND p.{col}=1 "
+            f"    AND (p.flag IS NULL OR p.flag != 'rejected')"
+            f")",
+            (self._ws_id(),),
         )
         self.conn.commit()
         return cur.rowcount

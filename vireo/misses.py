@@ -91,11 +91,12 @@ def classify_miss(row, siblings, config):
 
 
 def compute_misses_for_workspace(db, pipeline_config):
-    """Compute and persist miss flags for every scanned photo in the workspace.
+    """Compute and persist miss flags for photos in the active workspace.
 
-    Reads per-photo features from `photos`, groups by `burst_id`, calls
-    classify_miss for each photo with its siblings as context, then writes
-    the three flags and a timestamp in a single batch.
+    Reads per-photo features from `photos` (restricted to folders linked to
+    the active workspace), groups by `burst_id`, calls classify_miss for
+    each photo with its siblings as context, then writes the three flags
+    and a timestamp in a single batch.
 
     Singletons (burst_id IS NULL) are evaluated alone, which triggers the
     stricter singleton thresholds inside classify_miss.
@@ -105,9 +106,12 @@ def compute_misses_for_workspace(db, pipeline_config):
         return 0
 
     rows = db.conn.execute(
-        "SELECT id, burst_id, detection_conf, subject_size, crop_complete, "
-        "       subject_tenengrad, bg_tenengrad "
-        "FROM photos"
+        "SELECT p.id, p.burst_id, p.detection_conf, p.subject_size, "
+        "       p.crop_complete, p.subject_tenengrad, p.bg_tenengrad "
+        "FROM photos p "
+        "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+        "WHERE wf.workspace_id = ?",
+        (db._ws_id(),),
     ).fetchall()
 
     by_burst = defaultdict(list)

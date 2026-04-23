@@ -2319,7 +2319,7 @@ def create_app(db_path, thumb_cache_dir=None):
 
     @app.route("/api/misses/reject", methods=["POST"])
     def api_misses_reject():
-        """Set flag='reject' on every photo currently flagged with the given
+        """Set flag='rejected' on every photo currently flagged with the given
         miss category. Returns {"rejected": n, "category": ...}."""
         db = _get_db()
         body = request.get_json(silent=True) or {}

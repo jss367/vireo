@@ -4,7 +4,7 @@ The DB is pre-seeded with three misses (one per category). We open the
 page, verify the three category sections render with the right counts,
 click a thumbnail to open the lightbox, bulk-reject the `clipped` section
 (auto-accepting the confirm dialog), and re-check the DB state through
-the API to ensure `flag='reject'` landed on the right photo.
+the API to ensure `flag='rejected'` landed on the right photo.
 """
 
 
@@ -67,7 +67,7 @@ def run(session):
         f"expected no_subject count still (1), got {ns_after!r}",
     )
 
-    # -- Verify through the API that the clipped photo now has flag='reject' --
+    # -- Verify through the API that the clipped photo now has flag='rejected' --
     import json
 
     api_resp = session.eval(

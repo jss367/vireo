@@ -3899,7 +3899,7 @@ def test_clear_miss_flag_on_photo(tmp_path):
     assert row["miss_oof"] == 1
 
 
-def test_bulk_reject_category_sets_flag_reject(tmp_path):
+def test_bulk_reject_category_sets_flag_rejected(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
     folder_id = db.add_folder("/tmp/fake")
@@ -3920,13 +3920,13 @@ def test_bulk_reject_category_sets_flag_reject(tmp_path):
         flag = db.conn.execute(
             "SELECT flag FROM photos WHERE id=?", (pid,)
         ).fetchone()["flag"]
-        assert flag == "reject"
+        assert flag == "rejected"
 
 
 def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
     """Neither list_misses nor bulk_reject should touch photos already rejected.
 
-    The exclusion clause (flag IS NULL OR flag != 'reject') is load-bearing:
+    The exclusion clause (flag IS NULL OR flag != 'rejected') is load-bearing:
     a photo that's already been rejected must not show up again as a miss
     (it's done) and must not inflate the bulk-reject rowcount (it's not news).
     """
@@ -3943,7 +3943,7 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
         "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
         (p_miss, p_already),
     )
-    db.conn.execute("UPDATE photos SET flag='reject' WHERE id=?", (p_already,))
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (p_already,))
     db.conn.commit()
 
     listed = [m["id"] for m in db.list_misses(category="clipped")]
@@ -3955,7 +3955,7 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
     flag_already = db.conn.execute(
         "SELECT flag FROM photos WHERE id=?", (p_already,)
     ).fetchone()["flag"]
-    assert flag_already == "reject"  # unchanged
+    assert flag_already == "rejected"  # unchanged
 
 
 def test_list_misses_since_filter(tmp_path):
@@ -3992,3 +3992,46 @@ def test_list_misses_since_filter(tmp_path):
 
     grouped = db.list_misses(since="2026-04-21T00:00:00+00:00")
     assert [m["id"] for m in grouped] == [p_new]
+
+
+def test_list_misses_scoped_to_active_workspace(tmp_path):
+    """Misses in folders linked only to workspace A must not appear or get
+    rejected when workspace B is active."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    fb = db.add_folder("/tmp/b", name="b")
+    p_b = db.add_photo(fb, "b.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_b,))
+    db.conn.commit()
+
+    # Workspace B sees only its own miss.
+    ids_b = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_b == [p_b]
+
+    # Bulk reject in B must not touch A's photo.
+    n = db.bulk_reject_miss_category("clipped")
+    assert n == 1
+    flag_a = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_a,)
+    ).fetchone()["flag"]
+    assert flag_a != "rejected"
+    flag_b = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_b,)
+    ).fetchone()["flag"]
+    assert flag_b == "rejected"
+
+    # Switching back to A should still reveal its untouched miss.
+    db.set_active_workspace(ws_a)
+    ids_a = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_a == [p_a]

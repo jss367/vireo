@@ -209,3 +209,57 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
     assert miss["miss_clipped"] == 1
     assert keeper["miss_computed_at"] is not None
     assert miss["miss_computed_at"] is not None
+
+
+def test_compute_misses_scoped_to_active_workspace(tmp_path):
+    """Photos in folders linked only to workspace A must not be touched when
+    compute runs with workspace B active."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("Other")
+
+    # Folder linked to A only — add it while A is active.
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(
+        fa, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0,
+        timestamp="2026-04-22T10:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET detection_conf=?, subject_size=?, "
+        "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        (0.95, 0.001, 1.0, 80.0, 40.0, p_a),
+    )
+
+    # Folder linked to B — add while B is active.
+    db.set_active_workspace(ws_b)
+    fb = db.add_folder("/tmp/b", name="b")
+    p_b = db.add_photo(
+        fb, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
+        timestamp="2026-04-22T10:00:01",
+    )
+    db.conn.execute(
+        "UPDATE photos SET detection_conf=?, subject_size=?, "
+        "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        (0.95, 0.001, 1.0, 80.0, 40.0, p_b),
+    )
+    db.conn.commit()
+
+    # B is active; compute must only touch B's photo.
+    compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
+
+    row_a = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?", (p_a,)
+    ).fetchone())
+    row_b = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?", (p_b,)
+    ).fetchone())
+
+    assert row_a["miss_computed_at"] is None
+    assert row_a["miss_clipped"] != 1
+    assert row_b["miss_computed_at"] is not None
+    assert row_b["miss_clipped"] == 1

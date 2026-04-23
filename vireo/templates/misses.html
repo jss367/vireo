@@ -254,7 +254,7 @@
 <div class="misses-scroll" id="missesScroll" tabindex="0">
   <p class="misses-intro">
     Frames flagged as misses by the pipeline. Bulk-reject a category to set
-    <code>flag=reject</code> on every photo in it; photos aren't deleted.
+    <code>flag=rejected</code> on every photo in it; photos aren't deleted.
     Click a thumbnail to open at 1:1 zoom.
   </p>
 
@@ -528,7 +528,7 @@ async function bulkReject(cat, e) {
   var label = CATEGORY_LABELS[cat];
   var n = (missesData[cat] || []).length;
   if (n === 0) return;
-  if (!confirm('Set flag=reject on all ' + n + ' photos in "' + label + '"?\n' +
+  if (!confirm('Set flag=rejected on all ' + n + ' photos in "' + label + '"?\n' +
                'Photos are not deleted — use the existing purge flow to remove them.')) {
     return;
   }
