@@ -160,6 +160,28 @@ def _current_phase(stages):
     return "Pipeline"
 
 
+def _collapse_scan_roots(paths):
+    """Reduce ``paths`` to the minimal non-overlapping ancestor set.
+
+    Descendants of a kept path are dropped (the scanner walks recursively).
+    The filesystem root needs special handling because ``'/' + os.sep``
+    is ``'//'`` and would not prefix-match a child like ``/sub``.
+    """
+    candidates = sorted(set(paths), key=len)
+    kept: list[str] = []
+    for cand in candidates:
+        is_descendant = False
+        for k in kept:
+            prefix = k if k.endswith(os.sep) else k + os.sep
+            if cand.startswith(prefix):
+                is_descendant = True
+                break
+        if not is_descendant:
+            kept.append(cand)
+    kept.sort()
+    return kept
+
+
 def run_pipeline_job(job, runner, db_path, workspace_id, params):
     """Execute streaming pipeline. Called by JobRunner in a background thread.
 
@@ -196,13 +218,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         # snapshot has files at both /root/a.jpg and /root/sub/b.jpg the
         # naive derived roots (/root, /root/sub) would make the scanner walk
         # /root/sub twice — once on its own, once as a descendant of /root.
-        candidate_roots = sorted({os.path.dirname(p) for p in snapshot_paths}, key=len)
-        scan_roots: list[str] = []
-        for cand in candidate_roots:
-            if any(cand.startswith(kept + os.sep) for kept in scan_roots):
-                continue
-            scan_roots.append(cand)
-        scan_roots.sort()
+        scan_roots = _collapse_scan_roots(
+            [os.path.dirname(p) for p in snapshot_paths]
+        )
         # Override any source/sources/collection_id the caller passed; the
         # snapshot is the single source of truth for what to scan.
         params.sources = scan_roots

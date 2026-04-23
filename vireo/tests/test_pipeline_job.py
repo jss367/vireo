@@ -4368,3 +4368,33 @@ def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatc
         f"sub is a descendant of root and must not be scanned separately, "
         f"got {scan_calls}"
     )
+
+
+def test_collapse_scan_roots_handles_filesystem_root():
+    """Unit test for the collapse helper's edge case where a kept root IS
+    the filesystem root ('/' on POSIX, 'C:\\' on Windows). The naive
+    `kept + os.sep` prefix becomes '//' for '/' and fails to match child
+    paths like '/sub'. Descendants of the filesystem root must still be
+    collapsed away."""
+    from pipeline_job import _collapse_scan_roots
+
+    collapsed = _collapse_scan_roots([os.sep, os.path.join(os.sep, "sub")])
+    assert collapsed == [os.sep], (
+        f"descendants of filesystem root must collapse, got {collapsed}"
+    )
+
+    # Non-overlapping peers are preserved.
+    a = os.path.join(os.sep, "a")
+    b = os.path.join(os.sep, "b")
+    collapsed = _collapse_scan_roots([a, b])
+    assert collapsed == sorted([a, b]), (
+        f"peers must both be kept, got {collapsed}"
+    )
+
+    # Prefix-but-not-descendant isn't collapsed (/foo vs /foobar).
+    foo = os.path.join(os.sep, "foo")
+    foobar = os.path.join(os.sep, "foobar")
+    collapsed = _collapse_scan_roots([foo, foobar])
+    assert collapsed == sorted([foo, foobar]), (
+        f"/foo and /foobar are peers, got {collapsed}"
+    )

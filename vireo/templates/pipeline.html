@@ -1793,18 +1793,6 @@ async function selectSourceMode(mode) {
     importBody.classList.add('dimmed');
     collBody.classList.add('dimmed');
     if (newImgBody) newImgBody.classList.remove('dimmed');
-    if (newImagesSnapshotId === null) {
-      // User is selecting the card directly (no deep-link) — freeze the list now.
-      try {
-        var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
-        if (resp.ok) {
-          var data = await resp.json();
-          newImagesSnapshotId = data.snapshot_id;
-        }
-      } catch (e) {
-        // Leave snapshot id null; submit will fail validation via updateStartButton.
-      }
-    }
   }
 
   var copySection = document.getElementById('destCopySection');
@@ -1820,6 +1808,9 @@ async function selectSourceMode(mode) {
   // Snapshot IDs are scoped to the workspace they were captured in, so the
   // "New workspace" destination would produce a 404 at lookup time. Lock the
   // destination to the current workspace while new-images mode is active.
+  // Apply the destination lock and button state BEFORE any async snapshot
+  // POST — callers don't await this function, so a click on Start during
+  // the POST's network round-trip would otherwise see stale state.
   var wsNewRadio = document.getElementById('radioWsNew');
   var wsCurrentRadio = document.getElementById('radioWsCurrent');
   var wsNewNote = document.getElementById('destWsNewImagesNote');
@@ -1835,7 +1826,26 @@ async function selectSourceMode(mode) {
     if (wsNewNote) wsNewNote.style.display = 'none';
   }
 
+  // With new-images mode selected but no snapshot yet, updateStartButton()
+  // correctly disables Start (gate on `newImagesSnapshotId`). Call it now
+  // so stale state from the previous mode can't slip through during await.
   updateStartButton();
+
+  if (mode === 'new_images' && newImagesSnapshotId === null) {
+    // User is selecting the card directly (no deep-link) — freeze the list now.
+    try {
+      var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+      if (resp.ok) {
+        var data = await resp.json();
+        newImagesSnapshotId = data.snapshot_id;
+      }
+    } catch (e) {
+      // Leave snapshot id null; submit will fail validation via updateStartButton.
+    }
+    // Snapshot resolved (or failed) — refresh start-button state.
+    updateStartButton();
+  }
+
   fetchFolderPreview();
 }
 
