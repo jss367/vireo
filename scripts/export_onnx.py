@@ -1128,97 +1128,135 @@ def export_rtmpose_animal(output_dir, opset, validate=False):
 # SuperAnimal (DeepLabCut 3.x) — production animal keypoint models
 # ---------------------------------------------------------------------------
 #
-# DLC 3.x publishes SuperAnimal-Quadruped and SuperAnimal-Bird under
-# PyTorch state dicts on HuggingFace. dlclibrary.load_superanimal_model
-# returns a torch.nn.Module whose forward produces per-keypoint heatmaps
-# at 1/4 spatial resolution; the ONNX graph exports the raw forward and
-# decoding happens at inference time via keypoints.decode_heatmaps.
+# DLC 3.x publishes raw .pt snapshots of SuperAnimal-Quadruped and
+# SuperAnimal-Bird on DeepLabCut's HuggingFace org. We:
+#   1. build a DLC 3.x PoseModel with the resnet_50 pose-only architecture,
+#      sized by the official project-config bodypart list,
+#   2. load the snapshot state dict directly (strict=True),
+#   3. export a wrapper that emits just the bodypart heatmap tensor so
+#      Vireo's keypoints.decode_heatmaps sees (1, K, H', W').
+#
+# Keypoint names are read at export time from DLC's packaged project YAML
+# to stay in lockstep with whatever bodypart list the published weights
+# were trained on. Don't hardcode them here — the bird list has 42 entries,
+# the quadruped list has 39, and they've been reordered across DLC releases.
 
-# Keypoint orders below come from the DLC model cards. Left/right eye
-# indices are what the eye-focus pipeline stage actually reads; the rest
-# are included so the config.json documents the full model output and the
-# UI could later label them without re-deriving the order.
-_SUPERANIMAL_QUADRUPED_KEYPOINTS = [
-    "nose", "upper_jaw", "lower_jaw", "mouth_end_right", "mouth_end_left",
-    "right_eye", "right_earbase", "right_earend", "right_antler_base",
-    "right_antler_end",
-    "left_eye", "left_earbase", "left_earend", "left_antler_base",
-    "left_antler_end",
-    "neck_base", "neck_end", "throat_base", "throat_end",
-    "back_base", "back_end", "back_middle", "tail_base", "tail_end",
-    "front_left_thai", "front_left_knee", "front_left_paw",
-    "front_right_thai", "front_right_knee", "front_right_paw",
-    "back_left_paw", "back_left_thai", "back_left_knee",
-    "back_right_thai", "back_right_knee", "back_right_paw",
-    "belly_bottom", "body_middle_right", "body_middle_left",
-]
-_SUPERANIMAL_BIRD_KEYPOINTS = [
-    "beak_tip", "left_eye", "right_eye", "crown", "nape",
-    "left_shoulder", "right_shoulder", "left_wing_tip", "right_wing_tip",
-    "back", "tail_base", "tail_tip",
-    "left_leg", "right_leg",
-    "left_foot", "right_foot",
-]
+# HF repos for each snapshot. Bird lives under DLC's org; quadruped and
+# topview-mouse snapshots live under the maintainer's personal org. The
+# source of truth is dlclibrary.dlcmodelzoo.modelzoo_urls_pytorch.yaml.
+_SUPERANIMAL_HF_REPOS = {
+    "superanimal_bird": (
+        "DeepLabCut/DeepLabCutModelZoo-SuperAnimal-Bird",
+        "superanimal_bird_resnet_50.pt",
+    ),
+    "superanimal_quadruped": (
+        "mwmathis/DeepLabCutModelZoo-SuperAnimal-Quadruped",
+        "superanimal_quadruped_resnet_50.pt",
+    ),
+}
 
 
-class _SuperAnimalWrapper:
-    """Wrap a DLC pose model so ONNX export sees (B,3,H,W) → (B,K,H',W').
+def _superanimal_bodyparts(dlc_name):
+    """Read the official keypoint order from DLC's packaged project YAML."""
+    from pathlib import Path
 
-    DLC's stock forward can return dataclasses / nested dicts depending on
-    the DLC version; torch.onnx.export needs plain tensors. This wrapper
-    exposes only the heatmap tensor, making the export graph clean and the
-    ONNX output shape predictable for keypoints.decode_heatmaps.
+    import deeplabcut
+    import yaml
+
+    p = Path(deeplabcut.__file__).parent / f"modelzoo/project_configs/{dlc_name}.yaml"
+    return yaml.safe_load(p.read_text())["bodyparts"]
+
+
+def _build_superanimal_pose_model(keypoints):
+    """Construct a DLC 3.x PoseModel matching the resnet_50 snapshots on HF."""
+    from pathlib import Path
+
+    import yaml
+    from deeplabcut.pose_estimation_pytorch.config import utils as config_utils
+    from deeplabcut.pose_estimation_pytorch.models import PoseModel
+    from deeplabcut.pose_estimation_pytorch.modelzoo.utils import (
+        get_super_animal_model_config_path,
+    )
+
+    model_cfg_path = get_super_animal_model_config_path("resnet_50")
+    cfg = yaml.safe_load(Path(model_cfg_path).read_text())
+    cfg["metadata"] = {
+        "project_path": "/tmp",
+        "pose_config_path": str(model_cfg_path),
+        "bodyparts": list(keypoints),
+        "unique_bodyparts": [],
+        "individuals": ["animal"],
+        "with_identity": False,
+    }
+    cfg = config_utils.replace_default_values(
+        cfg,
+        num_bodyparts=len(keypoints),
+        num_individuals=1,
+        backbone_output_channels=cfg["model"]["backbone_output_channels"],
+    )
+    return PoseModel.build(cfg["model"], pretrained_backbone=False)
+
+
+def _inline_onnx_external_data(onnx_path):
+    """Consolidate a torch-exported ONNX into a single file.
+
+    torch 2.11's dynamo exporter + onnxscript optimizer emit weights as
+    external ``model.onnx.data`` by default. Vireo's keypoint download
+    path (keypoints.ensure_keypoint_weights) expects a single model.onnx,
+    so we rewrite in-place with all initializers inlined.
+    """
+    import onnx
+
+    model = onnx.load(onnx_path, load_external_data=True)
+    for init in model.graph.initializer:
+        if init.data_location == onnx.TensorProto.EXTERNAL:
+            init.data_location = onnx.TensorProto.DEFAULT
+            del init.external_data[:]
+    onnx.save(model, onnx_path, save_as_external_data=False)
+    sidecar = onnx_path + ".data"
+    if os.path.isfile(sidecar):
+        os.remove(sidecar)
+
+
+class _SuperAnimalWrapper(torch.nn.Module):
+    """Expose the bodypart heatmap so torch.onnx.export sees a single tensor.
+
+    DLC 3.x PoseModel.forward returns ``{head_name: {output_name: tensor}}``;
+    Vireo's keypoints.decode_heatmaps wants just ``(1, K, H', W')``.
     """
 
     def __init__(self, model):
-        import torch.nn as nn
-        if not isinstance(model, nn.Module):
-            raise TypeError(
-                "expected torch.nn.Module from dlclibrary, got "
-                f"{type(model).__name__}"
-            )
+        super().__init__()
         self.model = model.eval()
 
-    def __call__(self, x):
-        out = self.model(x)
-        # DLC's output structure varies by release; we defensively pull the
-        # heatmap tensor wherever it shows up. Raises early if this layout
-        # changes so a silent wrong-tensor export never lands.
-        if hasattr(out, "heatmap"):
-            return out.heatmap
-        if isinstance(out, dict) and "heatmap" in out:
-            return out["heatmap"]
-        if isinstance(out, (list, tuple)):
-            return out[0]
-        import torch
-        if isinstance(out, torch.Tensor):
-            return out
-        raise RuntimeError(
-            f"Unrecognized DLC model output: {type(out).__name__}. "
-            "Update _SuperAnimalWrapper to match the new DLC forward."
-        )
+    def forward(self, x):
+        return self.model(x)["bodypart"]["heatmap"]
 
 
-def _export_superanimal_variant(
-    dlc_name, model_id, keypoint_names, output_dir, opset, validate=False,
-):
-    """Shared export path for SuperAnimal-Quadruped and SuperAnimal-Bird.
-
-    Args:
-        dlc_name: the model name accepted by
-            ``dlclibrary.load_superanimal_model`` (e.g. 'superanimal_quadruped').
-        model_id: the Vireo-side id used for directory naming (e.g.
-            'superanimal-quadruped').
-        keypoint_names: ordered list of keypoint names matching the model's
-            output channels.
-    """
+def _export_superanimal_variant(dlc_name, model_id, output_dir, opset, validate=False):
+    """Shared export path for SuperAnimal-Quadruped and SuperAnimal-Bird."""
+    import huggingface_hub
     import torch
-    from dlclibrary import load_superanimal_model
 
     log.info("Exporting %s...", model_id)
+    keypoints = _superanimal_bodyparts(dlc_name)
+    log.info(
+        "  %d keypoints (left_eye=%d, right_eye=%d)",
+        len(keypoints),
+        keypoints.index("left_eye"),
+        keypoints.index("right_eye"),
+    )
 
-    torch_model = load_superanimal_model(dlc_name)
-    wrapped = _SuperAnimalWrapper(torch_model)
+    model = _build_superanimal_pose_model(keypoints)
+
+    repo_id, filename = _SUPERANIMAL_HF_REPOS[dlc_name]
+    log.info("  downloading %s from %s", filename, repo_id)
+    ckpt_path = huggingface_hub.hf_hub_download(repo_id=repo_id, filename=filename)
+    snapshot = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    model.load_state_dict(snapshot["model"], strict=True)
+    model.eval()
+
+    wrapped = _SuperAnimalWrapper(model).eval()
 
     # 256×256 keeps parity with RTMPose so the pipeline stage's aspect-
     # preserving resize + top-left pad produces the same crop geometry
@@ -1230,7 +1268,7 @@ def _export_superanimal_variant(
     onnx_path = os.path.join(out_dir, "model.onnx")
 
     torch.onnx.export(
-        lambda x: wrapped(x),
+        wrapped,
         dummy,
         onnx_path,
         opset_version=opset,
@@ -1241,6 +1279,7 @@ def _export_superanimal_variant(
         # one crop at a time anyway. If batched export is ever needed,
         # re-add dynamic_axes={"pixel_values": {0: "batch"}} here.
     )
+    _inline_onnx_external_data(onnx_path)
 
     config = {
         "input_size": [1, 3, input_h, input_w],
@@ -1248,23 +1287,23 @@ def _export_superanimal_variant(
         # ImageNet-pretrained backbones and expect the standard normalization.
         "mean": [123.675, 116.28, 103.53],
         "std": [58.395, 57.12, 57.375],
-        "keypoints": keypoint_names,
+        "keypoints": keypoints,
         "output_type": "heatmap",
     }
     _save_json(os.path.join(out_dir, "config.json"), config)
 
     if validate:
-        # Compare decoded keypoints between PyTorch and ONNX Runtime on the
-        # dummy input — ±1-pixel tolerance is the plan's bar. Real-image
-        # validation lives in tests/e2e/.
+        # Compare heatmaps between PyTorch and ONNX Runtime on the dummy
+        # input. Real-image validation lives in tests/e2e/.
+        import numpy as np
         import onnxruntime as ort
+
         sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
         with torch.no_grad():
             torch_hm = wrapped(dummy).numpy()
         onnx_hm = sess.run(None, {"pixel_values": dummy.numpy()})[0]
-        import numpy as np
         max_diff = float(np.abs(torch_hm - onnx_hm).max())
-        log.info("  %s ONNX vs PyTorch heatmap max abs diff: %.6f", model_id, max_diff)
+        log.info("  %s ONNX vs PyTorch heatmap max abs diff: %.6e", model_id, max_diff)
         if max_diff > 1e-3:
             raise RuntimeError(
                 f"{model_id} ONNX/PyTorch disagreement too large: {max_diff}"
@@ -1276,18 +1315,14 @@ def _export_superanimal_variant(
 
 def export_superanimal_quadruped(output_dir, opset, validate=False):
     return _export_superanimal_variant(
-        "superanimal_quadruped",
-        "superanimal-quadruped",
-        _SUPERANIMAL_QUADRUPED_KEYPOINTS,
+        "superanimal_quadruped", "superanimal-quadruped",
         output_dir, opset, validate,
     )
 
 
 def export_superanimal_bird(output_dir, opset, validate=False):
     return _export_superanimal_variant(
-        "superanimal_bird",
-        "superanimal-bird",
-        _SUPERANIMAL_BIRD_KEYPOINTS,
+        "superanimal_bird", "superanimal-bird",
         output_dir, opset, validate,
     )
 
