@@ -4177,3 +4177,23 @@ def test_migration_sets_labels_fingerprint_legacy(tmp_path):
         "SELECT labels_fingerprint FROM predictions WHERE id=1"
     ).fetchone()
     assert row["labels_fingerprint"] == "legacy"
+
+
+def test_predictions_has_new_unique_and_no_legacy_columns(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cols = {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(predictions)"
+    ).fetchall()}
+    # Legacy review/workspace columns are gone
+    for legacy in ("status", "reviewed_at", "individual", "group_id",
+                   "vote_count", "total_votes", "workspace_id"):
+        assert legacy not in cols, f"legacy column {legacy} still present"
+    # New unique constraint on (detection_id, classifier_model, labels_fingerprint, species)
+    indexes = db.conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='predictions'"
+    ).fetchall()
+    assert any(
+        "labels_fingerprint" in (idx["sql"] or "") and "species" in (idx["sql"] or "")
+        for idx in indexes
+    )

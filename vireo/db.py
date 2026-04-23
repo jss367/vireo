@@ -175,28 +175,22 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS predictions (
-                id              INTEGER PRIMARY KEY,
-                detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
-                species         TEXT,
-                confidence      REAL,
-                model           TEXT,
-                labels_fingerprint TEXT NOT NULL DEFAULT 'legacy',
-                category        TEXT,
-                status          TEXT DEFAULT 'pending',
-                group_id        TEXT,
-                vote_count      INTEGER,
-                total_votes     INTEGER,
-                individual      TEXT,
-                taxonomy_kingdom TEXT,
-                taxonomy_phylum TEXT,
-                taxonomy_class  TEXT,
-                taxonomy_order  TEXT,
-                taxonomy_family TEXT,
-                taxonomy_genus  TEXT,
-                scientific_name TEXT,
-                created_at      TEXT DEFAULT (datetime('now')),
-                reviewed_at     TEXT,
-                UNIQUE(detection_id, model, species)
+                id                   INTEGER PRIMARY KEY,
+                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+                classifier_model     TEXT NOT NULL,
+                labels_fingerprint   TEXT NOT NULL DEFAULT 'legacy',
+                species              TEXT,
+                confidence           REAL,
+                category             TEXT,
+                scientific_name      TEXT,
+                taxonomy_kingdom     TEXT,
+                taxonomy_phylum     TEXT,
+                taxonomy_class       TEXT,
+                taxonomy_order       TEXT,
+                taxonomy_family      TEXT,
+                taxonomy_genus       TEXT,
+                created_at           TEXT DEFAULT (datetime('now')),
+                UNIQUE(detection_id, classifier_model, labels_fingerprint, species)
             );
 
             CREATE TABLE IF NOT EXISTS detector_runs (
@@ -343,13 +337,9 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0"
             )
-        try:
-            self.conn.execute("SELECT group_id FROM predictions LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN group_id TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN vote_count INTEGER")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN total_votes INTEGER")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN individual TEXT")
+        # group_id/vote_count/total_votes/individual were predictions columns
+        # for group-voting review. Task 12 drops them — review state now lives
+        # in prediction_review. No legacy ALTER re-adds here.
         try:
             self.conn.execute("SELECT sharpness FROM photos LIMIT 0")
         except sqlite3.OperationalError:
@@ -865,6 +855,75 @@ class Database:
             )
             self.conn.commit()
 
+        # Drop review + legacy model columns, rename `model` -> `classifier_model`,
+        # apply new UNIQUE key. Uses create-copy-drop-rename because SQLite
+        # can't drop columns + add constraints atomically.
+        #
+        # Legacy schemas vary: some are missing the taxonomy_* / scientific_name /
+        # category columns (they were added by an ALTER-based migration only).
+        # Substitute NULL for any column that isn't present so the SELECT that
+        # feeds predictions_new doesn't fail with "no such column".
+        #
+        # Foreign keys are turned off for the duration of the rewrite: the
+        # DROP TABLE predictions would otherwise cascade-delete every row in
+        # prediction_review (which Task 11 just backfilled). After the rename,
+        # prediction_review.prediction_id continues to point at the same
+        # integer ids (PRIMARY KEYs are copied verbatim into predictions_new),
+        # so the FK is consistent again.
+        pred_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(predictions)"
+        ).fetchall()}
+        needs_pred_rewrite = "status" in pred_cols or "model" in pred_cols
+        if needs_pred_rewrite:
+            self.conn.execute("PRAGMA foreign_keys=OFF")
+            def _col_or_null(name: str) -> str:
+                return name if name in pred_cols else "NULL"
+            self.conn.execute("""
+                CREATE TABLE predictions_new (
+                    id                   INTEGER PRIMARY KEY,
+                    detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+                    classifier_model     TEXT NOT NULL,
+                    labels_fingerprint   TEXT NOT NULL DEFAULT 'legacy',
+                    species              TEXT,
+                    confidence           REAL,
+                    category             TEXT,
+                    scientific_name      TEXT,
+                    taxonomy_kingdom     TEXT,
+                    taxonomy_phylum      TEXT,
+                    taxonomy_class       TEXT,
+                    taxonomy_order       TEXT,
+                    taxonomy_family      TEXT,
+                    taxonomy_genus       TEXT,
+                    created_at           TEXT DEFAULT (datetime('now')),
+                    UNIQUE(detection_id, classifier_model, labels_fingerprint, species)
+                )
+            """)
+            self.conn.execute(f"""
+                INSERT OR IGNORE INTO predictions_new
+                    (id, detection_id, classifier_model, labels_fingerprint,
+                     species, confidence, category, scientific_name,
+                     taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                     taxonomy_order, taxonomy_family, taxonomy_genus, created_at)
+                SELECT id, detection_id,
+                       COALESCE(model, 'unknown'),
+                       COALESCE(labels_fingerprint, 'legacy'),
+                       species, confidence,
+                       {_col_or_null('category')},
+                       {_col_or_null('scientific_name')},
+                       {_col_or_null('taxonomy_kingdom')},
+                       {_col_or_null('taxonomy_phylum')},
+                       {_col_or_null('taxonomy_class')},
+                       {_col_or_null('taxonomy_order')},
+                       {_col_or_null('taxonomy_family')},
+                       {_col_or_null('taxonomy_genus')},
+                       created_at
+                FROM predictions
+            """)
+            self.conn.execute("DROP TABLE predictions")
+            self.conn.execute("ALTER TABLE predictions_new RENAME TO predictions")
+            self.conn.commit()
+            self.conn.execute("PRAGMA foreign_keys=ON")
+
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")
@@ -917,10 +976,20 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_predictions_detection "
             "ON predictions(detection_id)"
         )
+        # Explicit unique index on the predictions identity tuple. The
+        # CREATE TABLE above declares the same UNIQUE, but SQLite's auto-
+        # generated unique index (sqlite_autoindex_*) has NULL `sql` in
+        # sqlite_master, which makes it impossible to assert against in tests
+        # that inspect index SQL. This explicit index gives us a stable name
+        # and a visible CREATE statement.
         self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_predictions_status "
-            "ON predictions(status)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_predictions_identity "
+            "ON predictions(detection_id, classifier_model, "
+            "labels_fingerprint, species)"
         )
+        # predictions.status was dropped in the legacy-column migration above;
+        # review state lives in prediction_review now, so no status index here.
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_collections_workspace "
             "ON collections(workspace_id)"
