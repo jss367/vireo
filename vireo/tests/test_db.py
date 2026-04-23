@@ -3936,3 +3936,36 @@ def test_upsert_labels_fingerprint(tmp_path):
     ).fetchone()
     assert row["display_name"] == "California birds (v2)"
     assert row["label_count"] == 500
+
+
+def test_review_status_absence_is_pending(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("WS")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    pred_id = db.conn.execute(
+        """INSERT INTO predictions (detection_id, model, species, confidence)
+           VALUES (?, 'bioclip-2', 'Robin', 0.8)""",
+        (det_ids[0],),
+    ).lastrowid
+    db.conn.commit()
+
+    # No row in prediction_review yet → pending
+    assert db.get_review_status(pred_id, ws) == "pending"
+
+    db.set_review_status(pred_id, ws, status="approved")
+    assert db.get_review_status(pred_id, ws) == "approved"
+
+    db.set_review_status(pred_id, ws, status="rejected")
+    assert db.get_review_status(pred_id, ws) == "rejected"

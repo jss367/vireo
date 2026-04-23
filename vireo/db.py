@@ -3920,6 +3920,29 @@ class Database:
         )
         self.conn.commit()
 
+    def get_review_status(self, prediction_id, workspace_id):
+        row = self.conn.execute(
+            """SELECT status FROM prediction_review
+               WHERE prediction_id = ? AND workspace_id = ?""",
+            (prediction_id, workspace_id),
+        ).fetchone()
+        return row["status"] if row else "pending"
+
+    def set_review_status(self, prediction_id, workspace_id, status,
+                           individual=None, group_id=None):
+        self.conn.execute(
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status, reviewed_at, individual, group_id)
+               VALUES (?, ?, ?, datetime('now'), ?, ?)
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET status      = excluded.status,
+                             reviewed_at = excluded.reviewed_at,
+                             individual  = COALESCE(excluded.individual, individual),
+                             group_id    = COALESCE(excluded.group_id,   group_id)""",
+            (prediction_id, workspace_id, status, individual, group_id),
+        )
+        self.conn.commit()
+
     def save_detections(self, photo_id, detections, detector_model=None):
         """Store detection bounding boxes for a photo.
 
