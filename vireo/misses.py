@@ -110,7 +110,9 @@ def classify_miss(row, siblings, config):
     return {"no_subject": False, "clipped": clipped, "oof": oof}
 
 
-def compute_misses_for_workspace(db, pipeline_config, collection_id=None):
+def compute_misses_for_workspace(
+    db, pipeline_config, collection_id=None, exclude_photo_ids=None
+):
     """Compute and persist miss flags for photos in the active workspace.
 
     Reads per-photo features from `photos` (restricted to folders linked to
@@ -127,10 +129,18 @@ def compute_misses_for_workspace(db, pipeline_config, collection_id=None):
     not touched — so a partial pipeline run does not stamp
     `miss_computed_at` on photos outside its scope, which would
     otherwise defeat the `/misses?since=` review-window filter.
+
+    `exclude_photo_ids` mirrors the preview-deselection filter applied by
+    earlier pipeline stages (`params.exclude_photo_ids`). Those photos
+    still contribute burst-sibling context but are not written to, so a
+    run with deselections does not resurface or mass-flag deselected
+    photos in /misses.
     """
     if not pipeline_config.get("miss_enabled", True):
         log.info("Miss detection disabled via miss_enabled=false")
         return 0
+
+    excluded = set(exclude_photo_ids) if exclude_photo_ids else set()
 
     ws_id = db._ws_id()
     # Detector confidence is written to the `detections` table by the
@@ -170,6 +180,8 @@ def compute_misses_for_workspace(db, pipeline_config, collection_id=None):
         for row in burst_rows:
             if target_ids is not None and row["id"] not in target_ids:
                 continue
+            if row["id"] in excluded:
+                continue
             siblings = [s for s in burst_rows if s["id"] != row["id"]]
             flags = classify_miss(row, siblings, pipeline_config)
             updates.append((
@@ -182,6 +194,8 @@ def compute_misses_for_workspace(db, pipeline_config, collection_id=None):
 
     for row in singletons:
         if target_ids is not None and row["id"] not in target_ids:
+            continue
+        if row["id"] in excluded:
             continue
         flags = classify_miss(row, siblings=[], config=pipeline_config)
         updates.append((

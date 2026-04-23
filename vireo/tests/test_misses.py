@@ -376,3 +376,63 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
     # must not bleed into unrelated photos.
     assert row_out["miss_computed_at"] is None
     assert row_out["miss_clipped"] != 1
+
+
+def test_compute_misses_respects_exclude_photo_ids(tmp_path):
+    """Preview deselections (params.exclude_photo_ids) must not have their
+    miss flags or miss_computed_at rewritten. Earlier pipeline stages
+    filter out these IDs; the miss stage must too, or deselected photos
+    get resurfaced in the run-scoped /misses?since= review."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake", name="fake")
+
+    p_kept = db.add_photo(
+        folder_id, "kept.jpg", extension=".jpg", file_size=100,
+        file_mtime=1.0, timestamp="2026-04-22T10:00:00",
+    )
+    p_excluded = db.add_photo(
+        folder_id, "ex.jpg", extension=".jpg", file_size=100,
+        file_mtime=2.0, timestamp="2026-04-22T10:00:01",
+    )
+    # Both singletons below the singleton clipped threshold — so we can
+    # verify the excluded photo does NOT get its flag/timestamp written.
+    db.conn.executemany(
+        "UPDATE photos SET subject_size=?, crop_complete=?, "
+        "subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        [
+            (0.001, 1.0, 80.0, 40.0, p_kept),
+            (0.001, 1.0, 80.0, 40.0, p_excluded),
+        ],
+    )
+    for pid in (p_kept, p_excluded):
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.95, "category": "animal"}],
+        )
+    db.conn.commit()
+
+    n = compute_misses_for_workspace(
+        db,
+        cfg.DEFAULTS["pipeline"],
+        exclude_photo_ids={p_excluded},
+    )
+    assert n == 1
+
+    row_kept = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?",
+        (p_kept,),
+    ).fetchone())
+    row_excluded = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?",
+        (p_excluded,),
+    ).fetchone())
+
+    assert row_kept["miss_clipped"] == 1
+    assert row_kept["miss_computed_at"] is not None
+    assert row_excluded["miss_computed_at"] is None
+    assert row_excluded["miss_clipped"] != 1
