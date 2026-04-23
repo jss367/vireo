@@ -3883,3 +3883,27 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
 
     db._active_workspace_id = ws_b
     assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+
+
+def test_record_classifier_run_and_lookup(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    db._active_workspace_id = db.create_workspace("WS")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Need a detection row to reference:
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    assert db.get_classifier_run_keys(det_id) == set()
+
+    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=5)
+    assert db.get_classifier_run_keys(det_id) == {("bioclip-2", "abc123")}

@@ -3884,6 +3884,28 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
+    def record_classifier_run(self, detection_id, classifier_model,
+                               labels_fingerprint, prediction_count):
+        self.conn.execute(
+            """INSERT INTO classifier_runs
+                 (detection_id, classifier_model, labels_fingerprint, prediction_count)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
+               DO UPDATE SET prediction_count = excluded.prediction_count,
+                             run_at = datetime('now')""",
+            (detection_id, classifier_model, labels_fingerprint, prediction_count),
+        )
+        self.conn.commit()
+
+    def get_classifier_run_keys(self, detection_id):
+        rows = self.conn.execute(
+            """SELECT classifier_model, labels_fingerprint
+               FROM classifier_runs
+               WHERE detection_id = ?""",
+            (detection_id,),
+        ).fetchall()
+        return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
+
     def save_detections(self, photo_id, detections, detector_model=None):
         """Store detection bounding boxes for a photo.
 
