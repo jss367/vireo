@@ -2290,6 +2290,49 @@ def create_app(db_path, thumb_cache_dir=None):
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
 
+    @app.route("/api/misses")
+    def api_misses():
+        """Return photos flagged as misses.
+
+        With no query string, returns a dict with all three categories.
+        With ``?category=X``, returns {"photos": [...], "category": X}.
+        """
+        db = _get_db()
+        category = request.args.get("category")
+        if category is not None:
+            if category not in ("no_subject", "clipped", "oof"):
+                return jsonify({"error": "invalid category"}), 400
+            photos = db.list_misses(category=category)
+            return jsonify({"photos": photos, "category": category})
+        return jsonify({
+            "no_subject": db.list_misses(category="no_subject"),
+            "clipped":    db.list_misses(category="clipped"),
+            "oof":        db.list_misses(category="oof"),
+        })
+
+    @app.route("/api/misses/reject", methods=["POST"])
+    def api_misses_reject():
+        """Set flag='reject' on every photo currently flagged with the given
+        miss category. Returns {"rejected": n, "category": ...}."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        n = db.bulk_reject_miss_category(category)
+        return jsonify({"rejected": n, "category": category})
+
+    @app.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])
+    def api_misses_unflag(photo_id):
+        """Clear the given miss-category boolean on a single photo."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        db.clear_miss_flag(photo_id, category)
+        return jsonify({"ok": True})
+
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
         """Check what's ready for classification and what will need work."""
