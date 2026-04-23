@@ -639,3 +639,24 @@ def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
             f"stale snapshot id must be rejected synchronously, "
             f"got {resp.status_code}: {resp.get_json()}"
         )
+
+
+@pytest.mark.parametrize("bad_id", [{}, [], [1, 2], {"id": 3}, "abc", 1.5, True])
+def test_pipeline_rejects_non_integer_snapshot_id(setup, bad_id):
+    """Malformed source_snapshot_id values (objects, arrays, non-numeric
+    strings, floats, booleans) must be rejected with a 4xx before reaching
+    the DB layer. Without validation, SQLite raises InterfaceError and the
+    client sees an opaque 500."""
+    app, _ = setup
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": bad_id,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert 400 <= resp.status_code < 500, (
+            f"bad snapshot id {bad_id!r} must be rejected with 4xx, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )

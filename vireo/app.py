@@ -6900,6 +6900,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not source and not sources and not collection_id and not source_snapshot_id:
             return json_error("source, sources, collection_id, or source_snapshot_id required")
 
+        # Validate type before touching SQLite. Non-integer bodies (objects,
+        # arrays, non-numeric strings, floats, bools) would otherwise reach
+        # sqlite3 parameter binding and raise ProgrammingError, surfacing as
+        # an opaque 500 instead of a clean 4xx.
+        if source_snapshot_id is not None and (
+            isinstance(source_snapshot_id, bool)
+            or not isinstance(source_snapshot_id, int)
+        ):
+            return json_error("source_snapshot_id must be an integer")
+
         # Resolve the snapshot synchronously so clients get 404 at request
         # time instead of a 200 followed by an asynchronous job failure.
         if (
