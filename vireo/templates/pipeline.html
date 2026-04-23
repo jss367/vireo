@@ -611,6 +611,9 @@ body { padding-bottom: 36px; }
             <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;" data-testid="workspace-name-error"></div>
           </div>
         </div>
+        <div id="destWsNewImagesNote" style="display:none;margin-top:6px;font-size:12px;color:var(--text-dim);" data-testid="workspace-new-images-note">
+          Processing new images uses the current workspace — the snapshot is scoped to it.
+        </div>
       </div>
 
       <!-- Divider -->
@@ -1812,6 +1815,24 @@ async function selectSourceMode(mode) {
   } else {
     copySection.classList.remove('dimmed');
     copyNote.style.display = 'none';
+  }
+
+  // Snapshot IDs are scoped to the workspace they were captured in, so the
+  // "New workspace" destination would produce a 404 at lookup time. Lock the
+  // destination to the current workspace while new-images mode is active.
+  var wsNewRadio = document.getElementById('radioWsNew');
+  var wsCurrentRadio = document.getElementById('radioWsCurrent');
+  var wsNewNote = document.getElementById('destWsNewImagesNote');
+  if (mode === 'new_images') {
+    if (wsNewRadio) wsNewRadio.disabled = true;
+    if (wsCurrentRadio && !wsCurrentRadio.checked) {
+      wsCurrentRadio.checked = true;
+      onDestWorkspaceChange();
+    }
+    if (wsNewNote) wsNewNote.style.display = '';
+  } else {
+    if (wsNewRadio) wsNewRadio.disabled = false;
+    if (wsNewNote) wsNewNote.style.display = 'none';
   }
 
   updateStartButton();
