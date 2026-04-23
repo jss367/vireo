@@ -712,6 +712,28 @@ class Database:
             self.conn.execute("DELETE FROM predictions WHERE detection_id IS NULL")
             self.conn.commit()
 
+        # detector_runs backfill (detection-storage redesign): derive one row per
+        # distinct (photo_id, detector_model) from existing detections so downstream
+        # skip checks don't re-run MegaDetector over photos it has already seen.
+        # Idempotent — only inserts rows whose (photo_id, detector_model) isn't
+        # already present.
+        existing_runs = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM detector_runs"
+        ).fetchone()["n"]
+        legacy_detection_count = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM detections"
+        ).fetchone()["n"]
+        if existing_runs == 0 and legacy_detection_count > 0:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO detector_runs
+                     (photo_id, detector_model, box_count, run_at)
+                   SELECT photo_id, COALESCE(detector_model, 'megadetector-v6'),
+                          COUNT(*), MIN(created_at)
+                   FROM detections
+                   GROUP BY photo_id, COALESCE(detector_model, 'megadetector-v6')"""
+            )
+            self.conn.commit()
+
         # Folder health status
         try:
             self.conn.execute("SELECT status FROM folders LIMIT 0")

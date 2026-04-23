@@ -3969,3 +3969,45 @@ def test_review_status_absence_is_pending(tmp_path):
 
     db.set_review_status(pred_id, ws, status="rejected")
     assert db.get_review_status(pred_id, ws) == "rejected"
+
+
+def test_migration_backfills_detector_runs(tmp_path):
+    """Legacy detections become detector_runs rows on upgrade."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY,
+            photo_id INTEGER,
+            workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL,
+            category TEXT,
+            detector_model TEXT,
+            created_at TEXT
+        );
+        INSERT INTO folders (id, path) VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (10, 1, 0, 0, 1, 1, 0.5, 'animal', 'megadetector-v6', '2026-01-01T00:00:00');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Open through Database → migrations run
+    from db import Database
+    db = Database(db_path)
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id=10 AND detector_model='megadetector-v6'"
+    ).fetchone()
+    assert run is not None
+    assert run["box_count"] == 1
