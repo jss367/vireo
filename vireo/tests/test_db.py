@@ -3837,3 +3837,50 @@ def test_new_image_snapshots_tables_exist(tmp_path):
     }
     assert "new_image_snapshots" in tables
     assert "new_image_snapshot_files" in tables
+
+
+def test_create_and_get_new_images_snapshot(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    assert isinstance(snap_id, int)
+
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap is not None
+    assert snap["file_count"] == 2
+    assert snap["workspace_id"] == ws_id
+    assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    other_ws = db.create_workspace("Other")
+    paths = ["/tmp/a/IMG_001.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    db.set_active_workspace(other_ws)
+    assert db.get_new_images_snapshot(snap_id) is None
+
+
+def test_snapshot_deleted_with_workspace(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    throwaway_ws = db.create_workspace("Throwaway")
+    db.set_active_workspace(throwaway_ws)
+    snap_id = db.create_new_images_snapshot(["/tmp/a.jpg"])
+    db.delete_workspace(throwaway_ws)
+    row = db.conn.execute(
+        "SELECT id FROM new_image_snapshots WHERE id = ?", (snap_id,)
+    ).fetchone()
+    assert row is None
+
+
+def test_create_snapshot_empty_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    snap_id = db.create_new_images_snapshot([])
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap["file_count"] == 0
+    assert snap["file_paths"] == []

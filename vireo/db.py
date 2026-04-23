@@ -4349,6 +4349,59 @@ class Database:
         )
         self.conn.commit()
 
+    def create_new_images_snapshot(self, file_paths):
+        """Persist a snapshot of new-image file paths for the active workspace.
+
+        Returns the new snapshot id. An empty path list is allowed — the caller
+        decides how to handle zero-file snapshots (the pipeline short-circuits).
+        """
+        ws_id = self._ws_id()
+        cur = self.conn.execute(
+            "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
+            "VALUES (?, datetime('now'), ?)",
+            (ws_id, len(file_paths)),
+        )
+        snap_id = cur.lastrowid
+        if file_paths:
+            # De-duplicate in case the caller passed repeats; PK would reject them
+            # but sending a clean set keeps executemany cheap.
+            unique_paths = sorted(set(file_paths))
+            self.conn.executemany(
+                "INSERT INTO new_image_snapshot_files (snapshot_id, file_path) VALUES (?, ?)",
+                [(snap_id, p) for p in unique_paths],
+            )
+        self.conn.commit()
+        return snap_id
+
+    def get_new_images_snapshot(self, snapshot_id):
+        """Return snapshot metadata + file paths, or None if not found / cross-workspace.
+
+        Isolation: a snapshot created in workspace A is invisible when workspace B
+        is active. Callers treat None as 'expired / gone'.
+        """
+        row = self.conn.execute(
+            "SELECT id, workspace_id, created_at, file_count "
+            "FROM new_image_snapshots WHERE id = ? AND workspace_id = ?",
+            (snapshot_id, self._ws_id()),
+        ).fetchone()
+        if row is None:
+            return None
+        paths = [
+            r["file_path"]
+            for r in self.conn.execute(
+                "SELECT file_path FROM new_image_snapshot_files WHERE snapshot_id = ? "
+                "ORDER BY file_path",
+                (snapshot_id,),
+            ).fetchall()
+        ]
+        return {
+            "id": row["id"],
+            "workspace_id": row["workspace_id"],
+            "created_at": row["created_at"],
+            "file_count": row["file_count"],
+            "file_paths": paths,
+        }
+
     def _build_collection_query(self, collection_id):
         """Build SQL clauses from collection rules.
 
