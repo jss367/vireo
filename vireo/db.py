@@ -1854,6 +1854,148 @@ class Database:
             (self._ws_id(),),
         ).fetchone()[0]
 
+    # Coverage signals shown on the dashboard. Each entry is a (key, SQL
+    # predicate) pair; the predicate references the ``photos`` alias ``p`` and
+    # returns 1 when that pipeline stage has run for the row. Detection and
+    # classification are joined in separately since they live in other tables.
+    _COVERAGE_PHOTO_COLUMNS = [
+        ("timestamp", "p.timestamp IS NOT NULL"),
+        ("exif", "p.exif_data IS NOT NULL"),
+        ("gps", "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"),
+        ("file_hash", "p.file_hash IS NOT NULL"),
+        ("phash", "p.phash IS NOT NULL"),
+        ("thumbnail", "p.thumb_path IS NOT NULL"),
+        ("working_copy", "p.working_copy_path IS NOT NULL"),
+        ("mask", "p.mask_path IS NOT NULL"),
+        ("subject_sharpness", "p.subject_tenengrad IS NOT NULL"),
+        ("bg_sharpness", "p.bg_tenengrad IS NOT NULL"),
+        ("eye", "p.eye_x IS NOT NULL"),
+        ("quality", "p.quality_score IS NOT NULL"),
+        ("dino_embedding", "p.dino_subject_embedding IS NOT NULL"),
+        ("label_embedding", "p.embedding IS NOT NULL"),
+        ("burst", "p.burst_id IS NOT NULL"),
+        ("rating", "p.rating IS NOT NULL AND p.rating > 0"),
+    ]
+
+    def _coverage_select_fragment(self):
+        parts = [
+            f"SUM(CASE WHEN {pred} THEN 1 ELSE 0 END) AS {key}"
+            for key, pred in self._COVERAGE_PHOTO_COLUMNS
+        ]
+        return ",\n                ".join(parts)
+
+    def get_coverage_stats(self):
+        """Return per-stage coverage counts for the active workspace.
+
+        ``total`` is the number of photos in active (status='ok') folders of
+        the workspace. Each other key is the count of those photos for which
+        the named pipeline stage has produced output. ``detected`` and
+        ``classified`` are joined from the detections/predictions tables;
+        everything else is a simple NOT NULL check on ``photos``.
+        """
+        ws = self._ws_id()
+        photo_row = self.conn.execute(
+            f"""SELECT
+                COUNT(*) AS total,
+                {self._coverage_select_fragment()}
+            FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            WHERE wf.workspace_id = ?""",
+            (ws,),
+        ).fetchone()
+        detected = self.conn.execute(
+            """SELECT COUNT(DISTINCT d.photo_id)
+               FROM detections d
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
+            (ws, ws),
+        ).fetchone()[0] or 0
+        classified = self.conn.execute(
+            """SELECT COUNT(DISTINCT d.photo_id)
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
+            (ws, ws),
+        ).fetchone()[0] or 0
+        result = {"total": photo_row["total"] or 0}
+        for key, _ in self._COVERAGE_PHOTO_COLUMNS:
+            result[key] = photo_row[key] or 0
+        result["detected"] = detected
+        result["classified"] = classified
+        return result
+
+    def get_folder_coverage_stats(self):
+        """Return a list of per-folder coverage counts for the active workspace.
+
+        One row per folder that is linked to the workspace and has
+        ``status='ok'``. Each row carries ``folder_id``, ``path``, ``name``,
+        ``total`` (photos in that folder only — descendants are NOT rolled
+        in), and the same coverage keys as :meth:`get_coverage_stats`.
+        Folders with zero photos are included so the dashboard can still
+        show them as 0 / 0 if it chooses.
+        """
+        ws = self._ws_id()
+        photo_rows = self.conn.execute(
+            f"""SELECT
+                f.id AS folder_id,
+                f.path AS path,
+                f.name AS name,
+                COUNT(p.id) AS total,
+                {self._coverage_select_fragment()}
+            FROM folders f
+            JOIN workspace_folders wf ON wf.folder_id = f.id
+            LEFT JOIN photos p ON p.folder_id = f.id
+            WHERE wf.workspace_id = ? AND f.status = 'ok'
+            GROUP BY f.id
+            ORDER BY f.path""",
+            (ws,),
+        ).fetchall()
+        det_rows = self.conn.execute(
+            """SELECT p.folder_id AS folder_id,
+                      COUNT(DISTINCT d.photo_id) AS detected
+               FROM detections d
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?
+               GROUP BY p.folder_id""",
+            (ws, ws),
+        ).fetchall()
+        cls_rows = self.conn.execute(
+            """SELECT p.folder_id AS folder_id,
+                      COUNT(DISTINCT d.photo_id) AS classified
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               WHERE d.workspace_id = ? AND wf.workspace_id = ?
+               GROUP BY p.folder_id""",
+            (ws, ws),
+        ).fetchall()
+        det_by_folder = {r["folder_id"]: r["detected"] for r in det_rows}
+        cls_by_folder = {r["folder_id"]: r["classified"] for r in cls_rows}
+        out = []
+        for r in photo_rows:
+            entry = {
+                "folder_id": r["folder_id"],
+                "path": r["path"],
+                "name": r["name"],
+                "total": r["total"] or 0,
+            }
+            for key, _ in self._COVERAGE_PHOTO_COLUMNS:
+                entry[key] = r[key] or 0
+            entry["detected"] = det_by_folder.get(r["folder_id"], 0)
+            entry["classified"] = cls_by_folder.get(r["folder_id"], 0)
+            out.append(entry)
+        return out
+
     def get_pipeline_feature_counts(self):
         """Return counts of photos with masks, detections, and sharpness data."""
         ws = self._ws_id()

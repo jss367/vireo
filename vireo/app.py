@@ -1742,6 +1742,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stats["total_photos"] = db.count_photos()
         return jsonify(stats)
 
+    @app.route("/api/coverage")
+    def api_coverage():
+        """Return per-stage processing coverage for the active workspace.
+
+        ``overall`` is the workspace-wide count for each pipeline stage, and
+        ``folders`` is a per-folder breakdown (one row per top-level folder
+        linked to the workspace). Both share the same coverage keys.
+        """
+        db = _get_db()
+        return jsonify({
+            "overall": db.get_coverage_stats(),
+            "folders": db.get_folder_coverage_stats(),
+        })
+
     @app.route("/api/sync/status")
     def api_sync_status():
         db = _get_db()
