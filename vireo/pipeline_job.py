@@ -11,6 +11,7 @@ untouched. This is an additive orchestration layer.
 import contextlib
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -158,11 +159,17 @@ STAGE_WEIGHTS = {
 
 
 def _stage_fraction(info):
-    """Return a 0..1 completion fraction for one stage entry."""
+    """Return a 0..1 completion fraction for one stage entry.
+
+    'failed' stages still contribute their partial (count/total) progress:
+    heavy stages like classify and extract_masks often process most items
+    before marking themselves failed due to per-item errors, and dropping
+    their weight to 0 would make the overall bar lurch backward when that
+    failure surfaces."""
     status = info.get("status", "pending")
     if status in ("completed", "skipped"):
         return 1.0
-    if status != "running":
+    if status not in ("running", "failed"):
         return 0.0
     total = info.get("total") or 0
     count = info.get("count") or 0
@@ -177,7 +184,12 @@ def _weighted_progress(stages):
     """Overall pipeline progress as (current, total), weighted by stage cost.
 
     Scaled so total == sum(STAGE_WEIGHTS.values()), which keeps the UI's
-    `Math.round(current/total * 100)` rendering whole percent steps."""
+    `Math.round(current/total * 100)` rendering whole percent steps.
+
+    Uses floor rather than round: a done-but-not-quite value like 99.94
+    must not render as 100 because the overall bar reaching total is what
+    the UI treats as 'pipeline complete'. Only a genuinely completed
+    pipeline (all stages completed/skipped) produces done == total."""
     total = sum(STAGE_WEIGHTS.values())
     if total == 0:
         return 0, 0
@@ -185,7 +197,7 @@ def _weighted_progress(stages):
         weight * _stage_fraction(stages.get(name, {}))
         for name, weight in STAGE_WEIGHTS.items()
     )
-    return int(round(done)), total
+    return int(math.floor(done)), total
 
 
 def _progress_event(stages, stage_id, phase, **extra):

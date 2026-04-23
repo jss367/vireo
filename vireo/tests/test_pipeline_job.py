@@ -4245,6 +4245,24 @@ def test_stage_fraction_clamps_to_one():
     assert _stage_fraction({"status": "running", "count": 105, "total": 100}) == 1.0
 
 
+def test_stage_fraction_failed_counts_partial_work():
+    """Stages like classify can process most items and then mark themselves
+    'failed' due to per-item errors. Their partial completion must still
+    count toward the weighted overall — otherwise the bar drops sharply
+    when a near-done heavy stage fails."""
+    assert _stage_fraction({"status": "failed", "count": 80, "total": 100}) == 0.8
+
+
+def test_stage_fraction_failed_without_progress_is_zero():
+    """A failed stage with no count/total contributes nothing, same as
+    pending/unknown."""
+    assert _stage_fraction({"status": "failed"}) == 0.0
+
+
+def test_stage_fraction_failed_clamps_to_one():
+    assert _stage_fraction({"status": "failed", "count": 105, "total": 100}) == 1.0
+
+
 def test_weighted_progress_all_pending_is_zero():
     current, total = _weighted_progress(_empty_stages())
     assert current == 0
@@ -4288,6 +4306,37 @@ def test_weighted_progress_running_stage_partial():
     expected_done = 39 + 15
     assert current == expected_done
     assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_does_not_round_up_to_full():
+    """Overall must not report `current == total` before every stage is
+    actually complete. int(round(done)) would report 100/100 when done is
+    99.5+, falsely showing 100% while a stage is still running."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    # Override the last stage to running at 99/100. Contribution = 5.94
+    # (weight 6 * 0.99); others fully completed = 94. Total done = 99.94.
+    # A naive round(99.94) = 100 would hit total and falsely signal done.
+    stages["regroup"].update(status="running", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) before last stage completed"
+    )
+
+
+def test_weighted_progress_does_not_round_up_with_failed_stage():
+    """Same premature-100 guard, but via a failed stage that finished
+    processing most items. If failed now counts partial work, the weighted
+    sum can land at 99.x when only one stage hasn't fully completed."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    stages["regroup"].update(status="failed", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) with a non-complete stage"
+    )
 
 
 def test_weighted_progress_monotonic_through_pipeline():
