@@ -4991,6 +4991,26 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
+    def collection_photo_ids(self, collection_id):
+        """Return the set of photo IDs in the collection, workspace-scoped.
+
+        Returns an empty set for a missing collection. Used by stages
+        that need to restrict writes to the current pipeline-run scope
+        without paging through full photo rows.
+        """
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            return set()
+
+        folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return {row["id"] for row in self.conn.execute(query, params)}
+
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""
         self.conn.execute(

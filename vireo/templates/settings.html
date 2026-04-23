@@ -519,7 +519,7 @@
       <div class="setting-row">
         <div class="setting-label">
           Minimum subject area
-          <small>Subjects smaller than this fraction of the frame are flagged as "clipped / tiny". Singletons use a stricter floor.</small>
+          <small>Subjects smaller than this fraction of the frame are flagged as "clipped / tiny" in a burst (a tiny bbox next to larger siblings signals lost framing). Singletons require an even smaller subject (40% of this) before being flagged, since without siblings a small subject may be intentional framing.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="range" id="cfgMissBboxMin" min="1" max="20" step="1" value="5"
@@ -1309,12 +1309,19 @@ function saveConfig() {
             // Keep paired thresholds consistent: the UI exposes one slider
             // per pair, but classify_miss reads the sibling value (burst
             // vs singleton) independently. If we only save one side, the
-            // other falls back to defaults, which can invert the intended
-            // "burst relaxes vs singleton stricter" logic when the user
-            // picks a value below the paired default. Derive the paired
-            // value from the same slider using the default ratio.
-            //   defaults: det_conf=0.25 / det_conf_burst=0.15  → burst = 0.60 * singleton
-            //             bbox_min=0.005 / bbox_min_singleton=0.002 → singleton = 0.40 * burst
+            // other falls back to defaults, which can break the paired
+            // relationship when the user picks a value below the paired
+            // default. Derive the paired value from the same slider using
+            // the default ratio. Burst context and singleton context
+            // move in opposite numeric directions because they describe
+            // different kinds of evidence:
+            //   - det_conf: siblings confirm a subject, so a burst is
+            //     forgiving of low confidence (lower threshold). Default
+            //     det_conf=0.25 / det_conf_burst=0.15 → burst = 0.60 * singleton.
+            //   - bbox_min: siblings showing a larger subject make a tiny
+            //     bbox look like lost framing, so a burst flags more
+            //     aggressively (higher threshold). Default bbox_min=0.005 /
+            //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
             ...(function() {
               var det = parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100;
               var bbox = parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000;

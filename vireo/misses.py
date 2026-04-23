@@ -110,7 +110,7 @@ def classify_miss(row, siblings, config):
     return {"no_subject": False, "clipped": clipped, "oof": oof}
 
 
-def compute_misses_for_workspace(db, pipeline_config):
+def compute_misses_for_workspace(db, pipeline_config, collection_id=None):
     """Compute and persist miss flags for photos in the active workspace.
 
     Reads per-photo features from `photos` (restricted to folders linked to
@@ -119,7 +119,14 @@ def compute_misses_for_workspace(db, pipeline_config):
     and a timestamp in a single batch.
 
     Singletons (burst_id IS NULL) are evaluated alone, which triggers the
-    stricter singleton thresholds inside classify_miss.
+    singleton-specific thresholds inside classify_miss.
+
+    When `collection_id` is given, only photos in that collection have
+    their flags and `miss_computed_at` rewritten. Other workspace photos
+    still contribute burst-sibling context to the classifier, but are
+    not touched — so a partial pipeline run does not stamp
+    `miss_computed_at` on photos outside its scope, which would
+    otherwise defeat the `/misses?since=` review-window filter.
     """
     if not pipeline_config.get("miss_enabled", True):
         log.info("Miss detection disabled via miss_enabled=false")
@@ -143,6 +150,10 @@ def compute_misses_for_workspace(db, pipeline_config):
         (ws_id, ws_id),
     ).fetchall()
 
+    target_ids = None
+    if collection_id is not None:
+        target_ids = db.collection_photo_ids(collection_id)
+
     by_burst = defaultdict(list)
     singletons = []
     for r in rows:
@@ -157,6 +168,8 @@ def compute_misses_for_workspace(db, pipeline_config):
 
     for burst_rows in by_burst.values():
         for row in burst_rows:
+            if target_ids is not None and row["id"] not in target_ids:
+                continue
             siblings = [s for s in burst_rows if s["id"] != row["id"]]
             flags = classify_miss(row, siblings, pipeline_config)
             updates.append((
@@ -168,6 +181,8 @@ def compute_misses_for_workspace(db, pipeline_config):
             ))
 
     for row in singletons:
+        if target_ids is not None and row["id"] not in target_ids:
+            continue
         flags = classify_miss(row, siblings=[], config=pipeline_config)
         updates.append((
             int(flags["no_subject"]),

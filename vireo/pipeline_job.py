@@ -2456,7 +2456,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            n = compute_misses_for_workspace(thread_db, pipeline_cfg)
+            n = compute_misses_for_workspace(
+                thread_db, pipeline_cfg, collection_id=collection_id
+            )
 
             stages["misses"]["status"] = "completed"
             stages["misses"]["count"] = n

@@ -305,3 +305,74 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
     assert row_a["miss_clipped"] != 1
     assert row_b["miss_computed_at"] is not None
     assert row_b["miss_clipped"] == 1
+
+
+def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
+    """When a collection_id is passed, only photos inside that collection get
+    their flags/miss_computed_at rewritten. Other workspace photos still
+    supply burst-sibling context but are not touched, so a partial
+    pipeline run does not break /misses?since= scoping."""
+    import json
+
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake", name="fake")
+
+    p_in = db.add_photo(
+        folder_id, "in.jpg", extension=".jpg", file_size=100,
+        file_mtime=1.0, timestamp="2026-04-22T10:00:00",
+    )
+    p_out = db.add_photo(
+        folder_id, "out.jpg", extension=".jpg", file_size=100,
+        file_mtime=2.0, timestamp="2026-04-22T10:00:01",
+    )
+    # Both singletons with subject sizes below the singleton clipped
+    # threshold — so we can verify the out-of-collection photo does NOT
+    # get its flag/timestamp written.
+    db.conn.executemany(
+        "UPDATE photos SET subject_size=?, crop_complete=?, "
+        "subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        [
+            (0.001, 1.0, 80.0, 40.0, p_in),
+            (0.001, 1.0, 80.0, 40.0, p_out),
+        ],
+    )
+    for pid in (p_in, p_out):
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.95, "category": "animal"}],
+        )
+    db.conn.commit()
+
+    # Static collection scoped to just p_in.
+    cur = db.conn.execute(
+        "INSERT INTO collections(name, rules, workspace_id) VALUES(?,?,?)",
+        ("only-in", json.dumps([{"field": "photo_ids", "value": [p_in]}]),
+         db._ws_id()),
+    )
+    collection_id = cur.lastrowid
+    db.conn.commit()
+
+    n = compute_misses_for_workspace(
+        db, cfg.DEFAULTS["pipeline"], collection_id=collection_id
+    )
+    assert n == 1
+
+    row_in = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?", (p_in,)
+    ).fetchone())
+    row_out = dict(db.conn.execute(
+        "SELECT miss_clipped, miss_computed_at FROM photos WHERE id=?", (p_out,)
+    ).fetchone())
+
+    assert row_in["miss_clipped"] == 1
+    assert row_in["miss_computed_at"] is not None
+    # Out-of-collection photo must NOT be touched, even though its
+    # features would otherwise flag it — the partial pipeline scope
+    # must not bleed into unrelated photos.
+    assert row_out["miss_computed_at"] is None
+    assert row_out["miss_clipped"] != 1
