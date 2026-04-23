@@ -4123,3 +4123,57 @@ def test_migration_dedupes_detections_and_repoints_predictions(tmp_path):
     # detections table no longer has workspace_id column
     cols = {r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()}
     assert "workspace_id" not in cols
+
+
+def test_predictions_has_labels_fingerprint(tmp_path):
+    """Fresh DB's predictions table includes the labels_fingerprint column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cols = {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(predictions)"
+    ).fetchall()}
+    assert "labels_fingerprint" in cols
+
+
+def test_migration_sets_labels_fingerprint_legacy(tmp_path):
+    """Legacy predictions rows without labels_fingerprint get 'legacy' on migration."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        INSERT INTO predictions (id, detection_id, species, model) VALUES
+            (1, 100, 'Robin', 'bioclip-2');
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    row = db.conn.execute(
+        "SELECT labels_fingerprint FROM predictions WHERE id=1"
+    ).fetchone()
+    assert row["labels_fingerprint"] == "legacy"

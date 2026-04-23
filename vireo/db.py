@@ -180,6 +180,7 @@ class Database:
                 species         TEXT,
                 confidence      REAL,
                 model           TEXT,
+                labels_fingerprint TEXT NOT NULL DEFAULT 'legacy',
                 category        TEXT,
                 status          TEXT DEFAULT 'pending',
                 group_id        TEXT,
@@ -850,6 +851,17 @@ class Database:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_detections_conf "
                 "ON detections(photo_id, detector_confidence)"
+            )
+            self.conn.commit()
+
+        # Add labels_fingerprint column if missing. Existing rows get 'legacy'.
+        pred_cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(predictions)"
+        ).fetchall()}
+        if "labels_fingerprint" not in pred_cols:
+            self.conn.execute(
+                "ALTER TABLE predictions ADD COLUMN labels_fingerprint TEXT "
+                "NOT NULL DEFAULT 'legacy'"
             )
             self.conn.commit()
 
