@@ -6657,13 +6657,17 @@ def create_app(db_path, thumb_cache_dir=None):
                 status=404,
             )
 
-        # Validate all source directories exist
-        if sources:
-            for s in sources:
-                if not os.path.isdir(s):
-                    return json_error(f"source directory not found: {s}")
-        elif source and not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
+        # Validate source directories — skipped when a snapshot is present,
+        # since run_pipeline_job overrides source/sources with the snapshot's
+        # folders. Rejecting on stale placeholder paths would falsely 400 an
+        # otherwise-valid snapshot-backed run.
+        if source_snapshot_id is None:
+            if sources:
+                for s in sources:
+                    if not os.path.isdir(s):
+                        return json_error(f"source directory not found: {s}")
+            elif source and not os.path.isdir(source):
+                return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
         if destination and not os.path.isabs(destination):

@@ -549,6 +549,43 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
         pipeline_job.run_pipeline_job = original
 
 
+def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
+    """When a valid source_snapshot_id is present, the job overrides any
+    source/sources the caller passed. The handler must not preflight-validate
+    those stale paths — rejecting an otherwise-valid snapshot run because
+    the accompanying placeholder folder no longer exists is a false 400."""
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    import pipeline_job
+    original = pipeline_job.run_pipeline_job
+    pipeline_job.run_pipeline_job = lambda *a, **kw: None
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "source_snapshot_id": snap_id,
+                "sources": ["/does/not/exist/stale"],  # stale placeholder
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, (
+                f"snapshot should override stale sources, got "
+                f"{resp.status_code}: {resp.get_json()}"
+            )
+    finally:
+        pipeline_job.run_pipeline_job = original
+
+
 def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
     """A pipeline request with a non-existent source_snapshot_id must be
     rejected synchronously with 404 rather than accepted and failing later
