@@ -3906,6 +3906,20 @@ class Database:
         ).fetchall()
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
+    def upsert_labels_fingerprint(self, fingerprint, display_name, sources, label_count):
+        import json
+        self.conn.execute(
+            """INSERT INTO labels_fingerprints
+                 (fingerprint, display_name, sources_json, label_count)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(fingerprint)
+               DO UPDATE SET display_name = excluded.display_name,
+                             sources_json = excluded.sources_json,
+                             label_count  = excluded.label_count""",
+            (fingerprint, display_name, json.dumps(sources or []), label_count),
+        )
+        self.conn.commit()
+
     def save_detections(self, photo_id, detections, detector_model=None):
         """Store detection bounding boxes for a photo.
 

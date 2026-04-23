@@ -3907,3 +3907,32 @@ def test_record_classifier_run_and_lookup(tmp_path):
 
     db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=5)
     assert db.get_classifier_run_keys(det_id) == {("bioclip-2", "abc123")}
+
+
+def test_upsert_labels_fingerprint(tmp_path):
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.upsert_labels_fingerprint(
+        fingerprint="abc123",
+        display_name="California birds",
+        sources=["/labels/ca-birds.txt"],
+        label_count=423,
+    )
+    row = db.conn.execute(
+        "SELECT * FROM labels_fingerprints WHERE fingerprint=?", ("abc123",)
+    ).fetchone()
+    assert row["display_name"] == "California birds"
+    assert json.loads(row["sources_json"]) == ["/labels/ca-birds.txt"]
+    assert row["label_count"] == 423
+
+    # Upsert is idempotent
+    db.upsert_labels_fingerprint("abc123", "California birds (v2)",
+                                  ["/labels/ca-birds-v2.txt"], 500)
+    row = db.conn.execute(
+        "SELECT display_name, label_count FROM labels_fingerprints WHERE fingerprint=?",
+        ("abc123",),
+    ).fetchone()
+    assert row["display_name"] == "California birds (v2)"
+    assert row["label_count"] == 500
