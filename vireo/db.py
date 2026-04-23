@@ -3905,10 +3905,13 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
-    def list_misses(self, category=None):
+    def list_misses(self, category=None, since=None):
         """Return photos flagged as misses, optionally filtered by category.
 
         category: None | "no_subject" | "clipped" | "oof"
+        since: optional ISO timestamp; if set, restricts to photos whose
+            miss_computed_at >= since. Used by the pipeline-review step to
+            scope results to the current run.
 
         Excludes photos already flagged as rejected. Ordered by timestamp DESC.
         """
@@ -3924,14 +3927,21 @@ class Database:
             }[category]
             where = f"{col}=1"
 
+        params = []
+        if since:
+            where = f"({where}) AND miss_computed_at >= ?"
+            params.append(since)
+
         rows = self.conn.execute(
             f"SELECT id, folder_id, filename, timestamp, burst_id, "
             f"       detection_box, detection_conf, subject_size, "
             f"       crop_complete, subject_tenengrad, bg_tenengrad, "
-            f"       miss_no_subject, miss_clipped, miss_oof, flag "
+            f"       miss_no_subject, miss_clipped, miss_oof, "
+            f"       miss_computed_at, flag "
             f"FROM photos WHERE ({where}) "
             f"  AND (flag IS NULL OR flag != 'reject') "
-            f"ORDER BY timestamp DESC"
+            f"ORDER BY timestamp DESC",
+            params,
         ).fetchall()
         return [dict(r) for r in rows]
 

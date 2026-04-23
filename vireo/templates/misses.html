@@ -258,6 +258,13 @@
     Click a thumbnail to open at 1:1 zoom.
   </p>
 
+  <div id="scopeBanner" style="display:none;padding:8px 12px;margin-bottom:12px;
+       background:var(--bg-tertiary);border:1px solid var(--border-primary);
+       border-radius:4px;font-size:12px;color:var(--text-secondary);">
+    Showing misses from the current pipeline run.
+    <a href="/misses" style="color:var(--accent);margin-left:8px;">Show all</a>
+  </div>
+
   <div id="missesRoot">
     <!-- Sections rendered here -->
     <div class="misses-empty-page" id="loadingState">Loading...</div>
@@ -314,9 +321,24 @@ function sortPhotos(photos) {
   });
 }
 
+/* ---------- URL param: ?since=<iso-ts> scopes to current pipeline run ---------- */
+function getSinceParam() {
+  try {
+    var u = new URL(window.location.href);
+    var s = u.searchParams.get('since');
+    return s || null;
+  } catch (e) { return null; }
+}
+
 /* ---------- Fetch + render ---------- */
 async function loadMisses() {
-  var r = await fetch('/api/misses');
+  var since = getSinceParam();
+  if (since) {
+    var b = document.getElementById('scopeBanner');
+    if (b) b.style.display = '';
+  }
+  var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
+  var r = await fetch(url);
   if (!r.ok) {
     document.getElementById('missesRoot').innerHTML =
       '<div class="misses-empty-page">Failed to load misses.</div>';

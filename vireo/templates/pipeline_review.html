@@ -977,6 +977,12 @@ input[type="range"]::-moz-range-thumb {
         <div class="num" style="color:var(--warning);" id="statProtected">0</div>
         <div class="label">Protected</div>
       </div>
+      <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
+         style="display:none;margin-left:auto;padding:8px 14px;
+                background:var(--danger);color:#fff;border-radius:6px;
+                font-size:13px;font-weight:600;text-decoration:none;">
+        Review misses (<span id="missesReviewCount">0</span>)
+      </a>
     </div>
 
     <!-- Filter bar (hidden until data loads) -->
@@ -1769,7 +1775,42 @@ function initPipelineReviewPage() {
 
     renderResults();
     checkPendingSync();
+    refreshMissesReviewBtn();
   });
+}
+
+/* Show a "Review misses (N)" shortcut in the summary bar when any photos
+ * from the current pipeline run are flagged as misses. Scopes the link via
+ * ?since=<earliest miss_computed_at within this run>, so the /misses page
+ * only shows this run's misses. */
+function refreshMissesReviewBtn() {
+  var btn = document.getElementById('missesReviewBtn');
+  if (!btn || !pipelineResults || !pipelineResults.photos) return;
+  var runIds = {};
+  pipelineResults.photos.forEach(function(p) { runIds[p.id] = true; });
+
+  fetch('/api/misses').then(function(r) {
+    if (!r.ok) return null;
+    return r.json();
+  }).then(function(data) {
+    if (!data) return;
+    var all = (data.no_subject || []).concat(data.clipped || []).concat(data.oof || []);
+    // Intersect with photos from the current run.
+    var seen = {};
+    var minTs = null;
+    var count = 0;
+    all.forEach(function(p) {
+      if (!runIds[p.id] || seen[p.id]) return;
+      seen[p.id] = true;
+      count += 1;
+      var ts = p.miss_computed_at;
+      if (ts && (minTs == null || ts < minTs)) minTs = ts;
+    });
+    if (count === 0) return;  // stays hidden
+    document.getElementById('missesReviewCount').textContent = count;
+    if (minTs) btn.href = '/misses?since=' + encodeURIComponent(minTs);
+    btn.style.display = '';
+  }).catch(function() { /* no-op */ });
 }
 
 // -- Species confirmation --

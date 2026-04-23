@@ -2300,18 +2300,21 @@ def create_app(db_path, thumb_cache_dir=None):
 
         With no query string, returns a dict with all three categories.
         With ``?category=X``, returns {"photos": [...], "category": X}.
+        ``?since=<iso-ts>`` restricts results to photos whose
+        miss_computed_at >= since (used by the pipeline-review step).
         """
         db = _get_db()
         category = request.args.get("category")
+        since = request.args.get("since") or None
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = db.list_misses(category=category)
+            photos = db.list_misses(category=category, since=since)
             return jsonify({"photos": photos, "category": category})
         return jsonify({
-            "no_subject": db.list_misses(category="no_subject"),
-            "clipped":    db.list_misses(category="clipped"),
-            "oof":        db.list_misses(category="oof"),
+            "no_subject": db.list_misses(category="no_subject", since=since),
+            "clipped":    db.list_misses(category="clipped", since=since),
+            "oof":        db.list_misses(category="oof", since=since),
         })
 
     @app.route("/api/misses/reject", methods=["POST"])

@@ -142,3 +142,27 @@ def test_api_misses_rejects_invalid_category_on_unflag(client, db_with_misses, c
         content_type="application/json",
     )
     assert r.status_code == 400
+
+
+def test_api_misses_since_restricts_to_recent_run(client, db_with_misses):
+    """`?since=<ts>` filters the grouped response to photos computed at-or-after
+    the timestamp. Used by the pipeline-review step to scope the grid to the
+    current run."""
+    _, db, ids = db_with_misses
+    # Age the clipped and oof rows; keep no_subject on the "new" timestamp.
+    db.conn.execute(
+        "UPDATE photos SET miss_computed_at='2026-04-20T00:00:00+00:00' "
+        "WHERE id IN (?, ?)", (ids["clipped"], ids["oof"]),
+    )
+    db.conn.commit()
+
+    r = client.get("/api/misses?since=2026-04-21T00:00:00%2B00:00")
+    assert r.status_code == 200
+    data = r.get_json()
+    assert len(data["no_subject"]) == 1
+    assert data["clipped"] == []
+    assert data["oof"] == []
+
+    r2 = client.get("/api/misses?category=clipped&since=2026-04-21T00:00:00%2B00:00")
+    assert r2.status_code == 200
+    assert r2.get_json()["photos"] == []

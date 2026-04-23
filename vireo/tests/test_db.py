@@ -3956,3 +3956,39 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
         "SELECT flag FROM photos WHERE id=?", (p_already,)
     ).fetchone()["flag"]
     assert flag_already == "reject"  # unchanged
+
+
+def test_list_misses_since_filter(tmp_path):
+    """`since` restricts results to photos whose miss_computed_at >= since.
+
+    Used by the pipeline-review "Review misses" step to scope the grid to
+    photos from the current pipeline run.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_old = db.add_photo(
+        folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_new = db.add_photo(
+        folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-20T00:00:00+00:00' "
+        "WHERE id=?", (p_old,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22T10:00:00+00:00' "
+        "WHERE id=?", (p_new,),
+    )
+    db.conn.commit()
+
+    all_ids = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_old in all_ids and p_new in all_ids
+
+    recent = [m["id"] for m in db.list_misses(category="clipped",
+                                              since="2026-04-21T00:00:00+00:00")]
+    assert recent == [p_new]
+
+    grouped = db.list_misses(since="2026-04-21T00:00:00+00:00")
+    assert [m["id"] for m in grouped] == [p_new]
