@@ -8,13 +8,17 @@ function isTauri() {
 /**
  * Open a native directory picker dialog.
  * @param {string} [title] - Dialog title
- * @returns {Promise<string|null>} Selected directory path, or null if cancelled
+ * @param {object} [opts] - Options
+ * @param {boolean} [opts.multiple] - Allow selecting multiple folders
+ * @returns {Promise<string|string[]|null>} Selected directory path(s), or null if cancelled.
+ *   Returns an array when `opts.multiple` is true, otherwise a string.
  */
-async function pickDirectory(title) {
+async function pickDirectory(title, opts) {
   if (!isTauri()) return null;
+  opts = opts || {};
   var result = await window.__TAURI_INTERNALS__.invoke('plugin:dialog|open', {
     directory: true,
-    multiple: false,
+    multiple: !!opts.multiple,
     title: title || 'Select Folder',
   });
   return result || null;

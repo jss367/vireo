@@ -24,6 +24,7 @@ DEFAULTS = {
     "inat_token": "",
     "hf_token": "",
     "scan_roots": [],
+    "scan_workers": 0,
     "setup_complete": False,
     "darktable_bin": "",
     "external_editor": "",

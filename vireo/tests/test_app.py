@@ -49,6 +49,35 @@ def test_api_folders(app_and_db):
     assert '/photos/2024' in paths
 
 
+def test_api_folder_get_returns_linked_folder(app_and_db):
+    """GET /api/folders/<id> returns id/name/path for a folder in the active ws."""
+    app, db = app_and_db
+    fid = db.get_folder_tree()[0]['id']
+    client = app.test_client()
+    resp = client.get(f'/api/folders/{fid}')
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['id'] == fid
+    assert body['path'] == '/photos/2024'
+
+
+def test_api_folder_get_rejects_other_workspace(app_and_db):
+    """GET /api/folders/<id> must 404 when folder is not linked to the active
+    workspace — otherwise absolute paths leak across workspace boundaries via
+    the folder-tree Copy Path action.
+    """
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    # Folder added while other_ws is active; only linked to other_ws.
+    other_fid = db.add_folder('/secret/ws', name='secret')
+    db.set_active_workspace(default_ws)
+    client = app.test_client()
+    resp = client.get(f'/api/folders/{other_fid}')
+    assert resp.status_code == 404
+
+
 def test_api_keywords(app_and_db):
     """GET /api/keywords returns keyword tree."""
     app, _ = app_and_db

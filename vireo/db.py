@@ -1143,6 +1143,19 @@ class Database:
         ).fetchall()
         return [r["id"] for r in rows]
 
+    def get_folder(self, folder_id):
+        """Return a single folder row by id, or None if not found.
+
+        Not scoped to the active workspace — callers that need workspace
+        scoping should additionally verify membership via
+        ``workspace_folders``.
+        """
+        return self.conn.execute(
+            "SELECT id, path, name, parent_id, status, photo_count "
+            "FROM folders WHERE id = ?",
+            (folder_id,),
+        ).fetchone()
+
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
@@ -3602,7 +3615,7 @@ class Database:
             """SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence, p.filename, p.timestamp, p.sharpness,
                       p.quality_score, p.subject_sharpness, p.subject_size,
-                      p.rating, p.flag
+                      p.rating, p.flag, p.width, p.height
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
@@ -4476,6 +4489,59 @@ class Database:
             (collection_id, self._ws_id()),
         )
         self.conn.commit()
+
+    def rename_collection(self, collection_id, new_name):
+        """Rename a collection within the active workspace.
+
+        Raises ``ValueError`` if the collection isn't in the active workspace.
+        """
+        ws = self._ws_id()
+        cur = self.conn.execute(
+            "UPDATE collections SET name = ? WHERE id = ? AND workspace_id = ?",
+            (new_name, collection_id, ws),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("collection not found")
+        self.conn.commit()
+
+    def duplicate_collection(self, collection_id):
+        """Copy a collection (name + rules) within the active workspace.
+
+        The new collection's name is ``"{original} (copy)"``; if that name is
+        already taken, append an incrementing counter like ``"(copy 2)"``.
+        Rules are copied verbatim, which means static collections (photo_ids
+        rules) keep their memberships.
+
+        Returns the new collection id. Raises ``ValueError`` if the source
+        collection isn't in the active workspace.
+        """
+        ws = self._ws_id()
+        row = self.conn.execute(
+            "SELECT name, rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, ws),
+        ).fetchone()
+        if not row:
+            raise ValueError("collection not found")
+
+        existing = {
+            c["name"]
+            for c in self.conn.execute(
+                "SELECT name FROM collections WHERE workspace_id = ?", (ws,)
+            ).fetchall()
+        }
+        base = f"{row['name']} (copy)"
+        new_name = base
+        n = 2
+        while new_name in existing:
+            new_name = f"{row['name']} (copy {n})"
+            n += 1
+
+        cur = self.conn.execute(
+            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+            (new_name, row["rules"], ws),
+        )
+        self.conn.commit()
+        return cur.lastrowid
 
     def _build_collection_query(self, collection_id):
         """Build SQL clauses from collection rules.

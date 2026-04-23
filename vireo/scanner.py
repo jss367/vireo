@@ -1,10 +1,14 @@
 """Scan folders, discover photos, read metadata, populate database."""
 
+import contextlib
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
-from collections import defaultdict
+import sys
+from collections import defaultdict, deque
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +19,21 @@ from PIL import Image
 from xmp import read_hierarchical_keywords, read_keywords
 
 log = logging.getLogger(__name__)
+
+# scan() runs inside JobRunner/pipeline_job background threads, so the
+# default POSIX "fork" start method is unsafe here: forking a
+# multithreaded process can deadlock. Prefer "forkserver" (POSIX, cheap)
+# and fall back to "spawn" (universal).
+_SCAN_MP_METHOD = (
+    "forkserver"
+    if "forkserver" in multiprocessing.get_all_start_methods()
+    else "spawn"
+)
+
+# Windows' ProcessPoolExecutor raises ValueError when max_workers > 61
+# (the WaitForMultipleObjects handle limit). Clamp on Windows so scans
+# don't fail on high-core-count machines or misconfigured scan_workers.
+_WINDOWS_MAX_WORKERS = 61
 
 
 def compute_file_hash(file_path, chunk_size=65536):
@@ -27,6 +46,49 @@ def compute_file_hash(file_path, chunk_size=65536):
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _compute_file_features(path_str):
+    """Compute (phash, file_hash) for one image.
+
+    Module-level so ProcessPoolExecutor can pickle it. Mirrors the
+    best-effort behavior the main scan loop used to have inline: any
+    failure yields None for that field rather than raising.
+    """
+    phash = None
+    with contextlib.suppress(Exception), Image.open(path_str) as img:
+        phash = str(imagehash.phash(img))
+    file_hash = None
+    with contextlib.suppress(Exception):
+        file_hash = compute_file_hash(path_str)
+    return phash, file_hash
+
+
+def _resolve_worker_count(files_to_process):
+    """Decide how many workers to use for feature computation.
+
+    Returns 1 (sequential) when the batch is tiny or config disables
+    parallelism; otherwise honors ``scan_workers`` (0 = auto, cap at
+    cpu_count and batch size).
+    """
+    n = len(files_to_process)
+    if n < 8:
+        return 1
+    try:
+        import config as cfg
+        configured = int(cfg.get("scan_workers") or 0)
+    except Exception:
+        configured = 0
+    if configured == 1:
+        return 1
+    cpu = os.cpu_count() or 1
+    if configured <= 0:
+        workers = cpu
+    else:
+        workers = min(configured, cpu)
+    if sys.platform == "win32":
+        workers = min(workers, _WINDOWS_MAX_WORKERS)
+    return max(1, min(workers, n))
 
 
 def _import_keywords_for_photo(db, photo_id, xmp_path_str):
@@ -560,7 +622,42 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
     metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
 
-    for image_path in files_to_process:
+    # Compute phash + file_hash in parallel across all files that need
+    # processing. These are the two per-file operations that actually read
+    # every byte of the image; everything else in the loop is cheap DB or
+    # dict work. Results stream in order, so workers keep computing the tail
+    # while the main thread commits the head — no O(n) buffer of features.
+    workers = _resolve_worker_count(files_to_process)
+    if paths_to_extract and status_callback:
+        status_callback(
+            f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
+        )
+
+    def _iter_features():
+        if workers > 1:
+            mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+                # Bounded in-flight window instead of pool.map(): on Python
+                # 3.11 Executor.map eagerly submits every input, so on a
+                # 200k-file scan we would hold 200k queued futures in RAM.
+                # A few submissions per worker is enough to keep them fed
+                # while the main thread drains results in order.
+                max_in_flight = workers * 4
+                pending = deque()
+                inputs = zip(files_to_process, paths_to_extract, strict=True)
+                for image_path, path_str in inputs:
+                    pending.append((image_path, pool.submit(_compute_file_features, path_str)))
+                    if len(pending) >= max_in_flight:
+                        done_path, done_fut = pending.popleft()
+                        yield done_path, done_fut.result()
+                while pending:
+                    done_path, done_fut = pending.popleft()
+                    yield done_path, done_fut.result()
+        else:
+            for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
+                yield image_path, _compute_file_features(path_str)
+
+    for image_path, (phash, file_hash) in _iter_features():
         folder_id = _ensure_folder(image_path.parent)
 
         # File stats
@@ -620,22 +717,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         longitude = composite.get("GPSLongitude")
         if longitude is None:
             longitude = exif_group.get("GPSLongitude")
-
-        # Compute perceptual hash (computed, not from EXIF)
-        phash = None
-        try:
-            with Image.open(str(image_path)) as img:
-                phash = str(imagehash.phash(img))
-        except Exception:
-            log.debug("Could not compute pHash for %s", image_path)
-
-        # Compute file hash for duplicate detection
-        file_hash = None
-        try:
-            file_hash = compute_file_hash(str(image_path))
-        except Exception:
-            log.debug("Could not compute file hash for %s", image_path)
-
 
         photo_id = db.add_photo(
             folder_id=folder_id,

@@ -8,7 +8,13 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pipeline_job import PipelineParams, run_pipeline_job
+from pipeline_job import (
+    STAGE_WEIGHTS,
+    PipelineParams,
+    _stage_fraction,
+    _weighted_progress,
+    run_pipeline_job,
+)
 
 
 def _drop_jpeg(folder_path, filename):
@@ -746,6 +752,186 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     assert "eta_seconds" in last, "Progress event should include eta_seconds"
     assert isinstance(last["rate"], (int, float))
     assert isinstance(last["eta_seconds"], (int, float))
+
+
+def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch):
+    """Scan progress must not move backward at folder boundaries.
+
+    When sources is a list of folders, pipeline_job loops calling scan()
+    once per folder. Each scan() reports progress as local (current, total).
+    The weighted overall bar reads stages["scan"]["count"]/.total, so if
+    those get overwritten rather than accumulated, the UI progress jumps
+    backward when folder N+1 starts.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    folder_a = tmp_path / "folderA"
+    folder_a.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "blue").save(str(folder_a / f"a{i:02d}.jpg"))
+    folder_b = tmp_path / "folderB"
+    folder_b.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "red").save(str(folder_b / f"b{i:02d}.jpg"))
+
+    runner = JobRunner()
+    scan_counts = []
+    scan_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            scan_info = stages.get("scan") or {}
+            if scan_info.get("status") == "running":
+                scan_counts.append(scan_info.get("count") or 0)
+                scan_totals.append(scan_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(folder_a), str(folder_b)],
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-scan-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(scan_counts) > 0, "Expected at least one running scan progress event"
+    for i in range(1, len(scan_counts)):
+        assert scan_counts[i] >= scan_counts[i - 1], (
+            f"scan count moved backward: {scan_counts[i - 1]} -> "
+            f"{scan_counts[i]} at event {i}; full sequence={scan_counts}"
+        )
+    for i in range(1, len(scan_totals)):
+        assert scan_totals[i] >= scan_totals[i - 1], (
+            f"scan total moved backward: {scan_totals[i - 1]} -> "
+            f"{scan_totals[i]} at event {i}; full sequence={scan_totals}"
+        )
+    assert scan_totals[-1] >= 12, (
+        f"final scan total should cover both folders (>=12), got {scan_totals[-1]}"
+    )
+
+
+def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatch):
+    """Ingest progress must not move backward at source folder boundaries.
+
+    Copy mode with sources=[folderA, folderB] calls do_ingest() once per
+    folder. Each call reports (current, total) local to that folder. The
+    weighted overall bar reads stages["ingest"]["count"]/.total, so if
+    those get overwritten rather than accumulated, overall progress
+    rewinds each time a new source starts — the exact regression the
+    scan accumulator already prevents. Same treatment needed for ingest.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    src_a = tmp_path / "srcA"
+    src_a.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "blue").save(str(src_a / f"a{i:02d}.jpg"))
+    src_b = tmp_path / "srcB"
+    src_b.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "red").save(str(src_b / f"b{i:02d}.jpg"))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    runner = JobRunner()
+    ingest_counts = []
+    ingest_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            ingest_info = stages.get("ingest") or {}
+            if ingest_info.get("status") == "running":
+                ingest_counts.append(ingest_info.get("count") or 0)
+                ingest_totals.append(ingest_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(src_a), str(src_b)],
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-ingest-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(ingest_counts) > 0, "Expected at least one running ingest progress event"
+    for i in range(1, len(ingest_counts)):
+        assert ingest_counts[i] >= ingest_counts[i - 1], (
+            f"ingest count moved backward: {ingest_counts[i - 1]} -> "
+            f"{ingest_counts[i]} at event {i}; full sequence={ingest_counts}"
+        )
+    for i in range(1, len(ingest_totals)):
+        assert ingest_totals[i] >= ingest_totals[i - 1], (
+            f"ingest total moved backward: {ingest_totals[i - 1]} -> "
+            f"{ingest_totals[i]} at event {i}; full sequence={ingest_totals}"
+        )
+    assert ingest_totals[-1] >= 10, (
+        f"final ingest total should cover both sources (>=10), got {ingest_totals[-1]}"
+    )
 
 
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
@@ -4185,3 +4371,169 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         assert r["miss_computed_at"] is None, (
             "miss_stage ran after regroup failure and overwrote miss state"
         )
+
+
+# --- Weighted overall progress ---------------------------------------------
+
+def _empty_stages():
+    return {name: {"status": "pending", "count": 0} for name in STAGE_WEIGHTS}
+
+
+def test_stage_fraction_pending_is_zero():
+    assert _stage_fraction({"status": "pending", "count": 0}) == 0.0
+
+
+def test_stage_fraction_completed_is_one():
+    assert _stage_fraction({"status": "completed", "count": 5, "total": 10}) == 1.0
+
+
+def test_stage_fraction_skipped_is_one():
+    """Skipped stages are "done" for overall-progress purposes — their
+    weight has been paid out, so don't stall the bar at the last skip."""
+    assert _stage_fraction({"status": "skipped"}) == 1.0
+
+
+def test_stage_fraction_running_uses_count_over_total():
+    assert _stage_fraction({"status": "running", "count": 25, "total": 100}) == 0.25
+
+
+def test_stage_fraction_running_without_total_is_zero():
+    """A running stage that hasn't yet reported a total can't compute a
+    fraction; report 0 rather than dividing by zero or claiming completion."""
+    assert _stage_fraction({"status": "running", "count": 5}) == 0.0
+
+
+def test_stage_fraction_clamps_to_one():
+    """Stage counters sometimes overshoot total (last batch rounding)."""
+    assert _stage_fraction({"status": "running", "count": 105, "total": 100}) == 1.0
+
+
+def test_stage_fraction_failed_counts_partial_work():
+    """Stages like classify can process most items and then mark themselves
+    'failed' due to per-item errors. Their partial completion must still
+    count toward the weighted overall — otherwise the bar drops sharply
+    when a near-done heavy stage fails."""
+    assert _stage_fraction({"status": "failed", "count": 80, "total": 100}) == 0.8
+
+
+def test_stage_fraction_failed_without_progress_is_zero():
+    """A failed stage with no count/total contributes nothing, same as
+    pending/unknown."""
+    assert _stage_fraction({"status": "failed"}) == 0.0
+
+
+def test_stage_fraction_failed_clamps_to_one():
+    assert _stage_fraction({"status": "failed", "count": 105, "total": 100}) == 1.0
+
+
+def test_weighted_progress_all_pending_is_zero():
+    current, total = _weighted_progress(_empty_stages())
+    assert current == 0
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_all_completed_is_full():
+    stages = {name: {"status": "completed"} for name in STAGE_WEIGHTS}
+    current, total = _weighted_progress(stages)
+    assert current == total
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_fast_stage_done_heavy_pending():
+    """After a fast stage finishes and a heavy one hasn't started, the bar
+    should reflect the fast stage's small weight — NOT 100%. This is the
+    bug the helper fixes: previously the last-pushed stage-local current/total
+    dominated the overall bar."""
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"  # weight 2
+    stages["scan"]["status"] = "completed"    # weight 8
+    # classify (weight 30) still pending
+    current, total = _weighted_progress(stages)
+    pct = current / total * 100
+    assert pct < 15, f"Expected <15% with only ingest+scan done, got {pct:.1f}%"
+
+
+def test_weighted_progress_running_stage_partial():
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "completed"
+    stages["thumbnails"]["status"] = "completed"
+    stages["previews"]["status"] = "completed"
+    stages["model_loader"]["status"] = "completed"
+    stages["detect"]["status"] = "completed"
+    stages["classify"].update(status="running", count=50, total=100)
+    current, total = _weighted_progress(stages)
+    # ingest+scan+thumbs+previews+model_loader+detect = 2+8+6+6+2+15 = 39
+    # classify half-done = 15
+    # total weight sum via STAGE_WEIGHTS
+    expected_done = 39 + 15
+    assert current == expected_done
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_does_not_round_up_to_full():
+    """Overall must not report `current == total` before every stage is
+    actually complete. int(round(done)) would report 100/100 when done is
+    99.5+, falsely showing 100% while a stage is still running."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    # Override the last stage to running at 99/100. Contribution = 5.94
+    # (weight 6 * 0.99); others fully completed = 94. Total done = 99.94.
+    # A naive round(99.94) = 100 would hit total and falsely signal done.
+    stages["regroup"].update(status="running", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) before last stage completed"
+    )
+
+
+def test_weighted_progress_does_not_round_up_with_failed_stage():
+    """Same premature-100 guard, but via a failed stage that finished
+    processing most items. If failed now counts partial work, the weighted
+    sum can land at 99.x when only one stage hasn't fully completed."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    stages["regroup"].update(status="failed", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) with a non-complete stage"
+    )
+
+
+def test_weighted_progress_monotonic_through_pipeline():
+    """Completing stages in order should produce a monotonically increasing
+    overall percentage — no drops between phases."""
+    stages = _empty_stages()
+    order = ["ingest", "scan", "thumbnails", "previews", "model_loader",
+             "detect", "classify", "extract_masks", "eye_keypoints", "regroup"]
+    last_pct = -1.0
+    for name in order:
+        stages[name]["status"] = "completed"
+        current, total = _weighted_progress(stages)
+        pct = current / total * 100
+        assert pct > last_pct, f"Progress went backwards at {name}: {last_pct} -> {pct}"
+        last_pct = pct
+    assert last_pct == 100.0
+
+
+def test_update_stages_emits_weighted_current_total():
+    """_update_stages must send the weighted overall to push_event instead
+    of hardcoded 0/0. This is what makes the 'Overall %' visible in the UI."""
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "running"
+    stages["scan"]["count"] = 50
+    stages["scan"]["total"] = 100
+
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    assert runner.events, "no events pushed"
+    _, evt, data = runner.events[-1]
+    assert evt == "progress"
+    assert data["total"] == sum(STAGE_WEIGHTS.values())
+    # ingest (2) + scan half (4) = 6
+    assert data["current"] == 6

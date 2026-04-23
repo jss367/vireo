@@ -52,7 +52,7 @@ def app_and_db(tmp_path, monkeypatch):
     for pid in [p1, p2, p3]:
         Image.new('RGB', (100, 100)).save(os.path.join(thumb_dir, f"{pid}.jpg"))
 
-    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test-token-123")
     return app, db
 
 
@@ -92,5 +92,5 @@ def client_with_photo(tmp_path, monkeypatch):
         width=800, height=600,
     )
 
-    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir))
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumb_dir), api_token="test-token-123")
     return app, db, pid
