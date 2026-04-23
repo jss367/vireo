@@ -399,15 +399,14 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     assert 7 in detection_map
 
 
-def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
-    """When det_conf_threshold is unset, _detect_batch must read the
-    workspace-effective config (so per-workspace overrides apply), not
-    the bare global config.
+def test_detect_batch_does_not_pass_threshold_to_detector(tmp_path, monkeypatch):
+    """detect_animals is called with just the image path — the workspace
+    threshold is NOT applied at write time.
 
-    Regression: the old code called cfg.load() directly, which dropped
-    workspace overrides on the floor. A bird-photography workspace
-    setting detector_confidence=0.05 was silently ignored — every call
-    used the 0.2 global default.
+    Regression for the detection-storage redesign: the detector writes
+    everything above RAW_CONF_FLOOR so results can be globally cached
+    across workspaces. Any per-workspace threshold is applied as a
+    read-time filter (get_detections / stats queries), not here.
     """
     from unittest.mock import patch
 
@@ -434,8 +433,9 @@ def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_detect(image_path, confidence_threshold):
-        captured["threshold"] = confidence_threshold
+    def fake_detect(image_path, *args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
         return []
 
     runner = FakeRunner()
@@ -454,9 +454,13 @@ def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
             already_detected_ids=set(),
         )
 
-    assert captured["threshold"] == 0.05, (
-        "workspace override detector_confidence=0.05 was dropped; "
-        f"detect_animals was called with {captured.get('threshold')!r}"
+    assert "confidence_threshold" not in captured["kwargs"], (
+        "detect_animals must not receive confidence_threshold; "
+        f"got kwargs={captured['kwargs']!r}"
+    )
+    assert captured["args"] == (), (
+        "detect_animals must only be called with the image path; "
+        f"got extra positional args={captured['args']!r}"
     )
 
 

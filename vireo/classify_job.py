@@ -238,19 +238,22 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                     processed_ids.add(photo["id"])
                     continue
 
-            # Resolve threshold lazily on first actual detection call so a
-            # batch where every photo hits the cached/already-detected
-            # short-circuit doesn't need a working config/db at all (the
-            # cached-detections short-circuit test relies on this).
+            # Resolve workspace-effective threshold lazily on first actual
+            # detection call so a batch where every photo hits the
+            # cached/already-detected short-circuit doesn't need a working
+            # config/db at all (the cached-detections short-circuit test
+            # relies on this).
+            #
+            # The threshold is NOT passed to detect_animals — detector writes
+            # everything above RAW_CONF_FLOOR so results can be globally
+            # cached. The effective threshold is applied as a read-time
+            # filter by get_detections / stats queries (Tasks 20-22).
             if det_conf_threshold is None:
                 import config as cfg
-                # Use workspace-effective config so per-workspace overrides
-                # (e.g. bird-photography workspaces lowering the threshold)
-                # are honored, not just the bare global default.
                 effective_cfg = db.get_effective_config(cfg.load())
                 det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
 
-            detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
+            detections = detect_animals(image_path)
 
             if detections:
                 detected += 1

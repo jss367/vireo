@@ -13,6 +13,19 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+def test_detect_animals_uses_hard_floor(monkeypatch):
+    """detect_animals no longer takes a confidence_threshold param; it uses 0.01 floor."""
+    from detector import RAW_CONF_FLOOR
+    assert RAW_CONF_FLOOR == 0.01
+
+    # Signature regression: should not accept confidence_threshold kwarg
+    import inspect
+
+    from detector import detect_animals
+    sig = inspect.signature(detect_animals)
+    assert "confidence_threshold" not in sig.parameters
+
+
 def test_megadetector_onnx_session_loads():
     """MegaDetector ONNX session must load when model file exists."""
     try:
