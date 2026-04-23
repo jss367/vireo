@@ -6670,6 +6670,14 @@ def create_app(db_path, thumb_cache_dir=None):
                 return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
+        # Copy-ingest ("destination") is incompatible with snapshot runs:
+        # ingest would copy entire source folders, then snapshot filtering
+        # would drop the destination-scanned photo ids, producing empty
+        # downstream stages after an expensive copy. Fail fast.
+        if destination and source_snapshot_id is not None:
+            return json_error(
+                "destination is not allowed when source_snapshot_id is set"
+            )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 

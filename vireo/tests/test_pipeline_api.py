@@ -586,6 +586,41 @@ def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
         pipeline_job.run_pipeline_job = original
 
 
+def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
+    """A snapshot-backed run walks the folders that already hold the files
+    — there is no valid `destination` combination. If the handler accepted
+    both, the copy stage would ingest entire source folders (not just the
+    snapshot set), snapshot filtering would then drop the destination-scanned
+    photos, and the user would pay for an expensive copy that produces
+    nothing downstream. Reject synchronously."""
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": snap_id,
+            "destination": str(dest),
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400, (
+            f"destination is incompatible with snapshot runs, got "
+            f"{resp.status_code}: {resp.get_json()}"
+        )
+
+
 def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
     """A pipeline request with a non-existent source_snapshot_id must be
     rejected synchronously with 404 rather than accepted and failing later
