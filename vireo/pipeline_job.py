@@ -330,6 +330,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     collection_ready = threading.Event()
     models_ready = threading.Event()
     loaded_models = {}  # populated by model_loader thread
+    # Resolved in collection_stage once the scanner has committed photo rows.
+    # When set (i.e. snapshot-scoped runs), the collection is trimmed to this
+    # set so every downstream stage (classify, extract_masks, eye_keypoints,
+    # regroup) operates only on the files captured in the snapshot — files
+    # that landed in the folder after the snapshot are scanned (we walk the
+    # folder) but not further processed.
+    snapshot_photo_ids: set[int] | None = None
 
     skip_scan = collection_id is not None
 
@@ -669,7 +676,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
     def collection_stage():
         """Wait for scan to finish, build collection, signal classifier."""
-        nonlocal collection_id
+        nonlocal collection_id, snapshot_photo_ids
 
         if skip_scan:
             collection_ready.set()
@@ -681,6 +688,52 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             if stages["scan"]["status"] in ("completed", "failed"):
                 break
             time.sleep(0.1)
+
+        # Snapshot-scoped runs: resolve the captured file paths to photo IDs
+        # now that the scanner has committed rows, and trim the collection
+        # to exactly that set. A late-arriving file (landed in the folder
+        # after the snapshot) was still scanned — we walk the whole folder —
+        # but must not be classified or scored. Any snapshot path that never
+        # resolved (file was moved/deleted between snapshot and pipeline
+        # run) is logged so an unexpectedly small collection is auditable.
+        if snapshot_paths is not None:
+            resolver_db = Database(db_path)
+            resolver_db.set_active_workspace(workspace_id)
+            # Chunk the IN () query to stay under SQLite's bound-param
+            # limit on very large snapshots. The join uses
+            # (folders.path || '/' || photos.filename) so we match on
+            # the exact absolute path the snapshot captured.
+            resolved: set[int] = set()
+            _CHUNK = 900
+            paths_list = list(snapshot_paths)
+            for i in range(0, len(paths_list), _CHUNK):
+                chunk = paths_list[i : i + _CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                rows = resolver_db.conn.execute(
+                    f"""SELECT p.id
+                          FROM photos p
+                          JOIN folders f ON f.id = p.folder_id
+                         WHERE (f.path || '/' || p.filename) IN ({placeholders})""",
+                    tuple(chunk),
+                ).fetchall()
+                resolved.update(r["id"] for r in rows)
+            snapshot_photo_ids = resolved
+
+            missing = len(snapshot_paths) - len(snapshot_photo_ids)
+            log.info(
+                "pipeline: snapshot %s had %d files, %d ingested, %d missing on disk",
+                params.source_snapshot_id,
+                len(snapshot_paths),
+                len(snapshot_photo_ids),
+                missing,
+            )
+
+            # Filter collected_photo_ids to the snapshot set. collected_photo_ids
+            # is only read by this stage (to build the collection); the thumbnail
+            # queue has already drained it independently.
+            collected_photo_ids[:] = [
+                pid for pid in collected_photo_ids if pid in snapshot_photo_ids
+            ]
 
         if not collected_photo_ids:
             collection_ready.set()
