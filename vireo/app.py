@@ -1039,6 +1039,11 @@ def create_app(db_path, thumb_cache_dir=None):
             "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
         ).fetchone()
         if folder:
+            # Full on-disk path: mirrors the folder-join logic in
+            # api_files_reveal. Exposed so the browse-grid "Copy Path"
+            # right-click action can read a real filesystem path from the
+            # detail response.
+            result["path"] = os.path.join(folder["path"], photo["filename"])
             xmp_path = os.path.join(
                 folder["path"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -1053,6 +1058,7 @@ def create_app(db_path, thumb_cache_dir=None):
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path
         else:
+            result["path"] = ""
             result["xmp_exists"] = False
             result["xmp_keywords"] = []
             result["xmp_path"] = ""
