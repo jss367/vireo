@@ -31,6 +31,7 @@ class PipelineParams:
     collection_id: int | None = None
     source: str | None = None
     sources: list | None = None
+    source_snapshot_id: int | None = None
     destination: str | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
@@ -175,6 +176,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     job["_start_time"] = time.time()
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
+
+    # Snapshot-scoped pipelines: load the snapshot up front so scan targets
+    # are derived from the captured file paths (not a folder the user picked
+    # later). Raises if the snapshot has been garbage-collected — the API
+    # layer is expected to return 404 before this job ever runs, but we fail
+    # loud here to avoid silently running an unbounded scan.
+    snapshot_paths: list[str] | None = None
+    if params.source_snapshot_id is not None:
+        db_ro = Database(db_path)
+        db_ro.set_active_workspace(workspace_id)
+        snap = db_ro.get_new_images_snapshot(params.source_snapshot_id)
+        if snap is None:
+            raise ValueError(
+                f"snapshot {params.source_snapshot_id} not found"
+            )
+        snapshot_paths = list(snap["file_paths"])
+        scan_roots = sorted({os.path.dirname(p) for p in snapshot_paths})
+        # Override any source/sources/collection_id the caller passed; the
+        # snapshot is the single source of truth for what to scan.
+        params.sources = scan_roots
+        params.source = None
+        params.collection_id = None
 
     # Bridge user-initiated cancellation (runner.cancel_job) to the local
     # abort Event so all stages that already honor `abort` stop promptly.

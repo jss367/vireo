@@ -4114,3 +4114,57 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
         f"stages['thumbnails']['count'] must include failed items (was {thumb_stage_count}). "
         f"Last event stages: {last['stages']}"
     )
+
+
+def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path, monkeypatch):
+    """When source_snapshot_id is provided, the scan stage must walk only the
+    parent directories of the snapshot's files — sibling folders registered
+    with the workspace but not in the snapshot must NOT be scanned."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Two sibling folders each with one JPEG. Only folder A is in the snapshot.
+    folder_a = tmp_path / "folderA"
+    folder_b = tmp_path / "folderB"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    folder_a_id = db.add_folder(str(folder_a))
+    folder_b_id = db.add_folder(str(folder_b))
+    _drop_jpeg(str(folder_a), "IMG_001.JPG")
+    _drop_jpeg(str(folder_b), "IMG_002.JPG")
+
+    snap_id = db.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify via DB state: folder A has its photo ingested, folder B does not.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+    a_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_a_id,),
+    ).fetchall()
+    b_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_b_id,),
+    ).fetchall()
+    assert [r["filename"] for r in a_photos] == ["IMG_001.JPG"], (
+        f"folder A should have its snapshot file ingested, got {list(a_photos)}"
+    )
+    assert list(b_photos) == [], (
+        f"folder B must NOT be scanned (not in snapshot), got {list(b_photos)}"
+    )
