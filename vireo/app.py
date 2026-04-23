@@ -725,6 +725,10 @@ def create_app(db_path, thumb_cache_dir=None):
     def highlights_page():
         return render_template("highlights.html")
 
+    @app.route("/misses")
+    def misses_page():
+        return render_template("misses.html")
+
     # -- API routes --
 
     def _attach_species(db, photo_dicts):

@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Misses</title>
+<style>
+  body {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: 28px; /* space for bottom panel toggle */
+  }
+
+  .misses-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px 40px;
+  }
+
+  .misses-intro {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0 0 16px;
+    max-width: 800px;
+  }
+
+  .misses-section {
+    margin-bottom: 28px;
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    overflow: hidden;
+  }
+  .misses-section-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-tertiary);
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid var(--border-primary);
+  }
+  .misses-section-header:hover { background: var(--bg-primary); }
+  .misses-section-header .caret {
+    display: inline-block;
+    width: 10px;
+    font-size: 10px;
+    color: var(--text-faint);
+    transition: transform 0.15s;
+  }
+  .misses-section.collapsed .caret { transform: rotate(-90deg); }
+  .misses-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .misses-section-count {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .misses-category-badge {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .cat-no_subject { background: #7a7a7a; }   /* gray */
+  .cat-clipped   { background: #e0a020; }    /* amber */
+  .cat-oof       { background: #d04545; }    /* red */
+
+  .misses-section-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+  }
+  .misses-reject-btn {
+    background: var(--danger);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .misses-reject-btn:hover { opacity: 0.9; }
+  .misses-reject-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .misses-section-body {
+    padding: 12px 16px;
+  }
+  .misses-section.collapsed .misses-section-body { display: none; }
+
+  .misses-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+  }
+
+  .miss-card {
+    position: relative;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.1s, border-color 0.15s;
+  }
+  .miss-card:hover { transform: translateY(-1px); border-color: var(--accent); }
+  .miss-card.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+
+  .miss-card-img-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 3/2;
+    background: var(--bg-tertiary);
+  }
+  .miss-card-img-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .miss-card-img-wrap .no-subject-frame {
+    position: absolute;
+    inset: 12px;
+    border: 2px dashed rgba(255,255,255,0.45);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.65);
+    font-size: 12px;
+    text-align: center;
+    pointer-events: none;
+    background: rgba(0,0,0,0.15);
+  }
+
+  /* Detection bbox overlay (matches browse.html .det-box styling) */
+  .miss-bbox {
+    position: absolute;
+    border: 2px solid var(--accent);
+    border-radius: 2px;
+    pointer-events: none;
+    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+
+  .miss-card-badge {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    background: rgba(0,0,0,0.65);
+    border-radius: 3px;
+    font-size: 10px;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .miss-card-badge .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .miss-card-unflag {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+  .miss-card:hover .miss-card-unflag { opacity: 1; }
+  .miss-card-unflag:hover { background: rgba(0,0,0,0.85); }
+
+  .miss-card-info {
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    overflow: hidden;
+  }
+  .miss-card-filename {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  .miss-card-meta {
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .misses-empty {
+    padding: 24px 16px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .misses-empty-page {
+    padding: 80px 24px;
+    text-align: center;
+    color: var(--text-secondary);
+  }
+  .misses-empty-page a { color: var(--accent); }
+
+  .misses-hint {
+    padding: 8px 16px;
+    font-size: 11px;
+    color: var(--text-ghost);
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-primary);
+  }
+  .misses-hint kbd {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-secondary);
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: monospace;
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+</style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="misses-scroll" id="missesScroll" tabindex="0">
+  <p class="misses-intro">
+    Frames flagged as misses by the pipeline. Bulk-reject a category to set
+    <code>flag=reject</code> on every photo in it; photos aren't deleted.
+    Click a thumbnail to open at 1:1 zoom.
+  </p>
+
+  <div id="missesRoot">
+    <!-- Sections rendered here -->
+    <div class="misses-empty-page" id="loadingState">Loading...</div>
+  </div>
+</div>
+
+<script>
+/* ---------- State ---------- */
+var CATEGORY_ORDER = ['no_subject', 'clipped', 'oof'];
+var CATEGORY_LABELS = {
+  no_subject: 'No subject',
+  clipped:    'Clipped / tiny',
+  oof:        'Out of focus',
+};
+var missesData = { no_subject: [], clipped: [], oof: [] };
+var focusedCategory = null;
+var focusedIndex = -1;
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+/* ---------- detection_box parsing ----------
+ * Stored as a JSON string: '{"x": 0.12, "y": 0.22, "w": 0.3, "h": 0.4}'
+ * where x/y/w/h are normalized [0,1] image coordinates.
+ * Returns null if missing or unparseable.
+ */
+function parseDetectionBox(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    var b = JSON.parse(raw);
+    if (!b || b.x == null || b.w == null) return null;
+    return b;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ---------- Sorting: burst_id first, then filename ---------- */
+function sortPhotos(photos) {
+  return photos.slice().sort(function(a, b) {
+    var ab = a.burst_id || '';
+    var bb = b.burst_id || '';
+    if (ab !== bb) return ab < bb ? -1 : 1;
+    var af = a.filename || '';
+    var bf = b.filename || '';
+    if (af !== bf) return af < bf ? -1 : 1;
+    return (a.id || 0) - (b.id || 0);
+  });
+}
+
+/* ---------- Fetch + render ---------- */
+async function loadMisses() {
+  var r = await fetch('/api/misses');
+  if (!r.ok) {
+    document.getElementById('missesRoot').innerHTML =
+      '<div class="misses-empty-page">Failed to load misses.</div>';
+    return;
+  }
+  var data = await r.json();
+  missesData = {
+    no_subject: sortPhotos(data.no_subject || []),
+    clipped:    sortPhotos(data.clipped || []),
+    oof:        sortPhotos(data.oof || []),
+  };
+  render();
+}
+
+function render() {
+  var root = document.getElementById('missesRoot');
+  var total = missesData.no_subject.length + missesData.clipped.length + missesData.oof.length;
+  if (total === 0) {
+    root.innerHTML =
+      '<div class="misses-empty-page">' +
+      '<p>No misses detected — either you nailed every shot, or detection hasn\'t run yet.</p>' +
+      '<p><a href="/pipeline">Go to Pipeline</a> to run miss detection on your folders.</p>' +
+      '</div>';
+    focusedCategory = null;
+    focusedIndex = -1;
+    return;
+  }
+
+  var html = '';
+  CATEGORY_ORDER.forEach(function(cat) {
+    html += renderSection(cat, missesData[cat]);
+  });
+  html +=
+    '<div class="misses-hint">' +
+      'Shortcuts: ' +
+      '<kbd>J</kbd>/<kbd>K</kbd> next/prev in section &middot; ' +
+      '<kbd>U</kbd> unflag focused thumbnail &middot; ' +
+      'click to open lightbox at 1:1 zoom' +
+    '</div>';
+  root.innerHTML = html;
+}
+
+function renderSection(cat, photos) {
+  var count = photos.length;
+  var label = CATEGORY_LABELS[cat];
+  var sectionId = 'missesSection-' + cat;
+  var bodyHtml;
+  if (count === 0) {
+    bodyHtml = '<div class="misses-empty">No photos in this category.</div>';
+  } else {
+    bodyHtml = '<div class="misses-grid" data-cat="' + cat + '">';
+    photos.forEach(function(p, idx) {
+      bodyHtml += renderCard(cat, p, idx);
+    });
+    bodyHtml += '</div>';
+  }
+  return (
+    '<section class="misses-section" id="' + sectionId + '" data-cat="' + cat + '">' +
+      '<div class="misses-section-header" onclick="toggleSection(\'' + cat + '\', event)">' +
+        '<span class="caret">&#9662;</span>' +
+        '<span class="misses-category-badge cat-' + cat + '"></span>' +
+        '<span class="misses-section-title">' + escapeHtml(label) + '</span>' +
+        '<span class="misses-section-count" data-testid="miss-count-' + cat + '">(' + count + ')</span>' +
+        '<div class="misses-section-actions">' +
+          '<button class="misses-reject-btn" ' +
+            'data-testid="miss-reject-' + cat + '" ' +
+            'onclick="bulkReject(\'' + cat + '\', event)" ' +
+            (count === 0 ? 'disabled' : '') + '>' +
+            'Reject all in ' + escapeHtml(label) +
+          '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="misses-section-body">' +
+        bodyHtml +
+      '</div>' +
+    '</section>'
+  );
+}
+
+function renderCard(cat, p, idx) {
+  var bbox = parseDetectionBox(p.detection_box);
+  var bboxHtml = '';
+  if (cat === 'no_subject') {
+    // No bbox available — show dashed placeholder frame.
+    bboxHtml = '<div class="no-subject-frame">No subject detected</div>';
+  } else if (bbox) {
+    bboxHtml =
+      '<div class="miss-bbox" style="left:' + (bbox.x * 100) + '%;top:' + (bbox.y * 100) + '%;' +
+      'width:' + (bbox.w * 100) + '%;height:' + (bbox.h * 100) + '%;"></div>';
+  }
+
+  var meta = '';
+  if (cat === 'clipped' && p.subject_size != null) {
+    meta = (p.subject_size * 100).toFixed(1) + '%';
+  } else if (cat === 'oof' && p.subject_tenengrad != null && p.bg_tenengrad) {
+    meta = 'r=' + (p.subject_tenengrad / p.bg_tenengrad).toFixed(2);
+  } else if (cat === 'no_subject' && p.detection_conf != null) {
+    meta = 'c=' + Number(p.detection_conf).toFixed(2);
+  }
+
+  var ariaLabel = escapeAttr(
+    (CATEGORY_LABELS[cat] || cat) + ' miss: ' + (p.filename || ('photo ' + p.id))
+  );
+
+  return (
+    '<div class="miss-card" ' +
+      'data-cat="' + cat + '" ' +
+      'data-idx="' + idx + '" ' +
+      'data-photo-id="' + p.id + '" ' +
+      'data-filename="' + escapeAttr(p.filename || '') + '" ' +
+      'data-testid="miss-card-' + cat + '-' + p.id + '" ' +
+      'aria-label="' + ariaLabel + '" ' +
+      'onclick="openMiss(\'' + cat + '\', ' + idx + ', event)">' +
+      '<div class="miss-card-img-wrap">' +
+        '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="' + escapeAttr(p.filename || '') + '">' +
+        bboxHtml +
+        '<span class="miss-card-badge">' +
+          '<span class="dot cat-' + cat + '"></span>' +
+          escapeHtml(CATEGORY_LABELS[cat]) +
+        '</span>' +
+        '<button class="miss-card-unflag" ' +
+          'title="Unflag as miss (U)" ' +
+          'data-testid="miss-unflag-' + cat + '-' + p.id + '" ' +
+          'onclick="unflagMiss(\'' + cat + '\', ' + p.id + ', event)">&times;</button>' +
+      '</div>' +
+      '<div class="miss-card-info">' +
+        '<span class="miss-card-filename">' + escapeHtml(p.filename || '') + '</span>' +
+        '<span class="miss-card-meta">' + escapeHtml(meta) + '</span>' +
+      '</div>' +
+    '</div>'
+  );
+}
+
+/* ---------- Section collapse ---------- */
+function toggleSection(cat, e) {
+  if (e && e.target && e.target.closest('button')) return;
+  var sec = document.getElementById('missesSection-' + cat);
+  if (sec) sec.classList.toggle('collapsed');
+}
+
+/* ---------- Open lightbox ---------- */
+function openMiss(cat, idx, e) {
+  if (e && e.target && e.target.closest('button')) return;
+  var photos = missesData[cat];
+  if (!photos || !photos[idx]) return;
+  var p = photos[idx];
+  setFocused(cat, idx);
+  var photoList = photos.map(function(q) { return { id: q.id, filename: q.filename }; });
+
+  if (typeof openLightbox !== 'function') return;
+  openLightbox(p.id, p.filename || '', photoList);
+
+  // 1:1 zoom on open.
+  //
+  // openLightbox() does not currently accept a zoom option. The navbar
+  // defines _lbNativeZoom (computed once image metadata + natural size are
+  // available) and _lbSetZoom. We poll briefly and trigger 1:1 once the
+  // native zoom is known, bailing if the user already interacted.
+  //
+  // TODO(task-12): Playwright scenario should verify this lands at 1:1.
+  // If this proves flaky, we should extend openLightbox() in _navbar.html
+  // to accept an {zoom: '1:1'} option that sets _lbPending1To1 internally.
+  try {
+    var tries = 0;
+    var targetId = p.id;
+    var t = setInterval(function() {
+      tries += 1;
+      if (tries > 40) { clearInterval(t); return; }  // ~4s
+      if (typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== targetId) {
+        clearInterval(t); return;
+      }
+      if (typeof _lbZoom !== 'undefined' && _lbZoom > 1.001) {
+        // User already zoomed; respect that.
+        clearInterval(t); return;
+      }
+      if (typeof _lbNativeZoom !== 'undefined' && _lbNativeZoom && typeof _lbSetZoom === 'function') {
+        _lbSetZoom(_lbNativeZoom, null, null);
+        clearInterval(t);
+      }
+    }, 100);
+  } catch (err) { /* no-op */ }
+}
+
+/* ---------- Bulk reject ---------- */
+async function bulkReject(cat, e) {
+  if (e) e.stopPropagation();
+  var label = CATEGORY_LABELS[cat];
+  var n = (missesData[cat] || []).length;
+  if (n === 0) return;
+  if (!confirm('Set flag=reject on all ' + n + ' photos in "' + label + '"?\n' +
+               'Photos are not deleted — use the existing purge flow to remove them.')) {
+    return;
+  }
+  var r = await fetch('/api/misses/reject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category: cat }),
+  });
+  if (!r.ok) {
+    if (typeof showToast === 'function') showToast('Bulk reject failed', 'error');
+    return;
+  }
+  var data = await r.json();
+  if (typeof showToast === 'function') {
+    showToast('Rejected ' + (data.rejected || 0) + ' in ' + label, 'success');
+  }
+  // Optimistically clear the section, then refetch.
+  missesData[cat] = [];
+  render();
+  loadMisses();
+}
+
+/* ---------- Per-card unflag ---------- */
+async function unflagMiss(cat, photoId, e) {
+  if (e) e.stopPropagation();
+  var r = await fetch('/api/misses/' + photoId + '/unflag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ category: cat }),
+  });
+  if (!r.ok) {
+    if (typeof showToast === 'function') showToast('Unflag failed', 'error');
+    return;
+  }
+  // Remove from in-memory list and re-render.
+  missesData[cat] = (missesData[cat] || []).filter(function(p) { return p.id !== photoId; });
+  render();
+}
+
+/* ---------- Focus tracking + keyboard shortcuts ---------- */
+function setFocused(cat, idx) {
+  focusedCategory = cat;
+  focusedIndex = idx;
+  document.querySelectorAll('.miss-card.focused').forEach(function(el) {
+    el.classList.remove('focused');
+  });
+  if (cat == null || idx == null || idx < 0) return;
+  var sel = '.miss-card[data-cat="' + cat + '"][data-idx="' + idx + '"]';
+  var el = document.querySelector(sel);
+  if (el) {
+    el.classList.add('focused');
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+function moveFocus(delta) {
+  // Pick the first non-empty category if nothing focused yet.
+  if (focusedCategory == null) {
+    for (var i = 0; i < CATEGORY_ORDER.length; i++) {
+      if (missesData[CATEGORY_ORDER[i]].length > 0) {
+        setFocused(CATEGORY_ORDER[i], 0);
+        return;
+      }
+    }
+    return;
+  }
+  var photos = missesData[focusedCategory] || [];
+  var newIdx = focusedIndex + delta;
+  if (newIdx < 0) newIdx = 0;
+  if (newIdx >= photos.length) newIdx = photos.length - 1;
+  setFocused(focusedCategory, newIdx);
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  // Don't hijack modifier combos or when a modal/lightbox is open.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .help-overlay.active')) return;
+
+  var k = e.key;
+  if (k === 'j' || k === 'J') {
+    e.preventDefault();
+    moveFocus(1);
+  } else if (k === 'k' || k === 'K') {
+    e.preventDefault();
+    moveFocus(-1);
+  } else if (k === 'u' || k === 'U') {
+    if (focusedCategory != null && focusedIndex >= 0) {
+      var p = (missesData[focusedCategory] || [])[focusedIndex];
+      if (p) {
+        e.preventDefault();
+        unflagMiss(focusedCategory, p.id);
+      }
+    }
+  } else if (k === 'Enter') {
+    if (focusedCategory != null && focusedIndex >= 0) {
+      e.preventDefault();
+      openMiss(focusedCategory, focusedIndex);
+    }
+  }
+});
+
+/* ---------- Boot ---------- */
+loadMisses();
+</script>
+
+</body>
+</html>
