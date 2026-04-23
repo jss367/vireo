@@ -4849,6 +4849,8 @@ def create_app(db_path, thumb_cache_dir=None):
         if not folder:
             return json_error("folder not found", 404)
         root = folder["path"]
+        if not os.path.isdir(root):
+            return json_error(f"folder path no longer exists: {root}")
         active_ws = db._active_workspace_id
         runner = app._job_runner
 

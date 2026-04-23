@@ -28,12 +28,13 @@ def _wait_for_job_listed(runner, job_id, timeout=2.0):
     return runner.list_jobs()
 
 
-def test_folder_rescan_queues_job(app_and_db):
+def test_folder_rescan_queues_job(app_and_db, tmp_path):
     app, db = app_and_db
-    folder_row = db.conn.execute(
-        "SELECT id FROM folders ORDER BY id LIMIT 1"
-    ).fetchone()
-    folder_id = folder_row["id"]
+    # The fixture folders use fabricated paths; create a real on-disk
+    # directory so the on-disk existence check passes.
+    real_dir = tmp_path / "scan-me"
+    real_dir.mkdir()
+    folder_id = db.add_folder(str(real_dir), name="scan-me")
 
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{folder_id}/rescan", json={})
@@ -68,15 +69,25 @@ def test_folder_rescan_invalid_id_returns_404(app_and_db):
         assert resp.status_code == 404
 
 
-def test_folder_rescan_job_config_includes_folder_path(app_and_db):
+def test_folder_rescan_missing_path_returns_400(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    # Add a folder row whose on-disk path does not exist.
+    fid = db.add_folder(str(tmp_path / "does-not-exist"), name="ghost")
+    with app.test_client() as c:
+        resp = c.post(f"/api/folders/{fid}/rescan", json={})
+        assert resp.status_code == 400
+        assert "no longer exists" in resp.get_json().get("error", "")
+
+
+def test_folder_rescan_job_config_includes_folder_path(app_and_db, tmp_path):
     """The queued job's config carries the folder path so the work
     function can target the right directory."""
     app, db = app_and_db
-    folder_row = db.conn.execute(
-        "SELECT id, path FROM folders ORDER BY id LIMIT 1"
-    ).fetchone()
-    folder_id = folder_row["id"]
-    folder_path = folder_row["path"]
+    # Use a real on-disk directory so the existence check passes.
+    real_dir = tmp_path / "scan-config"
+    real_dir.mkdir()
+    folder_path = str(real_dir)
+    folder_id = db.add_folder(folder_path, name="scan-config")
 
     with app.test_client() as c:
         resp = c.post(f"/api/folders/{folder_id}/rescan", json={})
