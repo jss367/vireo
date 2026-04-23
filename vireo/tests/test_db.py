@@ -4025,8 +4025,9 @@ def test_bulk_reject_category_sets_flag_rejected(tmp_path):
     )
     db.conn.commit()
 
-    n = db.bulk_reject_miss_category("clipped")
-    assert n == 2
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 2
+    assert {a["photo_id"] for a in affected} == {p1, p2}
     for pid in (p1, p2):
         flag = db.conn.execute(
             "SELECT flag FROM photos WHERE id=?", (pid,)
@@ -4061,8 +4062,10 @@ def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
     assert p_miss in listed
     assert p_already not in listed
 
-    n = db.bulk_reject_miss_category("clipped")
-    assert n == 1  # only p_miss got rejected; p_already was already rejected
+    affected = db.bulk_reject_miss_category("clipped")
+    # only p_miss got rejected; p_already was already rejected
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_miss
     flag_already = db.conn.execute(
         "SELECT flag FROM photos WHERE id=?", (p_already,)
     ).fetchone()["flag"]
@@ -4131,8 +4134,9 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
     assert ids_b == [p_b]
 
     # Bulk reject in B must not touch A's photo.
-    n = db.bulk_reject_miss_category("clipped")
-    assert n == 1
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_b
     flag_a = db.conn.execute(
         "SELECT flag FROM photos WHERE id=?", (p_a,)
     ).fetchone()["flag"]
@@ -4216,8 +4220,9 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     db.conn.commit()
 
     # Since filter matches only the new miss.
-    n = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
-    assert n == 1
+    affected = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_new
 
     flag_old = db.conn.execute(
         "SELECT flag FROM photos WHERE id=?", (p_old,)
@@ -4229,8 +4234,9 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     assert flag_new == "rejected"
 
     # Without since, the old miss is now eligible.
-    n2 = db.bulk_reject_miss_category("clipped")
-    assert n2 == 1
+    affected2 = db.bulk_reject_miss_category("clipped")
+    assert len(affected2) == 1
+    assert affected2[0]["photo_id"] == p_old
     flag_old2 = db.conn.execute(
         "SELECT flag FROM photos WHERE id=?", (p_old,)
     ).fetchone()["flag"]

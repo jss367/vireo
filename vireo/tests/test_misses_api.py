@@ -144,6 +144,45 @@ def test_api_misses_rejects_invalid_category_on_unflag(client, db_with_misses, c
     assert r.status_code == 400
 
 
+def test_api_bulk_reject_records_edit_history(client, db_with_misses):
+    """Bulk reject must write a batch `flag` edit_history entry so the change
+    is undoable and shows up in the audit log, matching /api/batch/flag."""
+    _, db, ids = db_with_misses
+    r = client.post(
+        "/api/misses/reject",
+        data=json.dumps({"category": "clipped"}),
+        content_type="application/json",
+    )
+    assert r.status_code == 200
+    assert r.get_json()["rejected"] == 1
+
+    history = db.get_edit_history(limit=5, offset=0)
+    assert history, "bulk reject did not record an edit_history entry"
+    entry = history[0]
+    assert entry["action_type"] == "flag"
+    assert entry["new_value"] == "rejected"
+    assert entry["is_batch"] == 1
+    assert entry["item_count"] == 1
+    assert "category=clipped" in (entry["description"] or "")
+
+
+def test_api_bulk_reject_no_matches_skips_edit_history(client, db_with_misses):
+    """If nothing matches (empty category), no edit_history entry is written —
+    avoids cluttering the undo log with no-op rows."""
+    _, db, _ = db_with_misses
+    before = len(db.get_edit_history(limit=50, offset=0))
+    r = client.post(
+        "/api/misses/reject",
+        data=json.dumps({"category": "clipped",
+                         "since": "2099-01-01T00:00:00+00:00"}),
+        content_type="application/json",
+    )
+    assert r.status_code == 200
+    assert r.get_json()["rejected"] == 0
+    after = len(db.get_edit_history(limit=50, offset=0))
+    assert before == after
+
+
 def test_api_misses_since_restricts_to_recent_run(client, db_with_misses):
     """`?since=<ts>` filters the grouped response to photos computed at-or-after
     the timestamp. Used by the pipeline-review step to scope the grid to the

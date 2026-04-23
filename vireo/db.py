@@ -4184,7 +4184,14 @@ class Database:
         photos whose ``miss_computed_at >= since`` are rejected. This
         keeps bulk reject scoped to the /misses view the user is looking
         at (e.g. the current pipeline run), so older misses not shown on
-        screen aren't silently rejected. Returns rowcount.
+        screen aren't silently rejected.
+
+        Returns a list of ``{"photo_id": int, "old_value": str}`` for each
+        photo whose flag was changed. The caller (``/api/misses/reject``)
+        uses this to write an ``edit_history`` entry so the bulk change is
+        undoable/auditable like the other batch flag routes; without it,
+        an accidental "Reject all" on /misses would be invisible to the
+        undo flow.
         """
         col = {
             "no_subject": "miss_no_subject",
@@ -4196,20 +4203,33 @@ class Database:
         if since:
             since_clause = "    AND p.miss_computed_at >= ? "
             params.append(since)
-        cur = self.conn.execute(
-            f"UPDATE photos SET flag='rejected' "
-            f"WHERE id IN ("
-            f"  SELECT p.id FROM photos p "
-            f"  JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
-            f"  WHERE wf.workspace_id = ? "
-            f"    AND p.{col}=1 "
-            f"    AND (p.flag IS NULL OR p.flag != 'rejected') "
-            f"{since_clause}"
-            f")",
+        rows = self.conn.execute(
+            f"SELECT p.id, p.flag FROM photos p "
+            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"WHERE wf.workspace_id = ? "
+            f"  AND p.{col}=1 "
+            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"{since_clause}",
             params,
-        )
+        ).fetchall()
+        affected = [
+            {"photo_id": r["id"], "old_value": (r["flag"] or "")}
+            for r in rows
+        ]
+        if not affected:
+            return []
+        ids = [a["photo_id"] for a in affected]
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        _CHUNK = 500
+        for i in range(0, len(ids), _CHUNK):
+            chunk = ids[i:i + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"UPDATE photos SET flag='rejected' WHERE id IN ({placeholders})",
+                chunk,
+            )
         self.conn.commit()
-        return cur.rowcount
+        return affected
 
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.

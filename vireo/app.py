@@ -2574,6 +2574,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photos whose miss_computed_at >= since are rejected, so the bulk
         action matches what the user sees on screen. Returns
         {"rejected": n, "category": ...}.
+
+        Records a batch ``flag`` entry in ``edit_history`` so the bulk
+        change is undoable and shows up in the audit log, matching the
+        behavior of ``/api/batch/flag``.
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
@@ -2581,8 +2585,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         since = body.get("since") or None
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
-        n = db.bulk_reject_miss_category(category, since=since)
-        return jsonify({"rejected": n, "category": category})
+        affected = db.bulk_reject_miss_category(category, since=since)
+        if affected:
+            items = [
+                {"photo_id": a["photo_id"],
+                 "old_value": a["old_value"],
+                 "new_value": "rejected"}
+                for a in affected
+            ]
+            db.record_edit(
+                "flag",
+                f"Rejected {len(items)} miss photos (category={category})",
+                "rejected",
+                items,
+                is_batch=True,
+            )
+        return jsonify({"rejected": len(affected), "category": category})
 
     @app.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])
     def api_misses_unflag(photo_id):
