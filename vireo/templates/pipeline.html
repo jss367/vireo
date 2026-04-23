@@ -2126,15 +2126,22 @@ function _updatePipelineStageUI(p) {
   var text = document.getElementById('text' + progressSuffix);
   var status = document.getElementById('status' + progressSuffix);
 
+  // Per-stage progress lives in stages[stage_id]; event top-level
+  // current/total is the WEIGHTED OVERALL progress and must not drive
+  // individual cards (it would make every card read the same %).
+  var si = stages[p.stage_id] || {};
+  var stageCurrent = si.count || 0;
+  var stageTotal = si.total || 0;
+
   var parts = [];
   if (p.phase) parts.push(p.phase);
-  if (p.total > 0 && p.current > 0) {
-    parts.push(p.current.toLocaleString() + ' / ' + p.total.toLocaleString());
+  if (stageTotal > 0 && stageCurrent > 0) {
+    parts.push(stageCurrent.toLocaleString() + ' / ' + stageTotal.toLocaleString());
   }
   if (p.rate) parts.push(Math.round(p.rate) + ' files/min');
   if (p.eta_seconds != null && p.eta_seconds > 0) {
     parts.push('~' + _formatETA(p.eta_seconds) + ' remaining');
-  } else if (p.total > 0 && p.current > 0 && p.current < 10) {
+  } else if (stageTotal > 0 && stageCurrent > 0 && stageCurrent < 10) {
     parts.push('Estimating...');
   }
   if (p.current_file) parts.push(p.current_file);
@@ -2144,9 +2151,9 @@ function _updatePipelineStageUI(p) {
   // "Discovering files..." are visible even before the bar has a total.
   if (status) status.textContent = label;
 
-  if (p.total > 0) {
+  if (stageTotal > 0) {
     if (progressWrap) progressWrap.style.display = '';
-    var pct = Math.round(p.current / p.total * 100);
+    var pct = Math.round(stageCurrent / stageTotal * 100);
     if (fill) fill.style.width = pct + '%';
     if (text) text.textContent = label;
   }
