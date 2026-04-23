@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import subprocess
+import sys
 import time
 import webbrowser
 from datetime import UTC
@@ -900,6 +901,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "missing": [dict(f) for f in missing],
         })
 
+    @app.route("/api/folders/<int:folder_id>", methods=["GET"])
+    def api_folder_get(folder_id):
+        """Return a single folder's id, name, and path.
+
+        Powers the folder-tree context menu's "Copy Path" action. A lean
+        response on purpose: callers that want the richer tree data already
+        have /api/folders for that. Scoped to the active workspace so
+        absolute paths from folders hidden in this workspace don't leak.
+        """
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        return jsonify({
+            "id": folder["id"],
+            "name": folder["name"],
+            "path": folder["path"],
+        })
+
     @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
     def api_folder_relocate(folder_id):
         db = _get_db()
@@ -1079,6 +1105,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
         ).fetchone()
         if folder:
+            # Full on-disk path: mirrors the folder-join logic in
+            # api_files_reveal. Exposed so the browse-grid "Copy Path"
+            # right-click action can read a real filesystem path from the
+            # detail response.
+            result["path"] = os.path.join(folder["path"], photo["filename"])
             xmp_path = os.path.join(
                 folder["path"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -1093,6 +1124,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path
         else:
+            result["path"] = ""
             result["xmp_exists"] = False
             result["xmp_keywords"] = []
             result["xmp_path"] = ""
@@ -1271,6 +1303,104 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.remove_color_label(photo_id)
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
+    @app.route("/api/files/reveal", methods=["POST"])
+    def api_files_reveal():
+        """Reveal a photo or folder in the OS file manager.
+
+        Body: {"photo_id": <int>} OR {"folder_id": <int>}
+
+        Photo reveals select the file in its parent directory (macOS ``open
+        -R``, Windows ``explorer /select,``, Linux ``xdg-open <parent dir>``).
+        Folder reveals open the folder itself (macOS ``open -R <dir>``,
+        Windows ``explorer <dir>``, Linux ``xdg-open <dir>``) — this differs
+        from the photo case on Windows where we deliberately skip ``/select,``
+        so the user sees the folder's contents rather than its parent.
+
+        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if
+        the subprocess failed to launch; 404 if the id is unknown; 400 if
+        neither id was provided or either is malformed.
+        """
+        body = request.get_json(silent=True) or {}
+        pid_raw = body.get("photo_id")
+        fid_raw = body.get("folder_id")
+
+        if pid_raw is None and fid_raw is None:
+            return json_error("photo_id or folder_id required")
+
+        db = _get_db()
+        is_folder = False
+        path = ""
+
+        if pid_raw is not None:
+            try:
+                pid_int = int(pid_raw)
+            except (TypeError, ValueError):
+                return json_error("photo_id must be an integer")
+            # verify_workspace=True enforces that the photo's folder is
+            # linked to the active workspace — otherwise this endpoint would
+            # expose absolute filesystem paths for photos hidden from the
+            # current workspace.
+            photo = db.get_photo(pid_int, verify_workspace=True)
+            if not photo:
+                return json_error("photo not found", 404)
+            folder_row = db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            folder_path = folder_row["path"] if folder_row else ""
+            if not folder_path or not photo["filename"]:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = os.path.join(folder_path, photo["filename"])
+        else:
+            try:
+                fid_int = int(fid_raw)
+            except (TypeError, ValueError):
+                return json_error("folder_id must be an integer")
+            folder = db.get_folder(fid_int)
+            if not folder:
+                return json_error("folder not found", 404)
+            # Reject reveal for folders not linked to the active workspace,
+            # matching the photo branch's verify_workspace gate.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (db._active_workspace_id, fid_int),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
+            folder_path = folder["path"]
+            if not folder_path:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = folder_path
+            is_folder = True
+
+        try:
+            if sys.platform == "darwin":
+                # "open -R <dir>" reveals the folder inside its parent; that's
+                # the right behavior for folder reveals too, consistent with
+                # how Finder treats folder-targeted reveal.
+                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+            elif sys.platform.startswith("win"):
+                if is_folder:
+                    # Open the folder itself so the user sees its contents.
+                    subprocess.run(["explorer", path], timeout=5, check=False)
+                else:
+                    subprocess.run(
+                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    )
+            else:
+                # xdg-open on a file has inconsistent behavior across desktops
+                # (some open the image viewer, not the file manager), so for
+                # photo reveals we open the parent directory instead. Passing
+                # a directory to xdg-open opens the folder in the file manager,
+                # which is exactly what we want for folder reveals.
+                target = path if is_folder else (os.path.dirname(path) or path)
+                # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
+                # so a crafted leading-dash path can't be parsed as a flag.
+                target = os.path.abspath(target)
+                subprocess.run(["xdg-open", target], timeout=5, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
@@ -1719,6 +1849,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.delete_collection(collection_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
+    def api_update_collection(collection_id):
+        """Rename a collection. Body: {"name": "..."}."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return json_error("name required")
+        try:
+            db.rename_collection(collection_id, name)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True})
+
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
     def api_collection_add_photos(collection_id):
         """Add photos to a static collection by appending to its photo_ids rule."""
@@ -1762,6 +1906,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
+
+    @app.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
+    def api_collection_duplicate(collection_id):
+        """Duplicate a collection within the active workspace. Returns {id}."""
+        db = _get_db()
+        try:
+            new_id = db.duplicate_collection(collection_id)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True, "id": new_id})
 
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
@@ -4678,32 +4832,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    @app.route("/api/jobs/scan", methods=["POST"])
-    def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+    def _build_scan_work(root, incremental, active_ws):
+        """Build the background work function for a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
-        import tempfile
-
+        Shared by ``POST /api/jobs/scan`` and
+        ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
+        same scan + thumbnail pipeline as a full scan.
+        """
         import config as cfg
 
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
-
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from scanner import scan as do_scan
@@ -4811,8 +4949,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
+        return work
+
+    @app.route("/api/jobs/scan", methods=["POST"])
+    def api_job_scan():
+        body = request.get_json(silent=True) or {}
+        root = body.get("root", "")
+        incremental = body.get("incremental", False)
+        if not root:
+            return json_error("root path required")
+        if not os.path.isdir(root):
+            return json_error(f"directory not found: {root}")
+
+        # Remember this scan root (skip temp directories from tests)
+        import tempfile
+
+        import config as cfg
+
+        tmp_prefix = os.path.realpath(tempfile.gettempdir())
+        if not os.path.realpath(root).startswith(tmp_prefix):
+            user_cfg = cfg.load()
+            roots = user_cfg.get("scan_roots", [])
+            if root not in roots:
+                roots.insert(0, root)
+                user_cfg["scan_roots"] = roots
+                cfg.save(user_cfg)
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        work = _build_scan_work(root, incremental, active_ws)
+
         job_id = runner.start(
             "scan", work, config={"root": root, "incremental": incremental},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
+    def api_folder_rescan(folder_id):
+        """Queue a scan job scoped to the given folder's path.
+
+        Body (optional): {"incremental": bool}
+        Returns: {"job_id": "scan-..."} on success; 404 if the folder id
+        is unknown or not linked to the active workspace.
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = bool(body.get("incremental", False))
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        # Folders are global but scans emit workspace-scoped data (predictions,
+        # pending_changes). Reject rescans of folders the active workspace has
+        # no claim on — otherwise a stale UI or crafted request could pollute
+        # this workspace with scan output from an unrelated folder, and
+        # add_folder's auto-link would silently attach it.
+        active_ws = db._active_workspace_id
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (active_ws, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        root = folder["path"]
+        if not os.path.isdir(root):
+            return json_error(f"folder path no longer exists: {root}")
+        runner = app._job_runner
+
+        work = _build_scan_work(root, incremental, active_ws)
+
+        job_id = runner.start(
+            "scan", work,
+            config={
+                "root": root,
+                "incremental": incremental,
+                "folder_id": folder_id,
+            },
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})

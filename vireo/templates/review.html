@@ -1170,6 +1170,199 @@ document.addEventListener('keydown', function(e) {
   else if (matchesShortcut(e, _shortcuts.skip)) { e.preventDefault(); rejectPrediction(pending[0].id); }
 });
 
+/* ---------- Right-click context menu ----------
+ * The review grid has no multi-select — the menu always targets the single
+ * card under the cursor. Rating / flag chips POST directly to the batch
+ * endpoints so they don't depend on helpers that only exist on browse.html.
+ */
+function setReviewRating(photoId, rating) {
+  safeFetch('/api/batch/rating', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: [photoId], rating: rating }),
+  }, { toast: false }).catch(function() {});
+}
+
+function setReviewFlag(photoId, flag) {
+  safeFetch('/api/batch/flag', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_ids: [photoId], flag: flag }),
+  }, { toast: false }).catch(function() {});
+}
+
+function revealReviewPhoto(photoId) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photo_id: photoId }),
+  }, { toast: false }).catch(function() {});
+}
+
+async function copyReviewPhotoPath(photoId) {
+  try {
+    var data = await safeFetch('/api/photos/' + photoId, {}, { toast: false });
+    if (data && data.path) {
+      try { await navigator.clipboard.writeText(data.path); } catch(e) {}
+    }
+  } catch(e) {}
+}
+
+function openReviewLightbox(photoId, filename) {
+  // Build the same photoList the grid click handler builds, so arrow-key
+  // navigation inside the lightbox walks the current review grid.
+  var seen = {};
+  var photoList = [];
+  var thumbs = document.getElementById('grid').querySelectorAll('img[data-photo-id]');
+  for (var i = 0; i < thumbs.length; i++) {
+    var pid = parseInt(thumbs[i].dataset.photoId, 10);
+    if (seen[pid]) continue;
+    seen[pid] = true;
+    photoList.push({ id: pid, filename: thumbs[i].dataset.filename || '' });
+  }
+  openLightbox(photoId, filename || '', photoList);
+}
+
+function buildReviewCardContextMenu(pred) {
+  var photoId = pred.photo_id;
+  var predId = pred.id;
+  var species = pred.group_id ? getConsensusSpecies(pred) : pred.species;
+  var speciesLabel = species || 'species';
+  var pending = pred.status === 'pending';
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() { setReviewRating(photoId, n); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { setReviewFlag(photoId, f); },
+    };
+  };
+
+  var items = [];
+  items.push({
+    label: 'Accept as "' + speciesLabel + '"',
+    disabled: !pending,
+    disabledHint: pending ? undefined : 'Already resolved',
+    onClick: function() { acceptPrediction(predId); },
+  });
+  items.push({
+    label: 'Not "' + speciesLabel + '"',
+    disabled: !pending,
+    disabledHint: pending ? undefined : 'Already resolved',
+    onClick: function() { rejectPrediction(predId); },
+  });
+  items.push({ separator: true });
+  items.push({ chips: [0, 1, 2, 3, 4, 5].map(rateChip) });
+  items.push({ chips: [
+    flagChip('flagged', '\u2691', 'Flag as pick'),
+    flagChip('rejected', '\u2715', 'Reject'),
+    flagChip('none', '\u25CB', 'Unflag'),
+  ] });
+  items.push({ separator: true });
+  items.push({
+    label: 'Open in Lightbox',
+    onClick: function() { openReviewLightbox(photoId, pred.filename); },
+  });
+  items.push({
+    label: 'Reveal in Finder/Folder',
+    onClick: function() { revealReviewPhoto(photoId); },
+  });
+  items.push({
+    label: 'Copy Path',
+    onClick: function() { copyReviewPhotoPath(photoId); },
+  });
+  return items;
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.card[data-pred-id]');
+  if (!card) return;
+  // Only hijack contextmenu for cards that live inside the review grid —
+  // the burst-group modal and other surfaces handle their own menus.
+  var grid = document.getElementById('grid');
+  if (!grid || !grid.contains(card)) return;
+  e.preventDefault();
+  var predId = parseInt(card.dataset.predId, 10);
+  var pred = predictions.find(function(p) { return p.id === predId; });
+  if (!pred) return;
+  if (typeof openContextMenu !== 'function') return;
+  openContextMenu(e, buildReviewCardContextMenu(pred));
+});
+
+/* ---------- Burst group modal context menu ----------
+ * The grm-card selector (.grm-card[data-photo-id]) does NOT collide with
+ * the review grid's .card[data-pred-id] handler above — different class
+ * names, different closest() matches.
+ *
+ * Critical: grmMovePick / grmMoveReject / grmMoveCandidate / grmRemoveFromGroup
+ * all operate on grmState.selected. On right-click we MUST force-set
+ * grmState.selected to the clicked card's photo_id before opening the menu.
+ * We assign directly (not via grmSelect, which toggles) so a right-click on
+ * a non-selected card doesn't deselect it.
+ */
+function buildBurstGroupContextMenu(photoId, filename) {
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() { setReviewRating(photoId, n); },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() { setReviewFlag(photoId, f); },
+    };
+  };
+  return [
+    { label: '\u2B06  Move to Picks',      onClick: function() { grmMovePick(); } },
+    { label: '\u2B07  Move to Rejects',    onClick: function() { grmMoveReject(); } },
+    { label: '\u2423  Move to Candidates', onClick: function() { grmMoveCandidate(); } },
+    { separator: true },
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+        flagChip('flagged', '\u2691', 'Flag as pick'),
+        flagChip('rejected', '\u2715', 'Reject'),
+        flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+    { label: 'Open in Lightbox',        onClick: function() { openReviewLightbox(photoId, filename); } },
+    { label: 'Reveal in Finder/Folder', onClick: function() { revealReviewPhoto(photoId); } },
+    { label: 'Copy Path',               onClick: function() { copyReviewPhotoPath(photoId); } },
+    { separator: true },
+    { label: 'Remove from Group',       onClick: function() { grmRemoveFromGroup(); } },
+  ];
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.grm-card[data-photo-id]');
+  if (!card) return;
+  // Only fire when the burst modal is actually open — the handler is on
+  // document and grm-cards never exist outside #grmOverlay, but belt-and-
+  // suspenders against any future render path that reuses the class.
+  var overlay = document.getElementById('grmOverlay');
+  if (!overlay || !overlay.classList.contains('open')) return;
+  e.preventDefault();
+  var photoId = parseInt(card.dataset.photoId, 10);
+  if (!photoId) return;
+  var item = grmState.items.find(function(it) { return it.photo_id === photoId; });
+  var filename = item ? item.filename : '';
+  // Force-select the right-clicked card so move/remove actions target it.
+  // Assign directly rather than calling grmSelect() — that helper toggles
+  // selection, which would deselect when right-clicking the already-selected
+  // card.
+  grmState.selected = photoId;
+  renderGroupModal();
+  if (typeof openContextMenu !== 'function') return;
+  openContextMenu(e, buildBurstGroupContextMenu(photoId, filename));
+});
+
 /* ---------- Settings ---------- */
 function updateThumbSize(val) {
   thumbSize = parseInt(val, 10);
