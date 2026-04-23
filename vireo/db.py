@@ -4346,6 +4346,45 @@ class Database:
         )
         self.conn.commit()
 
+    def duplicate_collection(self, collection_id):
+        """Copy a collection (name + rules) within the active workspace.
+
+        The new collection's name is ``"{original} (copy)"``; if that name is
+        already taken, append an incrementing counter like ``"(copy 2)"``.
+        Rules are copied verbatim, which means static collections (photo_ids
+        rules) keep their memberships.
+
+        Returns the new collection id. Raises ``ValueError`` if the source
+        collection isn't in the active workspace.
+        """
+        ws = self._ws_id()
+        row = self.conn.execute(
+            "SELECT name, rules FROM collections WHERE id = ? AND workspace_id = ?",
+            (collection_id, ws),
+        ).fetchone()
+        if not row:
+            raise ValueError("collection not found")
+
+        existing = {
+            c["name"]
+            for c in self.conn.execute(
+                "SELECT name FROM collections WHERE workspace_id = ?", (ws,)
+            ).fetchall()
+        }
+        base = f"{row['name']} (copy)"
+        new_name = base
+        n = 2
+        while new_name in existing:
+            new_name = f"{row['name']} (copy {n})"
+            n += 1
+
+        cur = self.conn.execute(
+            "INSERT INTO collections (name, rules, workspace_id) VALUES (?, ?, ?)",
+            (new_name, row["rules"], ws),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
     def _build_collection_query(self, collection_id):
         """Build SQL clauses from collection rules.
 

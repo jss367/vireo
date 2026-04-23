@@ -1765,6 +1765,16 @@ def create_app(db_path, thumb_cache_dir=None):
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
 
+    @app.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
+    def api_collection_duplicate(collection_id):
+        """Duplicate a collection within the active workspace. Returns {id}."""
+        db = _get_db()
+        try:
+            new_id = db.duplicate_collection(collection_id)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True, "id": new_id})
+
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
         import config as cfg
