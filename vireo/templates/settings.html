@@ -1306,8 +1306,25 @@ function saveConfig() {
             reject_clip_high: parseInt(document.getElementById('cfgRejectClip').value, 10) / 100,
             reject_composite: parseInt(document.getElementById('cfgRejectComposite').value, 10) / 100,
             miss_enabled: document.getElementById('cfgMissEnabled').checked,
-            miss_det_confidence: parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100,
-            miss_bbox_area_min: parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000,
+            // Keep paired thresholds consistent: the UI exposes one slider
+            // per pair, but classify_miss reads the sibling value (burst
+            // vs singleton) independently. If we only save one side, the
+            // other falls back to defaults, which can invert the intended
+            // "burst relaxes vs singleton stricter" logic when the user
+            // picks a value below the paired default. Derive the paired
+            // value from the same slider using the default ratio.
+            //   defaults: det_conf=0.25 / det_conf_burst=0.15  → burst = 0.60 * singleton
+            //             bbox_min=0.005 / bbox_min_singleton=0.002 → singleton = 0.40 * burst
+            ...(function() {
+              var det = parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100;
+              var bbox = parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000;
+              return {
+                miss_det_confidence: det,
+                miss_det_confidence_burst: +(det * 0.60).toFixed(4),
+                miss_bbox_area_min: bbox,
+                miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
+              };
+            })(),
             miss_oof_ratio: parseInt(document.getElementById('cfgMissOofRatio').value, 10) / 100,
             eye_detect_enabled: document.getElementById('cfgEyeDetectEnabled').checked,
             eye_classifier_conf_gate: parseInt(document.getElementById('cfgEyeClassifierConfGate').value, 10) / 100,

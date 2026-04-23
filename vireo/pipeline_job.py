@@ -2335,7 +2335,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
     # Phase 5: miss detection (pure derivation from per-photo features +
     # burst_id written by regroup). Cheap; no model inference.
-    if not abort.is_set():
+    # Skip when regroup failed: miss classification depends on regroup's
+    # burst_id output, so running here after a regroup failure would
+    # overwrite miss_* flags with stale context during an already-failing
+    # job. regroup_stage marks itself "failed" without setting abort, so
+    # check the stage status explicitly.
+    if not abort.is_set() and stages["regroup"].get("status") != "failed":
         miss_stage()
 
     cancel_watcher_stop.set()

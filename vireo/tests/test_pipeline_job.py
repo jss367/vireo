@@ -4114,3 +4114,74 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
         f"stages['thumbnails']['count'] must include failed items (was {thumb_stage_count}). "
         f"Last event stages: {last['stages']}"
     )
+
+
+def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
+    """miss_stage depends on burst_id written by regroup. If regroup_stage
+    throws, running miss_stage would overwrite miss_* flags with stale
+    context during an already-failing job. The gate must check the
+    stage's failed status, not just the global abort flag (regroup_stage
+    marks itself failed without setting abort)."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Force regroup to fail before it finishes. pipeline_job imports
+    # run_full_pipeline lazily inside regroup_stage; patch at module level.
+    import pipeline as pipeline_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic regroup failure")
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _boom)
+
+    # Also mark the single photo with an arbitrary miss_computed_at so we
+    # can detect mutation by miss_stage.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        # Intentionally NOT skip_regroup — regroup must be attempted and fail.
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import contextlib
+    with contextlib.suppress(Exception):
+        result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Inspect the stages dict from the last progress event — if miss_stage
+    # ran, it would transition out of "pending" to "running"/"completed"/
+    # "failed"/"skipped". The fix must leave it "pending" (never entered).
+    progress_events = [
+        data for (_, evt, data) in runner.events
+        if evt == "progress" and "stages" in data
+    ]
+    assert progress_events, "pipeline emitted no progress events"
+    last_stages = progress_events[-1]["stages"]
+    assert last_stages["regroup"]["status"] == "failed"
+    # Miss stage must not have mutated any miss_* row. Verify by reading
+    # miss_computed_at on the scanned photos — all should still be NULL.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    rows = db2.conn.execute(
+        "SELECT miss_computed_at FROM photos"
+    ).fetchall()
+    assert rows, "scan produced no photo rows"
+    for r in rows:
+        assert r["miss_computed_at"] is None, (
+            "miss_stage ran after regroup failure and overwrote miss state"
+        )
