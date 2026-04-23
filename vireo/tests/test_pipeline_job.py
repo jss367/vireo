@@ -4302,6 +4302,290 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path, monkeypatch):
+    """When source_snapshot_id is provided, the scan stage must walk only the
+    parent directories of the snapshot's files — sibling folders registered
+    with the workspace but not in the snapshot must NOT be scanned."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Two sibling folders each with one JPEG. Only folder A is in the snapshot.
+    folder_a = tmp_path / "folderA"
+    folder_b = tmp_path / "folderB"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    folder_a_id = db.add_folder(str(folder_a))
+    folder_b_id = db.add_folder(str(folder_b))
+    _drop_jpeg(str(folder_a), "IMG_001.JPG")
+    _drop_jpeg(str(folder_b), "IMG_002.JPG")
+
+    snap_id = db.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify via DB state: folder A has its photo ingested, folder B does not.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+    a_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_a_id,),
+    ).fetchall()
+    b_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_b_id,),
+    ).fetchall()
+    assert [r["filename"] for r in a_photos] == ["IMG_001.JPG"], (
+        f"folder A should have its snapshot file ingested, got {list(a_photos)}"
+    )
+    assert list(b_photos) == [], (
+        f"folder B must NOT be scanned (not in snapshot), got {list(b_photos)}"
+    )
+
+
+def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
+    """Files that land in a registered folder AFTER a snapshot is captured
+    must still be scanned (we walk the folder), but downstream stages
+    (classify, extract_masks, regroup) must be constrained to the snapshot's
+    photo-id set. Verified via DB state: only the early (snapshot) photo
+    should have a predictions row after the pipeline completes.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+
+    # "Early" file — exists at snapshot time, goes into the snapshot.
+    # Use distinct pixel content so the scanner's hash-based duplicate
+    # resolver doesn't collapse the two files into one photo row (same
+    # 16x16 black rectangle hashes to the same bytes).
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(
+        str(folder / "IMG_early.JPG")
+    )
+    snap_id = db.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
+
+    # "Late" file — arrives after the snapshot but before the pipeline runs.
+    # The scanner will ingest it (same folder), but downstream stages must
+    # skip it.
+    Image.new("RGB", (16, 16), (200, 50, 50)).save(
+        str(folder / "IMG_late.JPG")
+    )
+
+    # Wire up fake classifier + detect_batch so classify_stage actually runs
+    # and writes a predictions row for whatever photo it sees.
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # detect_stage calls ensure_megadetector_weights() whenever any photo
+    # lacks a cached detection — which is every fresh-scan run. Short-circuit
+    # to avoid a real network download in the test.
+    import detector as detector_mod
+    monkeypatch.setattr(
+        detector_mod, "ensure_megadetector_weights",
+        lambda progress_callback=None: "/tmp/fake-md-weights.onnx",
+    )
+
+    # Map filename → synthetic detection_id; we need a real detection row per
+    # photo fed to classify so _flush_batch has a valid FK to bind to.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        processed = set()
+        for p in batch:
+            det_ids = db_.save_detections(
+                p["id"],
+                [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                  "confidence": 0.95, "category": "animal"}],
+                detector_model="MegaDetector",
+            )
+            det_map[p["id"]] = [{
+                "id": det_ids[0],
+                "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
+                "confidence": 0.95, "category": "animal",
+            }]
+            processed.add(p["id"])
+        return det_map, len(det_map), processed
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        return (
+            Image.new("RGB", (32, 32), "white"),
+            folders.get(photo["folder_id"], ""),
+            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
+        )
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Red-tailed Hawk", "score": 0.99}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify via DB: both files were scanned (scan walks the folder), but
+    # only the early one should have a prediction row.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+
+    scanned = {
+        r["filename"] for r in verify_db.conn.execute(
+            "SELECT filename FROM photos"
+        ).fetchall()
+    }
+    assert scanned == {"IMG_early.JPG", "IMG_late.JPG"}, (
+        f"scan should ingest both files in the folder, got {scanned}"
+    )
+
+    classified_names = {
+        r["filename"] for r in verify_db.conn.execute(
+            """SELECT p.filename
+                 FROM predictions pr
+                 JOIN detections d ON d.id = pr.detection_id
+                 JOIN photos p ON p.id = d.photo_id"""
+        ).fetchall()
+    }
+    assert "IMG_early.JPG" in classified_names, (
+        f"early (snapshot) file should be classified, got {classified_names}"
+    )
+    assert "IMG_late.JPG" not in classified_names, (
+        f"late (post-snapshot) file must NOT be classified, got "
+        f"{classified_names}"
+    )
+
+
+def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatch):
+    """When the snapshot contains files at both a folder and a nested subfolder
+    (e.g. /root/a.jpg and /root/sub/b.jpg), deriving scan roots naively would
+    produce overlapping paths (/root and /root/sub). The scanner would then
+    walk the subtree twice. params.sources must be collapsed to the minimal
+    non-overlapping ancestor set."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    root = tmp_path / "root"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    db.add_folder(str(root))
+    db.add_folder(str(sub))
+
+    top_path = root / "a.jpg"
+    sub_path = sub / "b.jpg"
+    _drop_jpeg(str(root), "a.jpg")
+    _drop_jpeg(str(sub), "b.jpg")
+
+    snap_id = db.create_new_images_snapshot([str(top_path), str(sub_path)])
+
+    # Spy on scanner.scan to count how many distinct roots it walks.
+    import scanner as scanner_mod
+    scan_calls = []
+    original_scan = scanner_mod.scan
+
+    def spy_scan(root_path, db_, **kwargs):
+        scan_calls.append(root_path)
+        return original_scan(root_path, db_, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", spy_scan)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The nested path is a descendant of the top path; the scanner walks root
+    # recursively, so sub must NOT be re-scanned as a separate root.
+    assert str(root) in scan_calls, f"top root must be scanned, got {scan_calls}"
+    assert str(sub) not in scan_calls, (
+        f"sub is a descendant of root and must not be scanned separately, "
+        f"got {scan_calls}"
+    )
+
+
+def test_collapse_scan_roots_handles_filesystem_root():
+    """Unit test for the collapse helper's edge case where a kept root IS
+    the filesystem root ('/' on POSIX, 'C:\\' on Windows). The naive
+    `kept + os.sep` prefix becomes '//' for '/' and fails to match child
+    paths like '/sub'. Descendants of the filesystem root must still be
+    collapsed away."""
+    from pipeline_job import _collapse_scan_roots
+
+    collapsed = _collapse_scan_roots([os.sep, os.path.join(os.sep, "sub")])
+    assert collapsed == [os.sep], (
+        f"descendants of filesystem root must collapse, got {collapsed}"
+    )
+
+    # Non-overlapping peers are preserved.
+    a = os.path.join(os.sep, "a")
+    b = os.path.join(os.sep, "b")
+    collapsed = _collapse_scan_roots([a, b])
+    assert collapsed == sorted([a, b]), (
+        f"peers must both be kept, got {collapsed}"
+    )
+
+    # Prefix-but-not-descendant isn't collapsed (/foo vs /foobar).
+    foo = os.path.join(os.sep, "foo")
+    foobar = os.path.join(os.sep, "foobar")
+    collapsed = _collapse_scan_roots([foo, foobar])
+    assert collapsed == sorted([foo, foobar]), (
+        f"/foo and /foobar are peers, got {collapsed}"
+    )
+
+
 # --- Weighted overall progress ---------------------------------------------
 
 def _empty_stages():

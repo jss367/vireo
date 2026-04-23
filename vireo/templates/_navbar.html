@@ -1013,12 +1013,21 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   gap: 10px;
   border-bottom: 1px solid var(--border-primary, #14374E);
 }
-.new-images-banner a {
+.new-images-banner a,
+.new-images-banner .banner-cta {
   color: var(--accent, #24E5CA);
   font-weight: 600;
   text-decoration: underline;
 }
-.new-images-banner a:hover { opacity: 0.85; }
+.new-images-banner .banner-cta {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.new-images-banner a:hover,
+.new-images-banner .banner-cta:hover { opacity: 0.85; }
 .new-images-banner .banner-dismiss {
   color: var(--text-secondary, #9fb3bd);
 }
@@ -1315,7 +1324,7 @@ function sendReport() {
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
-  <a href="/pipeline">Create a pipeline</a>
+  <button type="button" class="banner-cta" onclick="createPipelineFromNewImages()">Create a pipeline</button>
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
 </div>
 
@@ -4059,6 +4068,18 @@ function dismissNewImagesBanner() {
     // Store the dismissed count under a key scoped to this workspace id so
     // dismissing in workspace B doesn't overwrite A's entry.
     sessionStorage.setItem(_newImagesDismissKey(wsId), String(count));
+  }
+}
+
+async function createPipelineFromNewImages() {
+  try {
+    const r = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+    if (!r.ok) throw new Error('snapshot failed');
+    const data = await r.json();
+    window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+  } catch (e) {
+    // Fall back to the existing behavior — blank pipeline wizard.
+    window.location.href = '/pipeline';
   }
 }
 
