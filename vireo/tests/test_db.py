@@ -3824,3 +3824,16 @@ def test_preview_cache_oldest_first(tmp_path):
 
     rows = db.preview_cache_oldest_first()
     assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]
+
+
+def test_new_image_snapshots_tables_exist(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = {
+        r["name"]
+        for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "new_image_snapshots" in tables
+    assert "new_image_snapshot_files" in tables

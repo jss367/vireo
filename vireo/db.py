@@ -296,6 +296,22 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS preview_cache_last_access
             ON preview_cache(last_access_at);
+
+            CREATE TABLE IF NOT EXISTS new_image_snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+              created_at TEXT NOT NULL,
+              file_count INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS new_image_snapshot_files (
+              snapshot_id INTEGER NOT NULL REFERENCES new_image_snapshots(id) ON DELETE CASCADE,
+              file_path TEXT NOT NULL,
+              PRIMARY KEY (snapshot_id, file_path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_new_image_snapshots_ws
+              ON new_image_snapshots(workspace_id);
         """
         )
         # Migrations for existing databases
