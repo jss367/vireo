@@ -3950,7 +3950,12 @@ class Database:
         return [dict(r) for r in rows]
 
     def clear_miss_flag(self, photo_id, category):
-        """Set the given miss column to 0 on the given photo."""
+        """Set the given miss column to 0 on the given photo.
+
+        Raises ValueError if the photo is not in the active workspace, so
+        that `/api/misses/<id>/unflag` can't touch another workspace's photos.
+        """
+        self._verify_photo_in_workspace(photo_id)
         col = {
             "no_subject": "miss_no_subject",
             "clipped":    "miss_clipped",

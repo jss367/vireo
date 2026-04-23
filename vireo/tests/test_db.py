@@ -4035,3 +4035,29 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
     db.set_active_workspace(ws_a)
     ids_a = [m["id"] for m in db.list_misses(category="clipped")]
     assert ids_a == [p_a]
+
+
+def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
+    """clear_miss_flag must refuse to touch a photo from another workspace."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    with pytest.raises(ValueError):
+        db.clear_miss_flag(p_a, "clipped")
+
+    # A's miss flag must still be set.
+    row = db.conn.execute(
+        "SELECT miss_clipped FROM photos WHERE id=?", (p_a,)
+    ).fetchone()
+    assert row["miss_clipped"] == 1

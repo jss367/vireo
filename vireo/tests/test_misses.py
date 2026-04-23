@@ -183,16 +183,24 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
         file_mtime=2.0,
         timestamp="2026-04-22T10:00:00",
     )
-    # Hand-write pipeline features + shared burst_id.
+    # Hand-write pipeline features + shared burst_id. Detection confidence
+    # lives in the `detections` table (written by save_detections during the
+    # classify stage), not photos.detection_conf.
     db.conn.executemany(
-        "UPDATE photos SET burst_id=?, detection_conf=?, subject_size=?, "
+        "UPDATE photos SET burst_id=?, subject_size=?, "
         "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
         [
-            ("B1", 0.95, 0.08,  1.0, 80.0, 40.0, p_keeper),
-            ("B1", 0.95, 0.005, 1.0, 80.0, 40.0, p_miss),
+            ("B1", 0.08,  1.0, 80.0, 40.0, p_keeper),
+            ("B1", 0.005, 1.0, 80.0, 40.0, p_miss),
         ],
     )
     db.conn.commit()
+    for pid in (p_keeper, p_miss):
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.95, "category": "animal"}],
+        )
 
     compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
 
@@ -230,9 +238,14 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         timestamp="2026-04-22T10:00:00",
     )
     db.conn.execute(
-        "UPDATE photos SET detection_conf=?, subject_size=?, "
+        "UPDATE photos SET subject_size=?, "
         "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
-        (0.95, 0.001, 1.0, 80.0, 40.0, p_a),
+        (0.001, 1.0, 80.0, 40.0, p_a),
+    )
+    db.save_detections(
+        p_a,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+          "confidence": 0.95, "category": "animal"}],
     )
 
     # Folder linked to B — add while B is active.
@@ -243,9 +256,14 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         timestamp="2026-04-22T10:00:01",
     )
     db.conn.execute(
-        "UPDATE photos SET detection_conf=?, subject_size=?, "
+        "UPDATE photos SET subject_size=?, "
         "crop_complete=?, subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
-        (0.95, 0.001, 1.0, 80.0, 40.0, p_b),
+        (0.001, 1.0, 80.0, 40.0, p_b),
+    )
+    db.save_detections(
+        p_b,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+          "confidence": 0.95, "category": "animal"}],
     )
     db.conn.commit()
 

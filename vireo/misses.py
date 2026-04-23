@@ -105,13 +105,22 @@ def compute_misses_for_workspace(db, pipeline_config):
         log.info("Miss detection disabled via miss_enabled=false")
         return 0
 
+    ws_id = db._ws_id()
+    # Detector confidence is written to the `detections` table by the
+    # classify stage, not to `photos.detection_conf` (legacy column). Read
+    # the highest-confidence detection per photo, workspace-scoped, so
+    # photos with real detections aren't misread as no_subject.
     rows = db.conn.execute(
-        "SELECT p.id, p.burst_id, p.detection_conf, p.subject_size, "
-        "       p.crop_complete, p.subject_tenengrad, p.bg_tenengrad "
+        "SELECT p.id, p.burst_id, "
+        "       (SELECT MAX(d.detector_confidence) FROM detections d "
+        "        WHERE d.photo_id = p.id AND d.workspace_id = ?) "
+        "         AS detection_conf, "
+        "       p.subject_size, p.crop_complete, "
+        "       p.subject_tenengrad, p.bg_tenengrad "
         "FROM photos p "
         "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
         "WHERE wf.workspace_id = ?",
-        (db._ws_id(),),
+        (ws_id, ws_id),
     ).fetchall()
 
     by_burst = defaultdict(list)

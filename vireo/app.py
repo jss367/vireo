@@ -2337,7 +2337,10 @@ def create_app(db_path, thumb_cache_dir=None):
         category = body.get("category")
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
-        db.clear_miss_flag(photo_id, category)
+        try:
+            db.clear_miss_flag(photo_id, category)
+        except ValueError:
+            return jsonify({"error": "photo not in active workspace"}), 404
         return jsonify({"ok": True})
 
     @app.route("/api/classify/readiness")
