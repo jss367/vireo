@@ -93,3 +93,71 @@ def test_right_click_inside_selection_preserves_multi(live_server, page):
     assert page.evaluate("selectedPhotos.size") == 2
     assert page.evaluate(f"selectedPhotos.has({c0_id})") is True
     assert page.evaluate(f"selectedPhotos.has({c1_id})") is True
+
+
+def test_right_click_outside_selection_updates_detail(live_server, page):
+    """Right-click on an unselected card refreshes the detail side-panel.
+
+    Regression guard: before the fix, coercing selection on right-click would
+    update `selectedPhotoId` but not reload the detail panel, leaving the
+    panel stuck on the previously-focused photo.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 3
+
+    # Left-click card 0 to focus it and load its detail panel.
+    cards.nth(0).click()
+    c0_id = int(cards.nth(0).get_attribute("data-id"))
+    page.wait_for_function(
+        f"window._detailPhotoId === {c0_id}", timeout=3000
+    )
+
+    # Right-click a different card that is NOT in the selection.
+    c2_id = int(cards.nth(2).get_attribute("data-id"))
+    cards.nth(2).click(button="right")
+    expect(page.locator(".vireo-ctx-menu")).to_be_visible()
+
+    # Detail panel must now reflect the right-clicked photo.
+    page.wait_for_function(
+        f"window._detailPhotoId === {c2_id}", timeout=3000
+    )
+
+
+def test_copy_path_menu_item_tolerates_missing_paths(live_server, page):
+    """Clicking Copy Path must not throw even if the API omits `path`.
+
+    Regression guard for the Promise.allSettled refactor: the old
+    Promise.all + .catch would swallow errors silently but a single
+    rejection would drop the whole batch. With allSettled, each response
+    is evaluated independently and the handler never throws.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    # Grant clipboard permissions so a real writeText would not raise.
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+
+    # Collect JS page errors; clicking Copy Path must not surface any.
+    errors = []
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+
+    cards.first.click(button="right")
+    menu = page.locator(".vireo-ctx-menu")
+    expect(menu).to_be_visible()
+
+    copy_item = menu.locator(".vireo-ctx-item", has_text="Copy Path")
+    expect(copy_item).to_be_visible()
+    copy_item.click()
+
+    # Menu closes and no uncaught JS error was raised.
+    expect(menu).to_be_hidden()
+    # Give any async handler time to settle.
+    page.wait_for_timeout(200)
+    assert errors == [], f"copyPhotoPaths raised: {errors}"

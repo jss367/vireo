@@ -2915,16 +2915,31 @@ function revealPhoto(photoId) {
 }
 
 async function copyPhotoPaths(photoIds) {
-  try {
-    var results = await Promise.all(photoIds.map(function(id) {
-      return safeFetch('/api/photos/' + id, {}, { toast: false });
-    }));
-    var paths = results.map(function(r) { return r && r.path; }).filter(Boolean).join('\n');
-    if (paths && navigator.clipboard) {
-      await navigator.clipboard.writeText(paths);
-      showToast(photoIds.length === 1 ? 'Path copied' : 'Paths copied');
+  var settled = await Promise.allSettled(photoIds.map(function(id) {
+    return safeFetch('/api/photos/' + id, {}, { toast: false });
+  }));
+  var paths = settled
+    .filter(function(s) { return s.status === 'fulfilled' && s.value && s.value.path; })
+    .map(function(s) { return s.value.path; });
+  var failed = settled.length - paths.length;
+  if (!paths.length) {
+    if (failed > 0) {
+      console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+      showToast(failed === 1 ? '1 path could not be copied' : failed + ' paths could not be copied');
     }
-  } catch(e) { /* clipboard can throw in non-focused contexts */ }
+    return;
+  }
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(paths.join('\n'));
+      showToast(photoIds.length === 1 ? 'Path copied' : 'Paths copied');
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (failed > 0) {
+    console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+  }
 }
 
 // Re-apply the .selected highlight to match the current state of
@@ -3022,6 +3037,7 @@ document.addEventListener('contextmenu', function(e) {
   // reflects the photo the user right-clicked on.
   if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
     selectedPhotoId = pid;
+    loadDetail(pid);
   }
   refreshCardSelectionVisuals();
   updateBatchBar();
