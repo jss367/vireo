@@ -3037,10 +3037,12 @@ document.addEventListener('contextmenu', function(e) {
     selectedPhotos.add(selectedPhotoId);
   }
   var ids = coerceSelectionOnContext(selectedPhotos, pid);
-  // If coercion replaced the set, align selectedPhotoId so the detail panel
-  // reflects the photo the user right-clicked on.
+  // If coercion replaced the set, align selectedPhotoId (so the detail panel
+  // reflects the right-clicked photo) and selectedIndex (the Shift-range
+  // anchor — a subsequent Shift-click must range-select from this card).
   if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
     selectedPhotoId = pid;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
     loadDetail(pid);
   }
   refreshCardSelectionVisuals();

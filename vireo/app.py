@@ -1335,7 +1335,10 @@ def create_app(db_path, thumb_cache_dir=None):
                 # a directory to xdg-open opens the folder in the file manager,
                 # which is exactly what we want for folder reveals.
                 target = path if is_folder else (os.path.dirname(path) or path)
-                subprocess.run(["xdg-open", "--", target], timeout=5, check=False)
+                # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
+                # so a crafted leading-dash path can't be parsed as a flag.
+                target = os.path.abspath(target)
+                subprocess.run(["xdg-open", target], timeout=5, check=False)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})

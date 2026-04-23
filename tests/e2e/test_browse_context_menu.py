@@ -127,6 +127,53 @@ def test_right_click_outside_selection_updates_detail(live_server, page):
     )
 
 
+def test_right_click_updates_shift_range_anchor(live_server, page):
+    """Right-click coercion must sync selectedIndex so Shift-range uses the
+    right-clicked card as the anchor.
+
+    Regression guard: before the fix, right-click set selectedPhotoId but left
+    selectedIndex stale, so a subsequent Shift-click would range-select from
+    the previously-focused card (or fail if selectedIndex was -1).
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 4
+
+    # Left-click card 0 so selectedIndex = 0.
+    cards.nth(0).click()
+    assert page.evaluate("selectedIndex") == 0
+
+    # Right-click card 2 — coercion must update the anchor to index 2.
+    cards.nth(2).click(button="right")
+    expect(page.locator(".vireo-ctx-menu")).to_be_visible()
+    assert page.evaluate("selectedIndex") == 2
+
+    # Dismiss the menu via Escape so the outside-click swallower doesn't
+    # fire — an outside mousedown would eat the subsequent Shift-click.
+    page.keyboard.press("Escape")
+    expect(page.locator(".vireo-ctx-menu")).to_be_hidden()
+
+    # Shift-click card 3 — the shift branch of selectPhoto must see the
+    # anchor at 2, producing the range [2..3]. A stale anchor at 0 would
+    # produce [0..3] and include cards 0 and 1.
+    page.keyboard.down("Shift")
+    cards.nth(3).click()
+    page.keyboard.up("Shift")
+    c0_id = int(cards.nth(0).get_attribute("data-id"))
+    c1_id = int(cards.nth(1).get_attribute("data-id"))
+    c2_id = int(cards.nth(2).get_attribute("data-id"))
+    c3_id = int(cards.nth(3).get_attribute("data-id"))
+    selected_array = page.evaluate("Array.from(selectedPhotos)")
+    assert c2_id in selected_array, f"card 2 (id={c2_id}) missing from selection {selected_array}"
+    assert c3_id in selected_array, f"card 3 (id={c3_id}) missing from selection {selected_array}"
+    # Cards 0 and 1 must NOT be included — the anchor moved with the right-click.
+    assert c0_id not in selected_array, f"stale anchor selected card 0 (id={c0_id}) {selected_array}"
+    assert c1_id not in selected_array, f"stale anchor selected card 1 (id={c1_id}) {selected_array}"
+
+
 def test_copy_path_menu_item_tolerates_missing_paths(live_server, page):
     """Clicking Copy Path must not throw even if the API omits `path`.
 

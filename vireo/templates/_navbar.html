@@ -1224,7 +1224,14 @@ function sendReport() {
     }
   }
   function _keydown(e){
-    if (e.key === 'Escape') { e.preventDefault(); closeContextMenu(); }
+    if (e.key === 'Escape') {
+      // Stop propagation in the capture phase so page-level Escape handlers
+      // (e.g. browse.html's clearSelection, lightbox close) don't also fire.
+      // The user dismissed the menu, not the underlying surface.
+      e.preventDefault();
+      e.stopPropagation();
+      closeContextMenu();
+    }
   }
 
   function _renderItem(item){

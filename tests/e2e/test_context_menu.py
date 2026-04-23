@@ -55,6 +55,34 @@ def test_context_menu_escape_closes(live_server, page):
     expect(page.locator(".vireo-ctx-menu")).to_be_hidden()
 
 
+def test_escape_does_not_propagate_to_page(live_server, page):
+    """Escape dismissing the menu must not reach page-level Escape handlers.
+
+    Regression guard: before the stopPropagation fix, Escape while a menu
+    was open would also fire browse's clearSelection() (resetting
+    selectedPhotos / selectedIndex) and closeDetail(). The Shift-click anchor
+    test relies on the fix and is the primary consumer, but this unit
+    captures the behavior independently so the shared component owns it.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.evaluate(
+        """() => {
+            window.__esc_leaked = 0;
+            document.body.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') window.__esc_leaked++;
+            }, false);
+            openContextMenu({clientX: 40, clientY: 40},
+                [{label: 'Z', onClick: () => {}}]);
+        }"""
+    )
+    expect(page.locator(".vireo-ctx-menu")).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(page.locator(".vireo-ctx-menu")).to_be_hidden()
+    assert page.evaluate("window.__esc_leaked") == 0
+
+
 def test_context_menu_chip_row_renders_and_fires(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/browse")

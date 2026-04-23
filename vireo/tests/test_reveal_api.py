@@ -43,10 +43,11 @@ def test_reveal_linux_opens_parent(app_and_db):
         resp = c.post("/api/files/reveal", json={"photo_id": pid})
         assert resp.status_code == 200
         args = run.call_args[0][0]
-        # argv shape: ["xdg-open", "--", <parent_dir>]
+        # argv shape: ["xdg-open", <parent_dir>]. xdg-open does not accept `--`;
+        # the endpoint relies on os.path.abspath to guarantee a leading slash.
         assert args[0] == "xdg-open"
-        assert args[1] == "--"
-        assert args[2] == expected_parent
+        assert args[1] == os.path.abspath(expected_parent)
+        assert len(args) == 2
 
 
 def test_reveal_windows_select(app_and_db):
@@ -123,10 +124,11 @@ def test_reveal_folder_linux_opens_folder(app_and_db):
         resp = c.post("/api/files/reveal", json={"folder_id": folder["id"]})
         assert resp.status_code == 200
         args = run.call_args[0][0]
-        # argv shape: ["xdg-open", "--", <folder path>]
+        # argv shape: ["xdg-open", <folder path>]. xdg-open does not accept `--`;
+        # the endpoint relies on os.path.abspath to guarantee a leading slash.
         assert args[0] == "xdg-open"
-        assert args[1] == "--"
-        assert args[2] == folder["path"]
+        assert args[1] == os.path.abspath(folder["path"])
+        assert len(args) == 2
 
 
 def test_reveal_folder_windows_opens_folder(app_and_db):
