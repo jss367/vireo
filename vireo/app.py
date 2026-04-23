@@ -2054,6 +2054,23 @@ def create_app(db_path, thumb_cache_dir=None):
         payload["workspace_id"] = ws_id
         return jsonify(payload)
 
+    @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
+    def api_workspace_new_images_snapshot_create():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"error": "no active workspace"}), 400
+        from new_images import count_new_images_for_workspace
+        result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+        file_paths = list(result["sample"])
+        snap_id = db.create_new_images_snapshot(file_paths)
+        folders = sorted({os.path.dirname(p) for p in file_paths})
+        return jsonify({
+            "snapshot_id": snap_id,
+            "file_count": len(file_paths),
+            "folders": folders,
+        })
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")

@@ -87,3 +87,31 @@ def test_api_new_images_returns_null_workspace_when_none_active(app_and_db, monk
     assert data["workspace_id"] is None
     assert data["new_count"] == 0
     assert data["per_root"] == []
+
+
+def test_post_snapshot_creates_row_with_current_new_images(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    _touch_image(str(folder / "IMG_001.JPG"))
+    _touch_image(str(folder / "IMG_002.JPG"))
+
+    with app.test_client() as client:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["file_count"] == 2
+        assert isinstance(data["snapshot_id"], int)
+        assert str(folder) in data["folders"]
+
+    snap = db.get_new_images_snapshot(data["snapshot_id"])
+    assert snap["file_count"] == 2
+
+
+def test_post_snapshot_zero_new_images_returns_200(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/workspaces/active/new-images/snapshot")
+        assert resp.status_code == 200
+        assert resp.get_json()["file_count"] == 0
