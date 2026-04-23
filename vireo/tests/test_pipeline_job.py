@@ -754,6 +754,94 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     assert isinstance(last["eta_seconds"], (int, float))
 
 
+def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch):
+    """Scan progress must not move backward at folder boundaries.
+
+    When sources is a list of folders, pipeline_job loops calling scan()
+    once per folder. Each scan() reports progress as local (current, total).
+    The weighted overall bar reads stages["scan"]["count"]/.total, so if
+    those get overwritten rather than accumulated, the UI progress jumps
+    backward when folder N+1 starts.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    folder_a = tmp_path / "folderA"
+    folder_a.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "blue").save(str(folder_a / f"a{i:02d}.jpg"))
+    folder_b = tmp_path / "folderB"
+    folder_b.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "red").save(str(folder_b / f"b{i:02d}.jpg"))
+
+    runner = JobRunner()
+    scan_counts = []
+    scan_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            scan_info = stages.get("scan") or {}
+            if scan_info.get("status") == "running":
+                scan_counts.append(scan_info.get("count") or 0)
+                scan_totals.append(scan_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(folder_a), str(folder_b)],
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-scan-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(scan_counts) > 0, "Expected at least one running scan progress event"
+    for i in range(1, len(scan_counts)):
+        assert scan_counts[i] >= scan_counts[i - 1], (
+            f"scan count moved backward: {scan_counts[i - 1]} -> "
+            f"{scan_counts[i]} at event {i}; full sequence={scan_counts}"
+        )
+    for i in range(1, len(scan_totals)):
+        assert scan_totals[i] >= scan_totals[i - 1], (
+            f"scan total moved backward: {scan_totals[i - 1]} -> "
+            f"{scan_totals[i]} at event {i}; full sequence={scan_totals}"
+        )
+    assert scan_totals[-1] >= 12, (
+        f"final scan total should cover both folders (>=12), got {scan_totals[-1]}"
+    )
+
+
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
     """Ingest (import) phase should call update_step so the jobs page shows progress."""
     import config as cfg

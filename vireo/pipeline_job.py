@@ -427,21 +427,35 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     stages, "scan", message,
                 ))
 
+            # Accumulator so multi-folder scans (repair loop, scan-in-place
+            # with sources=[...]) don't rewind the overall progress at each
+            # folder boundary. scan() reports (current, total) local to the
+            # invocation; we fold those into cumulative counters that the
+            # weighted overall bar reads via stages["scan"].
+            scan_acc = {"prior": 0, "last_total": 0}
+
             def progress_cb(current, total):
-                stages["scan"]["count"] = current
-                stages["scan"]["total"] = total
+                scan_acc["last_total"] = total
+                cum_current = scan_acc["prior"] + current
+                cum_total = scan_acc["prior"] + total
+                stages["scan"]["count"] = cum_current
+                stages["scan"]["total"] = cum_total
                 elapsed = time.time() - job["_start_time"]
-                rate = round(current / max(elapsed, 0.01) * 60, 1)  # files/min
-                remaining = total - current
-                rate_per_sec = current / max(elapsed, 0.01)
-                eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and current >= 10 else None
+                rate = round(cum_current / max(elapsed, 0.01) * 60, 1)  # files/min
+                remaining = cum_total - cum_current
+                rate_per_sec = cum_current / max(elapsed, 0.01)
+                eta = round(remaining / rate_per_sec) if rate_per_sec > 0 and cum_current >= 10 else None
                 runner.update_step(job["id"], "scan",
-                                   progress={"current": current, "total": total})
+                                   progress={"current": cum_current, "total": cum_total})
                 runner.push_event(job["id"], "progress", _progress_event(
                     stages, "scan", "Scanning photos",
                     rate=rate,
                     eta_seconds=eta,
                 ))
+
+            def advance_scan_acc():
+                scan_acc["prior"] += scan_acc["last_total"]
+                scan_acc["last_total"] = 0
 
             # Collection mode: no scan targets, but check whether any
             # photos in the collection have broken metadata (NULL timestamp
@@ -526,6 +540,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             "Repair scan failed for %s: %s", folder_path, e,
                         )
                         unreachable += 1
+                    finally:
+                        advance_scan_acc()
 
                 summary = f"{total_broken} photos repaired"
                 if unreachable:
@@ -663,16 +679,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 _update_stages(runner, job["id"], stages)
                 for src_folder in sources:
                     scanned_roots.append(src_folder)
-                    do_scan(
-                        src_folder, thread_db,
-                        progress_callback=progress_cb,
-                        incremental=True,
-                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                        photo_callback=photo_cb,
-                        skip_paths=params.exclude_paths,
-                        status_callback=status_cb,
-                        recursive=params.recursive,
-                    )
+                    try:
+                        do_scan(
+                            src_folder, thread_db,
+                            progress_callback=progress_cb,
+                            incremental=True,
+                            extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                            photo_callback=photo_cb,
+                            skip_paths=params.exclude_paths,
+                            status_callback=status_cb,
+                            recursive=params.recursive,
+                        )
+                    finally:
+                        advance_scan_acc()
             stages["scan"]["status"] = "completed"
             runner.update_step(job["id"], "scan", status="completed",
                                summary=f"{stages['scan']['count']} photos")
