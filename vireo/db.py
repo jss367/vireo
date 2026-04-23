@@ -198,6 +198,43 @@ class Database:
                 UNIQUE(detection_id, model, species)
             );
 
+            CREATE TABLE IF NOT EXISTS detector_runs (
+                photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                detector_model  TEXT NOT NULL,
+                run_at          TEXT DEFAULT (datetime('now')),
+                box_count       INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (photo_id, detector_model)
+            );
+
+            CREATE TABLE IF NOT EXISTS classifier_runs (
+                detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
+                classifier_model     TEXT NOT NULL,
+                labels_fingerprint   TEXT NOT NULL,
+                run_at               TEXT DEFAULT (datetime('now')),
+                prediction_count     INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+            );
+
+            CREATE TABLE IF NOT EXISTS labels_fingerprints (
+                fingerprint    TEXT PRIMARY KEY,
+                display_name   TEXT,
+                sources_json   TEXT,
+                label_count    INTEGER,
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS prediction_review (
+                prediction_id  INTEGER NOT NULL REFERENCES predictions(id) ON DELETE CASCADE,
+                workspace_id   INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                reviewed_at    TEXT,
+                individual     TEXT,
+                group_id       TEXT,
+                vote_count     INTEGER,
+                total_votes    INTEGER,
+                PRIMARY KEY (prediction_id, workspace_id)
+            );
+
             CREATE TABLE IF NOT EXISTS inat_submissions (
                 id              INTEGER PRIMARY KEY,
                 photo_id        INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
@@ -716,6 +753,14 @@ class Database:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_detections_workspace "
             "ON detections(workspace_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection "
+            "ON classifier_runs(detection_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_review_workspace "
+            "ON prediction_review(workspace_id)"
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_predictions_detection "
