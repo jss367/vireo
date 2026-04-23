@@ -4037,6 +4037,53 @@ def test_list_misses_scoped_to_active_workspace(tmp_path):
     assert ids_a == [p_a]
 
 
+def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
+    """list_misses must source detection_box/detection_conf from the
+    canonical `detections` table (highest-confidence row per photo, workspace-
+    scoped), not the legacy photos.detection_* columns that aren't populated
+    by normal pipeline runs."""
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p,))
+    db.conn.commit()
+    # Two detections; the primary is the higher-confidence one.
+    db.save_detections(
+        p,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1},
+             "confidence": 0.40, "category": "animal"},
+            {"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
+             "confidence": 0.85, "category": "animal"},
+        ],
+    )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == 1
+    m = misses[0]
+    assert m["detection_conf"] == 0.85
+    box = _json.loads(m["detection_box"])
+    assert box == {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2}
+
+
+def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
+    """A no_subject miss has no detection — detection_box/conf are None."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_no_subject=1 WHERE id=?", (p,))
+    db.conn.commit()
+
+    misses = db.list_misses(category="no_subject")
+    assert len(misses) == 1
+    assert misses[0]["detection_box"] is None
+    assert misses[0]["detection_conf"] is None
+
+
 def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
     """clear_miss_flag must refuse to touch a photo from another workspace."""
     import pytest

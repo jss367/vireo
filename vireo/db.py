@@ -3914,8 +3914,12 @@ class Database:
             scope results to the current run.
 
         Excludes photos already flagged as rejected. Scoped to folders
-        linked to the active workspace. Ordered by timestamp DESC.
+        linked to the active workspace. ``detection_box`` and
+        ``detection_conf`` are sourced from the primary (highest-confidence)
+        row in the ``detections`` table — the legacy ``photos`` columns are
+        not populated by normal pipeline runs. Ordered by timestamp DESC.
         """
+        ws_id = self._ws_id()
         if category is None:
             where = (
                 "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
@@ -3928,15 +3932,15 @@ class Database:
             }[category]
             where = f"p.{col}=1"
 
-        params = [self._ws_id()]
+        params = [ws_id]
         if since:
             where = f"({where}) AND p.miss_computed_at >= ?"
             params.append(since)
 
         rows = self.conn.execute(
             f"SELECT p.id, p.folder_id, p.filename, p.timestamp, p.burst_id, "
-            f"       p.detection_box, p.detection_conf, p.subject_size, "
-            f"       p.crop_complete, p.subject_tenengrad, p.bg_tenengrad, "
+            f"       p.subject_size, p.crop_complete, "
+            f"       p.subject_tenengrad, p.bg_tenengrad, "
             f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
             f"       p.miss_computed_at, p.flag "
             f"FROM photos p "
@@ -3947,7 +3951,36 @@ class Database:
             f"ORDER BY p.timestamp DESC",
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        photos = [dict(r) for r in rows]
+        if not photos:
+            return photos
+
+        import json as _json
+        photo_ids = [p["id"] for p in photos]
+        placeholders = ",".join("?" * len(photo_ids))
+        det_rows = self.conn.execute(
+            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+            f"       detector_confidence "
+            f"FROM detections "
+            f"WHERE workspace_id=? AND photo_id IN ({placeholders}) "
+            f"ORDER BY photo_id, detector_confidence DESC",
+            [ws_id, *photo_ids],
+        ).fetchall()
+        primary = {}
+        for d in det_rows:
+            primary.setdefault(d["photo_id"], d)
+        for p in photos:
+            d = primary.get(p["id"])
+            if d is not None:
+                p["detection_box"] = _json.dumps({
+                    "x": d["box_x"], "y": d["box_y"],
+                    "w": d["box_w"], "h": d["box_h"],
+                })
+                p["detection_conf"] = d["detector_confidence"]
+            else:
+                p["detection_box"] = None
+                p["detection_conf"] = None
+        return photos
 
     def clear_miss_flag(self, photo_id, category):
         """Set the given miss column to 0 on the given photo.

@@ -104,8 +104,6 @@ def misses_seed(db_path, thumb_dir, photos_root):
     fixture sets the miss_* booleans directly, mimicking what miss_stage
     writes after classify_miss.
     """
-    import json as _json
-
     from db import Database
 
     db = Database(db_path)
@@ -134,13 +132,18 @@ def misses_seed(db_path, thumb_dir, photos_root):
         )
         photos.append(pid)
         col = next(iter(flags))
-        # Store a plausible normalized detection bbox for the non-no_subject cases.
-        det_box = _json.dumps({"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2})
         db.conn.execute(
-            f"UPDATE photos SET {col}=1, miss_computed_at=?, "
-            f"detection_box=?, detection_conf=? WHERE id=?",
-            (ts, det_box if _cat != "no_subject" else None,
-             0.10 if _cat == "no_subject" else 0.85, pid),
+            f"UPDATE photos SET {col}=1, miss_computed_at=? WHERE id=?",
+            (ts, pid),
+        )
+        # Write a primary detection to the canonical `detections` table so
+        # the /misses cards can render bbox overlays. no_subject gets a
+        # low-confidence detection (matches the pipeline behavior).
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
+              "confidence": 0.10 if _cat == "no_subject" else 0.85,
+              "category": "animal"}],
         )
     db.conn.commit()
 
