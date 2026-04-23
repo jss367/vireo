@@ -173,7 +173,15 @@ def compute_misses_for_workspace(
         else:
             singletons.append(d)
 
-    now = datetime.now(UTC).isoformat(timespec="seconds")
+    # Microsecond precision: the /misses?since=... review window uses
+    # the earliest miss_computed_at from a run as a lower bound, and
+    # bulk-reject reuses the same value. With seconds precision two runs
+    # finishing in the same second collide, so the second run's window
+    # would include the first run's misses (and bulk-reject could touch
+    # them). ISO-8601 timestamps still sort lexicographically when
+    # precision varies, so this is backward-compatible with rows written
+    # at seconds precision.
+    now = datetime.now(UTC).isoformat(timespec="microseconds")
     updates = []
 
     for burst_rows in by_burst.values():
