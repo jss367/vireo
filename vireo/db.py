@@ -3905,6 +3905,63 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
+    def list_misses(self, category=None):
+        """Return photos flagged as misses, optionally filtered by category.
+
+        category: None | "no_subject" | "clipped" | "oof"
+
+        Excludes photos already flagged as rejected. Ordered by timestamp DESC.
+        """
+        if category is None:
+            where = (
+                "miss_no_subject=1 OR miss_clipped=1 OR miss_oof=1"
+            )
+        else:
+            col = {
+                "no_subject": "miss_no_subject",
+                "clipped":    "miss_clipped",
+                "oof":        "miss_oof",
+            }[category]
+            where = f"{col}=1"
+
+        rows = self.conn.execute(
+            f"SELECT id, folder_id, filename, timestamp, burst_id, "
+            f"       detection_box, detection_conf, subject_size, "
+            f"       crop_complete, subject_tenengrad, bg_tenengrad, "
+            f"       miss_no_subject, miss_clipped, miss_oof, flag "
+            f"FROM photos WHERE ({where}) "
+            f"  AND (flag IS NULL OR flag != 'reject') "
+            f"ORDER BY timestamp DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_miss_flag(self, photo_id, category):
+        """Set the given miss column to 0 on the given photo."""
+        col = {
+            "no_subject": "miss_no_subject",
+            "clipped":    "miss_clipped",
+            "oof":        "miss_oof",
+        }[category]
+        self.conn.execute(
+            f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,)
+        )
+        self.conn.commit()
+
+    def bulk_reject_miss_category(self, category):
+        """Set flag='reject' on every photo currently flagged with that
+        miss category and not already rejected. Returns rowcount."""
+        col = {
+            "no_subject": "miss_no_subject",
+            "clipped":    "miss_clipped",
+            "oof":        "miss_oof",
+        }[category]
+        cur = self.conn.execute(
+            f"UPDATE photos SET flag='reject' "
+            f"WHERE {col}=1 AND (flag IS NULL OR flag != 'reject')"
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
 

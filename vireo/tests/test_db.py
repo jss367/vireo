@@ -3837,3 +3837,87 @@ def test_miss_columns_present(tmp_path):
     assert names == {
         "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
     }
+
+
+def test_list_misses_returns_flagged_photos_only(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22' "
+        "WHERE id=?", (p1,)
+    )
+    db.conn.commit()
+
+    misses = db.list_misses()
+    ids = [m["id"] for m in misses]
+    assert p1 in ids
+    assert p2 not in ids
+
+
+def test_list_misses_filters_by_category(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_clip = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_oof = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_clip,))
+    db.conn.execute("UPDATE photos SET miss_oof=1     WHERE id=?", (p_oof,))
+    db.conn.commit()
+
+    assert [m["id"] for m in db.list_misses(category="clipped")] == [p_clip]
+    assert [m["id"] for m in db.list_misses(category="oof")] == [p_oof]
+
+
+def test_clear_miss_flag_on_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_oof=1 WHERE id=?", (p,)
+    )
+    db.conn.commit()
+
+    db.clear_miss_flag(p, "clipped")
+    row = db.conn.execute(
+        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?", (p,)
+    ).fetchone()
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 1
+
+
+def test_bulk_reject_category_sets_flag_reject(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)", (p1, p2)
+    )
+    db.conn.commit()
+
+    n = db.bulk_reject_miss_category("clipped")
+    assert n == 2
+    for pid in (p1, p2):
+        flag = db.conn.execute(
+            "SELECT flag FROM photos WHERE id=?", (pid,)
+        ).fetchone()["flag"]
+        assert flag == "reject"
