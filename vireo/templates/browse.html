@@ -2862,6 +2862,172 @@ function openInEditorBatch() {
   openInEditor(ids);
 }
 
+/* ---------- Right-click context menu on grid cards ---------- */
+// Single-photo wrappers around the existing batch endpoints. The detail-panel
+// helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
+// menu needs to target an arbitrary id without mutating that focus, so we
+// post directly to the batch endpoints with a 1-photo list.
+async function setRatingFor(photoId, rating) {
+  try {
+    await safeFetch('/api/batch/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], rating: rating}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (p) p.rating = rating;
+  renderGrid();
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+}
+
+async function setFlagFor(photoId, flag) {
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], flag: flag}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (p) p.flag = flag;
+  renderGrid();
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+}
+
+async function setColorLabelFor(photoId, color) {
+  colorLabelGen++;
+  try {
+    await safeFetch('/api/batch/color_label', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], color: color}),
+    });
+  } catch(e) { return; }
+  if (color) colorLabels[photoId] = color;
+  else delete colorLabels[photoId];
+  renderGrid();
+  if (selectedPhotoId === photoId) updateDetailColors();
+}
+
+function revealPhoto(photoId) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_id: photoId}),
+  }, { toast: false }).catch(function(){});
+}
+
+async function copyPhotoPaths(photoIds) {
+  try {
+    var results = await Promise.all(photoIds.map(function(id) {
+      return safeFetch('/api/photos/' + id, {}, { toast: false });
+    }));
+    var paths = results.map(function(r) { return r && r.path; }).filter(Boolean).join('\n');
+    if (paths && navigator.clipboard) {
+      await navigator.clipboard.writeText(paths);
+      showToast(photoIds.length === 1 ? 'Path copied' : 'Paths copied');
+    }
+  } catch(e) { /* clipboard can throw in non-focused contexts */ }
+}
+
+// Re-apply the .selected highlight to match the current state of
+// selectedPhotos / selectedPhotoId. Mirrors the refresh block at the tail
+// of selectPhoto(); factored out so the context-menu handler can coerce
+// selection without paying the full selectPhoto side-effects.
+function refreshCardSelectionVisuals() {
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    var cardId = parseInt(el.dataset.id, 10);
+    el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
+  });
+}
+
+function buildPhotoContextMenu(photoIds) {
+  var one = photoIds.length === 1;
+  var hint = one ? undefined : 'Select a single photo';
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() {
+        photoIds.forEach(function(id) { setRatingFor(id, n); });
+      },
+    };
+  };
+  var colorChip = function(c, icon, title) {
+    return {
+      label: icon,
+      title: title,
+      onClick: function() {
+        photoIds.forEach(function(id) { setColorLabelFor(id, c); });
+      },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() {
+        photoIds.forEach(function(id) { setFlagFor(id, f); });
+      },
+    };
+  };
+
+  return [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+    ] },
+    { chips: [
+      flagChip('flagged', '\u2691', 'Flag as pick'),
+      flagChip('rejected', '\u2715', 'Reject'),
+      flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+    { label: 'Find Similar', disabled: !one, disabledHint: hint,
+      onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'Open in Editor',
+      onClick: function() { if (typeof openInEditor === 'function') openInEditor(photoIds); } },
+    { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
+      onClick: function() { revealPhoto(photoIds[0]); } },
+    { label: 'Copy Path',
+      onClick: function() { copyPhotoPaths(photoIds); } },
+    { separator: true },
+    { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
+    { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+    { separator: true },
+    { label: 'Delete', onClick: function() { batchDelete(); } },
+  ];
+}
+
+// Document-level delegation: grids re-render on sort/filter/scroll, so
+// per-card listeners would go stale.
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.grid-card');
+  if (!card || !card.dataset.id) return;
+  // Ignore right-clicks that came from inside the lightbox or a modal; this
+  // handler owns only grid-card context menus. Modal right-clicks are either
+  // handled by their own delegation (lightbox) or fall through to the browser.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  var pid = parseInt(card.dataset.id, 10);
+  // Finder-style coercion: right-click on an item outside the selection
+  // replaces the selection with that one item. Fold selectedPhotoId in first
+  // so a single-focus click doesn't get silently dropped.
+  if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
+    selectedPhotos.add(selectedPhotoId);
+  }
+  var ids = coerceSelectionOnContext(selectedPhotos, pid);
+  // If coercion replaced the set, align selectedPhotoId so the detail panel
+  // reflects the photo the user right-clicked on.
+  if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
+    selectedPhotoId = pid;
+  }
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  openContextMenu(e, buildPhotoContextMenu(ids));
+});
+
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
 (async function() {
   var params = new URLSearchParams(window.location.search);
