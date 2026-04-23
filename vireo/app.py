@@ -21,6 +21,7 @@ from db import Database
 from flask import (
     Flask,
     Response,
+    abort,
     g,
     jsonify,
     make_response,
@@ -2069,6 +2070,26 @@ def create_app(db_path, thumb_cache_dir=None):
             "snapshot_id": snap_id,
             "file_count": len(file_paths),
             "folders": folders,
+        })
+
+    @app.route(
+        "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
+        methods=["GET"],
+    )
+    def api_workspace_new_images_snapshot_get(snapshot_id):
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        snap = db.get_new_images_snapshot(snapshot_id)
+        if snap is None:
+            abort(404)
+        paths = snap["file_paths"]
+        folder_paths = sorted({os.path.dirname(p) for p in paths})
+        files_sample = paths[:5]
+        return jsonify({
+            "file_count": snap["file_count"],
+            "folder_paths": folder_paths,
+            "files_sample": files_sample,
         })
 
     # -- Prediction API routes --

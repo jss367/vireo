@@ -115,3 +115,44 @@ def test_post_snapshot_zero_new_images_returns_200(app_and_db):
         resp = client.post("/api/workspaces/active/new-images/snapshot")
         assert resp.status_code == 200
         assert resp.get_json()["file_count"] == 0
+
+
+def test_get_snapshot_returns_summary(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+    _touch_image(str(folder / "IMG_001.JPG"))
+
+    with app.test_client() as client:
+        post = client.post("/api/workspaces/active/new-images/snapshot")
+        snap_id = post.get_json()["snapshot_id"]
+
+        resp = client.get(f"/api/workspaces/active/new-images/snapshot/{snap_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["file_count"] == 1
+        assert data["folder_paths"] == [str(folder)]
+        assert data["files_sample"][0].endswith("IMG_001.JPG")
+
+
+def test_get_snapshot_unknown_id_returns_404(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    with app.test_client() as client:
+        resp = client.get("/api/workspaces/active/new-images/snapshot/99999")
+        assert resp.status_code == 404
+
+
+def test_get_snapshot_cross_workspace_returns_404(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    snap_id = db.create_new_images_snapshot(["/tmp/a.jpg"])
+    other = db.create_workspace("Other")
+    # Persist the switch so per-request Database instances restore "Other" as
+    # the active workspace (Database.__init__ picks the workspace with the most
+    # recent last_opened_at).
+    from datetime import datetime
+    db.update_workspace(other, last_opened_at=datetime.now().isoformat())
+    db.set_active_workspace(other)
+    with app.test_client() as client:
+        resp = client.get(f"/api/workspaces/active/new-images/snapshot/{snap_id}")
+        assert resp.status_code == 404
