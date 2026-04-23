@@ -172,3 +172,37 @@ def test_reveal_requires_photo_or_folder_id(app_and_db):
     with app.test_client() as c:
         resp = c.post("/api/files/reveal", json={})
         assert resp.status_code == 400
+
+
+def test_reveal_photo_outside_active_workspace_returns_404(app_and_db):
+    """A photo whose folder is not linked to the active workspace must 404.
+
+    Without this gate, a caller could reveal absolute file paths for photos
+    hidden from the current workspace by guessing photo IDs.
+    """
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    other_fid = db.add_folder('/secret/ws-photos', name='secret')
+    pid = db.add_photo(
+        folder_id=other_fid, filename='hidden.jpg', extension='.jpg',
+        file_size=10, file_mtime=1.0, timestamp='2024-01-01T00:00:00',
+    )
+    db.set_active_workspace(default_ws)
+    with app.test_client() as c:
+        resp = c.post("/api/files/reveal", json={"photo_id": pid})
+        assert resp.status_code == 404
+
+
+def test_reveal_folder_outside_active_workspace_returns_404(app_and_db):
+    """A folder not linked to the active workspace must 404."""
+    app, db = app_and_db
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    other_fid = db.add_folder('/secret/ws-dir', name='secret')
+    db.set_active_workspace(default_ws)
+    with app.test_client() as c:
+        resp = c.post("/api/files/reveal", json={"folder_id": other_fid})
+        assert resp.status_code == 404

@@ -866,11 +866,18 @@ def create_app(db_path, thumb_cache_dir=None):
 
         Powers the folder-tree context menu's "Copy Path" action. A lean
         response on purpose: callers that want the richer tree data already
-        have /api/folders for that.
+        have /api/folders for that. Scoped to the active workspace so
+        absolute paths from folders hidden in this workspace don't leak.
         """
         db = _get_db()
         folder = db.get_folder(folder_id)
         if not folder:
+            return json_error("folder not found", 404)
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
             return json_error("folder not found", 404)
         return jsonify({
             "id": folder["id"],
@@ -1290,7 +1297,11 @@ def create_app(db_path, thumb_cache_dir=None):
                 pid_int = int(pid_raw)
             except (TypeError, ValueError):
                 return json_error("photo_id must be an integer")
-            photo = db.get_photo(pid_int)
+            # verify_workspace=True enforces that the photo's folder is
+            # linked to the active workspace — otherwise this endpoint would
+            # expose absolute filesystem paths for photos hidden from the
+            # current workspace.
+            photo = db.get_photo(pid_int, verify_workspace=True)
             if not photo:
                 return json_error("photo not found", 404)
             folder_row = db.conn.execute(
@@ -1307,6 +1318,14 @@ def create_app(db_path, thumb_cache_dir=None):
                 return json_error("folder_id must be an integer")
             folder = db.get_folder(fid_int)
             if not folder:
+                return json_error("folder not found", 404)
+            # Reject reveal for folders not linked to the active workspace,
+            # matching the photo branch's verify_workspace gate.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (db._active_workspace_id, fid_int),
+            ).fetchone()
+            if not linked:
                 return json_error("folder not found", 404)
             folder_path = folder["path"]
             if not folder_path:
