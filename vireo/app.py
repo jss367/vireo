@@ -375,12 +375,16 @@ def _enforce_preview_cache_quota_at_startup(app):
             pass
 
 
-def create_app(db_path, thumb_cache_dir=None):
+def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
     Args:
         db_path: path to the SQLite database
         thumb_cache_dir: path to thumbnail cache directory
+        api_token: optional token required on /api/v1/* requests via the
+            ``X-Vireo-Token`` header. When ``None`` (default), all /api/v1/*
+            traffic is rejected with 401 — the token is expected to be
+            supplied by ``main()`` after calling ``runtime.generate_token``.
     """
     app = Flask(
         __name__, template_folder=os.path.join(os.path.dirname(__file__), "templates")
@@ -389,6 +393,7 @@ def create_app(db_path, thumb_cache_dir=None):
     app.config["THUMB_CACHE_DIR"] = thumb_cache_dir or os.path.expanduser(
         "~/.vireo/thumbnails"
     )
+    app.config["API_TOKEN"] = api_token
 
     _migrate_legacy_preview_cache(app)
     _enforce_preview_cache_quota_at_startup(app)
@@ -521,9 +526,45 @@ def create_app(db_path, thumb_cache_dir=None):
                         variant, e,
                     )
 
+    @app.before_request
+    def _enforce_api_v1_token():
+        if not request.path.startswith("/api/v1/"):
+            return None
+        expected = app.config.get("API_TOKEN")
+        if not expected:
+            # No token configured → deny all v1 traffic.
+            return json_error("API token not configured", 401)
+        if request.headers.get("X-Vireo-Token") != expected:
+            return json_error("Invalid or missing X-Vireo-Token", 401)
+        return None
+
     @app.route("/api/health")
     def api_health():
         return jsonify({"status": "ok"})
+
+    @app.route("/api/v1/health")
+    def api_v1_health():
+        # The "service" field is a Vireo-specific marker the single-instance
+        # guard's probe checks for. An unrelated local service that happens
+        # to return 200 on /api/v1/health (catch-all) would not carry it,
+        # so Vireo can distinguish a live peer from a port-reusing stranger.
+        from runtime import SERVICE_MARKER
+        return jsonify({"service": SERVICE_MARKER, "status": "ok"})
+
+    @app.route("/api/v1/version")
+    def api_v1_version():
+        return api_version()  # reuse existing implementation
+
+    @app.route("/api/v1/shutdown", methods=["POST"])
+    def api_v1_shutdown():
+        import signal
+        import threading
+
+        def _shutdown():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.5, _shutdown).start()
+        return jsonify({"status": "shutting_down"})
 
     @app.route("/api/models/status")
     def api_models_status():
@@ -7900,6 +7941,35 @@ def create_app(db_path, thumb_cache_dir=None):
     def stats_redirect():
         return redirect("/dashboard")
 
+    # --- /api/v1/* aliases over the stable subset of /api/* ---
+    # These are the endpoints advertised to external callers in docs/headless-api.md.
+    # Keep this list tight — expanding it locks the surface.
+    _V1_ALIASES = [
+        # (v1 path, existing endpoint name, methods)
+        ("/api/v1/photos", "api_photos", ["GET"]),
+        ("/api/v1/photos/<int:photo_id>", "api_photo_detail", ["GET"]),
+        ("/api/v1/collections", "api_collections", ["GET"]),
+        ("/api/v1/collections/<int:collection_id>/photos",
+         "api_collection_photos", ["GET"]),
+        ("/api/v1/workspaces", "api_get_workspaces", ["GET"]),
+        ("/api/v1/workspaces/<int:ws_id>/activate",
+         "api_activate_workspace", ["POST"]),
+        ("/api/v1/keywords", "api_keywords", ["GET"]),
+    ]
+
+    for v1_path, endpoint_name, methods in _V1_ALIASES:
+        view = app.view_functions.get(endpoint_name)
+        if view is None:
+            raise RuntimeError(
+                f"Cannot alias {v1_path}: endpoint '{endpoint_name}' not registered"
+            )
+        app.add_url_rule(
+            v1_path,
+            endpoint=f"v1_{endpoint_name}",
+            view_func=view,
+            methods=methods,
+        )
+
     return app
 
 
@@ -7918,11 +7988,21 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without opening a browser; write runtime.json and enable "
+             "the /api/v1 API. Use this when invoking the sidecar directly "
+             "from scripts or agents.",
+    )
+    parser.add_argument(
         "--load-taxonomy",
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
     )
     args = parser.parse_args()
+
+    if args.headless:
+        args.no_browser = True
 
     if args.load_taxonomy:
         from db import Database
@@ -7948,14 +8028,59 @@ def main():
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
 
-    # Write the port file when random port was requested (for Tauri to discover)
-    if args.port == 0:
-        port_file = os.path.join(os.path.expanduser("~/.vireo"), "port")
-        with open(port_file, "w") as f:
-            f.write(str(port))
-        log.info("Random port %d written to %s", port, port_file)
+    from runtime import (
+        acquire_single_instance,
+        delete_runtime_json,
+        generate_token,
+        release_single_instance,
+        write_runtime_json,
+    )
 
-    app = create_app(db_path=args.db, thumb_cache_dir=args.thumb_dir)
+    # Atomically reserve the single-instance slot BEFORE any heavy
+    # initialization. Reserving up-front (rather than writing runtime.json
+    # at the end of startup) closes the race where two near-simultaneous
+    # launches both see an empty slot and both start serving.
+    try:
+        status, info = acquire_single_instance(pid=os.getpid())
+    except OSError as e:
+        # Filesystem fault opening the lock file (unreadable ~/.vireo,
+        # permission denied, etc). Surface the real cause rather than
+        # misreporting as already_running — the two need different
+        # remediation.
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "startup_failed",
+            "reason": str(e),
+        }) + "\n")
+        raise SystemExit(2) from e
+    if status == "conflict":
+        import sys as _sys
+        _sys.stderr.write(json.dumps({
+            "error": "already_running",
+            "port": info.get("port"),
+            "pid": info.get("pid"),
+        }) + "\n")
+        raise SystemExit(1)
+
+    # Register cleanup immediately after acquiring the slot so a crash
+    # during initialization still releases the reservation lock and any
+    # runtime.json we may have written.
+    import atexit
+    import signal as _signal
+
+    def _cleanup_runtime_state():
+        delete_runtime_json()
+        release_single_instance()
+
+    atexit.register(_cleanup_runtime_state)
+    _signal.signal(_signal.SIGTERM, lambda *_: (_cleanup_runtime_state(), os._exit(0)))
+
+    api_token = generate_token()
+    mode = "headless" if args.headless else "gui"
+
+    app = create_app(
+        db_path=args.db, thumb_cache_dir=args.thumb_dir, api_token=api_token,
+    )
 
     # Startup banner
     import config as cfg
@@ -7988,6 +8113,31 @@ def main():
                     time.sleep(0.1)
 
         threading.Thread(target=_open_browser, daemon=True).start()
+
+    # Look up the running version using the same fallback chain as
+    # /api/version: package metadata, then pyproject.toml, then "0.0.0".
+    # In source/dev runs where importlib.metadata is missing but
+    # pyproject.toml is present, runtime.json must agree with
+    # /api/v1/version — external callers use it to make compatibility
+    # decisions and a bare "0.0.0" would mislead them.
+    try:
+        from importlib.metadata import version as pkg_version
+        ver = pkg_version("vireo")
+    except Exception:
+        import tomllib
+        try:
+            with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
+                ver = tomllib.load(f)["project"]["version"]
+        except Exception:
+            ver = "0.0.0"
+
+    # Finalize runtime.json, replacing the reservation marker with the full
+    # payload now that the port and token are known. Cleanup handlers were
+    # registered immediately after `acquire_single_instance` above.
+    write_runtime_json(
+        port=port, pid=os.getpid(), version=ver, db_path=args.db,
+        token=api_token, mode=mode,
+    )
 
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 
