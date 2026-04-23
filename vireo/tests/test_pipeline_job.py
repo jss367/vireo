@@ -8,7 +8,13 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pipeline_job import PipelineParams, run_pipeline_job
+from pipeline_job import (
+    STAGE_WEIGHTS,
+    PipelineParams,
+    _stage_fraction,
+    _weighted_progress,
+    run_pipeline_job,
+)
 
 
 def _drop_jpeg(folder_path, filename):
@@ -4114,3 +4120,120 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
         f"stages['thumbnails']['count'] must include failed items (was {thumb_stage_count}). "
         f"Last event stages: {last['stages']}"
     )
+
+
+# --- Weighted overall progress ---------------------------------------------
+
+def _empty_stages():
+    return {name: {"status": "pending", "count": 0} for name in STAGE_WEIGHTS}
+
+
+def test_stage_fraction_pending_is_zero():
+    assert _stage_fraction({"status": "pending", "count": 0}) == 0.0
+
+
+def test_stage_fraction_completed_is_one():
+    assert _stage_fraction({"status": "completed", "count": 5, "total": 10}) == 1.0
+
+
+def test_stage_fraction_skipped_is_one():
+    """Skipped stages are "done" for overall-progress purposes — their
+    weight has been paid out, so don't stall the bar at the last skip."""
+    assert _stage_fraction({"status": "skipped"}) == 1.0
+
+
+def test_stage_fraction_running_uses_count_over_total():
+    assert _stage_fraction({"status": "running", "count": 25, "total": 100}) == 0.25
+
+
+def test_stage_fraction_running_without_total_is_zero():
+    """A running stage that hasn't yet reported a total can't compute a
+    fraction; report 0 rather than dividing by zero or claiming completion."""
+    assert _stage_fraction({"status": "running", "count": 5}) == 0.0
+
+
+def test_stage_fraction_clamps_to_one():
+    """Stage counters sometimes overshoot total (last batch rounding)."""
+    assert _stage_fraction({"status": "running", "count": 105, "total": 100}) == 1.0
+
+
+def test_weighted_progress_all_pending_is_zero():
+    current, total = _weighted_progress(_empty_stages())
+    assert current == 0
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_all_completed_is_full():
+    stages = {name: {"status": "completed"} for name in STAGE_WEIGHTS}
+    current, total = _weighted_progress(stages)
+    assert current == total
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_fast_stage_done_heavy_pending():
+    """After a fast stage finishes and a heavy one hasn't started, the bar
+    should reflect the fast stage's small weight — NOT 100%. This is the
+    bug the helper fixes: previously the last-pushed stage-local current/total
+    dominated the overall bar."""
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"  # weight 2
+    stages["scan"]["status"] = "completed"    # weight 8
+    # classify (weight 30) still pending
+    current, total = _weighted_progress(stages)
+    pct = current / total * 100
+    assert pct < 15, f"Expected <15% with only ingest+scan done, got {pct:.1f}%"
+
+
+def test_weighted_progress_running_stage_partial():
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "completed"
+    stages["thumbnails"]["status"] = "completed"
+    stages["previews"]["status"] = "completed"
+    stages["model_loader"]["status"] = "completed"
+    stages["detect"]["status"] = "completed"
+    stages["classify"].update(status="running", count=50, total=100)
+    current, total = _weighted_progress(stages)
+    # ingest+scan+thumbs+previews+model_loader+detect = 2+8+6+6+2+15 = 39
+    # classify half-done = 15
+    # total weight sum via STAGE_WEIGHTS
+    expected_done = 39 + 15
+    assert current == expected_done
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_monotonic_through_pipeline():
+    """Completing stages in order should produce a monotonically increasing
+    overall percentage — no drops between phases."""
+    stages = _empty_stages()
+    order = ["ingest", "scan", "thumbnails", "previews", "model_loader",
+             "detect", "classify", "extract_masks", "eye_keypoints", "regroup"]
+    last_pct = -1.0
+    for name in order:
+        stages[name]["status"] = "completed"
+        current, total = _weighted_progress(stages)
+        pct = current / total * 100
+        assert pct > last_pct, f"Progress went backwards at {name}: {last_pct} -> {pct}"
+        last_pct = pct
+    assert last_pct == 100.0
+
+
+def test_update_stages_emits_weighted_current_total():
+    """_update_stages must send the weighted overall to push_event instead
+    of hardcoded 0/0. This is what makes the 'Overall %' visible in the UI."""
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "running"
+    stages["scan"]["count"] = 50
+    stages["scan"]["total"] = 100
+
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    assert runner.events, "no events pushed"
+    _, evt, data = runner.events[-1]
+    assert evt == "progress"
+    assert data["total"] == sum(STAGE_WEIGHTS.values())
+    # ingest (2) + scan half (4) = 6
+    assert data["current"] == 6
