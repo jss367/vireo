@@ -554,6 +554,20 @@ body { padding-bottom: 36px; }
             </div>
           </div>
         </div>
+
+        <div class="source-or" id="sourceOrNewImages" style="display:none;">OR</div>
+        <div class="source-option" id="sourceOptionNewImages" style="display:none;">
+          <div class="source-option-header" onclick="selectSourceMode('new_images')">
+            <input type="radio" id="radioNewImages" name="sourceMode" value="new_images" data-testid="source-new-images">
+            <label for="radioNewImages" style="cursor:pointer;font-weight:600;font-size:13px;">
+              <strong id="newImagesCardTitle">New images</strong>
+              <span id="newImagesCardSubtitle" class="muted" style="font-weight:400;color:var(--text-dim);"></span>
+            </label>
+          </div>
+          <div class="source-option-body dimmed" id="sourceNewImagesBody">
+            <ul id="newImagesFolderList" class="folder-list" style="list-style:none;padding:0;margin:0;font-size:12px;color:var(--text-secondary);"></ul>
+          </div>
+        </div>
       </div>
 
       <div class="progress-wrap" id="progressSource" style="display:none;">
@@ -1051,6 +1065,69 @@ function initPipelinePage() {
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);
+
+// -- New images (Stage 1 third option) --
+var newImagesSnapshotId = null;
+
+async function initNewImagesCard() {
+  var params = new URLSearchParams(window.location.search);
+  var deepLinkId = params.get('new_images');
+  if (deepLinkId) {
+    try {
+      var r = await fetch('/api/workspaces/active/new-images/snapshot/' + encodeURIComponent(deepLinkId));
+      if (!r.ok) throw new Error('snapshot expired');
+      var snap = await r.json();
+      newImagesSnapshotId = parseInt(deepLinkId, 10);
+      renderNewImagesCard(snap.file_count, snap.folder_paths || []);
+      selectSourceMode('new_images');
+    } catch (e) {
+      if (typeof showToast === 'function') {
+        showToast('That snapshot has expired — please try again from the banner.');
+      } else {
+        alert('That snapshot has expired — please try again from the banner.');
+      }
+      await probeNewImagesCard();
+    }
+  } else {
+    await probeNewImagesCard();
+  }
+}
+
+async function probeNewImagesCard() {
+  try {
+    var r = await fetch('/api/workspaces/active/new-images');
+    if (!r.ok) return;
+    var data = await r.json();
+    if ((data.new_count || 0) > 0) {
+      var folders = (data.per_root || [])
+        .filter(function(pr) { return (pr.new_count || 0) > 0; })
+        .map(function(pr) { return pr.path; });
+      renderNewImagesCard(data.new_count, folders);
+    }
+  } catch (e) {
+    // Silent fail — card stays hidden.
+  }
+}
+
+function renderNewImagesCard(count, folders) {
+  var card = document.getElementById('sourceOptionNewImages');
+  var orSep = document.getElementById('sourceOrNewImages');
+  if (!card || !orSep) return;
+  card.style.display = '';
+  orSep.style.display = '';
+  document.getElementById('newImagesCardSubtitle').textContent =
+    ' — ' + count + ' new image' + (count === 1 ? '' : 's') +
+    ' in ' + folders.length + ' folder' + (folders.length === 1 ? '' : 's');
+  var list = document.getElementById('newImagesFolderList');
+  list.innerHTML = '';
+  for (var i = 0; i < folders.length; i++) {
+    var li = document.createElement('li');
+    li.textContent = folders[i];
+    list.appendChild(li);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', initNewImagesCard);
 
 // -- Collection picker --
 async function loadCollections() {
@@ -1688,27 +1765,48 @@ function markFolderPreviewStale() {
   btn.disabled = !(hasSources && hasDest);
 }
 
-function selectSourceMode(mode) {
+async function selectSourceMode(mode) {
   // Cancel any in-flight duplicate scan before switching context
   if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
   document.getElementById('radioImport').checked = (mode === 'import');
   document.getElementById('radioCollection').checked = (mode === 'collection');
+  var newImgRadio = document.getElementById('radioNewImages');
+  if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
 
   var importBody = document.getElementById('sourceImportBody');
   var collBody = document.getElementById('sourceCollectionBody');
+  var newImgBody = document.getElementById('sourceNewImagesBody');
 
   if (mode === 'import') {
     importBody.classList.remove('dimmed');
     collBody.classList.add('dimmed');
-  } else {
+    if (newImgBody) newImgBody.classList.add('dimmed');
+  } else if (mode === 'collection') {
     importBody.classList.add('dimmed');
     collBody.classList.remove('dimmed');
+    if (newImgBody) newImgBody.classList.add('dimmed');
+  } else if (mode === 'new_images') {
+    importBody.classList.add('dimmed');
+    collBody.classList.add('dimmed');
+    if (newImgBody) newImgBody.classList.remove('dimmed');
+    if (newImagesSnapshotId === null) {
+      // User is selecting the card directly (no deep-link) — freeze the list now.
+      try {
+        var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
+        if (resp.ok) {
+          var data = await resp.json();
+          newImagesSnapshotId = data.snapshot_id;
+        }
+      } catch (e) {
+        // Leave snapshot id null; submit will fail validation via updateStartButton.
+      }
+    }
   }
 
   var copySection = document.getElementById('destCopySection');
   var copyNote = document.getElementById('destCopyDisabledNote');
-  if (mode === 'collection') {
+  if (mode === 'collection' || mode === 'new_images') {
     copySection.classList.add('dimmed');
     copyNote.style.display = '';
   } else {
@@ -1798,6 +1896,8 @@ function updateStartButton() {
     var hasFolders = _sourceFolders.length > 0;
     var anyType = getIngestFileTypes().length > 0;
     btn.disabled = !hasFolders || !anyType;
+  } else if (_sourceMode === 'new_images') {
+    btn.disabled = !newImagesSnapshotId;
   } else {
     var collId = document.getElementById('collectionPicker').value;
     btn.disabled = !collId;
@@ -1941,6 +2041,11 @@ async function startPipeline() {
       body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
       body.folder_template = getSelectedFolderTemplate();
     }
+  } else if (_sourceMode === 'new_images') {
+    body.source_snapshot_id = newImagesSnapshotId;
+    delete body.source;
+    delete body.sources;
+    delete body.file_types;
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
     // Add excluded photo IDs from preview selection
