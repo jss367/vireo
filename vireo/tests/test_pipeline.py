@@ -1078,3 +1078,88 @@ def test_eye_stage_picks_eye_with_higher_tenengrad(tmp_path, monkeypatch):
     assert abs(eye_y - 300.0 / 600.0) < 1.0 / 600.0
     assert eye_conf == 0.80
     assert eye_teng > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Read-time detection threshold filtering (Task 24)
+# ---------------------------------------------------------------------------
+
+
+def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
+    """Lowering workspace `detector_confidence` surfaces more cached boxes at
+    read time, without rewriting detection rows.
+
+    Exercises the global-detections design: boxes are stored once globally;
+    each workspace's view of subject crops / primary detections is filtered
+    by its effective `detector_confidence` override at read time.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid, "bird.jpg", ".jpg", 1000, 1.0,
+        timestamp="2026-04-23T10:00:00",
+        width=4000, height=3000,
+    )
+
+    # Save two boxes globally: one high-conf (surfaces at default threshold),
+    # one low-conf (only surfaces when the workspace lowers its threshold).
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3},
+         "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    # At the default workspace threshold (0.2), only the high-conf box wins
+    # as primary detection.
+    photos = load_photo_features(db)
+    assert len(photos) == 1
+    primary = photos[0]["detection_box"]
+    assert primary is not None
+    assert primary["x"] == 0.5
+    assert photos[0]["detection_conf"] == 0.95
+
+    # Lower the workspace threshold via per-workspace config override so the
+    # low-conf box becomes visible. Primary is still the high-conf one
+    # (helper sorts by confidence DESC), but if we drop the high-conf box
+    # the low-conf one now surfaces — proving the read-time filter actually
+    # changed behavior without any detection-row writes.
+    db.update_workspace(ws_id,
+                        config_overrides={"detector_confidence": 0.01})
+
+    # Delete just the high-conf detection to confirm the low-conf one now
+    # becomes primary under the lowered threshold.
+    db.conn.execute(
+        "DELETE FROM detections WHERE photo_id = ? AND detector_confidence = ?",
+        (pid, 0.95),
+    )
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert len(photos) == 1
+    primary = photos[0]["detection_box"]
+    assert primary is not None, (
+        "lowering detector_confidence should surface the cached low-conf box"
+    )
+    assert primary["x"] == 0.1
+    assert photos[0]["detection_conf"] == 0.05
+
+    # Raise the threshold back above 0.05 — the low-conf box disappears
+    # again, purely through read-time filtering.
+    db.update_workspace(ws_id,
+                        config_overrides={"detector_confidence": 0.5})
+    photos = load_photo_features(db)
+    assert photos[0]["detection_box"] is None
+    assert photos[0]["detection_conf"] is None
+
+    # And the raw row count never changed (no rewrites).
+    raw = db.conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,),
+    ).fetchone()[0]
+    assert raw == 1
