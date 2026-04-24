@@ -4861,13 +4861,26 @@ class Database:
                 "model_count": r["model_count"] or 0}
 
     def get_detector_run_photo_ids(self, detector_model):
-        """Return the set of photo_ids where `detector_model` has run.
+        """Return the set of photo_ids with a consistent cached detector run.
 
         Includes empty-scene photos (box_count=0) — which is the whole point:
         without this, we'd re-run the model forever on photos with no animals.
+
+        Excludes torn states where `detector_runs.box_count > 0` but no matching
+        row exists in `detections`. That shape happens when a reclassify pass
+        clears detections (via `clear_detections`) and then the job fails
+        before writing fresh rows (model init error, etc.). Leaving such
+        photos in the skip set would strand them on full-image fallback
+        until the user manually forces another reclassify.
         """
         rows = self.conn.execute(
-            "SELECT photo_id FROM detector_runs WHERE detector_model = ?",
+            """SELECT dr.photo_id
+               FROM detector_runs dr
+               WHERE dr.detector_model = ?
+                 AND (dr.box_count = 0
+                      OR EXISTS (SELECT 1 FROM detections d
+                                 WHERE d.photo_id = dr.photo_id
+                                   AND d.detector_model = dr.detector_model))""",
             (detector_model,),
         ).fetchall()
         return {r["photo_id"] for r in rows}

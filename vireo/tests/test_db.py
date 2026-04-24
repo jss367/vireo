@@ -3213,6 +3213,48 @@ def test_get_existing_detection_photo_ids(tmp_path):
     assert pid2 not in result
 
 
+def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
+    """A detector_runs row with box_count>0 but no matching detections is a
+    torn state left behind by a reclassify that cleared detections and then
+    failed before writing new rows. That photo must NOT be treated as cached —
+    otherwise the next non-reclassify run skips detection and the photo is
+    permanently stranded on full-image fallback.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    torn = db.add_photo(folder_id=fid, filename="torn.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    empty = db.add_photo(folder_id=fid, filename="empty.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    ok = db.add_photo(folder_id=fid, filename="ok.jpg", extension=".jpg",
+                      file_size=100, file_mtime=1.0)
+
+    # Torn: run recorded with boxes, but detections cleared (simulates a
+    # reclassify that wiped rows then crashed before re-detecting).
+    db.save_detections(torn, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(torn, "megadetector-v6", box_count=1)
+    db.clear_detections(torn)
+
+    # Legit empty scene: run recorded with box_count=0, no detections.
+    db.record_detector_run(empty, "megadetector-v6", box_count=0)
+
+    # Consistent: run recorded and detection rows present.
+    db.save_detections(ok, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(ok, "megadetector-v6", box_count=1)
+
+    result = db.get_detector_run_photo_ids("megadetector-v6")
+    assert torn not in result, "torn state must be re-detected, not skipped"
+    assert empty in result, "legit empty scenes must stay cached"
+    assert ok in result, "consistent cached runs must stay cached"
+
+
 def test_multiple_predictions_per_detection(tmp_path):
     """Multiple species predictions can be stored for the same detection."""
     from db import Database
@@ -4814,6 +4856,15 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
     )
 
     db._active_workspace_id = ws_a
+    # Save the matching detection rows alongside the run so the cached-run
+    # state is consistent — get_detector_run_photo_ids excludes torn states
+    # where box_count>0 has no matching detections.
+    db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9,
+         "category": "animal"},
+        {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}, "confidence": 0.8,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
     db.record_detector_run(photo_id, "megadetector-v6", box_count=2)
 
     db._active_workspace_id = ws_b
