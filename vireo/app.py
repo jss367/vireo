@@ -5128,48 +5128,68 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["id"], "scan", status="completed",
                     summary=f"{photo_count} photos",
                 )
-            runner.update_step(job["id"], "thumbnails", status="running")
+            # Skip the thumbnail phase when EVERY requested root failed.
+            # generate_all() walks the whole library looking for missing
+            # thumbnails — running it after a total scan failure does a
+            # long, unrelated pass and delays the failure feedback the
+            # user actually needs. When at least one root succeeded we
+            # still run thumbs so those newly-indexed photos get
+            # covered.
+            all_roots_failed = bool(root_errors) and len(root_errors) == len(roots_list)
 
-            # Auto-generate thumbnails for new photos only
-            from thumbnails import generate_all
+            if all_roots_failed:
+                log.info(
+                    "All %d scan root(s) failed; skipping thumbnail phase",
+                    len(roots_list),
+                )
+                runner.update_step(
+                    job["id"], "thumbnails", status="skipped",
+                    summary="skipped (all scan roots failed)",
+                )
+                thumb_result = None
+            else:
+                runner.update_step(job["id"], "thumbnails", status="running")
 
-            log.info("Generating thumbnails...")
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": 0,
-                    "current_file": "Checking for new thumbnails...",
-                    "rate": 0,
-                    "phase": "Generating thumbnails",
-                },
-            )
+                # Auto-generate thumbnails for new photos only
+                from thumbnails import generate_all
 
-            def thumb_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
+                log.info("Generating thumbnails...")
                 runner.push_event(
                     job["id"],
                     "progress",
                     {
-                        "current": current,
-                        "total": total,
-                        "current_file": "",
-                        "rate": round(
-                            current / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "Checking for new thumbnails...",
+                        "rate": 0,
                         "phase": "Generating thumbnails",
                     },
                 )
 
-            thumb_result = generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
-                vireo_dir=vireo_dir,
-            )
-            from thumbnails import format_summary as thumb_summary
-            runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
+                def thumb_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "current_file": "",
+                            "rate": round(
+                                current / max(time.time() - job["_start_time"], 0.01), 1
+                            ),
+                            "phase": "Generating thumbnails",
+                        },
+                    )
+
+                thumb_result = generate_all(
+                    thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
+                    vireo_dir=vireo_dir,
+                )
+                from thumbnails import format_summary as thumb_summary
+                runner.update_step(job["id"], "thumbnails", status="completed",
+                                   summary=thumb_summary(thumb_result))
 
             # Mixed-outcome rollup: any failed root => job is "failed".
             # JobRunner._run_job dedupes job["errors"] by exact string

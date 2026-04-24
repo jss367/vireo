@@ -296,3 +296,89 @@ def test_failed_root_does_not_inflate_cumulative_progress(app_and_db, tmp_path, 
         f"photo_count inflated by phantom planned-but-unprocessed files: "
         f"summary={summary!r}"
     )
+
+
+def test_thumbnails_skipped_when_all_roots_fail(app_and_db, tmp_path, monkeypatch):
+    """If every scan root fails, the thumbnail phase must be skipped.
+    generate_all() walks the whole library looking for missing thumbs;
+    running it after a total scan failure does a long unrelated pass
+    that delays failure feedback and does work the user didn't ask for.
+    When at least one root succeeds, thumbs still run normally."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bad_a = str(tmp_path / "bad_a")
+    bad_b = str(tmp_path / "bad_b")
+    _make_photo(bad_a, "a.jpg")
+    _make_photo(bad_b, "b.jpg")
+
+
+    def always_fails(root, db, *args, **kwargs):
+        raise RuntimeError(f"simulated immediate failure on {root}")
+
+    monkeypatch.setattr("scanner.scan", always_fails)
+
+    # Sentinel to detect if generate_all was called.
+    generate_calls = {"n": 0}
+    import thumbnails as real_thumb
+    real_generate_all = real_thumb.generate_all
+
+    def tracking_generate_all(*args, **kwargs):
+        generate_calls["n"] += 1
+        return real_generate_all(*args, **kwargs)
+
+    monkeypatch.setattr("thumbnails.generate_all", tracking_generate_all)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [bad_a, bad_b]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"
+    assert generate_calls["n"] == 0, (
+        "generate_all must NOT run when every scan root failed "
+        f"(called {generate_calls['n']} times)"
+    )
+    # Thumbnail step should be marked skipped, not running/failed.
+    thumb_step = next(s for s in data["steps"] if s["id"] == "thumbnails")
+    assert thumb_step["status"] == "skipped", thumb_step
+
+
+def test_thumbnails_still_run_when_some_roots_succeed(app_and_db, tmp_path, monkeypatch):
+    """Mixed outcome (some roots fail, some succeed) still runs thumbs
+    so the successfully-indexed photos get covered."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bad = str(tmp_path / "bad")
+    good = str(tmp_path / "good")
+    _make_photo(bad, "b.jpg")
+    _make_photo(good, "g.jpg")
+
+    import scanner as real_scanner
+    real_scan = real_scanner.scan
+
+    def flaky_scan(root, db, *args, **kwargs):
+        if root == bad:
+            raise RuntimeError("simulated fail on bad root")
+        return real_scan(root, db, *args, **kwargs)
+
+    monkeypatch.setattr("scanner.scan", flaky_scan)
+
+    generate_calls = {"n": 0}
+    import thumbnails as real_thumb
+    real_generate_all = real_thumb.generate_all
+
+    def tracking_generate_all(*args, **kwargs):
+        generate_calls["n"] += 1
+        return real_generate_all(*args, **kwargs)
+
+    monkeypatch.setattr("thumbnails.generate_all", tracking_generate_all)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [bad, good]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"  # mixed-outcome rollup
+    assert generate_calls["n"] == 1, (
+        "generate_all must run when at least one root succeeded"
+    )
