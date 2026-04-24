@@ -4332,21 +4332,26 @@ class Database:
         rows = [dict(r) for r in primaries]
         if not rows:
             return rows
-        # Alternatives are correlated by (detection_id, classifier_model):
-        # a detection may have been classified by multiple models (and those
-        # may even share a group), so we must not merge alternatives across
-        # models.  Alternatives are scoped per-workspace through
+        # Alternatives are correlated by
+        # (detection_id, classifier_model, labels_fingerprint): a detection
+        # may have been classified by multiple models or multiple label
+        # sets (and those may share a group), so we must not merge
+        # alternatives across any of those dimensions — otherwise stale
+        # label-set rows would bleed into the group UI's alternatives
+        # column. Alternatives are scoped per-workspace through
         # prediction_review.
-        det_model_pairs = {
-            (r['detection_id'], r.get('model'))
+        det_keys = {
+            (r['detection_id'], r.get('model'), r.get('labels_fingerprint'))
             for r in rows if r.get('detection_id') is not None
         }
-        alts_by_key = {pair: [] for pair in det_model_pairs}
-        det_ids = list({did for did, _ in det_model_pairs})
+        alts_by_key = {k: [] for k in det_keys}
+        det_ids = list({did for did, _, _ in det_keys})
         if det_ids:
             placeholders = ','.join('?' * len(det_ids))
             alt_rows = self.conn.execute(
-                f"""SELECT pr.detection_id, pr.classifier_model AS model,
+                f"""SELECT pr.detection_id,
+                           pr.classifier_model AS model,
+                           pr.labels_fingerprint,
                            pr.species, pr.confidence
                     FROM predictions pr
                     JOIN prediction_review pr_rev
@@ -4357,13 +4362,17 @@ class Database:
                 [ws, *det_ids],
             ).fetchall()
             for a in alt_rows:
-                key = (a['detection_id'], a['model'])
+                key = (a['detection_id'], a['model'], a['labels_fingerprint'])
                 if key in alts_by_key:
                     alts_by_key[key].append(
                         {'species': a['species'], 'confidence': a['confidence']}
                     )
         for r in rows:
-            r['alternatives'] = alts_by_key.get((r.get('detection_id'), r.get('model')), [])
+            r['alternatives'] = alts_by_key.get(
+                (r.get('detection_id'), r.get('model'),
+                 r.get('labels_fingerprint')),
+                [],
+            )
         return rows
 
     def update_predictions_status_by_photo(self, photo_id, status):
@@ -4585,18 +4594,26 @@ class Database:
             return None
 
         try:
-            # Reject sibling predictions for same detection+classifier_model
-            # in this workspace (covers both accepting an alternative and
-            # accepting the top-1).  Review state is workspace-scoped, so we
-            # upsert each row rather than UPDATE the base predictions table.
+            # Reject sibling predictions for the same
+            # (detection, classifier_model, labels_fingerprint) in this
+            # workspace (covers both accepting an alternative and accepting
+            # the top-1). Scoping by fingerprint is critical — without it,
+            # accepting a prediction from a new label set would mark old
+            # label-set rows as rejected, silently rewriting review state
+            # for unrelated fingerprints. Review state is workspace-scoped,
+            # so we upsert each row rather than UPDATE the base predictions
+            # table.
             sibs = self.conn.execute(
                 """SELECT pr.id FROM predictions pr
                    LEFT JOIN prediction_review pr_rev
                      ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                   WHERE pr.detection_id = ?
+                     AND pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?
                      AND pr.id != ?
                      AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
-                (ws, pred["detection_id"], pred["model"], prediction_id),
+                (ws, pred["detection_id"], pred["model"],
+                 pred["labels_fingerprint"], prediction_id),
             ).fetchall()
             for s in sibs:
                 self.conn.execute(

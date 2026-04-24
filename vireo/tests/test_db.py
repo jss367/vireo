@@ -1224,6 +1224,75 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_accept_prediction_sibling_rejection_scoped_to_fingerprint(tmp_path):
+    """Accepting a prediction under one labels_fingerprint must not mark
+    predictions with OTHER fingerprints on the same detection as rejected.
+    Each label set should have independent review state.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    ws = db._active_workspace_id
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Two predictions on the same detection, different fingerprints.
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    pred_old = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-old'"
+    ).fetchone()["id"]
+
+    db.add_prediction(det_id, species="Blue Jay", confidence=0.85,
+                      model="bioclip-2", labels_fingerprint="fp-new")
+    pred_new = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-new'"
+    ).fetchone()["id"]
+
+    # Accept the fp-new prediction. The fp-old one must remain pending.
+    db.accept_prediction(pred_new)
+
+    assert db.get_review_status(pred_new, ws) == "accepted"
+    assert db.get_review_status(pred_old, ws) == "pending", \
+        "sibling rejection must not cross fingerprints"
+
+
+def test_get_group_predictions_alternatives_scoped_to_fingerprint(tmp_path):
+    """Group alternatives must not mix across fingerprints — a detection
+    classified under two label sets should only show the current set's
+    alternatives in the group-review UI.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    ws = db._active_workspace_id
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Current fingerprint: primary + alternative.
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-new",
+                      group_id="g1")
+    pred_primary = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin'"
+    ).fetchone()["id"]
+    db.add_prediction(det_id, species="Sparrow", confidence=0.3,
+                      model="bioclip-2", labels_fingerprint="fp-new",
+                      status="alternative")
+
+    # Stale fingerprint: primary + alternative on the SAME detection.
+    db.add_prediction(det_id, species="Finch", confidence=0.8,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    db.add_prediction(det_id, species="Warbler", confidence=0.2,
+                      model="bioclip-2", labels_fingerprint="fp-old",
+                      status="alternative")
+
+    group = db.get_group_predictions("g1")
+    assert len(group) == 1
+    assert group[0]["species"] == "Robin"
+    alt_species = {a["species"] for a in group[0]["alternatives"]}
+    assert alt_species == {"Sparrow"}, \
+        f"expected only current-fingerprint alternative, got {alt_species}"
+
+
 def test_add_prediction_duplicate_does_not_corrupt_review(tmp_path):
     """When add_prediction is called twice with the same unique key and the
     second call carries review metadata, the upsert into prediction_review

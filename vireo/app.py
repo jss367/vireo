@@ -2436,7 +2436,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws = db._ws_id()
         pred = db.conn.execute(
             """SELECT pr.id, pr.species, pr.detection_id,
-                      pr.classifier_model AS model, d.photo_id
+                      pr.classifier_model AS model,
+                      pr.labels_fingerprint, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE pr.id = ?""",
@@ -2449,8 +2450,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if pred is None:
             return json_error("prediction not found", 404)
         db.update_prediction_status(pred_id, "rejected", _commit=False)
-        # Also reject sibling alternative predictions (same detection +
-        # classifier model, currently 'alternative' in this workspace).
+        # Also reject sibling alternative predictions for the same
+        # (detection, classifier_model, labels_fingerprint) in this
+        # workspace. Fingerprint scoping matters: without it, rejecting a
+        # prediction from a new label set would rewrite review state for
+        # prior fingerprints' alternatives on the same detection.
         sibling_ids = [row["id"] for row in db.conn.execute(
             """SELECT pr.id
                FROM predictions pr
@@ -2459,9 +2463,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 AND pr_rev.workspace_id = ?
                WHERE pr.detection_id = ?
                  AND pr.classifier_model = ?
+                 AND pr.labels_fingerprint = ?
                  AND pr.id != ?
                  AND pr_rev.status = 'alternative'""",
-            (ws, pred["detection_id"], pred["model"], pred_id),
+            (ws, pred["detection_id"], pred["model"],
+             pred["labels_fingerprint"], pred_id),
         ).fetchall()]
         for sid in sibling_ids:
             db.update_prediction_status(sid, "rejected", _commit=False)
