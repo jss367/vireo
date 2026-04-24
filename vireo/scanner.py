@@ -556,112 +556,199 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         folder_cache[folder_str] = folder_id
         return folder_id
 
-    # First pass: determine which files need full processing (for incremental mode).
-    # Handle XMP-only changes inline; collect files needing metadata extraction.
-    files_to_process = []
-    processed_count = 0
-    for image_path in image_files:
-        stat = image_path.stat()
-        file_mtime = stat.st_mtime
-        xmp_path = image_path.with_suffix(".xmp")
-        xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+    # Track folders whose scan touched them, so we can flag them 'partial'
+    # if any stage (pre-pass XMP commit, main per-file loop, or
+    # post-processing) dies midway. This set is populated as we go so the
+    # failure handler has as much precision as possible; the scoped roots
+    # below catch failures that happen before any folder_id is recorded.
+    touched_folder_ids = set()
 
-        if incremental:
-            full_path_str = str(image_path)
-            existing = existing_by_path.get(full_path_str)
-            if existing:
-                file_unchanged = existing["file_mtime"] == file_mtime
-                xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
-                # Re-process if ExifTool never ran for this photo (both
-                # timestamp and exif_data are NULL). Photos with genuinely
-                # missing timestamps (screenshots, exports) will have
-                # exif_data set after one extraction attempt.
-                # Also flag rows where a RAW file has absurdly small
-                # dimensions (<1000px) — that's the embedded JPEG thumb
-                # leaking through when ExifTool's File group was missing
-                # on the original scan.
-                dims_suspect = (
-                    existing["extension"] in RAW_EXTENSIONS
-                    and existing["width"] is not None
-                    and existing["width"] < 1000
+    def _mark_folders_partial():
+        """Flag the scanned scope as 'partial' after an unrecoverable failure.
+
+        Uses the scanned scope (``root`` + ``restrict_dirs``) plus every
+        folder the loop actually touched. Including the explicit roots
+        catches failures that abort before a folder_id reaches
+        ``touched_folder_ids`` — e.g. a non-retryable DB error raised from
+        ``_ensure_folder`` or from the incremental pre-pass.
+        """
+        try:
+            db.conn.rollback()
+        except Exception:
+            log.exception("Rollback after scan failure also failed")
+        scoped_paths = {str(root_path)}
+        if restrict_dirs is not None:
+            scoped_paths.update(str(d) for d in restrict_dirs)
+        try:
+            if scoped_paths:
+                path_placeholders = ",".join("?" * len(scoped_paths))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'partial' "
+                    f"WHERE path IN ({path_placeholders})",
+                    tuple(scoped_paths),
                 )
-                metadata_missing = (
-                    (existing["timestamp"] is None or dims_suspect)
-                    and existing["id"] not in exif_extracted
+            if touched_folder_ids:
+                id_placeholders = ",".join("?" * len(touched_folder_ids))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'partial' "
+                    f"WHERE id IN ({id_placeholders})",
+                    tuple(touched_folder_ids),
                 )
+            commit_with_retry(db.conn)
+        except Exception:
+            log.exception("Failed to flag folders partial after scan failure")
 
-                if file_unchanged and xmp_unchanged and not metadata_missing:
-                    processed_count += 1
-                    if photo_callback:
-                        photo_callback(existing["id"], full_path_str)
-                    if progress_callback:
-                        progress_callback(processed_count, total)
-                    continue
+    def _clear_partial_status():
+        """Clear 'partial' on the scanned scope after a fully successful scan.
 
-                # XMP changed: re-import keywords
-                if not xmp_unchanged and xmp_mtime is not None:
-                    _import_keywords_for_photo(db, existing["id"], str(xmp_path))
-                    db.conn.execute(
-                        "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
-                        (xmp_mtime, existing["id"]),
+        Scope mirrors the failure path plus the subtree when the scan was
+        recursive — otherwise a no-op incremental rescan (all files
+        unchanged) would leave descendant folders stuck on 'partial'
+        because the per-file loop never records them in
+        ``touched_folder_ids``.
+        """
+        cleared_paths = {str(root_path)}
+        if restrict_dirs is not None:
+            cleared_paths.update(str(d) for d in restrict_dirs)
+        try:
+            if cleared_paths:
+                path_placeholders = ",".join("?" * len(cleared_paths))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'ok' "
+                    f"WHERE status = 'partial' "
+                    f"AND path IN ({path_placeholders})",
+                    tuple(cleared_paths),
+                )
+            if touched_folder_ids:
+                id_placeholders = ",".join("?" * len(touched_folder_ids))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'ok' "
+                    f"WHERE status = 'partial' "
+                    f"AND id IN ({id_placeholders})",
+                    tuple(touched_folder_ids),
+                )
+            # Recursive scans cover the entire subtree under ``root``, so
+            # descendants that the per-file loop never touched (no-op
+            # incremental rescans where every file is unchanged) must also
+            # be cleared. Without this, previously-partial subfolders stay
+            # flagged even though the retry completed cleanly.
+            if recursive and restrict_dirs is None:
+                db.conn.execute(
+                    "UPDATE folders SET status = 'ok' "
+                    "WHERE status = 'partial' AND path LIKE ? ESCAPE '\\'",
+                    (_subtree_like_pattern(str(root_path)),),
+                )
+            commit_with_retry(db.conn)
+        except Exception:
+            log.exception("Failed to clear partial flag after scan success")
+
+    # Everything that writes to the DB lives inside this try so any
+    # unrecoverable failure — from the pre-pass XMP commit through
+    # post-processing — leaves folders flagged 'partial' instead of
+    # being silently reported as healthy state.
+    try:
+        # First pass: determine which files need full processing (for incremental mode).
+        # Handle XMP-only changes inline; collect files needing metadata extraction.
+        files_to_process = []
+        processed_count = 0
+        for image_path in image_files:
+            stat = image_path.stat()
+            file_mtime = stat.st_mtime
+            xmp_path = image_path.with_suffix(".xmp")
+            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+
+            if incremental:
+                full_path_str = str(image_path)
+                existing = existing_by_path.get(full_path_str)
+                if existing:
+                    file_unchanged = existing["file_mtime"] == file_mtime
+                    xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
+                    # Re-process if ExifTool never ran for this photo (both
+                    # timestamp and exif_data are NULL). Photos with genuinely
+                    # missing timestamps (screenshots, exports) will have
+                    # exif_data set after one extraction attempt.
+                    # Also flag rows where a RAW file has absurdly small
+                    # dimensions (<1000px) — that's the embedded JPEG thumb
+                    # leaking through when ExifTool's File group was missing
+                    # on the original scan.
+                    dims_suspect = (
+                        existing["extension"] in RAW_EXTENSIONS
+                        and existing["width"] is not None
+                        and existing["width"] < 1000
                     )
-                    commit_with_retry(db.conn)
+                    metadata_missing = (
+                        (existing["timestamp"] is None or dims_suspect)
+                        and existing["id"] not in exif_extracted
+                    )
 
-                if file_unchanged and not metadata_missing:
-                    processed_count += 1
-                    if photo_callback:
-                        photo_callback(existing["id"], full_path_str)
-                    if progress_callback:
-                        progress_callback(processed_count, total)
-                    continue
+                    if file_unchanged and xmp_unchanged and not metadata_missing:
+                        processed_count += 1
+                        if photo_callback:
+                            photo_callback(existing["id"], full_path_str)
+                        if progress_callback:
+                            progress_callback(processed_count, total)
+                        continue
 
-        files_to_process.append(image_path)
+                    # XMP changed: re-import keywords
+                    if not xmp_unchanged and xmp_mtime is not None:
+                        _import_keywords_for_photo(db, existing["id"], str(xmp_path))
+                        db.conn.execute(
+                            "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
+                            (xmp_mtime, existing["id"]),
+                        )
+                        commit_with_retry(db.conn)
 
-    # Batch extract metadata via ExifTool only for files that need processing
-    paths_to_extract = [str(ip) for ip in files_to_process]
-    if paths_to_extract and status_callback:
-        status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
-    metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+                    if file_unchanged and not metadata_missing:
+                        processed_count += 1
+                        if photo_callback:
+                            photo_callback(existing["id"], full_path_str)
+                        if progress_callback:
+                            progress_callback(processed_count, total)
+                        continue
 
-    # Compute phash + file_hash in parallel across all files that need
-    # processing. These are the two per-file operations that actually read
-    # every byte of the image; everything else in the loop is cheap DB or
-    # dict work. Results stream in order, so workers keep computing the tail
-    # while the main thread commits the head — no O(n) buffer of features.
-    workers = _resolve_worker_count(files_to_process)
-    if paths_to_extract and status_callback:
-        status_callback(
-            f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
-        )
+            files_to_process.append(image_path)
 
-    def _iter_features():
-        if workers > 1:
-            mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
-            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
-                # Bounded in-flight window instead of pool.map(): on Python
-                # 3.11 Executor.map eagerly submits every input, so on a
-                # 200k-file scan we would hold 200k queued futures in RAM.
-                # A few submissions per worker is enough to keep them fed
-                # while the main thread drains results in order.
-                max_in_flight = workers * 4
-                pending = deque()
-                inputs = zip(files_to_process, paths_to_extract, strict=True)
-                for image_path, path_str in inputs:
-                    pending.append((image_path, pool.submit(_compute_file_features, path_str)))
-                    if len(pending) >= max_in_flight:
+        # Batch extract metadata via ExifTool only for files that need processing
+        paths_to_extract = [str(ip) for ip in files_to_process]
+        if paths_to_extract and status_callback:
+            status_callback(f"Extracting metadata ({len(paths_to_extract)} files)...")
+        metadata_map = extract_metadata(paths_to_extract) if paths_to_extract else {}
+
+        # Compute phash + file_hash in parallel across all files that need
+        # processing. These are the two per-file operations that actually read
+        # every byte of the image; everything else in the loop is cheap DB or
+        # dict work. Results stream in order, so workers keep computing the tail
+        # while the main thread commits the head — no O(n) buffer of features.
+        workers = _resolve_worker_count(files_to_process)
+        if paths_to_extract and status_callback:
+            status_callback(
+                f"Hashing {len(paths_to_extract)} files ({workers} worker{'s' if workers != 1 else ''})..."
+            )
+
+        def _iter_features():
+            if workers > 1:
+                mp_ctx = multiprocessing.get_context(_SCAN_MP_METHOD)
+                with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+                    # Bounded in-flight window instead of pool.map(): on Python
+                    # 3.11 Executor.map eagerly submits every input, so on a
+                    # 200k-file scan we would hold 200k queued futures in RAM.
+                    # A few submissions per worker is enough to keep them fed
+                    # while the main thread drains results in order.
+                    max_in_flight = workers * 4
+                    pending = deque()
+                    inputs = zip(files_to_process, paths_to_extract, strict=True)
+                    for image_path, path_str in inputs:
+                        pending.append((image_path, pool.submit(_compute_file_features, path_str)))
+                        if len(pending) >= max_in_flight:
+                            done_path, done_fut = pending.popleft()
+                            yield done_path, done_fut.result()
+                    while pending:
                         done_path, done_fut = pending.popleft()
                         yield done_path, done_fut.result()
-                while pending:
-                    done_path, done_fut = pending.popleft()
-                    yield done_path, done_fut.result()
-        else:
-            for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
-                yield image_path, _compute_file_features(path_str)
+            else:
+                for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
+                    yield image_path, _compute_file_features(path_str)
 
-    # Track folders whose scan touched them, so we can flag them 'partial'
-    # if the per-file loop dies midway (unrecoverable DB error, etc).
-    touched_folder_ids = set()
-    try:
         for image_path, (phash, file_hash) in _iter_features():
             folder_id = _ensure_folder(image_path.parent)
             touched_folder_ids.add(folder_id)
@@ -800,96 +887,20 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             processed_count += 1
             if progress_callback:
                 progress_callback(processed_count, total)
-    except BaseException:
-        # Per-file loop died mid-way (DB error, signal, etc). Roll back any
-        # half-applied write so the partial-status UPDATE below runs on a
-        # clean transaction, then flag every folder in scope as 'partial' so
-        # callers can detect and re-scan.
-        #
-        # We intentionally use the scanned scope (root + restrict_dirs) rather
-        # than ``touched_folder_ids`` alone: a failure inside ``_ensure_folder``
-        # commits the folder row but the exception propagates before the
-        # folder_id reaches the scanner loop, so the set can be empty even
-        # when a folder row exists.
-        try:
-            db.conn.rollback()
-        except Exception:
-            log.exception("Rollback after scan failure also failed")
-        scoped_paths = set()
-        scoped_paths.add(str(root_path))
-        if restrict_dirs is not None:
-            scoped_paths.update(str(d) for d in restrict_dirs)
-        if touched_folder_ids:
-            scoped_paths.add(None)  # sentinel to use id-list below too
-        try:
-            # Match by path for the in-scope roots.
-            if scoped_paths - {None}:
-                path_placeholders = ",".join(
-                    "?" * len(scoped_paths - {None})
-                )
-                db.conn.execute(
-                    f"UPDATE folders SET status = 'partial' "
-                    f"WHERE path IN ({path_placeholders})",
-                    tuple(scoped_paths - {None}),
-                )
-            if touched_folder_ids:
-                id_placeholders = ",".join("?" * len(touched_folder_ids))
-                db.conn.execute(
-                    f"UPDATE folders SET status = 'partial' "
-                    f"WHERE id IN ({id_placeholders})",
-                    tuple(touched_folder_ids),
-                )
-            commit_with_retry(db.conn)
-        except Exception:
-            log.exception("Failed to flag folders partial after scan failure")
-        raise
-    else:
-        # Per-file loop completed cleanly. Clear any stale 'partial' flag
-        # from a prior failed scan on the folders this scan covered, so a
-        # successful rescan restores full visibility. Scope mirrors the
-        # exception path above: the explicit roots (``root`` and any
-        # ``restrict_dirs``) plus every folder the loop actually touched.
-        # Including the roots catches folders that were flagged 'partial'
-        # by a previous failure inside ``_ensure_folder``, before the new
-        # folder_id reached ``touched_folder_ids``.
-        cleared_paths = {str(root_path)}
-        if restrict_dirs is not None:
-            cleared_paths.update(str(d) for d in restrict_dirs)
-        try:
-            if cleared_paths:
-                path_placeholders = ",".join("?" * len(cleared_paths))
-                db.conn.execute(
-                    f"UPDATE folders SET status = 'ok' "
-                    f"WHERE status = 'partial' "
-                    f"AND path IN ({path_placeholders})",
-                    tuple(cleared_paths),
-                )
-            if touched_folder_ids:
-                id_placeholders = ",".join("?" * len(touched_folder_ids))
-                db.conn.execute(
-                    f"UPDATE folders SET status = 'ok' "
-                    f"WHERE status = 'partial' "
-                    f"AND id IN ({id_placeholders})",
-                    tuple(touched_folder_ids),
-                )
-            commit_with_retry(db.conn)
-        except Exception:
-            log.exception("Failed to clear partial flag after scan success")
 
-    # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
-    # Wrap post-processing so folder counts are always updated, even on failure.
-    # On exception, roll back any uncommitted partial writes before updating
-    # counts — otherwise update_folder_counts()'s commit would persist
-    # half-applied pairing or working-copy records.
-    try:
+        # Pair raw+JPEG companions: raw is primary, JPEG becomes
+        # companion_path. Kept inside the same protective block as the
+        # per-file loop so a non-retryable failure here leaves folders
+        # flagged 'partial' instead of being reported as healthy state.
         _pair_raw_jpeg_companions(db)
 
-        # Extract working copies for RAW photos (after pairing so companion is known).
-        # Scope to the folders the caller just scanned so a fresh import doesn't
-        # trigger library-wide backfill for every pre-existing large JPEG.
-        # Match-mode mirrors what scan() actually traversed: restrict_dirs and
-        # non-recursive scans only touch direct children, so the scope uses an
-        # exact-folder match; a recursive walk from `root` matches the subtree.
+        # Extract working copies for RAW photos (after pairing so companion
+        # is known). Scope to the folders the caller just scanned so a fresh
+        # import doesn't trigger library-wide backfill for every pre-existing
+        # large JPEG. Match-mode mirrors what scan() actually traversed:
+        # restrict_dirs and non-recursive scans only touch direct children,
+        # so the scope uses an exact-folder match; a recursive walk from
+        # ``root`` matches the subtree.
         if vireo_dir:
             if restrict_dirs is not None:
                 wc_scope = [(str(d), "exact") for d in restrict_dirs]
@@ -901,8 +912,20 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 db, vireo_dir, progress_callback, status_callback, scope=wc_scope,
             )
     except BaseException:
-        db.conn.rollback()
+        # Any unrecoverable failure — pre-pass XMP commit, per-file loop,
+        # companion pairing, or working-copy extraction — flags the scanned
+        # scope as 'partial' before propagating.
+        _mark_folders_partial()
         raise
+    else:
+        # Fully successful scan: clear stale 'partial' flags so a user who
+        # retried after a prior failure sees the tree restored.
+        _clear_partial_status()
     finally:
-        db.update_folder_counts()
+        # Always refresh folder counts so the UI reflects whatever photos
+        # did land, even on partial failure.
+        try:
+            db.update_folder_counts()
+        except Exception:
+            log.exception("Failed to update folder counts after scan")
     log.info("Scan complete: %d photos indexed", total)

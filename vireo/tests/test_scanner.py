@@ -1482,3 +1482,141 @@ def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
         f"coverage should count photos in partial folders, "
         f"got total={stats['total']!r}"
     )
+
+
+def test_scan_pre_pass_xmp_failure_marks_folder_partial(tmp_path):
+    """A non-recoverable DB error during the incremental pre-pass marks the
+    folder partial.
+
+    The pre-pass commits XMP-only changes (updated sidecar mtime) before the
+    main per-file loop runs. Routing this path through the same partial-status
+    handler keeps the UI's 'partial' badge consistent no matter which stage
+    of scan() actually aborted.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # First scan: seed the DB with xmp_mtime=NULL (no sidecar yet).
+    scanner_mod.scan(root, db, incremental=True)
+    # Populate exif_data so the incremental pre-pass treats the photo as
+    # metadata-complete and the only pending update is the new XMP mtime.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    db.conn.commit()
+
+    # Create the XMP sidecar so the second scan sees xmp_unchanged=False
+    # and enters the pre-pass commit branch.
+    xmp_path = tmp_path / "photos" / "a.xmp"
+    xmp_path.write_text(
+        '<?xml version="1.0"?>'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '</rdf:RDF>'
+    )
+
+    # Fail the very first commit of scan #2. An empty XMP yields no keyword
+    # commits, so that first commit is the pre-pass ``UPDATE photos SET
+    # xmp_mtime`` — the exact statement Codex flagged.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={1: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db, incremental=True)
+
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None and row["status"] == "partial", (
+        f"pre-pass XMP commit failure should mark folder partial, "
+        f"got {row and row['status']!r}"
+    )
+
+
+def test_scan_post_processing_failure_marks_folder_partial(tmp_path):
+    """A non-recoverable DB error in post-processing marks the folder partial.
+
+    ``_pair_raw_jpeg_companions`` and ``_extract_working_copies`` run after
+    the main per-file loop. Previously the success path cleared the partial
+    flag before post-processing ran, so a failure there rolled back the
+    scan but left the folder reported as healthy state.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg', 'c.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Per-file commits for 3 files consume calls 1-3; the 4th commit is
+    # ``_pair_raw_jpeg_companions``. Failing it with a non-lock error drives
+    # the scan into our partial-status handler via post-processing.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={4: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db)
+
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None and row["status"] == "partial", (
+        f"post-processing failure should mark folder partial, "
+        f"got {row and row['status']!r}"
+    )
+
+
+def test_incremental_noop_rescan_clears_partial_on_subtree(tmp_path):
+    """A successful no-op incremental rescan clears 'partial' on descendants.
+
+    Regression: the success path used to clear only paths in
+    ``root``/``restrict_dirs``, so if the per-file loop touched zero
+    folders (all files unchanged) the descendants a previous failure had
+    marked partial stayed flagged even though the retry completed cleanly.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['root.jpg'],
+        'sub': ['nested.jpg'],
+    })
+    db = Database(str(tmp_path / "test.db"))
+
+    scanner_mod.scan(root, db)
+    # Backfill exif_data so the incremental pre-pass ``continue``s for every
+    # file — otherwise metadata_missing would force a full re-scan and the
+    # main loop would populate ``touched_folder_ids``, masking the bug.
+    db.conn.execute("UPDATE photos SET exif_data = '{}' WHERE exif_data IS NULL")
+    # Simulate a prior failed scan that left root and descendants 'partial'.
+    db.conn.execute("UPDATE folders SET status = 'partial'")
+    db.conn.commit()
+
+    scanner_mod.scan(root, db, incremental=True)
+
+    statuses = {
+        r["path"]: r["status"]
+        for r in db.conn.execute(
+            "SELECT path, status FROM folders ORDER BY path"
+        ).fetchall()
+    }
+    assert statuses[root] == "ok", (
+        f"root should be cleared on no-op rescan, got {statuses[root]!r}"
+    )
+    sub_path = os.path.join(root, "sub")
+    assert statuses[sub_path] == "ok", (
+        f"descendant subfolder should be cleared on no-op rescan, "
+        f"got {statuses[sub_path]!r}"
+    )
