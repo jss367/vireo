@@ -2395,6 +2395,42 @@ def test_get_detections_for_photos_is_global(tmp_path):
     assert result[pid][0]["confidence"] == 0.9
 
 
+def test_get_predictions_for_detection_filters(tmp_path):
+    """get_predictions_for_detection filters by min_classifier_conf and labels_fingerprint."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(photo_id, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+
+    for sp, conf, fp in [("Robin", 0.8, "abc"), ("Sparrow", 0.3, "abc"),
+                          ("Robin", 0.9, "xyz")]:
+        db.conn.execute(
+            """INSERT INTO predictions (detection_id, classifier_model,
+                                         labels_fingerprint, species, confidence)
+               VALUES (?, 'bioclip-2', ?, ?, ?)""",
+            (det_id, fp, sp, conf),
+        )
+    db.conn.commit()
+
+    # All three rows when unfiltered
+    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0)) == 3
+    # Only >= 0.5
+    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0.5)) == 2
+    # Filter by fingerprint
+    by_abc = db.get_predictions_for_detection(
+        det_id, labels_fingerprint="abc", min_classifier_conf=0
+    )
+    assert {r["species"] for r in by_abc} == {"Robin", "Sparrow"}
+
+
 def test_clear_detections(tmp_path):
     """clear_detections should remove detections and cascade to predictions."""
     from db import Database

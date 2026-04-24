@@ -4272,6 +4272,41 @@ class Database:
             })
         return result
 
+    def get_predictions_for_detection(self, detection_id,
+                                        min_classifier_conf=None,
+                                        classifier_model=None,
+                                        labels_fingerprint=None):
+        """Return cached classifier predictions for a single detection.
+
+        Reads the global ``predictions`` table. Review status (accepted /
+        rejected / pending) lives in ``prediction_review`` and is joined in
+        by callers that need workspace-scoped review state.
+
+        Args:
+            detection_id: the detection whose predictions to fetch.
+            min_classifier_conf: confidence floor. ``None`` resolves to the
+                active workspace's effective ``classifier_confidence`` (0.0
+                if unset). ``0`` returns all rows.
+            classifier_model: optional — filter to a single classifier model.
+            labels_fingerprint: optional — filter to predictions produced
+                against a specific label set.
+        """
+        if min_classifier_conf is None:
+            import config as cfg
+            effective = self.get_effective_config(cfg.load())
+            min_classifier_conf = effective.get("classifier_confidence", 0.0)
+        q = ("SELECT * FROM predictions WHERE detection_id = ? "
+             "AND confidence >= ?")
+        params = [detection_id, min_classifier_conf]
+        if classifier_model is not None:
+            q += " AND classifier_model = ?"
+            params.append(classifier_model)
+        if labels_fingerprint is not None:
+            q += " AND labels_fingerprint = ?"
+            params.append(labels_fingerprint)
+        q += " ORDER BY confidence DESC"
+        return self.conn.execute(q, params).fetchall()
+
     def clear_detections(self, photo_id, detector_model=None):
         """Remove detections (and cascaded predictions) for a photo.
 
