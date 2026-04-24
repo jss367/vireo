@@ -4657,6 +4657,67 @@ def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
         )
 
 
+def test_pipeline_clears_stale_miss_computed_at_when_miss_skipped(tmp_path, monkeypatch):
+    """save_results() preserves an existing miss_computed_at across
+    regroup_stage's save, so when miss_stage is skipped (skip_classify,
+    skip_regroup, abort, or no collection_id) the marker from a prior
+    run would survive and pipeline_review's "Review misses" shortcut
+    would point to an old ?since= window. miss_stage must drop the
+    stale marker when no recomputation happened this run."""
+    import json
+
+    import config as cfg
+    from db import Database
+    from PIL import Image
+    from pipeline import save_results_raw
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Seed a prior-run miss_computed_at in the cache.
+    cache_dir = str(tmp_path)
+    stale_ts = "2026-04-01T00:00:00.000000+00:00"
+    save_results_raw(
+        {"encounters": [], "photos": [], "summary": {},
+         "miss_computed_at": stale_ts},
+        cache_dir, ws_id,
+    )
+
+    # skip_classify triggers miss_stage's early-return gate; this is the
+    # path where regroup_stage would otherwise leave the stale marker in
+    # the cache because miss_stage never runs.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The stale marker must be gone. If it survived, /misses?since=...
+    # would include unrelated older misses on "Review misses" click.
+    cache_file = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    assert os.path.exists(cache_file)
+    with open(cache_file) as f:
+        cached = json.load(f)
+    assert "miss_computed_at" not in cached, (
+        "stale miss_computed_at survived a run where miss_stage was skipped"
+    )
+
+
 # --- Weighted overall progress ---------------------------------------------
 
 def _empty_stages():

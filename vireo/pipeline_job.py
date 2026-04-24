@@ -2440,6 +2440,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             stages["misses"]["status"] = "skipped"
             runner.update_step(job["id"], "misses", status="completed",
                                summary="Skipped")
+            # regroup_stage's save_results() carries forward any prior
+            # miss_computed_at from the cache, so a stale timestamp can
+            # survive this skipped run and trick the review UI into
+            # surfacing old misses as current-run output. Clear it.
+            _clear_stale_miss_computed_at()
             return
 
         stages["misses"]["status"] = "running"
@@ -2483,19 +2488,43 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             # Mark the cached results so the review UI knows misses
             # were actually recomputed this run. Without this, the
             # shortcut would surface stale miss flags from a prior
-            # run as "current-run misses" whenever miss_enabled=False
-            # or the stage was skipped.
-            if miss_enabled:
-                cache_dir = os.path.dirname(db_path)
-                cached = load_results_raw(cache_dir, workspace_id)
-                if cached is not None:
+            # run as "current-run misses".
+            cache_dir = os.path.dirname(db_path)
+            cached = load_results_raw(cache_dir, workspace_id)
+            if cached is not None:
+                if miss_enabled:
                     cached["miss_computed_at"] = now_ts
-                    save_results_raw(cached, cache_dir, workspace_id)
+                else:
+                    # miss_enabled=false means no recomputation happened
+                    # this run, but regroup_stage's save_results()
+                    # carried a stale timestamp forward. Drop it so the
+                    # shortcut doesn't point to an old ?since= window.
+                    cached.pop("miss_computed_at", None)
+                save_results_raw(cached, cache_dir, workspace_id)
         except Exception as e:
             errors.append(f"[misses] Fatal: {e}")
             log.exception("Pipeline miss-detection stage failed")
             stages["misses"]["status"] = "failed"
             runner.update_step(job["id"], "misses", status="failed", error=str(e))
+
+    def _clear_stale_miss_computed_at():
+        """Drop any miss_computed_at marker from the cached pipeline results.
+
+        Called when miss_stage is skipped (skip_regroup, skip_classify,
+        abort, or no collection_id). Those paths don't recompute misses
+        but regroup_stage's save_results() preserves an existing marker,
+        which would otherwise be treated as "current run" by the review
+        UI's `/misses?since=` shortcut.
+        """
+        try:
+            from pipeline import load_results_raw, save_results_raw
+            cache_dir = os.path.dirname(db_path)
+            cached = load_results_raw(cache_dir, workspace_id)
+            if cached is not None and "miss_computed_at" in cached:
+                cached.pop("miss_computed_at", None)
+                save_results_raw(cached, cache_dir, workspace_id)
+        except Exception:
+            log.exception("Failed to clear stale miss_computed_at marker")
 
         _update_stages(runner, job["id"], stages)
 
