@@ -2275,6 +2275,55 @@ def test_get_detections_cross_workspace_read(tmp_path):
     assert rows[0]["detector_confidence"] == 0.9
 
 
+def test_get_detections_for_photos_threshold_filter(tmp_path, monkeypatch):
+    """Batch get_detections_for_photos filters by min_conf across photos and reads cross-workspace."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, fid)
+    db.add_workspace_folder(ws_b, fid)
+    p1 = db.add_photo(fid, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(fid, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
+
+    db._active_workspace_id = ws_a
+    db.save_detections(p1, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.6, "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.save_detections(p2, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.1, "category": "animal"},
+    ], detector_model="megadetector-v6")
+
+    # min_conf=0: both photos, all three rows
+    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    assert len(result[p1]) == 2
+    assert len(result[p2]) == 1
+
+    # min_conf=0.5: only p1's 0.6 row; p2 has nothing above threshold → omitted
+    result = db.get_detections_for_photos([p1, p2], min_conf=0.5)
+    assert set(result.keys()) == {p1}
+    assert len(result[p1]) == 1
+    assert result[p1][0]["confidence"] == 0.6
+
+    # min_conf=None resolves from workspace-effective config (default 0.2):
+    # p1 keeps the 0.6, p2's 0.1 is filtered out.
+    result = db.get_detections_for_photos([p1, p2])
+    assert set(result.keys()) == {p1}
+    assert len(result[p1]) == 1
+
+    # Cross-workspace: read from B, see A's writes.
+    db._active_workspace_id = ws_b
+    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    assert len(result[p1]) == 2
+    assert len(result[p2]) == 1
+
+
 def test_get_detections_for_photo(tmp_path):
     """get_detections should return all detections for a photo in current workspace."""
     from db import Database
@@ -2326,8 +2375,8 @@ def test_get_detections_for_photos_empty(tmp_path):
     assert db.get_detections_for_photos([]) == {}
 
 
-def test_get_detections_for_photos_scoped_to_workspace(tmp_path):
-    """get_detections_for_photos must not leak detections from other workspaces."""
+def test_get_detections_for_photos_is_global(tmp_path):
+    """get_detections_for_photos reads detections globally — table is no longer workspace-scoped."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
@@ -2340,8 +2389,10 @@ def test_get_detections_for_photos_scoped_to_workspace(tmp_path):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
 
-    result = db.get_detections_for_photos([pid])
-    assert result == {}
+    # Global cache: workspace "Other" sees detections written under the default workspace.
+    result = db.get_detections_for_photos([pid], min_conf=0)
+    assert len(result[pid]) == 1
+    assert result[pid][0]["confidence"] == 0.9
 
 
 def test_clear_detections(tmp_path):

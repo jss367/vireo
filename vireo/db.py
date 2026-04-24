@@ -4224,25 +4224,42 @@ class Database:
         q += " ORDER BY detector_confidence DESC"
         return self.conn.execute(q, params).fetchall()
 
-    def get_detections_for_photos(self, photo_ids):
+    def get_detections_for_photos(self, photo_ids, min_conf=None,
+                                  detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
-        Each det_dict has keys: x, y, w, h, confidence, category.
-        Lists are ordered by confidence DESC. Scoped to the active workspace.
-        Photos with no detections are omitted from the result.
+        Each det_dict has keys: x, y, w, h, confidence, category. Lists are
+        ordered by confidence DESC. The detections table is global — threshold
+        filtering happens at read time. Photos with no detections above
+        ``min_conf`` are omitted from the result.
+
+        Args:
+            photo_ids: iterable of photo ids
+            min_conf: confidence floor. ``None`` resolves to the active
+                workspace's effective ``detector_confidence`` (default 0.2).
+                ``0`` returns raw rows.
+            detector_model: optional — filter to a single detector model.
         """
         if not photo_ids:
             return {}
+        if min_conf is None:
+            import config as cfg
+            effective = self.get_effective_config(cfg.load())
+            min_conf = effective.get("detector_confidence", 0.2)
         placeholders = ",".join("?" for _ in photo_ids)
-        rows = self.conn.execute(
-            f"""SELECT photo_id, box_x, box_y, box_w, box_h,
-                       detector_confidence, category
-                FROM detections
-                WHERE workspace_id = ?
-                  AND photo_id IN ({placeholders})
-                ORDER BY photo_id, detector_confidence DESC""",
-            [self._ws_id(), *photo_ids],
-        ).fetchall()
+        q = (
+            f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+            f"       detector_confidence, category "
+            f"FROM detections "
+            f"WHERE photo_id IN ({placeholders}) "
+            f"  AND detector_confidence >= ?"
+        )
+        params = [*photo_ids, min_conf]
+        if detector_model is not None:
+            q += " AND detector_model = ?"
+            params.append(detector_model)
+        q += " ORDER BY photo_id, detector_confidence DESC"
+        rows = self.conn.execute(q, params).fetchall()
         result = {}
         for r in rows:
             result.setdefault(r["photo_id"], []).append({
@@ -4280,10 +4297,13 @@ class Database:
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
 
-        Only returns rows from the active workspace.  Used to snapshot
-        pre-run detection IDs so that a reclassify pass can delete only
-        the *stale* rows after fresh ones have been inserted, avoiding the
+        The detections table is global (no workspace_id). Used to snapshot
+        pre-run detection IDs so that a reclassify pass can delete only the
+        *stale* rows after fresh ones have been inserted, avoiding the
         cascade-delete that would destroy other-model predictions.
+
+        No threshold filter: the caller needs to see every existing row,
+        including low-confidence ones, so they can all be cleaned up.
 
         IDs are queried in chunks of at most 900 to stay safely under
         SQLite's default bound-parameter limit (SQLITE_LIMIT_VARIABLE_NUMBER,
@@ -4291,7 +4311,6 @@ class Database:
         """
         if not photo_ids:
             return {}
-        ws_id = self._ws_id()
         result: dict = {}
         ids = list(photo_ids)
         _CHUNK = 900
@@ -4300,8 +4319,8 @@ class Database:
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"SELECT id, photo_id FROM detections "
-                f"WHERE photo_id IN ({placeholders}) AND workspace_id = ?",
-                (*chunk, ws_id),
+                f"WHERE photo_id IN ({placeholders})",
+                tuple(chunk),
             ).fetchall()
             for row in rows:
                 result.setdefault(row["photo_id"], set()).add(row["id"])
