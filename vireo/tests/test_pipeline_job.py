@@ -740,6 +740,61 @@ def test_pipeline_passes_vireo_dir_to_scan(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_forwards_thumb_cache_dir_to_scan(tmp_path, monkeypatch):
+    """Pipeline must forward the configured thumb_cache_dir to scanner.scan().
+
+    ``--thumb-dir`` can point outside ``vireo_dir/thumbnails`` — scanner's
+    invalidation now accepts a ``thumb_cache_dir`` override for exactly
+    that reason. If pipeline scans drop it, the default fallback
+    (``vireo_dir/thumbnails``) targets the wrong directory on custom
+    layouts and stale thumbnails survive.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "vireo.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    custom_thumb_dir = str(tmp_path / "custom-thumbs")
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params,
+        thumb_cache_dir=custom_thumb_dir,
+    )
+
+    assert scan_kwargs.get("thumb_cache_dir") == custom_thumb_dir, (
+        "Pipeline must thread the configured thumb_cache_dir to scan() "
+        "so invalidation targets the real cache on custom --thumb-dir "
+        "layouts."
+    )
+
+
 def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     """Scan progress events should include rate and eta_seconds fields."""
     import time

@@ -7127,7 +7127,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            return run_pipeline_job(job, runner, db_path, active_ws, params)
+            return run_pipeline_job(
+                job, runner, db_path, active_ws, params,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
 
         job_id = runner.start(
             "pipeline", work,

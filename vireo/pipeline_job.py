@@ -263,7 +263,8 @@ def _collapse_scan_roots(paths):
     return kept
 
 
-def run_pipeline_job(job, runner, db_path, workspace_id, params):
+def run_pipeline_job(job, runner, db_path, workspace_id, params,
+                     thumb_cache_dir=None):
     """Execute streaming pipeline. Called by JobRunner in a background thread.
 
     Args:
@@ -272,6 +273,11 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         db_path: path to SQLite database
         workspace_id: active workspace ID
         params: PipelineParams with request parameters
+        thumb_cache_dir: configured thumbnail cache directory. Forwarded
+            to scanner.scan() and used by the thumbnail stage so the
+            pipeline writes and invalidates the real cache even when
+            ``--thumb-dir`` points outside ``dirname(db_path)/thumbnails``.
+            Defaults to that convention for backward compatibility.
 
     Returns:
         dict with stage results, duration, and errors
@@ -279,6 +285,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     job["_start_time"] = time.time()
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
+
+    # Effective thumbnail cache directory for every internal call below.
+    # Falls back to the historical ``<db_dir>/thumbnails`` convention when
+    # the caller didn't supply an explicit value — matches prior behavior
+    # for the default ~/.vireo layout.
+    effective_thumb_cache_dir = thumb_cache_dir or os.path.join(
+        os.path.dirname(db_path), "thumbnails",
+    )
 
     # Snapshot-scoped pipelines: load the snapshot up front so scan targets
     # are derived from the captured file paths (not a folder the user picked
@@ -608,6 +622,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             restrict_dirs=[folder_path],
                             restrict_files=set(file_paths),
                             vireo_dir=os.path.dirname(db_path),
+                            thumb_cache_dir=effective_thumb_cache_dir,
                         )
                     except (OSError, RuntimeError) as e:
                         log.warning(
@@ -760,6 +775,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     status_callback=status_cb,
                     restrict_dirs=restrict,
                     vireo_dir=os.path.dirname(db_path),
+                    thumb_cache_dir=effective_thumb_cache_dir,
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -781,6 +797,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             status_callback=status_cb,
                             recursive=params.recursive,
                             vireo_dir=os.path.dirname(db_path),
+                            thumb_cache_dir=effective_thumb_cache_dir,
                         )
                     finally:
                         advance_scan_acc()
@@ -912,8 +929,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             effective_cfg = thread_db.get_effective_config(cfg.load())
             thumb_size = effective_cfg.get("display", {}).get("thumbnail_size", 300)
 
-            # Resolve thumb cache dir from db_path
-            cache_dir = os.path.join(os.path.dirname(db_path), "thumbnails")
+            # Write thumbnails to the configured cache dir so custom
+            # --thumb-dir layouts receive the files the Flask serve
+            # route (reading from app.config["THUMB_CACHE_DIR"]) will
+            # look for. Falls back to <db_dir>/thumbnails only when the
+            # caller passed no explicit override.
+            cache_dir = effective_thumb_cache_dir
             os.makedirs(cache_dir, exist_ok=True)
 
             generated = 0
