@@ -922,6 +922,56 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_populate_taxa_db_from_json_drops_stale_common_names(tmp_path):
+    """Re-downloading the taxonomy clears stale common-name mappings.
+
+    Regression: the populate step used INSERT OR IGNORE for
+    taxa_common_names, so common names that disappeared or were
+    reassigned in a newer taxonomy release kept matching forever.
+    """
+    from taxonomy import populate_taxa_db_from_json
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    # Find a taxon that was populated, then add a fake legacy common-name
+    # row for it that won't be in the next import.
+    row = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 9135"
+    ).fetchone()
+    assert row is not None
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name, locale) "
+        "VALUES (?, 'obsolete name from older taxonomy', 'en')",
+        (row["id"],),
+    )
+    db.conn.commit()
+
+    stale_before = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names "
+        "WHERE name = 'obsolete name from older taxonomy'"
+    ).fetchone()
+    assert stale_before is not None
+
+    # Re-run populate with the same JSON (simulates a re-download).
+    populate_taxa_db_from_json(db, tax_path)
+
+    stale_after = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names "
+        "WHERE name = 'obsolete name from older taxonomy'"
+    ).fetchone()
+    assert stale_after is None, (
+        "re-populate should drop common-name rows that aren't in the "
+        "new taxonomy data"
+    )
+    # Valid names from the new taxonomy still present.
+    fresh = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names WHERE name = 'song sparrow'"
+    ).fetchone()
+    assert fresh is not None
+
+
 def test_populate_taxa_db_from_json_single_transaction_allows_clean_rollback(tmp_path):
     """populate_taxa_db_from_json commits once at the end.
 

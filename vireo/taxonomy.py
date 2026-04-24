@@ -639,7 +639,14 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     # Populate taxa_common_names — index every English common name (including
     # alternates) under its taxon so add_keyword's auto-detect can match
     # regional/alt names like "Green heron" or "Common gallinule".
+    #
+    # Clear the English index first so names that disappeared or were
+    # reassigned in the new taxonomy drop out. Without this the INSERT
+    # OR IGNORE below would leave stale rows behind and add_keyword would
+    # keep matching obsolete common names across re-downloads. Still
+    # inside the populate transaction, so a failure rolls it back.
     _status(f"Indexing {len(taxa_by_common):,} common names...")
+    db.conn.execute("DELETE FROM taxa_common_names WHERE locale = 'en'")
     cn_loaded = 0
     for name_lower, entry in taxa_by_common.items():
         inat_id = entry.get("taxon_id")
