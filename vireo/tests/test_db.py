@@ -1224,6 +1224,27 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_clear_detections_also_clears_detector_runs(tmp_path):
+    """clear_detections must wipe the matching detector_runs entry, or a
+    failed reclassify (clear, then model init crash) would leave a stale
+    "done" run key behind and the next non-reclassify pass would skip
+    detection forever, leaving the photo without boxes.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(pids[0], "megadetector-v6", box_count=1)
+    assert pids[0] in db.get_detector_run_photo_ids("megadetector-v6")
+
+    db.clear_detections(pids[0])
+
+    assert pids[0] not in db.get_detector_run_photo_ids("megadetector-v6"), (
+        "clear_detections left a stale run key — _detect_subjects would "
+        "skip this photo on the next non-reclassify pass."
+    )
+
+
 def test_migration_backfills_group_metadata_on_pending_rows(tmp_path):
     """Legacy burst-grouped predictions stored group_id/vote_count on
     pending rows. The migration must backfill prediction_review for those

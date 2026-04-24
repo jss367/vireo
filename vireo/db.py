@@ -5091,6 +5091,13 @@ class Database:
     def clear_detections(self, photo_id, detector_model=None):
         """Remove detections (and cascaded predictions) for a photo.
 
+        Also clears the matching ``detector_runs`` rows so a subsequent
+        non-reclassify pass actually re-runs MegaDetector. Without this,
+        a reclassify that clears detections but leaves the run key behind
+        (e.g. because model init then failed) would cause future runs to
+        skip detection forever — the gate in ``_detect_subjects`` treats
+        any ``detector_runs`` entry as authoritative.
+
         Global: no workspace scoping. If `detector_model` is None, all
         detector models for this photo are cleared; otherwise only the
         rows for that model.
@@ -5099,9 +5106,16 @@ class Database:
             self.conn.execute(
                 "DELETE FROM detections WHERE photo_id = ?", (photo_id,)
             )
+            self.conn.execute(
+                "DELETE FROM detector_runs WHERE photo_id = ?", (photo_id,)
+            )
         else:
             self.conn.execute(
                 "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
+                (photo_id, detector_model),
+            )
+            self.conn.execute(
+                "DELETE FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
                 (photo_id, detector_model),
             )
         self.conn.commit()
