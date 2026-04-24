@@ -1224,6 +1224,65 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monkeypatch):
+    """/api/species/<name>/clusters must not mix stale and current-label
+    rows when a detection has been classified under multiple fingerprints.
+    """
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    from app import create_app
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    from db import Database
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/p", name="p")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    import numpy as np
+    emb = np.zeros(512, dtype=np.float32).tobytes()
+    db.conn.execute(
+        "UPDATE photos SET embedding=?, embedding_model='test' WHERE id=?",
+        (emb, pid),
+    )
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Two fingerprints on the same detection with the same species.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir,
+                     api_token="t")
+    client = app.test_client()
+    resp = client.get("/api/species/Robin/clusters")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Photo must appear exactly once (deduped to the current fingerprint),
+    # not twice (one per fingerprint row).
+    assert data["total_photos"] == 1, (
+        f"Expected one photo (deduped to current fingerprint), got "
+        f"{data['total_photos']}"
+    )
+
+
 def test_clear_detections_also_clears_detector_runs(tmp_path):
     """clear_detections must wipe the matching detector_runs entry, or a
     failed reclassify (clear, then model init crash) would leave a stale

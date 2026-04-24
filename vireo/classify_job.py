@@ -972,9 +972,51 @@ def _classify_photos(
                 )
                 full_det_id = full_det_ids[0]
             # Gate check for the synthetic full-image detection too.
+            # Mirror the regular detection branch: when gated, surface the
+            # cached top-1 prediction into raw_results so downstream
+            # grouping/storage still sees it. Without this, non-reclassify
+            # reruns silently drop cached full-image photos even though
+            # those photos were intentionally kept in the cache.
             if not reclassify:
                 run_keys = db.get_classifier_run_keys(full_det_id)
                 if (model_name, fp) in run_keys:
+                    cached = db.get_predictions_for_detection(
+                        full_det_id,
+                        classifier_model=model_name,
+                        labels_fingerprint=fp,
+                        min_classifier_conf=0,
+                    )
+                    if cached:
+                        skipped_existing += 1
+                        top = cached[0]
+                        timestamp = None
+                        if photo["timestamp"]:
+                            try:
+                                timestamp = dt.fromisoformat(photo["timestamp"])
+                            except Exception:
+                                pass
+                        embedding = None
+                        if model_type != "timm":
+                            emb_blob = db.get_photo_embedding(photo["id"])
+                            if emb_blob:
+                                import numpy as np
+                                embedding = np.frombuffer(
+                                    emb_blob, dtype=np.float32,
+                                )
+                        raw_results.append({
+                            "photo": photo,
+                            "detection_id": full_det_id,
+                            "folder_path": folder_path,
+                            "image_path": image_path,
+                            "prediction": top["species"],
+                            "confidence": top["confidence"],
+                            "timestamp": timestamp,
+                            "filename": photo["filename"],
+                            "embedding": embedding,
+                            "taxonomy": None,
+                            "alternatives": [],
+                            "_existing": True,
+                        })
                     continue
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:

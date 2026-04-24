@@ -623,6 +623,60 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     assert call_count["n"] == 2, "failed photos must be retried on next pass"
 
 
+def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
+    """When a photo has no real detections and the full-image synthetic
+    detection is gated by classifier_runs, the cached top prediction
+    must still be surfaced into raw_results as `_existing: True` —
+    otherwise non-reclassify reruns silently drop those photos from
+    downstream grouping.
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    # No real detections → full-image path. Existing full-image
+    # detection is cached.
+    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = [
+        {"species": "Robin", "confidence": 0.9, "detection_id": 999},
+    ]
+    mock_db.get_photo_embedding.return_value = None
+
+    raw_results, failed, skipped = _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map={},  # no real detections → full-image branch
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    assert skipped == 1, "cached full-image detection should count as skipped"
+    assert len(raw_results) == 1, "cached full-image prediction must surface"
+    assert raw_results[0]["_existing"] is True
+    assert raw_results[0]["prediction"] == "Robin"
+    assert raw_results[0]["detection_id"] == 999
+    mock_clf.classify_with_embedding.assert_not_called()
+    mock_clf.classify_batch_with_embedding.assert_not_called()
+
+
 def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypatch):
     """When a photo has no real detections, classify_photos falls back to a
     synthetic ('full-image') detection. Because save_detections is

@@ -6455,6 +6455,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Find all photos with this species prediction in the active
         # workspace. Predictions are global but membership in the
         # workspace is expressed through workspace_folders.
+        #
+        # Fingerprint filter: for each (detection, classifier_model) only
+        # surface rows from the most recent labels_fingerprint. Without
+        # this, a workspace that rotated label sets would cluster stale
+        # species rows alongside current ones, distorting cluster
+        # membership / counts / variant labels and duplicating the same
+        # photo embedding.
         rows = db.conn.execute(
             """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
@@ -6465,7 +6472,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE pr.species = ?
                  AND p.embedding IS NOT NULL
-                 AND d.detector_confidence >= ?""",
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
             (ws, species_name, min_conf),
         ).fetchall()
 
