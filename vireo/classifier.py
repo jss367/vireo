@@ -350,9 +350,18 @@ class Classifier:
         self._mean = preproc["mean"]
         self._std = preproc["std"]
 
-        # Load image encoder ONNX session
+        # Load image encoder ONNX session. When this model lives in the
+        # known-models directory we wrap the load in a self-heal retry so
+        # a corrupt / truncated file triggers a single delete+redownload
+        # attempt before surfacing the error to the user. Custom models
+        # fall back to the plain loader (no redownloader available).
+        import models as _models_mod
+
+        redownload = _models_mod.build_self_heal_redownloader(self._model_dir)
         log.info("Loading BioCLIP image encoder: %s", image_encoder_path)
-        self._image_session = onnx_runtime.create_session(image_encoder_path)
+        self._image_session = onnx_runtime.create_session_with_self_heal(
+            image_encoder_path, redownload=redownload,
+        )
         self._image_input_name = self._image_session.get_inputs()[0].name
 
         if labels is not None:
@@ -386,8 +395,13 @@ class Classifier:
                     "(first run -- will be cached for next time)...",
                     len(labels),
                 )
-                # Load text encoder session
-                text_session = onnx_runtime.create_session(text_encoder_path)
+                # Load text encoder session (self-healing on corruption;
+                # reuses the same redownloader resolved for the image
+                # encoder above since both files live in the same model
+                # directory).
+                text_session = onnx_runtime.create_session_with_self_heal(
+                    text_encoder_path, redownload=redownload,
+                )
                 try:
                     text_input_name = text_session.get_inputs()[0].name
                     tokenizer = _load_tokenizer(tokenizer_path)
