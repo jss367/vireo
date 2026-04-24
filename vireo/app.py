@@ -2220,26 +2220,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
     def api_reject_prediction(pred_id):
         db = _get_db()
+        # Review state lives in prediction_review now; predictions.model is
+        # renamed to classifier_model.  Sibling-alternative rejection goes
+        # through the workspace-scoped review table.
+        ws = db._ws_id()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
+            """SELECT pr.id, pr.species, pr.detection_id,
+                      pr.classifier_model AS model, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE pr.id = ?""",
             (pred_id,),
         ).fetchone()
-        db.update_prediction_status(pred_id, "rejected")
+        db.update_prediction_status(pred_id, "rejected", _commit=False)
         if pred:
-            # Also reject sibling alternative predictions
-            db.conn.execute(
-                """UPDATE predictions SET status = 'rejected'
-                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
-                (pred["detection_id"], pred["model"], pred_id),
-            )
+            # Also reject sibling alternative predictions (same detection +
+            # classifier model, currently 'alternative' in this workspace).
+            sibling_ids = [row["id"] for row in db.conn.execute(
+                """SELECT pr.id
+                   FROM predictions pr
+                   JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id
+                    AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ?
+                     AND pr.classifier_model = ?
+                     AND pr.id != ?
+                     AND pr_rev.status = 'alternative'""",
+                (ws, pred["detection_id"], pred["model"], pred_id),
+            ).fetchall()]
+            for sid in sibling_ids:
+                db.update_prediction_status(sid, "rejected", _commit=False)
             db.conn.commit()
             db.record_edit('prediction_reject',
                            f'Rejected prediction "{pred["species"]}"',
                            'rejected',
                            [{'photo_id': pred['photo_id'], 'old_value': 'pending', 'new_value': 'rejected'}])
+        else:
+            db.conn.commit()
         return jsonify({"ok": True})
 
     @app.route("/api/predictions/group/<group_id>")
@@ -5922,8 +5939,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ws_name = ws["name"] if ws else "unknown"
             folder_count = db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
             photo_count = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            # Predictions are global now; workspace scoping happens through
+            # the detection -> photo -> workspace_folders join.
             pred_count = db.conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE workspace_id = ?",
+                """SELECT COUNT(*) FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?""",
                 (db._ws_id(),)
             ).fetchone()[0]
         except Exception:
