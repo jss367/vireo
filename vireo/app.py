@@ -3770,14 +3770,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if snap is None:
             abort(404)
 
-        # Precompute workspace folder roots so we can express each file's
-        # subfolder relative to the root it belongs to (matches the grouping
-        # that folder-preview produces). Scope to the active workspace so a
-        # longer-prefix folder from another workspace can't steal the label.
-        folder_rows = db.get_workspace_folders(db._active_workspace_id)
+        # Use only top-level mapped roots (not every auto-registered
+        # subfolder the scanner created) so grouping matches the user's
+        # source folders — otherwise longest-prefix match picks the
+        # deepest descendant and hides which source a file came from.
+        from new_images import mapped_roots as _ni_mapped_roots
         roots = sorted(
-            [(r["path"], r["name"] or os.path.basename(r["path"].rstrip("/")))
-             for r in folder_rows],
+            [(r["path"], os.path.basename(r["path"].rstrip("/")) or r["path"])
+             for r in _ni_mapped_roots(db, db._active_workspace_id)],
             key=lambda pn: len(pn[0]),
             reverse=True,
         )

@@ -273,6 +273,46 @@ def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
         )
 
 
+def test_new_images_preview_groups_by_top_level_root_not_scanned_descendants(app_and_db):
+    """The scanner auto-registers every descendant folder and auto-links
+    it to the active workspace (db.py:1108, scanner.py _ensure_folder).
+    A preview that uses all linked folders as candidate roots would pick
+    the deepest nested descendant as the subfolder label, hiding the
+    actual top-level source root. Verify grouping resolves to the
+    user-mapped root, not an auto-registered subfolder."""
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    (root / "trip1").mkdir(parents=True)
+    _touch_image(str(root / "edge.jpg"))
+    _touch_image(str(root / "trip1" / "bird.jpg"))
+
+    # Simulate the post-scan state: top-level root + auto-registered
+    # descendant both linked to the active workspace.
+    root_id = db.add_folder(str(root), name="shoot")
+    db.add_folder(str(root / "trip1"), name="trip1", parent_id=root_id)
+
+    snap_id = db.create_new_images_snapshot([
+        str(root / "edge.jpg"),
+        str(root / "trip1" / "bird.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    files_by_name = {f["filename"]: f for f in data["files"]}
+    # The top-level root's basename must appear in every subfolder so the
+    # user sees which source the files came from — not just "trip1".
+    for fname, f in files_by_name.items():
+        assert "shoot" in f["subfolder"], (
+            f"{fname} grouped under {f['subfolder']!r} — lost its top-level root"
+        )
+
+
 def test_new_images_preview_skips_missing_files(app_and_db):
     """If a path in the snapshot no longer exists on disk, skip it rather
     than 500ing — the file may have been moved or deleted since snapshot."""
