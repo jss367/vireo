@@ -1332,7 +1332,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                            current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
-            from classify_job import _load_taxonomy
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -1348,13 +1347,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             runner.update_step(job["id"], "model_loader", current_file=first_name)
 
             # Download taxonomy if missing and requested
-            taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+            from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
+            taxonomy_path = find_taxonomy_json()
             if params.download_taxonomy and not os.path.exists(taxonomy_path):
                 try:
                     from taxonomy import download_taxonomy
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "model_loader", "Downloading taxonomy...",
                     ))
+                    # Always write new downloads to the persistent path.
+                    taxonomy_path = TAXONOMY_JSON_PATH
                     download_taxonomy(taxonomy_path, progress_callback=lambda msg:
                         runner.push_event(job["id"], "progress", _progress_event(
                             stages, "model_loader", msg,
@@ -1364,7 +1366,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     log.warning("Taxonomy download failed, continuing without: %s", e)
 
             # Taxonomy is shared across every classifier in the run.
-            tax = _load_taxonomy(taxonomy_path)
+            # Use load_local_taxonomy() so a corrupt persistent file
+            # falls back to the legacy package-dir copy.
+            from taxonomy import load_local_taxonomy
+            tax = load_local_taxonomy()
             loaded_models["tax"] = tax
             loaded_models["resolved_specs"] = resolved_specs
 

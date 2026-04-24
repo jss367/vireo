@@ -943,7 +943,8 @@ def download_hf_model(repo_id, progress_callback=None):
 
 def get_taxonomy_info():
     """Return taxonomy status info."""
-    taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+    from taxonomy import find_taxonomy_json
+    taxonomy_path = find_taxonomy_json()
     if not os.path.exists(taxonomy_path):
         return {
             "available": False,

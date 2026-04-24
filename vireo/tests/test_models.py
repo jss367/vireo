@@ -382,21 +382,14 @@ def test_get_taxonomy_info_no_file(monkeypatch):
 def test_get_taxonomy_info_with_file(tmp_path, monkeypatch):
     """Returns correct info when taxonomy.json exists."""
     import models
+    import taxonomy
 
     tax_path = tmp_path / "taxonomy.json"
     # Make the file large enough for taxa_count estimation (size // 150)
     tax_data = {"last_updated": "2024-01-15", "taxa": [{"name": f"Species {i}"} for i in range(100)]}
     tax_path.write_text(json.dumps(tax_data))
 
-    # Monkey-patch the function to look at our test file
-    orig_dirname = os.path.dirname
-
-    def fake_dirname(path):
-        if path == models.__file__:
-            return str(tmp_path)
-        return orig_dirname(path)
-
-    monkeypatch.setattr(os.path, "dirname", fake_dirname)
+    monkeypatch.setattr(taxonomy, "find_taxonomy_json", lambda: str(tax_path))
 
     info = models.get_taxonomy_info()
     assert info["available"] is True

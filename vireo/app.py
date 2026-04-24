@@ -635,19 +635,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     import threading
 
     def _mark_species():
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-        if not os.path.exists(taxonomy_path):
+        from taxonomy import load_local_taxonomy
+
+        tax = load_local_taxonomy()
+        if tax is None:
             return
         try:
-            from taxonomy import Taxonomy
-
-            tax = Taxonomy(taxonomy_path)
             bg_db = Database(db_path)
             updated = bg_db.mark_species_keywords(tax)
             if updated:
                 log.info("Marked %d keywords as species from taxonomy", updated)
         except Exception:
-            log.debug("Could not load taxonomy for species marking", exc_info=True)
+            log.debug("Could not mark species from taxonomy", exc_info=True)
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
@@ -865,7 +864,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except Exception:
                 pass
 
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+        from taxonomy import find_taxonomy_json
+        taxonomy_path = find_taxonomy_json()
         taxonomy_available = os.path.exists(taxonomy_path)
 
         return jsonify({
@@ -4239,7 +4239,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from taxonomy import download_taxonomy
+            from taxonomy import (
+                TAXONOMY_JSON_PATH,
+                Taxonomy,
+                download_taxonomy,
+                populate_taxa_db_from_json,
+                seed_informal_groups,
+            )
 
             def progress_cb(msg):
                 runner.push_event(
@@ -4253,9 +4259,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     },
                 )
 
-            taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-            download_taxonomy(taxonomy_path, progress_callback=progress_cb)
-            return {"ok": True}
+            download_taxonomy(TAXONOMY_JSON_PATH, progress_callback=progress_cb)
+
+            bg_db = Database(db_path)
+            bg_db.set_active_workspace(active_ws)
+
+            # Populate the SQLite taxa table from the same DWCA data so
+            # add_keyword's auto-detect (which queries the DB, not the JSON)
+            # can type newly-imported keywords as 'taxonomy' going forward.
+            # Roll back and fail the job on error — populate_taxa_db_from_json
+            # issues many INSERTs within a single open transaction, and
+            # letting the subsequent mark_species_keywords call commit
+            # would flush the partial writes onto disk and leave the taxa
+            # table silently inconsistent.
+            try:
+                populate_taxa_db_from_json(
+                    bg_db, TAXONOMY_JSON_PATH, progress_callback=progress_cb,
+                )
+                seed_informal_groups(bg_db)
+            except Exception:
+                log.error("Post-download taxa DB population failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
+
+            # Retype existing keywords that match the new taxonomy so the
+            # user sees the effect immediately, without restarting the app.
+            # Roll back and fail the job on error: mark_species_keywords
+            # accumulates UPDATEs before its own commit, so a mid-flight
+            # failure (e.g., transient "database is locked") would leave
+            # a pending transaction that a later commit could flush, and
+            # reporting success would hide the retype failure from the UI.
+            # The download + populate + seed steps already committed, so
+            # the user keeps that progress — retrying the download re-runs
+            # retype for free (it's idempotent).
+            progress_cb("Retyping existing keywords...")
+            try:
+                tax = Taxonomy(TAXONOMY_JSON_PATH)
+                updated = bg_db.mark_species_keywords(tax)
+                log.info("Retyped %d existing keywords as taxonomy after download", updated)
+            except Exception:
+                log.error("Post-download keyword retype failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
+            return {"ok": True, "keywords_retyped": updated}
 
         job_id = runner.start("download-taxonomy", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
