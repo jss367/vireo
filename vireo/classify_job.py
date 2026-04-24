@@ -171,6 +171,88 @@ def _record_labels_fingerprint(db, fingerprint, labels, sources):
     )
 
 
+def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
+                                  labels_fingerprint, classify_fn=None):
+    """Run the classifier for a single detection and persist results.
+
+    This is a thin adapter that the gate wrapper calls. ``classify_fn`` is an
+    injection seam for the higher-level classify/pipeline code that already
+    has a loaded model bundle and prepared image — it should return a list of
+    prediction dicts that get stored in the ``predictions`` table for this
+    (detection, classifier_model, labels_fingerprint) triple.
+
+    Returns the list of prediction dicts that were stored (may be empty).
+    """
+    if classify_fn is None:
+        # No classifier plugged in — record a zero-result run so the gate's
+        # next call notices a prior attempt.  Used in tests that just exercise
+        # the gating logic without actually running a model.
+        return []
+
+    predictions = classify_fn() or []
+    # Persist predictions with the new (classifier_model, labels_fingerprint)
+    # identity. INSERT OR REPLACE on the UNIQUE
+    # (detection_id, classifier_model, labels_fingerprint, species) so a
+    # re-classify with reclassify=True refreshes the row in place.
+    for pred in predictions:
+        species = pred.get("species")
+        if not species:
+            continue
+        confidence = pred.get("confidence") or pred.get("score")
+        tax = pred.get("taxonomy") or {}
+        db.conn.execute(
+            """INSERT OR REPLACE INTO predictions
+                (detection_id, classifier_model, labels_fingerprint, species,
+                 confidence, category, scientific_name,
+                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                 taxonomy_order, taxonomy_family, taxonomy_genus)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                detection_id,
+                classifier_model,
+                labels_fingerprint,
+                species,
+                confidence,
+                pred.get("category", "new"),
+                tax.get("scientific_name"),
+                tax.get("kingdom"),
+                tax.get("phylum"),
+                tax.get("class"),
+                tax.get("order"),
+                tax.get("family"),
+                tax.get("genus"),
+            ),
+        )
+    db.conn.commit()
+    return predictions
+
+
+def _classify_detection_gated(db, detection_id, classifier_model,
+                               labels_fingerprint, labels, reclassify,
+                               classify_fn=None):
+    """Run the classifier only if we haven't already for this triple.
+
+    The gate is keyed on (detection_id, classifier_model, labels_fingerprint):
+    if a row exists in classifier_runs and reclassify is False, the classifier
+    is not invoked. After a successful invocation the classifier_runs row is
+    written (or refreshed) so subsequent passes skip.
+    """
+    if not reclassify:
+        existing = db.get_classifier_run_keys(detection_id)
+        if (classifier_model, labels_fingerprint) in existing:
+            return []
+    predictions = _run_classifier_on_detection(
+        db, detection_id, classifier_model, labels,
+        labels_fingerprint=labels_fingerprint,
+        classify_fn=classify_fn,
+    )
+    db.record_classifier_run(
+        detection_id, classifier_model, labels_fingerprint,
+        prediction_count=len(predictions),
+    )
+    return predictions
+
+
 def _resolve_label_sources(params, db):
     """Return list of source file paths used to build the active label set.
 
@@ -715,6 +797,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
     model_name, runner, job, db, top_k=1, vireo_dir=None,
+    labels_fingerprint=None, reclassify=False,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -725,9 +808,16 @@ def _classify_photos(
     Images are passed directly to classifiers as PIL objects (no temp file I/O).
     Multiple images are batched into a single forward pass for throughput.
 
+    A per-detection classifier_runs gate keyed on (detection_id, model_name,
+    labels_fingerprint) short-circuits re-work when the same triple already
+    ran. reclassify=True bypasses the gate.
+
     Returns:
         (raw_results, failed_count, skipped_existing_count)
     """
+    # Fall back to the legacy sentinel when the caller didn't compute a
+    # fingerprint — matches the default used by classifier_runs.
+    fp = labels_fingerprint or "legacy"
     from datetime import datetime as dt
 
     if load_image is None:
@@ -808,6 +898,14 @@ def _classify_photos(
         if photo_detections:
             # Classify each detection independently
             for detection in photo_detections:
+                # Classifier-run gate: skip (detection, model, fingerprint)
+                # triples that have already produced results, unless the
+                # caller asked for a reclassify pass.
+                if not reclassify:
+                    run_keys = db.get_classifier_run_keys(detection["id"])
+                    if (model_name, fp) in run_keys:
+                        continue
+
                 img, det_folder_path, det_image_path = _prepare_image(
                     photo, folders, detection, vireo_dir=vireo_dir
                 )
@@ -825,6 +923,7 @@ def _classify_photos(
 
                 if len(batch) >= _BATCH_SIZE:
                     failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                    _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
                     batch = []
         else:
             # No detections — create a full-image detection and classify it
@@ -832,6 +931,12 @@ def _classify_photos(
                                "confidence": 0, "category": "animal"}]
             full_det_ids = db.save_detections(photo["id"], full_image_det,
                                               detector_model="full-image")
+            # Gate check for the synthetic full-image detection too.
+            full_det_id = full_det_ids[0]
+            if not reclassify:
+                run_keys = db.get_classifier_run_keys(full_det_id)
+                if (model_name, fp) in run_keys:
+                    continue
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:
                 failed += 1
@@ -839,7 +944,7 @@ def _classify_photos(
 
             batch.append({
                 "photo": photo,
-                "detection_id": full_det_ids[0],
+                "detection_id": full_det_id,
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "img": img,
@@ -847,13 +952,46 @@ def _classify_photos(
 
             if len(batch) >= _BATCH_SIZE:
                 failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
                 batch = []
 
     # Flush remaining images
     if batch:
         failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+        _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
 
     return raw_results, failed, skipped_existing
+
+
+def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw_results):
+    """Record classifier_runs rows for every detection in ``batch``.
+
+    ``batch`` is the list of entries that were just passed to _flush_batch;
+    ``raw_results`` may already contain entries from prior batches, so we scope
+    the prediction_count lookup to entries that reference this batch's
+    detection_ids.  Called after _flush_batch has committed predictions so the
+    run row is only written for detections that actually produced output.
+    """
+    if not batch:
+        return
+    # Tally how many raw_results entries reference each detection_id. Entries
+    # without a detection_id (unusual, but possible on synthesized rows) are
+    # ignored. For a per-detection batch this is typically 0 or 1.
+    counts: dict = {}
+    for r in raw_results:
+        did = r.get("detection_id")
+        if did is not None:
+            counts[did] = counts.get(did, 0) + 1
+    seen: set = set()
+    for entry in batch:
+        did = entry.get("detection_id")
+        if did is None or did in seen:
+            continue
+        seen.add(did)
+        db.record_classifier_run(
+            did, model_name, labels_fingerprint,
+            prediction_count=counts.get(did, 0),
+        )
 
 
 def _store_grouped_predictions(
@@ -1240,6 +1378,8 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             db=thread_db,
             top_k=top_k,
             vireo_dir=vireo_dir,
+            labels_fingerprint=fp,
+            reclassify=params.reclassify,
         )
         classified_count = len(raw_results) - skipped_existing
         parts = [f"{classified_count} classified"]

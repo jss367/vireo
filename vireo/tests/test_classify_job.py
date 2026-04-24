@@ -575,6 +575,43 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
 
+def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
+    """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    # Pre-seed a classifier run — any subsequent invocation should bail
+    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=0)
+
+    calls = {"n": 0}
+    def fake_classify(*a, **kw):
+        calls["n"] += 1
+        return []
+    monkeypatch.setattr("classify_job._run_classifier_on_detection", fake_classify)
+
+    import classify_job
+    classify_job._classify_detection_gated(
+        db=db, detection_id=det_id,
+        classifier_model="bioclip-2",
+        labels_fingerprint="abc123",
+        labels=["Robin"], reclassify=False,
+    )
+    assert calls["n"] == 0, "classifier should be skipped when run key exists"
+
+
 def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
     """When a classifier runs, the labels fingerprint is upserted."""
     from db import Database
