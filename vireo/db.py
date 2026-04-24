@@ -4198,14 +4198,31 @@ class Database:
         self.conn.commit()
         return ids
 
-    def get_detections(self, photo_id):
-        """Get all detections for a photo in the active workspace."""
-        return self.conn.execute(
-            """SELECT * FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC""",
-            (photo_id, self._ws_id()),
-        ).fetchall()
+    def get_detections(self, photo_id, min_conf=None, detector_model=None):
+        """Return all boxes for a photo above `min_conf`, globally.
+
+        The detections table is global (no workspace_id). Threshold filtering
+        happens at read time so raw boxes stay cached across workspaces.
+
+        Args:
+            photo_id: the photo
+            min_conf: confidence floor. ``None`` pulls ``detector_confidence``
+                from the active workspace's effective config (default 0.2).
+                ``0`` returns raw rows with no filtering.
+            detector_model: optional — filter to a single detector model.
+        """
+        if min_conf is None:
+            import config as cfg
+            effective = self.get_effective_config(cfg.load())
+            min_conf = effective.get("detector_confidence", 0.2)
+        q = ("SELECT * FROM detections WHERE photo_id = ? "
+             "AND detector_confidence >= ?")
+        params = [photo_id, min_conf]
+        if detector_model is not None:
+            q += " AND detector_model = ?"
+            params.append(detector_model)
+        q += " ORDER BY detector_confidence DESC"
+        return self.conn.execute(q, params).fetchall()
 
     def get_detections_for_photos(self, photo_ids):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.

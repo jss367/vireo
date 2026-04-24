@@ -2208,6 +2208,73 @@ def test_save_detections_is_global(tmp_path):
     assert len(rows) == 1
 
 
+def test_get_detections_threshold_filter(tmp_path, monkeypatch):
+    """get_detections filters by min_conf, resolving from workspace-effective config when None."""
+    import config as cfg
+    from db import Database
+
+    # Isolate config from the user's ~/.vireo/config.json so the default
+    # detector_confidence (0.2) is what the test actually resolves.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.4, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    # min_conf=0: returns everything
+    rows = db.get_detections(photo_id, min_conf=0)
+    assert len(rows) == 2
+
+    # min_conf=0.2: only the 0.4 row
+    rows = db.get_detections(photo_id, min_conf=0.2)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.4
+
+    # min_conf=None pulls from workspace-effective config (default 0.2 → 1 row)
+    rows = db.get_detections(photo_id)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.4
+
+
+def test_get_detections_cross_workspace_read(tmp_path):
+    """Detections written in workspace A are readable from workspace B — table is global."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+
+    db._active_workspace_id = ws_a
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+
+    db._active_workspace_id = ws_b
+    rows = db.get_detections(photo_id, min_conf=0)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.9
+
+
 def test_get_detections_for_photo(tmp_path):
     """get_detections should return all detections for a photo in current workspace."""
     from db import Database
