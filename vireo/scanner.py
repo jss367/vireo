@@ -346,7 +346,32 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id):
         (photo_id,),
     )
 
+    # Preview pyramid + its LRU accounting. Only drop a preview_cache row
+    # for sizes whose file was successfully removed (or was already
+    # missing): if unlink fails (e.g. Windows file lock) and we drop the
+    # row anyway, the serve path's lazy-adoption shortcut re-adopts the
+    # stranded file and hands out stale pre-change bytes. Mirrors the
+    # self-healing semantics in preview_cache.evict_if_over_quota.
     preview_dir = os.path.join(vireo_dir, "previews")
+    rows = db.conn.execute(
+        "SELECT size FROM preview_cache WHERE photo_id = ?", (photo_id,)
+    ).fetchall()
+    tracked_sizes = {r["size"] for r in rows}
+    deleted_sizes = []
+    for size in tracked_sizes:
+        path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            deleted_sizes.append(size)
+        except OSError:
+            log.debug("Could not delete stale preview %s", path, exc_info=True)
+        else:
+            deleted_sizes.append(size)
+
+    # Also sweep preview files that aren't tracked by preview_cache (older
+    # code paths wrote without inserting a row). These have no matching
+    # row to preserve, so failed unlinks just get logged.
     if os.path.isdir(preview_dir):
         prefix = f"{photo_id}_"
         try:
@@ -354,22 +379,29 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id):
         except OSError:
             entries = []
         for fname in entries:
-            if fname.startswith(prefix):
-                try:
-                    os.remove(os.path.join(preview_dir, fname))
-                except OSError:
-                    log.debug(
-                        "Could not delete stale preview %s",
-                        os.path.join(preview_dir, fname),
-                        exc_info=True,
-                    )
-    # Drop the LRU accounting rows alongside the files. Leaving them would
-    # inflate preview_cache_total_bytes with bytes for files that no longer
-    # exist, and push quota eviction to target valid previews before the
-    # ghost rows are eventually cleaned up.
-    db.conn.execute(
-        "DELETE FROM preview_cache WHERE photo_id = ?", (photo_id,)
-    )
+            if not (fname.startswith(prefix) and fname.endswith(".jpg")):
+                continue
+            size_str = fname[len(prefix):-len(".jpg")]
+            try:
+                size = int(size_str)
+            except ValueError:
+                continue
+            if size in tracked_sizes:
+                continue
+            path = os.path.join(preview_dir, fname)
+            try:
+                os.remove(path)
+            except OSError:
+                log.debug(
+                    "Could not delete untracked stale preview %s",
+                    path, exc_info=True,
+                )
+
+    if deleted_sizes:
+        db.conn.executemany(
+            "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
+            [(photo_id, s) for s in deleted_sizes],
+        )
 
 
 def _subtree_like_pattern(path, sep=None):

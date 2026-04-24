@@ -1678,6 +1678,59 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     assert db.preview_cache_total_bytes() == 0
 
 
+def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeypatch):
+    """If a preview file can't be deleted (e.g. locked on Windows), the
+    matching preview_cache row must stay. Otherwise the serve path's
+    lazy-adoption shortcut (app.py ~L8131) re-adopts the stale file on
+    the next /photos/<id>/preview and hands out pre-change content, and
+    quota eviction stops accounting for the leaked bytes.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    preview_file = preview_dir / f"{photo_id}_1920.jpg"
+    Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    file_bytes = preview_file.stat().st_size
+    db.preview_cache_insert(photo_id, 1920, file_bytes)
+
+    # Simulate the preview file being un-removable (locked, ACL, etc.).
+    real_remove = os.remove
+    stuck = str(preview_file)
+
+    def selective_remove(path):
+        if os.fspath(path) == stuck:
+            raise PermissionError("simulated lock")
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", selective_remove)
+
+    # Force a content-change rescan so invalidation fires.
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert preview_file.exists(), "sanity: stuck preview file should remain"
+    assert db.preview_cache_get(photo_id, 1920) is not None, (
+        "When preview unlink fails, the cache row must stay so quota "
+        "accounting keeps the leaked bytes visible and the serve path "
+        "does not lazy-adopt stale content."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""
