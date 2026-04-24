@@ -854,6 +854,16 @@
   </div>
 
 
+  <!-- Detection Cache -->
+  <div class="section">
+    <div class="section-title">Detection Cache</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      MegaDetector results are cached globally per photo &amp; model. Switching workspaces or changing
+      the detector confidence threshold never re-runs detection on a photo that has already been scanned.
+    </p>
+    <div id="detectionCacheStats" style="font-size:13px;color:var(--text-secondary);">Loading&hellip;</div>
+  </div>
+
   <!-- Embedding Matrix -->
   <div class="section">
     <div class="section-title">Embedding Cache</div>
@@ -937,6 +947,7 @@ loadScanRoots();
 loadVersion();
 loadThemePicker();
 loadPreviewCacheStatus();
+loadDetectionCacheStats();
 
 function toggleSection(header) {
   header.classList.toggle('open');
@@ -2129,6 +2140,22 @@ async function clearPreviewCache() {
   } catch(e) {}
   if (btn) btn.disabled = false;
   loadPreviewCacheStatus();
+}
+
+/* ---------- Detection Cache ---------- */
+async function loadDetectionCacheStats() {
+  var el = document.getElementById('detectionCacheStats');
+  if (!el) return;
+  try {
+    var d = await safeFetch('/api/detection-cache/stats', {}, { toast: false });
+    var pc = d.photo_count || 0;
+    var mc = d.model_count || 0;
+    var photoWord = pc === 1 ? 'photo' : 'photos';
+    var modelWord = mc === 1 ? 'model' : 'models';
+    el.textContent = pc + ' ' + photoWord + ' \u00D7 ' + mc + ' ' + modelWord + ' cached';
+  } catch(e) {
+    el.textContent = 'Failed to load';
+  }
 }
 
 /* ---------- Embedding Cache ---------- */

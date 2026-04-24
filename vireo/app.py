@@ -3042,6 +3042,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "failed": len(failed_tracked),
         })
 
+    @app.route("/api/detection-cache/stats")
+    def api_detection_cache_stats():
+        """Return global detector-cache stats for the settings page.
+
+        `detector_runs` is shared across workspaces, so the numbers do
+        not depend on the active workspace.
+        """
+        db = _get_db()
+        return jsonify(db.get_global_detection_stats())
+
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
         """Return info about cached label embeddings."""

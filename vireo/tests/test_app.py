@@ -92,6 +92,41 @@ def test_settings_page_has_preview_cache_field(app_and_db):
     assert b'clearPreviewCache' in resp.data
 
 
+def test_detection_cache_stats_endpoint(app_and_db):
+    """GET /api/detection-cache/stats reports global photo/model counts.
+
+    The cache is shared across workspaces, so the stat must reflect
+    every detector_runs row regardless of the active workspace.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Zero state: no detector runs recorded yet.
+    resp = client.get('/api/detection-cache/stats')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data == {"photo_count": 0, "model_count": 0}
+
+    # Settings page advertises the stat with the right DOM hooks.
+    page = client.get('/settings')
+    assert page.status_code == 200
+    assert b'detectionCacheStats' in page.data
+    assert b'photos' in page.data
+
+    # Record runs for two photos across two models and re-check.
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    db.record_detector_run(p1, "megadetector-v6", box_count=2)
+    db.record_detector_run(p2, "megadetector-v6", box_count=0)
+    db.record_detector_run(p1, "megadetector-v5", box_count=1)
+
+    resp = client.get('/api/detection-cache/stats')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_count"] == 2
+    assert data["model_count"] == 2
+
+
 def test_encounter_species_confirm(app_and_db):
     """POST /api/encounters/species tags photos with species keyword."""
     app, db = app_and_db

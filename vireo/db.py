@@ -4315,6 +4315,22 @@ class Database:
         )
         self.conn.commit()
 
+    def get_global_detection_stats(self):
+        """Return global (workspace-agnostic) detector-cache counts.
+
+        `detector_runs` is shared across workspaces by design — switching
+        workspaces or bumping a threshold never invalidates these rows —
+        so the settings page surfaces this as a single "N photos x M
+        models cached" figure.
+        """
+        r = self.conn.execute(
+            """SELECT COUNT(DISTINCT photo_id) AS photo_count,
+                      COUNT(DISTINCT detector_model) AS model_count
+               FROM detector_runs"""
+        ).fetchone()
+        return {"photo_count": r["photo_count"] or 0,
+                "model_count": r["model_count"] or 0}
+
     def get_detector_run_photo_ids(self, detector_model):
         """Return the set of photo_ids where `detector_model` has run.
 
