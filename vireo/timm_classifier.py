@@ -58,9 +58,16 @@ class TimmClassifier:
                     "Download the model from the Models page in Settings."
                 )
 
-        # Load ONNX session
+        # Load ONNX session with self-heal on corruption: if the bytes
+        # are truncated / partial, delete them and re-download once
+        # rather than bricking the classify pipeline.
+        import models as _models_mod
+
+        redownload = _models_mod.build_self_heal_redownloader(model_dir)
         log.info("Loading timm ONNX model: %s", model_path)
-        self._session = onnx_runtime.create_session(model_path)
+        self._session = onnx_runtime.create_session_with_self_heal(
+            model_path, redownload=redownload,
+        )
         self._input_name = self._session.get_inputs()[0].name
 
         # Load class names (list of scientific names, index = class id)

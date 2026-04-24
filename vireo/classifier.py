@@ -343,17 +343,46 @@ class Classifier:
                     "Download the model from the Models page in Settings."
                 )
 
-        # Load preprocessing config
+        # Load image encoder ONNX session. When this model lives in the
+        # known-models directory we wrap the load in a self-heal retry so
+        # a corrupt / truncated file triggers a single delete+redownload
+        # attempt before surfacing the error to the user. Custom models
+        # fall back to the plain loader (no redownloader available).
+        import models as _models_mod
+
+        redownload = _models_mod.build_self_heal_redownloader(self._model_dir)
+
+        # Track whether image-side self-heal fires. If it does, the
+        # refreshed model dir may have new text_encoder bytes, making
+        # any cached label embeddings (computed against old text
+        # weights) produce silent score drift. We invalidate the
+        # cache before the cache-lookup branch below.
+        image_heal_state = {"triggered": False}
+
+        if redownload is not None:
+            def _image_redownload():
+                image_heal_state["triggered"] = True
+                redownload()
+
+            _image_redownload_cb = _image_redownload
+        else:
+            _image_redownload_cb = None
+
+        log.info("Loading BioCLIP image encoder: %s", image_encoder_path)
+        self._image_session = onnx_runtime.create_session_with_self_heal(
+            image_encoder_path, redownload=_image_redownload_cb,
+        )
+        self._image_input_name = self._image_session.get_inputs()[0].name
+
+        # Load preprocessing config AFTER the session loads: a self-heal
+        # redownload may have replaced config.json alongside the ONNX
+        # bytes, and reading it before would leave us with stale
+        # input_size/mean/std causing silent mis-preprocessing.
         with open(config_path) as f:
             preproc = json.load(f)
         self._input_size = tuple(preproc["input_size"][-2:])  # (H, W)
         self._mean = preproc["mean"]
         self._std = preproc["std"]
-
-        # Load image encoder ONNX session
-        log.info("Loading BioCLIP image encoder: %s", image_encoder_path)
-        self._image_session = onnx_runtime.create_session(image_encoder_path)
-        self._image_input_name = self._image_session.get_inputs()[0].name
 
         if labels is not None:
             if not labels:
@@ -374,6 +403,24 @@ class Classifier:
 
             cache_path = _embedding_cache_path(labels, model_str, self._model_dir)
 
+            # If image self-heal refreshed the model dir, the on-disk
+            # text_encoder bytes are different from what any previously-
+            # cached embeddings were computed against. Invalidate the
+            # cache so we re-compute embeddings from the healed weights.
+            if image_heal_state["triggered"] and os.path.exists(cache_path):
+                log.info(
+                    "Image self-heal refreshed model dir; invalidating "
+                    "stale text embedding cache at %s",
+                    cache_path,
+                )
+                try:
+                    os.unlink(cache_path)
+                except OSError:
+                    log.exception(
+                        "Failed to invalidate text embedding cache %s",
+                        cache_path,
+                    )
+
             if os.path.exists(cache_path):
                 log.info(
                     "Loading cached label embeddings for %d labels...", len(labels)
@@ -386,11 +433,51 @@ class Classifier:
                     "(first run -- will be cached for next time)...",
                     len(labels),
                 )
-                # Load text encoder session
-                text_session = onnx_runtime.create_session(text_encoder_path)
+                # Load text encoder session (self-healing on corruption).
+                # A text-side heal invokes download_model which refreshes
+                # the ENTIRE model directory (image_encoder, text_encoder,
+                # config.json, tokenizer). If that happens, the already-
+                # loaded image session is stale — a version bump between
+                # the original install and the heal could leave us with
+                # an old image encoder paired with new text embeddings,
+                # producing silently incompatible features. Wrap the
+                # redownloader in a tracker and rebuild the image side
+                # if we see it fire.
+                text_heal_state = {"triggered": False}
+
+                if redownload is not None:
+                    def _tracked_redownload():
+                        text_heal_state["triggered"] = True
+                        redownload()
+
+                    text_redownload = _tracked_redownload
+                else:
+                    text_redownload = None
+
+                text_session = onnx_runtime.create_session_with_self_heal(
+                    text_encoder_path, redownload=text_redownload,
+                )
                 try:
                     text_input_name = text_session.get_inputs()[0].name
                     tokenizer = _load_tokenizer(tokenizer_path)
+
+                    if text_heal_state["triggered"]:
+                        log.info(
+                            "Text-encoder self-heal refreshed model dir; "
+                            "rebuilding image encoder and preprocessing "
+                            "config from the healed snapshot."
+                        )
+                        self._image_session = onnx_runtime.create_session(
+                            image_encoder_path,
+                        )
+                        self._image_input_name = (
+                            self._image_session.get_inputs()[0].name
+                        )
+                        with open(config_path) as f:
+                            preproc = json.load(f)
+                        self._input_size = tuple(preproc["input_size"][-2:])
+                        self._mean = preproc["mean"]
+                        self._std = preproc["std"]
 
                     self._txt_embeddings = _compute_embeddings_with_progress(
                         text_session,
