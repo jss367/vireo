@@ -607,6 +607,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             status_callback=status_cb,
                             restrict_dirs=[folder_path],
                             restrict_files=set(file_paths),
+                            vireo_dir=os.path.dirname(db_path),
                         )
                     except (OSError, RuntimeError) as e:
                         log.warning(
@@ -758,6 +759,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     photo_callback=photo_cb,
                     status_callback=status_cb,
                     restrict_dirs=restrict,
+                    vireo_dir=os.path.dirname(db_path),
                 )
             else:
                 # Scan-in-place: scan each source folder independently.
@@ -778,6 +780,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             skip_paths=params.exclude_paths,
                             status_callback=status_cb,
                             recursive=params.recursive,
+                            vireo_dir=os.path.dirname(db_path),
                         )
                     finally:
                         advance_scan_acc()
