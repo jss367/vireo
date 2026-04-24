@@ -795,6 +795,66 @@ def test_pipeline_forwards_thumb_cache_dir_to_scan(tmp_path, monkeypatch):
     )
 
 
+def test_pipeline_vireo_dir_aligns_with_thumb_cache_dir_parent(tmp_path, monkeypatch):
+    """On custom --thumb-dir layouts, the Flask serve path computes
+    ``vireo_dir = os.path.dirname(THUMB_CACHE_DIR)`` — that's where it
+    reads previews/ and working/. Pipeline scans must align with that
+    convention, or invalidation runs against one tree while the app
+    serves from another (so stale previews/working_copies survive).
+    """
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # DB and thumb cache on *different* roots (simulates
+    # --db ~/.vireo/vireo.db --thumb-dir /data/thumbs).
+    db_dir = tmp_path / "dbstore"
+    db_dir.mkdir()
+    db_path = str(db_dir / "vireo.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    custom_thumb_dir = tmp_path / "cache" / "thumbs"
+    custom_thumb_dir.mkdir(parents=True)
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params,
+        thumb_cache_dir=str(custom_thumb_dir),
+    )
+
+    expected_vireo_dir = os.path.dirname(str(custom_thumb_dir))
+    assert scan_kwargs.get("vireo_dir") == expected_vireo_dir, (
+        f"Pipeline should derive vireo_dir from thumb_cache_dir's parent "
+        f"({expected_vireo_dir}); got {scan_kwargs.get('vireo_dir')!r}. "
+        "Otherwise scan's previews/working paths diverge from the "
+        "Flask serve paths."
+    )
+
+
 def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     """Scan progress events should include rate and eta_seconds fields."""
     import time

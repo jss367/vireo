@@ -527,7 +527,7 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
     called = threading.Event()
     original = pipeline_job.run_pipeline_job
 
-    def spy_run(job, runner, db_path_arg, ws_id, params):
+    def spy_run(job, runner, db_path_arg, ws_id, params, **_kwargs):
         captured["source_snapshot_id"] = params.source_snapshot_id
         called.set()
 

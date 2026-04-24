@@ -1964,6 +1964,55 @@ def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
     assert not (vireo_dir / "thumbnails").exists()
 
 
+def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
+    """Legacy photo rows predating file_hash tracking (or where prior
+    hash computation failed) have file_hash=NULL. When a later rescan
+    computes a concrete hash, derived caches written during the NULL
+    era must be invalidated — we can't prove the bytes are unchanged,
+    so safer to flush than leave a stale thumbnail in place.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "legacy.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Simulate a legacy row: wipe the hash as if it was recorded before
+    # file_hash tracking existed.
+    db.conn.execute("UPDATE photos SET file_hash = NULL WHERE id = ?", (photo_id,))
+    # Also bump file_mtime backwards so incremental scan reprocesses the row.
+    db.conn.execute("UPDATE photos SET file_mtime = 0 WHERE id = ?", (photo_id,))
+    db.conn.commit()
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    new_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert new_hash is not None, "sanity: rescan must populate the hash"
+
+    assert not os.path.exists(thumb_path), (
+        "Invalidation must fire on NULL → concrete transitions too; "
+        "otherwise legacy rows keep stale derived caches forever."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""

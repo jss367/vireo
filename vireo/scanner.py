@@ -995,19 +995,17 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 )
                 commit_with_retry(db.conn)
 
-            # Content-change self-heal: if the file's bytes have changed
-            # since the last scan, derived caches are now stale. Drop them
-            # so the next thumbnail / preview / working-copy access rebuilds
-            # from the current source. The working-copy extraction pass at
-            # the end of scan() picks this row back up because
-            # _invalidate_derived_caches also NULLs working_copy_path.
-            # Requires an explicit vireo_dir — we can't guess the cache
-            # root from db_path because --db and --thumb-dir are
-            # independently configurable. Callers that need invalidation
-            # on their entry points (audit, pipeline, Flask job routes)
-            # must pass it.
-            if (prev_file_hash is not None
-                    and file_hash is not None
+            # Content-change self-heal: when the computed hash differs
+            # from what's stored, derived caches are stale. Includes the
+            # NULL → concrete transition for legacy rows that predate
+            # hash tracking — we can't prove their caches match current
+            # bytes, so safer to flush and regenerate. For brand-new
+            # photos the invalidation is a cheap no-op (no files yet).
+            # Skips only when the new hash is NULL (computation failed)
+            # — no reliable signal to act on. Requires explicit
+            # vireo_dir; callers must pass it (scan can't guess because
+            # --db and --thumb-dir are independently configurable).
+            if (file_hash is not None
                     and prev_file_hash != file_hash
                     and vireo_dir):
                 _invalidate_derived_caches(
