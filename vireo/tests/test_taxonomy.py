@@ -922,6 +922,148 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_load_local_taxonomy_falls_back_when_persistent_corrupt(tmp_path, monkeypatch):
+    """A corrupt persistent taxonomy.json doesn't disable enrichment.
+
+    Regression: find_taxonomy_json returned the persistent path as soon
+    as it existed, and callers raised on load. If an interrupted write
+    left a truncated ~/.vireo/taxonomy.json, taxonomy features broke
+    even when a valid package-dir copy was present.
+    """
+    import taxonomy as tax_mod
+
+    # Build a valid legacy file next to the module and a corrupt one at
+    # the persistent path.
+    corrupt = tmp_path / "persistent.json"
+    corrupt.write_text("{ not valid json")
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        '{"last_updated":"2026-04-24","source":"test",'
+        '"taxa_by_common":{"test species":{"taxon_id":1,'
+        '"scientific_name":"Test species","common_name":"Test",'
+        '"rank":"species","lineage_names":["Animalia","Test species"],'
+        '"lineage_ranks":["kingdom","species"]}},'
+        '"taxa_by_scientific":{}}'
+    )
+
+    monkeypatch.setattr(tax_mod, "TAXONOMY_JSON_PATH", str(corrupt))
+    # Redirect the "package-dir legacy" candidate path to our tmp fixture.
+    orig_dirname = tax_mod.os.path.dirname
+
+    def fake_dirname(p):
+        if p == tax_mod.__file__:
+            return str(tmp_path)
+        return orig_dirname(p)
+
+    legacy.rename(tmp_path / "taxonomy.json")
+    monkeypatch.setattr(tax_mod.os.path, "dirname", fake_dirname)
+
+    result = tax_mod.load_local_taxonomy()
+    assert result is not None, "should fall back to legacy copy on corrupt persistent"
+    assert result.is_taxon("test species")
+
+
+def test_load_local_taxonomy_returns_none_when_no_file(tmp_path, monkeypatch):
+    """load_local_taxonomy returns None when neither candidate exists."""
+    import taxonomy as tax_mod
+
+    monkeypatch.setattr(
+        tax_mod, "TAXONOMY_JSON_PATH", str(tmp_path / "nonexistent.json"),
+    )
+    orig_dirname = tax_mod.os.path.dirname
+
+    def fake_dirname(p):
+        if p == tax_mod.__file__:
+            return str(tmp_path)
+        return orig_dirname(p)
+
+    monkeypatch.setattr(tax_mod.os.path, "dirname", fake_dirname)
+    assert tax_mod.load_local_taxonomy() is None
+
+
+def test_populate_taxa_db_from_json_refuses_empty_payload(tmp_path):
+    """Empty taxonomy payload fails before any destructive writes.
+
+    Regression: without a guard, an empty entries_by_inat_id caused the
+    prune step to DELETE every taxa row and NULL every keywords.taxon_id,
+    then the job reported success. Now it raises before any writes.
+    """
+    import json
+
+    import pytest
+    from taxonomy import populate_taxa_db_from_json
+
+    # Seed an existing populated DB.
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+    pre_count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert pre_count > 0
+
+    # Now write an empty payload and try to re-populate.
+    empty_path = str(tmp_path / "empty.json")
+    with open(empty_path, "w") as f:
+        json.dump({
+            "last_updated": "2026-04-24",
+            "source": "test",
+            "taxa_by_common": {},
+            "taxa_by_scientific": {},
+        }, f)
+
+    with pytest.raises(ValueError, match="empty|refusing"):
+        populate_taxa_db_from_json(db, empty_path)
+
+    post_count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert post_count == pre_count, (
+        "existing taxa must not be deleted when the new payload is empty"
+    )
+
+
+def test_populate_taxa_db_from_json_refuses_suspiciously_small_payload(tmp_path):
+    """Drastically-smaller payloads fail before destructive writes.
+
+    Regression: a corrupt/partial download could have a few hundred taxa
+    while the existing DB has 1.3M. Silently pruning ~99% of the table
+    is almost certainly wrong; fail visibly so the user retries.
+    """
+    import json
+
+    import pytest
+    from taxonomy import populate_taxa_db_from_json
+
+    # Seed a DB with >100 rows so the proportional check kicks in.
+    db = Database(str(tmp_path / "x.db"))
+    for i in range(200):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, rank, kingdom) "
+            "VALUES (?, ?, 'species', 'Animalia')",
+            (1000 + i, f"Species{i:03d} name"),
+        )
+    db.conn.commit()
+
+    # Now a tiny payload — under 10% of existing.
+    tiny = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {"taxon_id": 1, "scientific_name": "Animalia",
+                         "common_name": "", "rank": "kingdom",
+                         "lineage_names": ["Animalia"],
+                         "lineage_ranks": ["kingdom"]},
+        },
+    }
+    tiny_path = str(tmp_path / "tiny.json")
+    with open(tiny_path, "w") as f:
+        json.dump(tiny, f)
+
+    with pytest.raises(ValueError, match="corrupt|partial|refusing"):
+        populate_taxa_db_from_json(db, tiny_path)
+
+    # Nothing deleted.
+    assert db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 200
+
+
 def test_populate_taxa_db_from_json_prunes_stale_taxa(tmp_path):
     """Re-populate deletes taxa rows whose inat_id disappeared from the
     new payload, and nulls out the corresponding keywords.taxon_id.

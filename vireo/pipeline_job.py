@@ -1332,7 +1332,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                            current_file="Resolving model...")
         _update_stages(runner, job["id"], stages)
         try:
-            from classify_job import _load_taxonomy
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -1367,7 +1366,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     log.warning("Taxonomy download failed, continuing without: %s", e)
 
             # Taxonomy is shared across every classifier in the run.
-            tax = _load_taxonomy(taxonomy_path)
+            # Use load_local_taxonomy() so a corrupt persistent file
+            # falls back to the legacy package-dir copy.
+            from taxonomy import load_local_taxonomy
+            tax = load_local_taxonomy()
             loaded_models["tax"] = tax
             loaded_models["resolved_specs"] = resolved_specs
 

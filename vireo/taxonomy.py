@@ -163,6 +163,9 @@ def find_taxonomy_json():
     to this module (for dev checkouts where a taxonomy.json was committed
     or previously downloaded). Always returns a path — callers should check
     os.path.exists() if they need to know whether data is actually present.
+
+    For loading (not just path-checking) use load_local_taxonomy(), which
+    also tries the legacy path when the persistent file is unreadable.
     """
     if os.path.exists(TAXONOMY_JSON_PATH):
         return TAXONOMY_JSON_PATH
@@ -170,6 +173,32 @@ def find_taxonomy_json():
     if os.path.exists(legacy_path):
         return legacy_path
     return TAXONOMY_JSON_PATH
+
+
+def load_local_taxonomy():
+    """Load a Taxonomy from disk, falling back across known paths.
+
+    Tries ~/.vireo/taxonomy.json first, then the package-dir legacy path.
+    A truncated or corrupt persistent file (e.g., from an interrupted
+    write) no longer disables taxonomy features if a valid legacy file
+    is present. Returns a Taxonomy instance on success, or None if no
+    readable taxonomy file exists.
+    """
+    candidates = [
+        TAXONOMY_JSON_PATH,
+        os.path.join(os.path.dirname(__file__), "taxonomy.json"),
+    ]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            return Taxonomy(path)
+        except Exception as e:
+            log.warning(
+                "Failed to load taxonomy from %s: %s — trying next candidate",
+                path, e,
+            )
+    return None
 
 
 # --- AWS open-data taxa.csv.gz loader constants ---
@@ -578,6 +607,25 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
             if inat_id is None:
                 continue
             entries_by_inat_id.setdefault(int(inat_id), entry)
+
+    # Refuse to proceed on suspicious payloads — the prune step below
+    # drops every taxa row whose inat_id isn't in entries_by_inat_id,
+    # so an empty or drastically-reduced payload would destroy a good
+    # existing DB. Fail loudly before any destructive writes.
+    if not entries_by_inat_id:
+        raise ValueError(
+            "Taxonomy payload has no usable entries — refusing to "
+            "populate (would delete the entire local taxa table)"
+        )
+    existing_count = db.conn.execute(
+        "SELECT COUNT(*) FROM taxa"
+    ).fetchone()[0]
+    if existing_count > 100 and len(entries_by_inat_id) < existing_count * 0.1:
+        raise ValueError(
+            f"Taxonomy payload has only {len(entries_by_inat_id):,} entries "
+            f"but local taxa table already has {existing_count:,}; refusing "
+            f"as likely corrupt/partial"
+        )
 
     # Prune stale taxa whose inat_id isn't in the new payload, so taxa
     # that disappeared from iNat (or dropped out of our major-ranks

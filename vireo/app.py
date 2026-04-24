@@ -635,21 +635,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     import threading
 
     def _mark_species():
-        from taxonomy import find_taxonomy_json
+        from taxonomy import load_local_taxonomy
 
-        taxonomy_path = find_taxonomy_json()
-        if not os.path.exists(taxonomy_path):
+        tax = load_local_taxonomy()
+        if tax is None:
             return
         try:
-            from taxonomy import Taxonomy
-
-            tax = Taxonomy(taxonomy_path)
             bg_db = Database(db_path)
             updated = bg_db.mark_species_keywords(tax)
             if updated:
                 log.info("Marked %d keywords as species from taxonomy", updated)
         except Exception:
-            log.debug("Could not load taxonomy for species marking", exc_info=True)
+            log.debug("Could not mark species from taxonomy", exc_info=True)
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
