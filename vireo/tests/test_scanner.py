@@ -1858,6 +1858,55 @@ def test_audit_import_untracked_invalidates_stale_thumbnail(tmp_path):
     )
 
 
+def test_preview_sweep_chunks_large_photo_id_sets(tmp_path):
+    """_sweep_untracked_previews_for_photos must chunk its IN (...) query.
+
+    Older SQLite builds cap bound parameters at 999
+    (SQLITE_MAX_VARIABLE_NUMBER). A rescan that invalidates thousands
+    of photos would otherwise raise ``too many SQL variables`` during
+    post-processing and fail the whole scan.
+    """
+    import scanner
+    from db import Database
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    (vireo_dir / "previews").mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+
+    real_conn = db.conn
+    max_params_seen = 0
+
+    class TrackingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            nonlocal max_params_seen
+            if isinstance(params, (list, tuple)):
+                max_params_seen = max(max_params_seen, len(params))
+            return self._inner.execute(sql, params)
+
+        def executemany(self, sql, seq):
+            return self._inner.executemany(sql, seq)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    db.conn = TrackingConn(real_conn)
+
+    scanner._sweep_untracked_previews_for_photos(
+        db, str(vireo_dir), list(range(1, 2001)),
+    )
+
+    assert max_params_seen <= 999, (
+        f"Preview sweep sent {max_params_seen} bound parameters in one "
+        f"query; would crash on SQLite builds with "
+        f"SQLITE_MAX_VARIABLE_NUMBER=999."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""

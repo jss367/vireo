@@ -426,12 +426,19 @@ def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
 
     photo_ids_set = {int(p) for p in photo_ids}
     ids_list = list(photo_ids_set)
-    ph = ",".join("?" * len(ids_list))
-    rows = db.conn.execute(
-        f"SELECT photo_id, size FROM preview_cache WHERE photo_id IN ({ph})",
-        ids_list,
-    ).fetchall()
-    still_tracked = {(r["photo_id"], r["size"]) for r in rows}
+    # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999 on
+    # older builds). Without this, a rescan that invalidates thousands
+    # of photos crashes scan post-processing with "too many SQL variables".
+    _CHUNK = 900
+    still_tracked: set[tuple[int, int]] = set()
+    for i in range(0, len(ids_list), _CHUNK):
+        chunk = ids_list[i : i + _CHUNK]
+        ph = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"SELECT photo_id, size FROM preview_cache WHERE photo_id IN ({ph})",
+            chunk,
+        ).fetchall()
+        still_tracked.update((r["photo_id"], r["size"]) for r in rows)
 
     try:
         entries = os.listdir(preview_dir)
