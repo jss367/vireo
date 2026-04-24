@@ -4196,14 +4196,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             # Retype existing keywords that match the new taxonomy so the
             # user sees the effect immediately, without restarting the app.
+            # Roll back and fail the job on error: mark_species_keywords
+            # accumulates UPDATEs before its own commit, so a mid-flight
+            # failure (e.g., transient "database is locked") would leave
+            # a pending transaction that a later commit could flush, and
+            # reporting success would hide the retype failure from the UI.
+            # The download + populate + seed steps already committed, so
+            # the user keeps that progress — retrying the download re-runs
+            # retype for free (it's idempotent).
             progress_cb("Retyping existing keywords...")
             try:
                 tax = Taxonomy(TAXONOMY_JSON_PATH)
                 updated = bg_db.mark_species_keywords(tax)
                 log.info("Retyped %d existing keywords as taxonomy after download", updated)
             except Exception:
-                log.warning("Post-download keyword retype failed", exc_info=True)
-                updated = 0
+                log.error("Post-download keyword retype failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
             return {"ok": True, "keywords_retyped": updated}
 
         job_id = runner.start("download-taxonomy", work, workspace_id=active_ws)
