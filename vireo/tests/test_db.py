@@ -1392,6 +1392,72 @@ def test_clear_predictions_scopes_by_fingerprint(tmp_path):
     assert ("bioclip-2", "fp-b") in run_keys, "fp-b run key must be preserved"
 
 
+def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
+    """clear_predictions() with no model must also wipe classifier_runs for
+    affected detections. Otherwise the (detection, model, fingerprint) skip
+    gate treats them as already classified and the next non-reclassify pass
+    leaves those photos permanently without predictions.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-a")
+    db.add_prediction(det_id, species="Sparrow", confidence=0.85,
+                      model="other-model", labels_fingerprint="fp-b")
+    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.record_classifier_run(det_id, "other-model", "fp-b", prediction_count=1)
+
+    db.clear_predictions()
+
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()[0]
+    assert remaining == 0, "All predictions for the detection must be deleted"
+
+    run_keys = db.get_classifier_run_keys(det_id)
+    assert run_keys == set(), (
+        "All classifier_runs entries for the detection must be cleared so "
+        "the next non-reclassify pass actually re-runs inference"
+    )
+
+
+def test_get_predictions_filters_to_latest_fingerprint(tmp_path):
+    """get_predictions() must return only the most recent fingerprint per
+    (detection, classifier_model). Mixing stale and current fingerprints
+    contaminates /api/predictions and /api/predictions/compare with
+    duplicate/conflicting species after a label-set change.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint with HIGHER confidence than current — confidence-only
+    # ranking would surface it; the latest-fingerprint filter must exclude it.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    rows = db.get_predictions(photo_ids=[pids[0]])
+    species_seen = {r["species"] for r in rows}
+    assert species_seen == {"Robin"}, (
+        "get_predictions returned stale-fingerprint species — would mix "
+        "old and current label sets in /api/predictions."
+    )
+
+
 def test_move_folders_moves_prediction_review(tmp_path):
     """Moving folders between workspaces must carry prediction_review rows
     with them — otherwise accepted/rejected/group metadata is silently

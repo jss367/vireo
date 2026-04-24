@@ -4295,39 +4295,45 @@ class Database:
         # labels_fingerprint), so delete by the full composite key, not by
         # detection_id alone — otherwise another fingerprint's run key on
         # the same detection would be wiped too.
+        #
+        # Run for every clear_predictions() call: when model is None we just
+        # built a workspace-wide DELETE on predictions, so leaving the run
+        # keys behind would strand those detections (the (detection, model,
+        # fingerprint) gate would treat them as already classified).
+        run_conds = []
+        run_params = []
         if model is not None:
-            run_conds = ["cr.classifier_model = ?"]
-            run_params = [model]
-            if labels_fingerprint is not None:
-                run_conds.append("cr.labels_fingerprint = ?")
-                run_params.append(labels_fingerprint)
-            if collection_photo_ids is not None:
-                placeholders = ",".join("?" for _ in collection_photo_ids)
-                run_conds.append(f"d.photo_id IN ({placeholders})")
-                run_params.extend(collection_photo_ids)
-            where = " AND ".join(run_conds)
-            # Match by (detection_id, classifier_model, labels_fingerprint)
-            # — delete composite key tuples via rowid equivalents.
-            rows = self.conn.execute(
-                f"""SELECT cr.detection_id, cr.classifier_model,
-                           cr.labels_fingerprint
-                    FROM classifier_runs cr
-                    JOIN detections d ON d.id = cr.detection_id
-                    JOIN photos ph ON ph.id = d.photo_id
-                    JOIN workspace_folders wf
-                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                    WHERE {where}""",
-                [ws, *run_params],
-            ).fetchall()
-            for r in rows:
-                self.conn.execute(
-                    """DELETE FROM classifier_runs
-                       WHERE detection_id = ?
-                         AND classifier_model = ?
-                         AND labels_fingerprint = ?""",
-                    (r["detection_id"], r["classifier_model"],
-                     r["labels_fingerprint"]),
-                )
+            run_conds.append("cr.classifier_model = ?")
+            run_params.append(model)
+        if labels_fingerprint is not None:
+            run_conds.append("cr.labels_fingerprint = ?")
+            run_params.append(labels_fingerprint)
+        if collection_photo_ids is not None:
+            placeholders = ",".join("?" for _ in collection_photo_ids)
+            run_conds.append(f"d.photo_id IN ({placeholders})")
+            run_params.extend(collection_photo_ids)
+        run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
+        # Match by (detection_id, classifier_model, labels_fingerprint)
+        # — delete composite key tuples via rowid equivalents.
+        rows = self.conn.execute(
+            f"""SELECT cr.detection_id, cr.classifier_model,
+                       cr.labels_fingerprint
+                FROM classifier_runs cr
+                JOIN detections d ON d.id = cr.detection_id
+                JOIN photos ph ON ph.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?{run_where}""",
+            [ws, *run_params],
+        ).fetchall()
+        for r in rows:
+            self.conn.execute(
+                """DELETE FROM classifier_runs
+                   WHERE detection_id = ?
+                     AND classifier_model = ?
+                     AND labels_fingerprint = ?""",
+                (r["detection_id"], r["classifier_model"],
+                 r["labels_fingerprint"]),
+            )
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):
@@ -4337,6 +4343,11 @@ class Database:
         per-workspace review state (status, group_id, individual, vote_count)
         is left-joined from ``prediction_review`` so absent rows naturally
         surface as ``status = 'pending'``.
+
+        Predictions are filtered to the most recent ``labels_fingerprint``
+        per ``(detection_id, classifier_model)`` so stale rows from prior
+        label sets don't contaminate ``/api/predictions`` or
+        ``/api/predictions/compare`` after re-classification.
         """
         ws = self._ws_id()
         conditions = ["wf.workspace_id = ?"]
@@ -4351,6 +4362,15 @@ class Database:
         if status:
             conditions.append("COALESCE(pr_rev.status, 'pending') = ?")
             params.append(status)
+        # Latest-fingerprint-per-(detection, classifier_model) filter — same
+        # pattern used by /api/species/summary and get_top_prediction_for_photo.
+        conditions.append(
+            "pr.labels_fingerprint = ("
+            "SELECT pr2.labels_fingerprint FROM predictions pr2 "
+            "WHERE pr2.detection_id = pr.detection_id "
+            "AND pr2.classifier_model = pr.classifier_model "
+            "ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)"
+        )
         where = "WHERE " + " AND ".join(conditions)
         return self.conn.execute(
             f"""SELECT pr.*,
