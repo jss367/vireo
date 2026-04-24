@@ -1836,6 +1836,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             skipped_existing += 1
                             pred_row = thread_db.get_prediction_for_photo(
                                 photo["id"], model_name,
+                                labels_fingerprint=spec_fp,
                             )
                             if pred_row:
                                 folder_path = folders.get(photo["folder_id"], "")

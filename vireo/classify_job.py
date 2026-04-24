@@ -859,7 +859,9 @@ def _classify_photos(
                 failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
                 batch = []
             skipped_existing += 1
-            pred_row = db.get_prediction_for_photo(photo["id"], model_name)
+            pred_row = db.get_prediction_for_photo(
+                photo["id"], model_name, labels_fingerprint=fp,
+            )
             if pred_row:
                 timestamp = None
                 if photo["timestamp"]:
@@ -926,13 +928,33 @@ def _classify_photos(
                     _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
                     batch = []
         else:
-            # No detections — create a full-image detection and classify it
-            full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                               "confidence": 0, "category": "animal"}]
-            full_det_ids = db.save_detections(photo["id"], full_image_det,
-                                              detector_model="full-image")
+            # No detections — use (or create) a full-image synthetic detection
+            # to carry the classifier output.
+            #
+            # save_detections() does clear-and-reinsert per
+            # (photo_id, detector_model), so calling it on every pass would
+            # generate a new id each time and cascade-delete prior predictions
+            # and classifier_runs tied to the old id. Reuse the existing
+            # full-image detection when one is already cached, and only
+            # create a fresh one if none exists (or if the caller asked for
+            # a reclassify).
+            # min_conf=0 because the synthetic full-image detection is
+            # written with confidence=0 — the default threshold filter would
+            # hide it.
+            existing_full = db.get_detections(
+                photo["id"], detector_model="full-image", min_conf=0,
+            )
+            if existing_full and not reclassify:
+                full_det_id = existing_full[0]["id"]
+            else:
+                full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                                   "confidence": 0, "category": "animal"}]
+                full_det_ids = db.save_detections(
+                    photo["id"], full_image_det,
+                    detector_model="full-image",
+                )
+                full_det_id = full_det_ids[0]
             # Gate check for the synthetic full-image detection too.
-            full_det_id = full_det_ids[0]
             if not reclassify:
                 run_keys = db.get_classifier_run_keys(full_det_id)
                 if (model_name, fp) in run_keys:

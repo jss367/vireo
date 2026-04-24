@@ -1166,6 +1166,43 @@ def test_get_existing_prediction_photo_ids(tmp_path):
     assert result == set()
 
 
+def test_get_prediction_for_photo_keyed_by_fingerprint(tmp_path):
+    """When labels_fingerprint is given, it must scope the lookup.
+
+    Cache identity is (detection, model, fingerprint, species), so the
+    single-photo fetch used by the classify-skip path must honor it;
+    otherwise it would return a row from a different label set and
+    propagate incorrect species metadata into downstream grouping.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    # Two predictions on the same detection, same model, different fingerprints.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'aaa', 'Robin', 0.9)",
+        (det_ids[0],),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'bbb', 'Sparrow', 0.85)",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='aaa',
+    )['species'] == 'Robin'
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='bbb',
+    )['species'] == 'Sparrow'
+    # Absent fingerprint → no row
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='ccc',
+    ) is None
+
+
 def test_clear_predictions_without_collection_photo_ids(tmp_path):
     """The no-collection branch must bind every workspace_id placeholder it
     uses. A bug where the list of bound params had fewer entries than the

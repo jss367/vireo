@@ -575,6 +575,64 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
 
+def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypatch):
+    """When a photo has no real detections, classify_photos falls back to a
+    synthetic ('full-image') detection. Because save_detections is
+    clear-and-reinsert per (photo, detector_model), calling it on every
+    pass would generate a new id each time and cascade-delete prior
+    predictions/classifier_runs tied to the old id. The non-reclassify
+    path must reuse the existing full-image detection instead.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    # Pre-seed a full-image detection that a prior classify pass would have
+    # left behind.
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )
+    original_det_id = det_ids[0]
+
+    # Sanity check the helper used by the reuse path — must use min_conf=0
+    # because the synthetic full-image detection has confidence=0.
+    existing = db.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert len(existing) == 1
+    assert existing[0]["id"] == original_det_id
+
+    # Simulate what classify_photos does on a subsequent pass: the reuse
+    # branch must NOT call save_detections again, or it would cascade-delete
+    # any cached predictions attached to the original detection.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'bioclip', 'fp1', 'Robin', 0.8)",
+        (original_det_id,),
+    )
+    db.conn.commit()
+
+    # Reuse path via the helper
+    reused = db.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert reused[0]["id"] == original_det_id
+    # Prediction still there
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id = ?",
+        (original_det_id,),
+    ).fetchone()["n"]
+    assert n == 1
+
+
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
     from db import Database

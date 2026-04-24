@@ -4424,20 +4424,36 @@ class Database:
             ).fetchall()
         return {r["photo_id"] for r in rows}
 
-    def get_prediction_for_photo(self, photo_id, model):
-        """Return species, confidence, and detection_id for a photo's prediction by model, or None.
+    def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):
+        """Return species, confidence, and detection_id for a photo's prediction.
 
         Detections and predictions are global; the active workspace is
-        enforced through ``workspace_folders``.
+        enforced through ``workspace_folders``. Since prediction cache
+        identity is (detection, model, fingerprint, species), callers
+        should pass ``labels_fingerprint`` to avoid returning a row
+        written under a different label set. ``labels_fingerprint=None``
+        preserves the pre-refactor behavior (any row for the model).
         """
+        if labels_fingerprint is None:
+            return self.conn.execute(
+                """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   WHERE d.photo_id = ? AND pr.classifier_model = ?""",
+                (self._ws_id(), photo_id, model),
+            ).fetchone()
         return self.conn.execute(
             """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE d.photo_id = ? AND pr.classifier_model = ?""",
-            (self._ws_id(), photo_id, model),
+               WHERE d.photo_id = ?
+                 AND pr.classifier_model = ?
+                 AND pr.labels_fingerprint = ?""",
+            (self._ws_id(), photo_id, model, labels_fingerprint),
         ).fetchone()
 
     def get_photo_embedding(self, photo_id):
