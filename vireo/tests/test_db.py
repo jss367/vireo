@@ -3937,6 +3937,409 @@ def test_preview_cache_oldest_first(tmp_path):
     assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]
 
 
+def test_miss_columns_present(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+        "FROM photos LIMIT 0"
+    ).description
+    names = {c[0] for c in row}
+    assert names == {
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
+    }
+
+
+def test_list_misses_returns_flagged_photos_only(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22' "
+        "WHERE id=?", (p1,)
+    )
+    db.conn.commit()
+
+    misses = db.list_misses()
+    ids = [m["id"] for m in misses]
+    assert p1 in ids
+    assert p2 not in ids
+
+
+def test_list_misses_filters_by_category(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_clip = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_oof = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_clip,))
+    db.conn.execute("UPDATE photos SET miss_oof=1     WHERE id=?", (p_oof,))
+    db.conn.commit()
+
+    assert [m["id"] for m in db.list_misses(category="clipped")] == [p_clip]
+    assert [m["id"] for m in db.list_misses(category="oof")] == [p_oof]
+
+
+def test_clear_miss_flag_on_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_oof=1 WHERE id=?", (p,)
+    )
+    db.conn.commit()
+
+    db.clear_miss_flag(p, "clipped")
+    row = db.conn.execute(
+        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?", (p,)
+    ).fetchone()
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 1
+
+
+def test_bulk_reject_category_sets_flag_rejected(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)", (p1, p2)
+    )
+    db.conn.commit()
+
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 2
+    assert {a["photo_id"] for a in affected} == {p1, p2}
+    for pid in (p1, p2):
+        flag = db.conn.execute(
+            "SELECT flag FROM photos WHERE id=?", (pid,)
+        ).fetchone()["flag"]
+        assert flag == "rejected"
+
+
+def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
+    """Neither list_misses nor bulk_reject should touch photos already rejected.
+
+    The exclusion clause (flag IS NULL OR flag != 'rejected') is load-bearing:
+    a photo that's already been rejected must not show up again as a miss
+    (it's done) and must not inflate the bulk-reject rowcount (it's not news).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_miss = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_already = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
+        (p_miss, p_already),
+    )
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (p_already,))
+    db.conn.commit()
+
+    listed = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_miss in listed
+    assert p_already not in listed
+
+    affected = db.bulk_reject_miss_category("clipped")
+    # only p_miss got rejected; p_already was already rejected
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_miss
+    flag_already = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_already,)
+    ).fetchone()["flag"]
+    assert flag_already == "rejected"  # unchanged
+
+
+def test_list_misses_since_filter(tmp_path):
+    """`since` restricts results to photos whose miss_computed_at >= since.
+
+    Used by the pipeline-review "Review misses" step to scope the grid to
+    photos from the current pipeline run.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_old = db.add_photo(
+        folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_new = db.add_photo(
+        folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-20T00:00:00+00:00' "
+        "WHERE id=?", (p_old,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22T10:00:00+00:00' "
+        "WHERE id=?", (p_new,),
+    )
+    db.conn.commit()
+
+    all_ids = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_old in all_ids and p_new in all_ids
+
+    recent = [m["id"] for m in db.list_misses(category="clipped",
+                                              since="2026-04-21T00:00:00+00:00")]
+    assert recent == [p_new]
+
+    grouped = db.list_misses(since="2026-04-21T00:00:00+00:00")
+    assert [m["id"] for m in grouped] == [p_new]
+
+
+def test_list_misses_scoped_to_active_workspace(tmp_path):
+    """Misses in folders linked only to workspace A must not appear or get
+    rejected when workspace B is active."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    fb = db.add_folder("/tmp/b", name="b")
+    p_b = db.add_photo(fb, "b.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_b,))
+    db.conn.commit()
+
+    # Workspace B sees only its own miss.
+    ids_b = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_b == [p_b]
+
+    # Bulk reject in B must not touch A's photo.
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_b
+    flag_a = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_a,)
+    ).fetchone()["flag"]
+    assert flag_a != "rejected"
+    flag_b = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_b,)
+    ).fetchone()["flag"]
+    assert flag_b == "rejected"
+
+    # Switching back to A should still reveal its untouched miss.
+    db.set_active_workspace(ws_a)
+    ids_a = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_a == [p_a]
+
+
+def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
+    """list_misses must source detection_box/detection_conf from the
+    canonical `detections` table (highest-confidence row per photo, workspace-
+    scoped), not the legacy photos.detection_* columns that aren't populated
+    by normal pipeline runs."""
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p,))
+    db.conn.commit()
+    # Two detections; the primary is the higher-confidence one.
+    db.save_detections(
+        p,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1},
+             "confidence": 0.40, "category": "animal"},
+            {"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
+             "confidence": 0.85, "category": "animal"},
+        ],
+    )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == 1
+    m = misses[0]
+    assert m["detection_conf"] == 0.85
+    box = _json.loads(m["detection_box"])
+    assert box == {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2}
+
+
+def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
+    """A no_subject miss has no detection — detection_box/conf are None."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_no_subject=1 WHERE id=?", (p,))
+    db.conn.commit()
+
+    misses = db.list_misses(category="no_subject")
+    assert len(misses) == 1
+    assert misses[0]["detection_box"] is None
+    assert misses[0]["detection_conf"] is None
+
+
+def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
+    """Bulk reject must honor the same `since` filter as list_misses so
+    clicking "Reject all" on /misses?since=... doesn't silently reject
+    older misses from prior pipeline runs that aren't shown on screen."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_old = db.add_photo(folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_new = db.add_photo(folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-10T00:00:00+00:00", p_old),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-22T10:00:00+00:00", p_new),
+    )
+    db.conn.commit()
+
+    # Since filter matches only the new miss.
+    affected = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_new
+
+    flag_old = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    flag_new = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_new,)
+    ).fetchone()["flag"]
+    assert flag_old != "rejected"
+    assert flag_new == "rejected"
+
+    # Without since, the old miss is now eligible.
+    affected2 = db.bulk_reject_miss_category("clipped")
+    assert len(affected2) == 1
+    assert affected2[0]["photo_id"] == p_old
+    flag_old2 = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    assert flag_old2 == "rejected"
+
+
+def test_bulk_reject_miss_category_preserves_null_flag_in_old_value(tmp_path):
+    """old_value must be None (not "") for rows with NULL flag, so undo
+    can restore the original NULL rather than writing a non-canonical
+    empty string that bypasses flag validation (none/flagged/rejected
+    or NULL)."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_null = db.add_photo(folder_id, "null.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id, "none.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_flagged = db.add_photo(folder_id, "flagged.jpg", ".jpg", file_size=100, file_mtime=3.0)
+
+    # p_null forced to NULL flag (add_photo defaults the column to 'none');
+    # p_none explicitly "none"; p_flagged "flagged".
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?, ?)",
+        (p_null, p_none, p_flagged),
+    )
+    db.conn.execute("UPDATE photos SET flag=NULL      WHERE id=?", (p_null,))
+    db.conn.execute("UPDATE photos SET flag='none'    WHERE id=?", (p_none,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (p_flagged,))
+    db.conn.commit()
+
+    affected = db.bulk_reject_miss_category("clipped")
+    by_id = {a["photo_id"]: a for a in affected}
+
+    assert by_id[p_null]["old_value"] is None
+    assert by_id[p_none]["old_value"] == "none"
+    assert by_id[p_flagged]["old_value"] == "flagged"
+
+
+def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
+    """With >999 flagged misses, the detections IN (...) clause would exceed
+    SQLite's SQLITE_MAX_VARIABLE_NUMBER. list_misses must chunk the lookup
+    so /api/misses doesn't raise ``OperationalError: too many SQL variables``
+    for workspaces with many flagged photos."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    # Insert 1100 photos, all flagged as clipped, each with one detection.
+    # This pushes the IN clause well past the default 999-var limit and would
+    # crash without chunking.
+    N = 1100
+    photo_ids = []
+    for i in range(N):
+        pid = db.add_photo(
+            folder_id, f"p{i:04d}.jpg", ".jpg",
+            file_size=100, file_mtime=float(i + 1),
+        )
+        photo_ids.append(pid)
+    db.conn.executemany(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?",
+        [(pid,) for pid in photo_ids],
+    )
+    db.conn.commit()
+    for pid in photo_ids:
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.9, "category": "animal"}],
+        )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == N
+    # Every row must have a detection attached (proving chunking visited all).
+    assert all(m["detection_conf"] == 0.9 for m in misses)
+    assert all(m["detection_box"] is not None for m in misses)
+
+
+def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
+    """clear_miss_flag must refuse to touch a photo from another workspace."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    with pytest.raises(ValueError):
+        db.clear_miss_flag(p_a, "clipped")
+
+    # A's miss flag must still be set.
+    row = db.conn.execute(
+        "SELECT miss_clipped FROM photos WHERE id=?", (p_a,)
+    ).fetchone()
+    assert row["miss_clipped"] == 1
+
+
 def test_new_image_snapshots_tables_exist(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))

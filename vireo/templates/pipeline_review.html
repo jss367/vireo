@@ -977,6 +977,12 @@ input[type="range"]::-moz-range-thumb {
         <div class="num" style="color:var(--warning);" id="statProtected">0</div>
         <div class="label">Protected</div>
       </div>
+      <a id="missesReviewBtn" href="/misses" data-testid="pipeline-review-misses"
+         style="display:none;margin-left:auto;padding:8px 14px;
+                background:var(--danger);color:#fff;border-radius:6px;
+                font-size:13px;font-weight:600;text-decoration:none;">
+        Review misses (<span id="missesReviewCount">0</span>)
+      </a>
     </div>
 
     <!-- Filter bar (hidden until data loads) -->
@@ -1769,7 +1775,35 @@ function initPipelineReviewPage() {
 
     renderResults();
     checkPendingSync();
+    refreshMissesReviewBtn();
   });
+}
+
+/* Show a "Review misses (N)" shortcut in the summary bar when the current
+ * pipeline run actually recomputed miss flags. Gated on
+ * pipelineResults.miss_computed_at (set by pipeline_job's miss_stage);
+ * without the marker we'd surface stale miss flags from a prior run as
+ * current-run misses — e.g. when miss_enabled=false or the stage was
+ * skipped. The link is scoped to that same timestamp so /misses only
+ * shows misses written during this run. */
+function refreshMissesReviewBtn() {
+  var btn = document.getElementById('missesReviewBtn');
+  if (!btn || !pipelineResults) return;
+  var sinceTs = pipelineResults.miss_computed_at;
+  if (!sinceTs) return;  // miss stage didn't run this pipeline
+
+  fetch('/api/misses?since=' + encodeURIComponent(sinceTs)).then(function(r) {
+    if (!r.ok) return null;
+    return r.json();
+  }).then(function(data) {
+    if (!data) return;
+    var all = (data.no_subject || []).concat(data.clipped || []).concat(data.oof || []);
+    var count = all.length;
+    if (count === 0) return;  // stays hidden
+    document.getElementById('missesReviewCount').textContent = count;
+    btn.href = '/misses?since=' + encodeURIComponent(sinceTs);
+    btn.style.display = '';
+  }).catch(function() { /* no-op */ });
 }
 
 // -- Species confirmation --

@@ -768,6 +768,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def highlights_page():
         return render_template("highlights.html")
 
+    @app.route("/misses")
+    def misses_page():
+        return render_template("misses.html")
+
     # -- API routes --
 
     def _attach_species(db, photo_dicts):
@@ -2536,6 +2540,81 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
+
+    @app.route("/api/misses")
+    def api_misses():
+        """Return photos flagged as misses.
+
+        With no query string, returns a dict with all three categories.
+        With ``?category=X``, returns {"photos": [...], "category": X}.
+        ``?since=<iso-ts>`` restricts results to photos whose
+        miss_computed_at >= since (used by the pipeline-review step).
+        """
+        db = _get_db()
+        category = request.args.get("category")
+        since = request.args.get("since") or None
+        if category is not None:
+            if category not in ("no_subject", "clipped", "oof"):
+                return jsonify({"error": "invalid category"}), 400
+            photos = db.list_misses(category=category, since=since)
+            return jsonify({"photos": photos, "category": category})
+        return jsonify({
+            "no_subject": db.list_misses(category="no_subject", since=since),
+            "clipped":    db.list_misses(category="clipped", since=since),
+            "oof":        db.list_misses(category="oof", since=since),
+        })
+
+    @app.route("/api/misses/reject", methods=["POST"])
+    def api_misses_reject():
+        """Set flag='rejected' on every photo currently flagged with the given
+        miss category.
+
+        Accepts an optional ``since`` ISO timestamp that mirrors the
+        ``/misses?since=...`` review-window scope; when present, only
+        photos whose miss_computed_at >= since are rejected, so the bulk
+        action matches what the user sees on screen. Returns
+        {"rejected": n, "category": ...}.
+
+        Records a batch ``flag`` entry in ``edit_history`` so the bulk
+        change is undoable and shows up in the audit log, matching the
+        behavior of ``/api/batch/flag``.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        since = body.get("since") or None
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        affected = db.bulk_reject_miss_category(category, since=since)
+        if affected:
+            items = [
+                {"photo_id": a["photo_id"],
+                 "old_value": a["old_value"],
+                 "new_value": "rejected"}
+                for a in affected
+            ]
+            db.record_edit(
+                "flag",
+                f"Rejected {len(items)} miss photos (category={category})",
+                "rejected",
+                items,
+                is_batch=True,
+            )
+        return jsonify({"rejected": len(affected), "category": category})
+
+    @app.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])
+    def api_misses_unflag(photo_id):
+        """Clear the given miss-category boolean on a single photo."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        try:
+            db.clear_miss_flag(photo_id, category)
+        except ValueError:
+            return jsonify({"error": "photo not in active workspace"}), 404
+        return jsonify({"ok": True})
 
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
@@ -7375,6 +7454,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             reflow,
             run_grouping,
             save_results,
@@ -7400,8 +7480,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         encounters = run_grouping(photos, config=pipeline_cfg)
         results = reflow(encounters, config=pipeline_cfg)
 
-        # Save updated results
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. reflow/regroup-live do not recompute misses themselves.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
+        # Save updated results
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
@@ -7415,6 +7502,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             run_full_pipeline,
             save_results,
             serialize_results,
@@ -7435,7 +7523,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         results = run_full_pipeline(photos, config=pipeline_cfg)
 
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. regroup-live does not rerun the miss stage itself.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))

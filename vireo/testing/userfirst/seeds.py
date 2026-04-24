@@ -96,6 +96,64 @@ def browse_seed(db_path, thumb_dir, photos_root):
     db.conn.close()
 
 
+def misses_seed(db_path, thumb_dir, photos_root):
+    """Seed: three photos pre-flagged as misses (one per category).
+
+    Exercises the /misses page and its bulk-reject flow without requiring a
+    real pipeline run (which would need MegaDetector/SAM2 weights). The
+    fixture sets the miss_* booleans directly, mimicking what miss_stage
+    writes after classify_miss.
+    """
+    from db import Database
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    base = photos_root if photos_root else "/test/photos"
+    folder_id = db.add_folder(os.path.join(base, "misses_fixture"), name="misses_fixture")
+
+    ts = "2026-04-22T10:00:00+00:00"
+    specs = [
+        ("no_subject", "ns01.jpg", "2026-04-22T09:00:00", {"miss_no_subject": 1}),
+        ("clipped",    "clip01.jpg", "2026-04-22T09:00:01", {"miss_clipped": 1}),
+        ("oof",        "oof01.jpg",  "2026-04-22T09:00:02", {"miss_oof": 1}),
+    ]
+
+    photos = []
+    for _cat, fname, photo_ts, flags in specs:
+        pid = db.add_photo(
+            folder_id=folder_id,
+            filename=fname,
+            extension=".jpg",
+            file_size=4000,
+            file_mtime=float(len(photos) + 1),
+            timestamp=photo_ts,
+        )
+        photos.append(pid)
+        col = next(iter(flags))
+        db.conn.execute(
+            f"UPDATE photos SET {col}=1, miss_computed_at=? WHERE id=?",
+            (ts, pid),
+        )
+        # Write a primary detection to the canonical `detections` table so
+        # the /misses cards can render bbox overlays. no_subject gets a
+        # low-confidence detection (matches the pipeline behavior).
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
+              "confidence": 0.10 if _cat == "no_subject" else 0.85,
+              "category": "animal"}],
+        )
+    db.conn.commit()
+
+    os.makedirs(thumb_dir, exist_ok=True)
+    for pid in photos:
+        _make_thumb(thumb_dir, pid)
+
+    db.conn.close()
+
+
 def orphan_folder_seed(db_path, thumb_dir, photos_root):
     """Seed: a child folder whose parent is linked-then-unlinked.
 

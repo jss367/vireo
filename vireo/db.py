@@ -439,6 +439,15 @@ class Database:
             self.conn.execute("ALTER TABLE photos ADD COLUMN eye_conf REAL")
             self.conn.execute("ALTER TABLE photos ADD COLUMN eye_tenengrad REAL")
 
+        # Miss detection flags (derived from detection + quality + burst context)
+        try:
+            self.conn.execute("SELECT miss_no_subject FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_no_subject INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_clipped INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_oof INTEGER")
+            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_computed_at TEXT")
+
         # Edit history tables migration
         try:
             self.conn.execute("SELECT id FROM edit_history LIMIT 0")
@@ -4067,6 +4076,166 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
+    def list_misses(self, category=None, since=None):
+        """Return photos flagged as misses in the active workspace.
+
+        category: None | "no_subject" | "clipped" | "oof"
+        since: optional ISO timestamp; if set, restricts to photos whose
+            miss_computed_at >= since. Used by the pipeline-review step to
+            scope results to the current run.
+
+        Excludes photos already flagged as rejected. Scoped to folders
+        linked to the active workspace. ``detection_box`` and
+        ``detection_conf`` are sourced from the primary (highest-confidence)
+        row in the ``detections`` table — the legacy ``photos`` columns are
+        not populated by normal pipeline runs. Ordered by timestamp DESC.
+        """
+        ws_id = self._ws_id()
+        if category is None:
+            where = (
+                "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
+            )
+        else:
+            col = {
+                "no_subject": "miss_no_subject",
+                "clipped":    "miss_clipped",
+                "oof":        "miss_oof",
+            }[category]
+            where = f"p.{col}=1"
+
+        params = [ws_id]
+        if since:
+            where = f"({where}) AND p.miss_computed_at >= ?"
+            params.append(since)
+
+        rows = self.conn.execute(
+            f"SELECT p.id, p.folder_id, p.filename, p.timestamp, p.burst_id, "
+            f"       p.subject_size, p.crop_complete, "
+            f"       p.subject_tenengrad, p.bg_tenengrad, "
+            f"       p.miss_no_subject, p.miss_clipped, p.miss_oof, "
+            f"       p.miss_computed_at, p.flag "
+            f"FROM photos p "
+            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"WHERE wf.workspace_id = ? "
+            f"  AND ({where}) "
+            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"ORDER BY p.timestamp DESC",
+            params,
+        ).fetchall()
+        photos = [dict(r) for r in rows]
+        if not photos:
+            return photos
+
+        import json as _json
+        photo_ids = [p["id"] for p in photos]
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        # A workspace with thousands of flagged misses would otherwise raise
+        # ``OperationalError: too many SQL variables``.
+        CHUNK = 500
+        primary = {}
+        for i in range(0, len(photo_ids), CHUNK):
+            chunk = photo_ids[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            det_rows = self.conn.execute(
+                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence "
+                f"FROM detections "
+                f"WHERE workspace_id=? AND photo_id IN ({placeholders}) "
+                f"ORDER BY photo_id, detector_confidence DESC",
+                [ws_id, *chunk],
+            ).fetchall()
+            for d in det_rows:
+                primary.setdefault(d["photo_id"], d)
+        for p in photos:
+            d = primary.get(p["id"])
+            if d is not None:
+                p["detection_box"] = _json.dumps({
+                    "x": d["box_x"], "y": d["box_y"],
+                    "w": d["box_w"], "h": d["box_h"],
+                })
+                p["detection_conf"] = d["detector_confidence"]
+            else:
+                p["detection_box"] = None
+                p["detection_conf"] = None
+        return photos
+
+    def clear_miss_flag(self, photo_id, category):
+        """Set the given miss column to 0 on the given photo.
+
+        Raises ValueError if the photo is not in the active workspace, so
+        that `/api/misses/<id>/unflag` can't touch another workspace's photos.
+        """
+        self._verify_photo_in_workspace(photo_id)
+        col = {
+            "no_subject": "miss_no_subject",
+            "clipped":    "miss_clipped",
+            "oof":        "miss_oof",
+        }[category]
+        self.conn.execute(
+            f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,)
+        )
+        self.conn.commit()
+
+    def bulk_reject_miss_category(self, category, since=None):
+        """Set flag='rejected' on every photo flagged with that miss category
+        in the active workspace and not already rejected.
+
+        ``since`` mirrors the filter on ``list_misses``: when set, only
+        photos whose ``miss_computed_at >= since`` are rejected. This
+        keeps bulk reject scoped to the /misses view the user is looking
+        at (e.g. the current pipeline run), so older misses not shown on
+        screen aren't silently rejected.
+
+        Returns a list of ``{"photo_id": int, "old_value": str}`` for each
+        photo whose flag was changed. The caller (``/api/misses/reject``)
+        uses this to write an ``edit_history`` entry so the bulk change is
+        undoable/auditable like the other batch flag routes; without it,
+        an accidental "Reject all" on /misses would be invisible to the
+        undo flow.
+        """
+        col = {
+            "no_subject": "miss_no_subject",
+            "clipped":    "miss_clipped",
+            "oof":        "miss_oof",
+        }[category]
+        params = [self._ws_id()]
+        since_clause = ""
+        if since:
+            since_clause = "    AND p.miss_computed_at >= ? "
+            params.append(since)
+        rows = self.conn.execute(
+            f"SELECT p.id, p.flag FROM photos p "
+            f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
+            f"WHERE wf.workspace_id = ? "
+            f"  AND p.{col}=1 "
+            f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"{since_clause}",
+            params,
+        ).fetchall()
+        # Preserve NULL flag values in old_value so undo is lossless.
+        # Coercing NULL to "" would make _apply_undo restore an empty
+        # string instead of the original NULL, leaving rows in a
+        # non-canonical state that bypasses code paths expecting
+        # none/flagged/rejected (or NULL).
+        affected = [
+            {"photo_id": r["id"], "old_value": r["flag"]}
+            for r in rows
+        ]
+        if not affected:
+            return []
+        ids = [a["photo_id"] for a in affected]
+        # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
+        _CHUNK = 500
+        for i in range(0, len(ids), _CHUNK):
+            chunk = ids[i:i + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"UPDATE photos SET flag='rejected' WHERE id IN ({placeholders})",
+                chunk,
+            )
+        self.conn.commit()
+        return affected
+
     def get_detection_ids_for_photos(self, photo_ids):
         """Return {photo_id: set(detection_id, ...)} for the given photo IDs.
 
@@ -4846,6 +5015,26 @@ class Database:
             {where}
         """
         return self.conn.execute(query, params).fetchone()[0]
+
+    def collection_photo_ids(self, collection_id):
+        """Return the set of photo IDs in the collection, workspace-scoped.
+
+        Returns an empty set for a missing collection. Used by stages
+        that need to restrict writes to the current pipeline-run scope
+        without paging through full photo rows.
+        """
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            return set()
+
+        folder_join, join_clause, where, params = parts
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        return {row["id"] for row in self.conn.execute(query, params)}
 
     def update_folder_counts(self):
         """Recalculate photo_count for all folders."""

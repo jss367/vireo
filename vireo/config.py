@@ -61,6 +61,13 @@ DEFAULTS = {
         "reject_focus": 0.35,
         "reject_clip_high": 0.30,
         "reject_composite": 0.40,
+        # Miss detection
+        "miss_enabled": True,
+        "miss_det_confidence": 0.25,
+        "miss_det_confidence_burst": 0.15,
+        "miss_bbox_area_min": 0.005,
+        "miss_bbox_area_min_singleton": 0.002,
+        "miss_oof_ratio": 0.5,
         # Eye-focus detection
         "eye_detect_enabled": True,
         "eye_classifier_conf_gate": 0.50,

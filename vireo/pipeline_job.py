@@ -156,6 +156,7 @@ STAGE_WEIGHTS = {
     "extract_masks": 10,
     "eye_keypoints": 15,
     "regroup": 6,
+    "misses": 4,
 }
 
 
@@ -232,7 +233,7 @@ def _update_stages(runner, job_id, stages):
 
 def _current_phase(stages):
     """Determine the primary phase label from stage statuses."""
-    for name in ["regroup", "eye_keypoints", "extract_masks", "classify", "detect",
+    for name in ["misses", "regroup", "eye_keypoints", "extract_masks", "classify", "detect",
                  "model_loader", "previews", "thumbnails", "scan", "ingest"]:
         info = stages.get(name, {})
         if info.get("status") == "running":
@@ -333,6 +334,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         "extract_masks": {"status": "pending", "count": 0, "label": "Extracting features"},
         "eye_keypoints": {"status": "pending", "count": 0, "label": "Detecting eye keypoints"},
         "regroup": {"status": "pending", "label": "Grouping encounters"},
+        "misses": {"status": "pending", "count": 0, "label": "Flagging missed shots"},
     }
 
     # Normalize model_ids: prefer the explicit list, fall back to the legacy
@@ -429,6 +431,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         step_defs.append({"id": "eye_keypoints", "label": "Detect eye keypoints"})
     if not params.skip_regroup:
         step_defs.append({"id": "regroup", "label": "Group encounters"})
+        step_defs.append({"id": "misses", "label": "Flag missed shots"})
     runner.set_steps(job["id"], step_defs)
 
     result = {"stages": {}}
@@ -2418,6 +2421,84 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         _update_stages(runner, job["id"], stages)
 
+    def miss_stage():
+        """Compute miss-detection flags for the workspace after regroup.
+
+        Runs last so burst_id is available. Uses only per-photo features
+        already computed by earlier stages — no model inference.
+        """
+        # Skip when classify was skipped: classify_miss depends on fresh
+        # detections/classifications written by the classify stage, and
+        # without them it would mass-flag "no_subject" on photos whose
+        # subjects simply weren't re-evaluated this run.
+        if (
+            params.skip_regroup
+            or params.skip_classify
+            or abort.is_set()
+            or not collection_id
+        ):
+            stages["misses"]["status"] = "skipped"
+            runner.update_step(job["id"], "misses", status="completed",
+                               summary="Skipped")
+            return
+
+        stages["misses"]["status"] = "running"
+        runner.update_step(job["id"], "misses", status="running")
+        _update_stages(runner, job["id"], stages)
+
+        try:
+            from datetime import UTC, datetime
+
+            import config as cfg
+            from misses import compute_misses_for_workspace
+            from pipeline import load_results_raw, save_results_raw
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            # Share one timestamp between the DB write and the saved
+            # pipeline-results cache so pipeline_review's "Review misses"
+            # shortcut can gate on actual recomputation in this run and
+            # scope /misses?since=... to exactly what was just written.
+            now_ts = datetime.now(UTC).isoformat(timespec="microseconds")
+            miss_enabled = pipeline_cfg.get("miss_enabled", True)
+
+            n = compute_misses_for_workspace(
+                thread_db,
+                pipeline_cfg,
+                collection_id=collection_id,
+                exclude_photo_ids=params.exclude_photo_ids,
+                now=now_ts,
+            )
+
+            stages["misses"]["status"] = "completed"
+            stages["misses"]["count"] = n
+            runner.update_step(job["id"], "misses", status="completed",
+                               summary=f"{n} photos evaluated")
+            result["stages"]["misses"] = {"evaluated": n}
+
+            # Mark the cached results so the review UI knows misses
+            # were actually recomputed this run. Without this, the
+            # shortcut would surface stale miss flags from a prior
+            # run as "current-run misses" whenever miss_enabled=False
+            # or the stage was skipped.
+            if miss_enabled:
+                cache_dir = os.path.dirname(db_path)
+                cached = load_results_raw(cache_dir, workspace_id)
+                if cached is not None:
+                    cached["miss_computed_at"] = now_ts
+                    save_results_raw(cached, cache_dir, workspace_id)
+        except Exception as e:
+            errors.append(f"[misses] Fatal: {e}")
+            log.exception("Pipeline miss-detection stage failed")
+            stages["misses"]["status"] = "failed"
+            runner.update_step(job["id"], "misses", status="failed", error=str(e))
+
+        _update_stages(runner, job["id"], stages)
+
     # --- Launch threads ---
 
     threads = {}
@@ -2470,6 +2551,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
     # Phase 4: regroup (needs extract-masks + eye-keypoints output)
     if not abort.is_set():
         regroup_stage()
+
+    # Phase 5: miss detection (pure derivation from per-photo features +
+    # burst_id written by regroup). Cheap; no model inference.
+    # Skip when regroup failed: miss classification depends on regroup's
+    # burst_id output, so running here after a regroup failure would
+    # overwrite miss_* flags with stale context during an already-failing
+    # job. regroup_stage marks itself "failed" without setting abort, so
+    # check the stage status explicitly.
+    if not abort.is_set() and stages["regroup"].get("status") != "failed":
+        miss_stage()
 
     cancel_watcher_stop.set()
 
