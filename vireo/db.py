@@ -751,6 +751,23 @@ class Database:
             self.conn.execute("DELETE FROM predictions WHERE detection_id IS NULL")
             self.conn.commit()
 
+        # Legacy detector-key normalization: pre-redesign code wrote
+        # ``detector_model='MegaDetector'``; the new code standardizes on
+        # ``'megadetector-v6'``. Without this rewrite the very first run
+        # after upgrade would insert a parallel set of detections instead of
+        # replacing the legacy rows (save_detections keys off detector_model
+        # for clear-and-reinsert), duplicating downstream predictions/stats.
+        # Idempotent: only affects rows still keyed on the legacy string.
+        self.conn.execute(
+            "UPDATE detections SET detector_model='megadetector-v6' "
+            "WHERE detector_model='MegaDetector'"
+        )
+        self.conn.execute(
+            "UPDATE detector_runs SET detector_model='megadetector-v6' "
+            "WHERE detector_model='MegaDetector'"
+        )
+        self.conn.commit()
+
         # detector_runs backfill (detection-storage redesign): derive one row per
         # distinct (photo_id, detector_model) from existing detections so downstream
         # skip checks don't re-run MegaDetector over photos it has already seen.

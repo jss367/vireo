@@ -988,9 +988,16 @@ def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw
         if did is None or did in seen:
             continue
         seen.add(did)
+        # Only record the run for detections that actually produced a
+        # prediction. A count of 0 means the classifier failed (transient
+        # load error, decode error, etc.) — caching it as "done" would
+        # permanently strand the detection on the next non-reclassify run.
+        n = counts.get(did, 0)
+        if n <= 0:
+            continue
         db.record_classifier_run(
             did, model_name, labels_fingerprint,
-            prediction_count=counts.get(did, 0),
+            prediction_count=n,
         )
 
 

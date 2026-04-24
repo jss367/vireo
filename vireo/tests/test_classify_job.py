@@ -612,6 +612,47 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     assert calls["n"] == 0, "classifier should be skipped when run key exists"
 
 
+def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
+    """A failed classifier batch (no prediction for a detection) must not be
+    cached as a completed run — otherwise the detection is permanently
+    stranded on the next non-reclassify pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ok, det_failed = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9},
+            {"box": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5}, "confidence": 0.8},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    batch = [
+        {"detection_id": det_ok, "img": object()},
+        {"detection_id": det_failed, "img": object()},
+    ]
+    # Only the first detection made it into raw_results (second one failed)
+    raw_results = [{"detection_id": det_ok, "species": "Robin", "confidence": 0.9}]
+
+    import classify_job
+    classify_job._record_batch_classifier_runs(
+        db, batch, "bioclip-2", "abc123", raw_results
+    )
+
+    keys_ok = db.get_classifier_run_keys(det_ok)
+    keys_failed = db.get_classifier_run_keys(det_failed)
+    assert keys_ok == {("bioclip-2", "abc123")}, "successful detection should be cached"
+    assert keys_failed == set(), "failed detection must NOT be cached"
+
+
 def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
     """When a classifier runs, the labels fingerprint is upserted."""
     from db import Database

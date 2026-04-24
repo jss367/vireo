@@ -6426,17 +6426,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import numpy as np
 
         db = _get_db()
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         distance_threshold = request.args.get("threshold", 0.4, type=float)
 
-        # Find all photos with this species prediction
+        # Find all photos with this species prediction in the active
+        # workspace. Predictions are global but membership in the
+        # workspace is expressed through workspace_folders.
         rows = db.conn.execute(
             """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               WHERE pr.species = ? AND p.embedding IS NOT NULL""",
-            (species_name,),
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pr.species = ?
+                 AND p.embedding IS NOT NULL
+                 AND d.detector_confidence >= ?""",
+            (ws, species_name, min_conf),
         ).fetchall()
 
         if len(rows) < 2:

@@ -4291,6 +4291,52 @@ def test_detector_run_is_not_workspace_scoped(tmp_path):
     assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
 
 
+def test_init_normalizes_legacy_detector_model_key(tmp_path):
+    """Legacy rows written with detector_model='MegaDetector' must be
+    renamed to 'megadetector-v6' on init. Without this, the next run
+    would insert a parallel set of detections keyed on the new string
+    instead of clearing-and-reinserting the legacy ones.
+    """
+    from db import Database
+
+    db_path = str(tmp_path / "legacy.db")
+    db = Database(db_path)
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Manually write a legacy-keyed detection and detector_runs row, as if
+    # the DB had been populated by pre-refactor code.
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_model, "
+        "box_x, box_y, box_w, box_h, detector_confidence) "
+        "VALUES (?, 'MegaDetector', 0.1, 0.1, 0.2, 0.2, 0.9)",
+        (photo_id,),
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO detector_runs "
+        "(photo_id, detector_model, box_count) VALUES (?, 'MegaDetector', 1)",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.conn.close()
+
+    # Re-open: init-time migration should normalize the key.
+    db2 = Database(db_path)
+    det_keys = {r["detector_model"] for r in db2.conn.execute(
+        "SELECT detector_model FROM detections"
+    ).fetchall()}
+    run_keys = {r["detector_model"] for r in db2.conn.execute(
+        "SELECT detector_model FROM detector_runs"
+    ).fetchall()}
+    assert det_keys == {"megadetector-v6"}
+    assert run_keys == {"megadetector-v6"}
+
+
 def test_record_classifier_run_and_lookup(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
