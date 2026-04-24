@@ -5099,9 +5099,14 @@ class Database:
         Args:
             taxonomy: a Taxonomy instance with a lookup() method
         """
+        # Also include already-typed taxonomy keywords whose taxon_id is
+        # still NULL — those were created before the local taxa table was
+        # populated (e.g. via add_keyword(..., is_species=True) from the
+        # classifier), and still need their hierarchy link filled in.
         keywords = self.conn.execute(
             "SELECT id, name, type, taxon_id FROM keywords "
-            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy'"
+            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy' "
+            "   OR taxon_id IS NULL"
         ).fetchall()
         updated = 0
         for kw in keywords:
@@ -5117,6 +5122,11 @@ class Database:
                     ).fetchone()
                     if row:
                         local_taxon_id = row["id"]
+            # Skip no-op updates so the "updated" count reflects real changes.
+            is_type_change = kw["type"] != "taxonomy"
+            is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
+            if not (is_type_change or is_taxon_link):
+                continue
             self.conn.execute(
                 "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
                 "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",

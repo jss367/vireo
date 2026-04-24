@@ -597,27 +597,44 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
              kingdom, common_name),
         )
 
-    # Resolve parent_id by matching the second-to-last lineage scientific
-    # name to a local taxa.id.
+    # Resolve parent_id using the full lineage path as the key, not just
+    # the parent's scientific name. Scientific names aren't globally unique
+    # — homonyms exist at different ranks (e.g. plant/animal genera sharing
+    # a name) — so a name-keyed map silently overwrites one inat_id with
+    # another and wires parent_id to the wrong node. Indexing by the full
+    # tuple of lineage_names disambiguates: two taxa with the same
+    # scientific name always have different ancestry.
     _status("Resolving parent relationships...")
-    rows = db.conn.execute("SELECT id, name FROM taxa").fetchall()
-    local_id_by_sci = {r["name"]: r["id"] for r in rows}
+    inat_id_by_lineage = {}
+    local_id_by_inat_id = {}
     for inat_id, entry in entries_by_inat_id.items():
-        lineage_names = entry.get("lineage_names") or []
-        if len(lineage_names) < 2:
-            continue
-        parent_sci = lineage_names[-2]
-        parent_local = local_id_by_sci.get(parent_sci)
-        if parent_local is None:
-            continue
-        own_row = db.conn.execute(
+        lineage = tuple(entry.get("lineage_names") or [])
+        if lineage:
+            # First winner by iteration order; conflicts would mean two
+            # taxa share the exact same lineage path, which shouldn't
+            # happen in well-formed data.
+            inat_id_by_lineage.setdefault(lineage, inat_id)
+        row = db.conn.execute(
             "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
         ).fetchone()
-        if own_row and own_row["id"] != parent_local:
-            db.conn.execute(
-                "UPDATE taxa SET parent_id = ? WHERE id = ?",
-                (parent_local, own_row["id"]),
-            )
+        if row:
+            local_id_by_inat_id[inat_id] = row["id"]
+
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage = tuple(entry.get("lineage_names") or [])
+        if len(lineage) < 2:
+            continue
+        parent_inat_id = inat_id_by_lineage.get(lineage[:-1])
+        if parent_inat_id is None:
+            continue
+        parent_local = local_id_by_inat_id.get(parent_inat_id)
+        own_local = local_id_by_inat_id.get(inat_id)
+        if parent_local is None or own_local is None or own_local == parent_local:
+            continue
+        db.conn.execute(
+            "UPDATE taxa SET parent_id = ? WHERE id = ?",
+            (parent_local, own_local),
+        )
 
     # Populate taxa_common_names — index every English common name (including
     # alternates) under its taxon so add_keyword's auto-detect can match

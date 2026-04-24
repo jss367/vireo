@@ -922,6 +922,76 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_populate_taxa_db_from_json_disambiguates_homonym_parents(tmp_path):
+    """Parent resolution keys by lineage tuple, so homonym parents don't
+    cross-wire each other's children.
+
+    Scientific names aren't globally unique — a genus "Iris" exists in
+    both Plantae and a fictional Animalia homonym here. Before the fix,
+    whichever taxon happened to be iterated last won the name→id map,
+    so both kids got their parent_id pointed at the same taxon. Using
+    the full lineage tuple prevents that.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    homonym_tax = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "plantae": {"taxon_id": 1000, "scientific_name": "Plantae", "common_name": "",
+                        "rank": "kingdom", "lineage_names": ["Plantae"], "lineage_ranks": ["kingdom"]},
+            "animalia": {"taxon_id": 2000, "scientific_name": "Animalia", "common_name": "",
+                         "rank": "kingdom", "lineage_names": ["Animalia"], "lineage_ranks": ["kingdom"]},
+            "iris_plant": {"taxon_id": 1010, "scientific_name": "Iris", "common_name": "",
+                           "rank": "genus",
+                           "lineage_names": ["Plantae", "Iris"],
+                           "lineage_ranks": ["kingdom", "genus"]},
+            "iris_animal": {"taxon_id": 2010, "scientific_name": "Iris", "common_name": "",
+                            "rank": "genus",
+                            "lineage_names": ["Animalia", "Iris"],
+                            "lineage_ranks": ["kingdom", "genus"]},
+            "plant_species": {"taxon_id": 1011, "scientific_name": "Iris germanica",
+                              "common_name": "", "rank": "species",
+                              "lineage_names": ["Plantae", "Iris", "Iris germanica"],
+                              "lineage_ranks": ["kingdom", "genus", "species"]},
+            "animal_species": {"taxon_id": 2011, "scientific_name": "Iris animalia",
+                               "common_name": "", "rank": "species",
+                               "lineage_names": ["Animalia", "Iris", "Iris animalia"],
+                               "lineage_ranks": ["kingdom", "genus", "species"]},
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(homonym_tax, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    plant_species_parent = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 1011"
+    ).fetchone()["parent_id"]
+    animal_species_parent = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 2011"
+    ).fetchone()["parent_id"]
+    iris_plant_local = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 1010"
+    ).fetchone()["id"]
+    iris_animal_local = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 2010"
+    ).fetchone()["id"]
+
+    assert plant_species_parent == iris_plant_local, (
+        "Plantae species should point to plant Iris genus, not animal Iris"
+    )
+    assert animal_species_parent == iris_animal_local, (
+        "Animalia species should point to animal Iris genus, not plant Iris"
+    )
+    assert plant_species_parent != animal_species_parent
+
+
 def test_populate_taxa_db_from_json_enables_auto_detect(tmp_path):
     """After populate, add_keyword auto-detects common names as taxonomy.
 

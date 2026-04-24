@@ -748,6 +748,51 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     assert row['taxon_id'] == taxa_id
 
 
+def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path):
+    """Keywords already typed 'taxonomy' but with taxon_id=NULL get linked.
+
+    Covers the Gadwall/Black-crowned-night-heron case: keywords added via
+    the classifier path with is_species=True (which also set
+    type='taxonomy') before the local taxa table was populated. A later
+    taxonomy download should attach taxon_id to those existing rows.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, rank, kingdom) VALUES (?, ?, ?, ?)",
+        (6924, 'Mareca strepera', 'species', 'Animalia'),
+    )
+    db.conn.commit()
+    taxa_id = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 6924"
+    ).fetchone()['id']
+
+    # Simulate classifier-added keyword: type='taxonomy' but taxon_id=NULL.
+    kid = db.add_keyword('Gadwall', is_species=True)
+    row = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['type'] == 'taxonomy'
+    assert row['taxon_id'] is None
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == 'gadwall':
+                return {"taxon_id": 6924}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['taxon_id'] == taxa_id
+
+
 def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
     """A keyword with is_species=1 but type!='taxonomy' still gets retyped.
 
