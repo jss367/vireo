@@ -864,59 +864,65 @@ def _classify_photos(
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
 
-        if photo["id"] in existing_preds:
-            # Flush pending batch to preserve photo ordering in raw_results
-            if batch:
-                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
-                batch = []
-            skipped_existing += 1
-            pred_row = db.get_prediction_for_photo(
-                photo["id"], model_name, labels_fingerprint=fp,
-            )
-            if pred_row:
-                timestamp = None
-                if photo["timestamp"]:
-                    try:
-                        timestamp = dt.fromisoformat(photo["timestamp"])
-                    except Exception:
-                        pass
-                embedding = None
-                if model_type != "timm":
-                    emb_blob = db.get_photo_embedding(photo["id"])
-                    if emb_blob:
-                        import numpy as np
-
-                        embedding = np.frombuffer(emb_blob, dtype=np.float32)
-                raw_results.append(
-                    {
-                        "photo": photo,
-                        "detection_id": pred_row["detection_id"],
-                        "folder_path": folder_path,
-                        "image_path": image_path,
-                        "prediction": pred_row["species"],
-                        "confidence": pred_row["confidence"],
-                        "timestamp": timestamp,
-                        "filename": photo["filename"],
-                        "embedding": embedding,
-                        "taxonomy": None,
-                        "alternatives": [],
-                        "_existing": True,
-                    }
-                )
-            continue
-
         # Get detections for this photo (list of detection dicts with IDs)
         photo_detections = detection_map.get(photo["id"], [])
 
         if photo_detections:
-            # Classify each detection independently
+            # Classify each detection independently.
+            #
+            # No photo-level short-circuit here: a prior short-circuit that
+            # skipped photos with any cached prediction under (model, fp)
+            # silently dropped newly-surfaced detections after the user
+            # lowered `detector_confidence`, leaving them unclassified
+            # until --reclassify. The per-detection classifier_runs gate
+            # below handles incremental work correctly.
+            timestamp = None
+            if photo["timestamp"]:
+                try:
+                    timestamp = dt.fromisoformat(photo["timestamp"])
+                except Exception:
+                    pass
+
             for detection in photo_detections:
                 # Classifier-run gate: skip (detection, model, fingerprint)
                 # triples that have already produced results, unless the
-                # caller asked for a reclassify pass.
+                # caller asked for a reclassify pass. For gated detections
+                # we still surface the cached top-1 prediction into
+                # raw_results so downstream grouping sees it.
                 if not reclassify:
                     run_keys = db.get_classifier_run_keys(detection["id"])
                     if (model_name, fp) in run_keys:
+                        cached = db.get_predictions_for_detection(
+                            detection["id"],
+                            classifier_model=model_name,
+                            labels_fingerprint=fp,
+                            min_classifier_conf=0,
+                        )
+                        if cached:
+                            skipped_existing += 1
+                            top = cached[0]  # ordered by confidence DESC
+                            embedding = None
+                            if model_type != "timm":
+                                emb_blob = db.get_photo_embedding(photo["id"])
+                                if emb_blob:
+                                    import numpy as np
+                                    embedding = np.frombuffer(
+                                        emb_blob, dtype=np.float32,
+                                    )
+                            raw_results.append({
+                                "photo": photo,
+                                "detection_id": detection["id"],
+                                "folder_path": folder_path,
+                                "image_path": image_path,
+                                "prediction": top["species"],
+                                "confidence": top["confidence"],
+                                "timestamp": timestamp,
+                                "filename": photo["filename"],
+                                "embedding": embedding,
+                                "taxonomy": None,
+                                "alternatives": [],
+                                "_existing": True,
+                            })
                         continue
 
                 img, det_folder_path, det_image_path = _prepare_image(
@@ -1399,21 +1405,13 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             summary=f"{detected} animals detected in {total} photos",
         )
 
-        # Phase 6: Classify each photo
+        # Phase 6: Classify each photo. The per-detection classifier_runs
+        # gate inside _classify_photos skips already-done detections and
+        # still surfaces their cached predictions into raw_results, so a
+        # photo-level short-circuit is both unnecessary and actively
+        # harmful (it hides newly-surfaced detections after the user
+        # lowers detector_confidence).
         existing_preds = set()
-        if not params.reclassify:
-            # Key the photo-level short-circuit on BOTH model and fingerprint.
-            # Keying on model alone would cause workspace label changes to
-            # leave stale predictions until the user forces reclassify.
-            existing_preds = thread_db.get_existing_prediction_photo_ids(
-                model_name, labels_fingerprint=fp,
-            )
-            if existing_preds:
-                log.info(
-                    "Skipping %d photos with existing predictions "
-                    "(model=%s, fingerprint=%s)",
-                    len(existing_preds), model_name, fp,
-                )
 
         job["_start_time"] = time.time()  # reset rate timer for classification phase
 

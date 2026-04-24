@@ -1780,15 +1780,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 # skips work instead of re-running inference.
                 spec_fp = loaded_models.get("labels_fingerprint", "legacy")
 
-                existing_preds = set()
-                if not params.reclassify:
-                    # Key the photo-level short-circuit on BOTH model and
-                    # fingerprint so changing the workspace's label set
-                    # doesn't leave stale predictions unprocessed.
-                    existing_preds = thread_db.get_existing_prediction_photo_ids(
-                        model_name, labels_fingerprint=spec_fp,
-                    )
-
+                # No photo-level short-circuit: it would hide detections
+                # that newly cross the workspace's detector_confidence
+                # threshold on photos that already had a cached prediction
+                # for some other detection. The per-detection
+                # classifier_runs gate below handles skipping correctly
+                # and still surfaces cached results into raw_results so
+                # grouping sees them.
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
@@ -1832,47 +1830,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         # restrict deletions to photos actually reclassified.
                         if models_succeeded == 0:
                             first_model_photo_ids.add(photo["id"])
-                        if photo["id"] in existing_preds:
-                            skipped_existing += 1
-                            pred_row = thread_db.get_prediction_for_photo(
-                                photo["id"], model_name,
-                                labels_fingerprint=spec_fp,
-                            )
-                            if pred_row:
-                                folder_path = folders.get(photo["folder_id"], "")
-                                image_path = os.path.join(
-                                    folder_path, photo["filename"],
-                                )
-                                timestamp = None
-                                if photo["timestamp"]:
-                                    with contextlib.suppress(ValueError, TypeError):
-                                        timestamp = dt.fromisoformat(
-                                            photo["timestamp"]
-                                        )
-                                embedding = None
-                                if model_type != "timm":
-                                    emb_blob = thread_db.get_photo_embedding(
-                                        photo["id"]
-                                    )
-                                    if emb_blob:
-                                        import numpy as np
-                                        embedding = np.frombuffer(
-                                            emb_blob, dtype=np.float32,
-                                        )
-                                raw_results.append({
-                                    "photo": photo,
-                                    "detection_id": pred_row["detection_id"],
-                                    "folder_path": folder_path,
-                                    "image_path": image_path,
-                                    "prediction": pred_row["species"],
-                                    "confidence": pred_row["confidence"],
-                                    "timestamp": timestamp,
-                                    "filename": photo["filename"],
-                                    "embedding": embedding,
-                                    "taxonomy": None,
-                                    "_existing": True,
-                                })
-                            continue
 
                         # Pull the primary detection for this photo from the
                         # detect-stage cache. Fall back to db.get_detections()
@@ -1906,12 +1863,58 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         # Classifier-run gate: skip work when this exact
                         # (detection, classifier_model, labels_fingerprint)
                         # triple was already classified. Reclassify bypasses
-                        # the gate so users can force a fresh pass.
+                        # the gate so users can force a fresh pass. When
+                        # gated, surface the cached top-1 prediction into
+                        # raw_results so downstream grouping/storage sees
+                        # it — otherwise the cached detection would silently
+                        # drop out of the grouping pipeline.
                         if not params.reclassify:
                             run_keys = thread_db.get_classifier_run_keys(
                                 primary_det["id"]
                             )
                             if (model_name, spec_fp) in run_keys:
+                                cached = thread_db.get_predictions_for_detection(
+                                    primary_det["id"],
+                                    classifier_model=model_name,
+                                    labels_fingerprint=spec_fp,
+                                    min_classifier_conf=0,
+                                )
+                                if cached:
+                                    skipped_existing += 1
+                                    top = cached[0]
+                                    folder_path = folders.get(photo["folder_id"], "")
+                                    image_path = os.path.join(
+                                        folder_path, photo["filename"],
+                                    )
+                                    timestamp = None
+                                    if photo["timestamp"]:
+                                        with contextlib.suppress(ValueError, TypeError):
+                                            timestamp = dt.fromisoformat(
+                                                photo["timestamp"]
+                                            )
+                                    embedding = None
+                                    if model_type != "timm":
+                                        emb_blob = thread_db.get_photo_embedding(
+                                            photo["id"]
+                                        )
+                                        if emb_blob:
+                                            import numpy as np
+                                            embedding = np.frombuffer(
+                                                emb_blob, dtype=np.float32,
+                                            )
+                                    raw_results.append({
+                                        "photo": photo,
+                                        "detection_id": primary_det["id"],
+                                        "folder_path": folder_path,
+                                        "image_path": image_path,
+                                        "prediction": top["species"],
+                                        "confidence": top["confidence"],
+                                        "timestamp": timestamp,
+                                        "filename": photo["filename"],
+                                        "embedding": embedding,
+                                        "taxonomy": None,
+                                        "_existing": True,
+                                    })
                                 continue
 
                         img, folder_path, image_path = _prepare_image(

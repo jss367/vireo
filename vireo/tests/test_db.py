@@ -1224,6 +1224,136 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_migration_backfills_group_metadata_on_pending_rows(tmp_path):
+    """Legacy burst-grouped predictions stored group_id/vote_count on
+    pending rows. The migration must backfill prediction_review for those
+    too — not just non-pending rows — or the group membership is lost
+    and get_group_predictions can't recover the burst.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            group_id TEXT, individual TEXT, vote_count INTEGER,
+            total_votes INTEGER, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        -- Pending row carrying group metadata from a prior burst pass.
+        INSERT INTO predictions (id, detection_id, species, model, status,
+                                 group_id, vote_count, total_votes)
+            VALUES (1000, 100, 'Robin', 'bioclip-2', 'pending',
+                    'g-2026', 3, 5);
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    rev = db.conn.execute(
+        "SELECT group_id, vote_count, total_votes FROM prediction_review "
+        "WHERE prediction_id = 1000 AND workspace_id = 1"
+    ).fetchone()
+    assert rev is not None, (
+        "Pending prediction with group metadata should have been backfilled "
+        "into prediction_review; migration silently dropped the group."
+    )
+    assert rev["group_id"] == "g-2026"
+    assert rev["vote_count"] == 3
+
+
+def test_clear_predictions_scopes_by_fingerprint(tmp_path):
+    """When a fingerprint is supplied, clear_predictions must delete only
+    that label set's rows and leave predictions under other fingerprints
+    untouched. Also wipes the matching classifier_runs so next pass
+    re-runs inference.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-a")
+    db.add_prediction(det_id, species="Sparrow", confidence=0.85,
+                      model="bioclip-2", labels_fingerprint="fp-b")
+    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.record_classifier_run(det_id, "bioclip-2", "fp-b", prediction_count=1)
+
+    db.clear_predictions(model="bioclip-2", labels_fingerprint="fp-a")
+
+    remaining = {r["species"] for r in db.conn.execute(
+        "SELECT species FROM predictions WHERE detection_id=?", (det_id,)
+    ).fetchall()}
+    assert remaining == {"Sparrow"}, "fp-b row must be untouched"
+
+    run_keys = db.get_classifier_run_keys(det_id)
+    assert ("bioclip-2", "fp-a") not in run_keys, \
+        "fp-a classifier_runs key must be cleared or next pass will skip"
+    assert ("bioclip-2", "fp-b") in run_keys, "fp-b run key must be preserved"
+
+
+def test_move_folders_moves_prediction_review(tmp_path):
+    """Moving folders between workspaces must carry prediction_review rows
+    with them — otherwise accepted/rejected/group metadata is silently
+    dropped and the target workspace reads everything as 'pending'.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_src = db.create_workspace("src")
+    ws_tgt = db.create_workspace("tgt")
+    fid = db.add_folder("/p", name="p")
+    db.add_workspace_folder(ws_src, fid)
+
+    db._active_workspace_id = ws_src
+    pid = db.add_photo(fid, "a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-x",
+                      status="accepted", individual="Ruby")
+    pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin'"
+    ).fetchone()["id"]
+    # Sanity: review row exists in source ws.
+    assert db.get_review_status(pred_id, ws_src) == "accepted"
+
+    db.move_folders_to_workspace(ws_src, ws_tgt, [fid])
+
+    # Review row must have followed the folder.
+    assert db.get_review_status(pred_id, ws_tgt) == "accepted"
+    assert db.get_review_status(pred_id, ws_src) == "pending", \
+        "source ws should no longer claim this review row"
+    # Individual carried over.
+    row = db.conn.execute(
+        "SELECT individual FROM prediction_review "
+        "WHERE prediction_id=? AND workspace_id=?",
+        (pred_id, ws_tgt),
+    ).fetchone()
+    assert row["individual"] == "Ruby"
+
+
 def test_migration_preserves_predictions_when_dropping_detections(tmp_path):
     """Legacy DB with FK ON DELETE CASCADE from predictions→detections:
     the global-detections rewrite must NOT cascade-delete predictions

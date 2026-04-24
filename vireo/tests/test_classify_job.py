@@ -981,7 +981,12 @@ def test_classify_photos_new_photo(tmp_path):
 
 
 def test_classify_photos_skips_existing(tmp_path):
-    """Phase 6: skips photos with existing predictions."""
+    """Skipping is now per-detection via classifier_runs, not per-photo.
+
+    When a detection's (model, fingerprint) has a cached classifier run,
+    the classifier is not re-invoked, but the cached top-1 prediction is
+    surfaced into raw_results so downstream grouping still sees it.
+    """
     from unittest.mock import MagicMock
 
     from classify_job import _classify_photos
@@ -994,22 +999,28 @@ def test_classify_photos_skips_existing(tmp_path):
          "timestamp": "2024-01-15T10:00:00"},
     ]
     folders = {10: str(tmp_path)}
-    existing_preds = {1}  # photo 1 already classified
 
     mock_clf = MagicMock()
     mock_db = MagicMock()
-    mock_db.get_prediction_for_photo.return_value = {
-        "species": "Northern Cardinal",
-        "confidence": 0.95,
-        "detection_id": 101,
-    }
+    # Detection 101 has a cached classifier_run for (BioCLIP, legacy).
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "legacy")}
+    mock_db.get_predictions_for_detection.return_value = [
+        {"species": "Northern Cardinal", "confidence": 0.95,
+         "detection_id": 101},
+    ]
     mock_db.get_photo_embedding.return_value = None
+
+    detection_map = {
+        1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
+             "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+             "category": "animal"}],
+    }
 
     raw_results, failed, skipped = _classify_photos(
         photos=photos,
         folders=folders,
-        detection_map={},
-        existing_preds=existing_preds,
+        detection_map=detection_map,
+        existing_preds=set(),  # dead parameter post-refactor
         clf=mock_clf,
         model_type="bioclip",
         model_name="BioCLIP",
@@ -1018,9 +1029,10 @@ def test_classify_photos_skips_existing(tmp_path):
         db=mock_db,
     )
 
-    assert skipped == 1
-    assert len(raw_results) == 1
+    assert skipped == 1, "cached detection should count as skipped"
+    assert len(raw_results) == 1, "cached prediction must be surfaced"
     assert raw_results[0]["_existing"] is True
+    assert raw_results[0]["prediction"] == "Northern Cardinal"
     mock_clf.classify_with_embedding.assert_not_called()
 
 

@@ -804,6 +804,16 @@ class Database:
         if "status" in pred_cols and review_exists == 0:
             def _col_or_null(name: str) -> str:
                 return f"p.{name}" if name in pred_cols else "NULL"
+            # Backfill any row that carries non-default review state OR any
+            # grouping metadata. Legacy grouped predictions commonly stored
+            # group_id/vote_count/individual on `pending` rows — the prior
+            # filter `status <> 'pending'` dropped all of that, so upgraded
+            # DBs silently lost their burst-group membership.
+            group_filter_parts = ["COALESCE(p.status, 'pending') <> 'pending'"]
+            for col in ("group_id", "individual", "vote_count", "total_votes"):
+                if col in pred_cols:
+                    group_filter_parts.append(f"p.{col} IS NOT NULL")
+            group_filter = " OR ".join(group_filter_parts)
             self.conn.execute(f"""
                 INSERT OR IGNORE INTO prediction_review
                     (prediction_id, workspace_id, status, reviewed_at,
@@ -818,7 +828,7 @@ class Database:
                 FROM predictions p
                 JOIN detections d ON d.id = p.detection_id
                 WHERE d.workspace_id IS NOT NULL
-                  AND COALESCE(p.status, 'pending') <> 'pending'
+                  AND ({group_filter})
             """)
             self.conn.commit()
 
@@ -1393,6 +1403,49 @@ class Database:
                 [target_ws_id, source_ws_id] + list(folder_ids),
             )
             pending_changes_moved = cur.rowcount
+
+            # Move prediction_review rows for predictions whose photo is in
+            # the moved folders. Without this the accepted/rejected/group
+            # metadata stays attached to the source workspace_id and the
+            # target reads all predictions as 'pending' — silently dropping
+            # the user's review decisions during a folder move.
+            #
+            # INSERT OR IGNORE into the target first, then DELETE from the
+            # source. That way if the target already has a review row for
+            # the same (prediction_id), we keep the target's value rather
+            # than overwriting it.
+            self.conn.execute(
+                f"""INSERT OR IGNORE INTO prediction_review
+                      (prediction_id, workspace_id, status, reviewed_at,
+                       individual, group_id, vote_count, total_votes)
+                    SELECT pr_rev.prediction_id, ?, pr_rev.status,
+                           pr_rev.reviewed_at, pr_rev.individual,
+                           pr_rev.group_id, pr_rev.vote_count,
+                           pr_rev.total_votes
+                    FROM prediction_review pr_rev
+                    JOIN predictions p ON p.id = pr_rev.prediction_id
+                    JOIN detections d ON d.id = p.detection_id
+                    WHERE pr_rev.workspace_id = ?
+                      AND d.photo_id IN (
+                          SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                      )""",
+                [target_ws_id, source_ws_id] + list(folder_ids),
+            )
+            self.conn.execute(
+                f"""DELETE FROM prediction_review
+                    WHERE workspace_id = ?
+                      AND prediction_id IN (
+                          SELECT pr_rev.prediction_id
+                          FROM prediction_review pr_rev
+                          JOIN predictions p ON p.id = pr_rev.prediction_id
+                          JOIN detections d ON d.id = p.detection_id
+                          WHERE pr_rev.workspace_id = ?
+                            AND d.photo_id IN (
+                                SELECT id FROM photos WHERE folder_id IN ({placeholders})
+                            )
+                      )""",
+                [source_ws_id, source_ws_id] + list(folder_ids),
+            )
 
             # Move workspace_folders: remove from source, add to target
             self.conn.execute(
@@ -4184,64 +4237,97 @@ class Database:
             )
         self.conn.commit()
 
-    def clear_predictions(self, model=None, collection_photo_ids=None):
-        """Clear predictions, optionally filtered by model and/or photo set.
+    def clear_predictions(self, model=None, collection_photo_ids=None,
+                          labels_fingerprint=None):
+        """Clear predictions, optionally filtered by model, photo set, and fingerprint.
 
         The ``predictions`` table is now global (no workspace_id).  This
         still restricts the delete to photos visible in the active workspace
         via ``workspace_folders`` so that calling "clear" in one workspace
         does not nuke another workspace's cached classifier output.
+
+        ``labels_fingerprint`` is strongly recommended for reclassify flows:
+        in shared-folder setups where workspace A and workspace B classify
+        the same photos with different label sets, a reclassify in A keyed
+        only by ``model`` would wipe B's cached predictions under its own
+        fingerprint. And because ``classifier_runs`` keys include
+        fingerprint, B's later non-reclassify runs would skip inference and
+        leave those detections unclassified until forced. With
+        ``labels_fingerprint`` passed, we delete only A's rows AND the
+        matching ``classifier_runs`` rows so A's next pass actually re-runs.
         """
         ws = self._ws_id()
+        # Build a reusable (cond, params) pair for the predictions subquery.
+        extra_conds = []
+        extra_params = []
+        if model:
+            extra_conds.append("pr.classifier_model = ?")
+            extra_params.append(model)
+        if labels_fingerprint is not None:
+            extra_conds.append("pr.labels_fingerprint = ?")
+            extra_params.append(labels_fingerprint)
+
         if collection_photo_ids is not None:
             placeholders = ",".join("?" for _ in collection_photo_ids)
-            if model:
-                self.conn.execute(
-                    f"""DELETE FROM predictions WHERE id IN (
-                        SELECT pr.id FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                        WHERE pr.classifier_model = ?
-                          AND d.photo_id IN ({placeholders})
-                    )""",
-                    [ws, model, *collection_photo_ids],
-                )
-            else:
-                self.conn.execute(
-                    f"""DELETE FROM predictions WHERE id IN (
-                        SELECT pr.id FROM predictions pr
-                        JOIN detections d ON d.id = pr.detection_id
-                        JOIN photos ph ON ph.id = d.photo_id
-                        JOIN workspace_folders wf
-                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                        WHERE d.photo_id IN ({placeholders})
-                    )""",
-                    [ws, *collection_photo_ids],
-                )
-        else:
-            # Workspace scoping is already enforced by the JOIN ON clause
-            # (one ? bound to ws below). Keep the WHERE filter list only for
-            # the optional model predicate so the placeholder count matches
-            # the params list.
-            params = [ws]
-            where_parts = []
-            if model:
-                where_parts.append("pr.classifier_model = ?")
-                params.append(model)
-            where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
-            self.conn.execute(
-                f"""DELETE FROM predictions WHERE id IN (
-                    SELECT pr.id FROM predictions pr
-                    JOIN detections d ON d.id = pr.detection_id
+            extra_conds.append(f"d.photo_id IN ({placeholders})")
+            extra_params.extend(collection_photo_ids)
+
+        where_clause = (" WHERE " + " AND ".join(extra_conds)) if extra_conds else ""
+        self.conn.execute(
+            f"""DELETE FROM predictions WHERE id IN (
+                SELECT pr.id FROM predictions pr
+                JOIN detections d ON d.id = pr.detection_id
+                JOIN photos ph ON ph.id = d.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                {where_clause}
+            )""",
+            [ws, *extra_params],
+        )
+
+        # Also clear matching classifier_runs rows so the next pass actually
+        # re-runs the classifier. Without this, the skip gate at
+        # classifier_runs would still report "done" even though the cached
+        # predictions are gone, leaving detections permanently unclassified
+        # unless the user forces a reclassify.
+        #
+        # classifier_runs has PK (detection_id, classifier_model,
+        # labels_fingerprint), so delete by the full composite key, not by
+        # detection_id alone — otherwise another fingerprint's run key on
+        # the same detection would be wiped too.
+        if model is not None:
+            run_conds = ["cr.classifier_model = ?"]
+            run_params = [model]
+            if labels_fingerprint is not None:
+                run_conds.append("cr.labels_fingerprint = ?")
+                run_params.append(labels_fingerprint)
+            if collection_photo_ids is not None:
+                placeholders = ",".join("?" for _ in collection_photo_ids)
+                run_conds.append(f"d.photo_id IN ({placeholders})")
+                run_params.extend(collection_photo_ids)
+            where = " AND ".join(run_conds)
+            # Match by (detection_id, classifier_model, labels_fingerprint)
+            # — delete composite key tuples via rowid equivalents.
+            rows = self.conn.execute(
+                f"""SELECT cr.detection_id, cr.classifier_model,
+                           cr.labels_fingerprint
+                    FROM classifier_runs cr
+                    JOIN detections d ON d.id = cr.detection_id
                     JOIN photos ph ON ph.id = d.photo_id
                     JOIN workspace_folders wf
                       ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                    {where_clause}
-                )""",
-                params,
-            )
+                    WHERE {where}""",
+                [ws, *run_params],
+            ).fetchall()
+            for r in rows:
+                self.conn.execute(
+                    """DELETE FROM classifier_runs
+                       WHERE detection_id = ?
+                         AND classifier_model = ?
+                         AND labels_fingerprint = ?""",
+                    (r["detection_id"], r["classifier_model"],
+                     r["labels_fingerprint"]),
+                )
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):
