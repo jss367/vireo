@@ -1731,6 +1731,133 @@ def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeyp
     )
 
 
+def test_rescan_sweeps_untracked_preview_files(tmp_path):
+    """Legacy preview files that pre-date preview_cache accounting (no
+    row) must still be cleaned up when a photo's content changes.
+    Otherwise app.py's lazy-adoption path (~L8131) re-adopts them on
+    the next /photos/<id>/preview request and hands out pre-change
+    bytes.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    # Seed an *untracked* preview (file exists, no preview_cache row).
+    untracked = preview_dir / f"{photo_id}_800.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(untracked), "JPEG")
+    assert db.preview_cache_get(photo_id, 800) is None
+
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert not untracked.exists(), (
+        "Untracked preview files for invalidated photos must be swept "
+        "or serve's lazy-adoption path re-adopts stale pre-change bytes."
+    )
+
+
+def test_rescan_preview_sweep_is_batched_not_per_photo(tmp_path, monkeypatch):
+    """The untracked-preview sweep must run at most once per scan,
+    not once per invalidated photo. Per-photo os.listdir on the
+    preview dir turns large rescans into O(N × M) work.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    paths = []
+    for i in range(3):
+        p = os.path.join(root, f"photo_{i}.jpg")
+        Image.new("RGB", (800, 600), color=(255, i * 40, 0)).save(p, "JPEG")
+        paths.append(p)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    # Replace all three files' contents so each invalidation fires.
+    time.sleep(0.05)
+    for i, p in enumerate(paths):
+        Image.new("RGB", (800, 600), color=(0, 0, 255 - i * 30)).save(p, "JPEG")
+
+    preview_listings = []
+    real_listdir = os.listdir
+
+    def counting_listdir(path):
+        if str(path).rstrip(os.sep).endswith("previews"):
+            preview_listings.append(str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert len(preview_listings) <= 1, (
+        f"previews/ must be enumerated at most once per scan regardless "
+        f"of how many photos were invalidated; got {len(preview_listings)} "
+        f"listings across 3 invalidations."
+    )
+
+
+def test_audit_import_untracked_invalidates_stale_thumbnail(tmp_path):
+    """audit.import_untracked calls scan() without an explicit vireo_dir.
+    Invalidation must still fire so stale thumbnails don't survive a
+    re-import of a folder that contains content-changed files. Exercises
+    the db._db_path fallback inside _invalidate_derived_caches.
+    """
+    from audit import import_untracked
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    img = root / "photo.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(img), "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    (vireo_dir / "thumbnails").mkdir()
+
+    db = Database(str(vireo_dir / "vireo.db"))
+    scan(str(root), db, vireo_dir=str(vireo_dir))
+
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+    thumb_path = vireo_dir / "thumbnails" / f"{photo_id}.jpg"
+    generate_thumbnail(photo_id, str(img), str(vireo_dir / "thumbnails"))
+    assert thumb_path.exists()
+
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(str(img), "JPEG")
+
+    # audit.import_untracked does scan(d, db, incremental=True) without vireo_dir.
+    import_untracked(db, [str(img)])
+
+    assert not thumb_path.exists(), (
+        "Invalidation must fire even when the caller omits vireo_dir; "
+        "otherwise audit-driven rescans bake stale thumbnails into the cache."
+    )
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""
