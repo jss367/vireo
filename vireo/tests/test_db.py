@@ -4062,3 +4062,37 @@ def test_folder_status_partial_value_allowed(tmp_path):
         "SELECT status FROM folders WHERE id = ?", (fid,)
     ).fetchone()
     assert row["status"] == "partial"
+
+
+def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
+    """Partial folders must stay in the tree so the browse sidebar can render
+    a badge and the user can rescan. Also, the returned rows must carry
+    ``status`` so the UI can tell ok from partial. Missing folders are still
+    excluded — they have their own ``get_missing_folders`` path.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "tree.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    ok_id = db.add_folder("/ok", name="ok")
+    partial_id = db.add_folder("/partial", name="partial")
+    missing_id = db.add_folder("/missing", name="missing")
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE id = ?", (partial_id,)
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_id,)
+    )
+    db.conn.commit()
+
+    rows = {row["id"]: dict(row) for row in db.get_folder_tree()}
+
+    assert ok_id in rows, "ok folder must appear in tree"
+    assert partial_id in rows, (
+        "partial folder must appear in tree so badge renders and rescan works"
+    )
+    assert missing_id not in rows, "missing folder must not appear in tree"
+    assert rows[ok_id]["status"] == "ok"
+    assert rows[partial_id]["status"] == "partial"

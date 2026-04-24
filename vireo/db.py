@@ -1103,12 +1103,17 @@ class Database:
     def get_folder_tree(self):
         """Return folders for the active workspace.
 
+        Includes folders whose status is ``'ok'`` or ``'partial'`` — a
+        partially-scanned folder must stay in the tree so the browse sidebar
+        can render its badge and the user can trigger a rescan. ``'missing'``
+        folders are still excluded (they go through ``get_missing_folders``).
+
         ``parent_id`` is rewritten to the nearest ancestor that is also linked
-        to the active workspace AND has ``status='ok'``. If no such ancestor
-        exists, ``parent_id`` is NULL. This keeps the returned set a
-        well-formed tree: callers that group by ``parent_id`` (notably the
-        browse-page folder sidebar) never leave a linked folder dangling under
-        an ancestor that was filtered out of the result.
+        to the active workspace AND visible here. If no such ancestor exists,
+        ``parent_id`` is NULL. This keeps the returned set a well-formed tree:
+        callers that group by ``parent_id`` (notably the browse-page folder
+        sidebar) never leave a linked folder dangling under an ancestor that
+        was filtered out of the result.
         """
         ws = self._ws_id()
         return self.conn.execute(
@@ -1116,7 +1121,7 @@ class Database:
                visible(id) AS (
                    SELECT f.id FROM folders f
                    JOIN workspace_folders wf ON wf.folder_id = f.id
-                   WHERE wf.workspace_id = ? AND f.status = 'ok'
+                   WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
                ),
                walk(start_id, current_id) AS (
                    SELECT v.id, f.parent_id
@@ -1137,7 +1142,7 @@ class Database:
                )
                SELECT f.id, f.path, f.name,
                       e.parent_id AS parent_id,
-                      f.photo_count
+                      f.photo_count, f.status
                FROM folders f
                JOIN visible v ON v.id = f.id
                JOIN effective e ON e.start_id = f.id
