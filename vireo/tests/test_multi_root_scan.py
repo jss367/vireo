@@ -384,6 +384,130 @@ def test_thumbnails_still_run_when_some_roots_succeed(app_and_db, tmp_path, monk
     )
 
 
+def test_summary_counts_unique_failed_roots_not_error_entries(
+    app_and_db, tmp_path, monkeypatch
+):
+    """A root that raises in both scan AND cache invalidation counts
+    as ONE failed root in the summary, not two.
+
+    Regression: summary used to derive "N of M failed" from
+    len(root_errors), so a single root hitting both scan failure and
+    cache-invalidation failure would report "2 of 2 failed" even when
+    one of the two roots succeeded.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bad = str(tmp_path / "bad")
+    good = str(tmp_path / "good")
+    _make_photo(bad, "b.jpg")
+    _make_photo(good, "g.jpg")
+
+    import scanner as real_scanner
+    real_scan = real_scanner.scan
+
+    def flaky_scan(root, db, *args, **kwargs):
+        if root == bad:
+            raise RuntimeError("scan boom")
+        return real_scan(root, db, *args, **kwargs)
+
+    monkeypatch.setattr("scanner.scan", flaky_scan)
+
+    # Also make cache invalidation fail on the SAME bad root so it
+    # contributes two error entries but is still only one failed root.
+    import app as app_module
+    real_invalidate = app_module._invalidate_new_images_after_scan
+
+    def flaky_invalidate(db, root, *args, **kwargs):
+        if root == bad:
+            raise RuntimeError("cache boom")
+        return real_invalidate(db, root, *args, **kwargs)
+
+    monkeypatch.setattr(
+        app_module, "_invalidate_new_images_after_scan", flaky_invalidate,
+    )
+
+    resp = client.post("/api/jobs/scan", json={"roots": [bad, good]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"
+    scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+    summary = scan_step.get("summary", "")
+    # Exactly one root failed, out of two. NOT "2 of 2".
+    assert "1 of 2" in summary, (
+        f"expected '1 of 2 roots failed' in summary, got {summary!r}"
+    )
+
+
+def test_cache_only_failure_still_runs_thumbnails(
+    app_and_db, tmp_path, monkeypatch
+):
+    """A root whose scan succeeds but cache invalidation fails still
+    produced indexed photos, so thumbnails must still run.
+
+    Regression: all_roots_failed used to be len(root_errors) ==
+    len(roots_list). A two-root run where root A's scan raised and
+    root B's cache invalidation raised produced 2 errors across 2
+    roots — incorrectly triggering the thumbnail skip even though
+    root B had indexed photos that needed thumbs.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bad = str(tmp_path / "bad")
+    good = str(tmp_path / "good")
+    _make_photo(bad, "b.jpg")
+    _make_photo(good, "g.jpg")
+
+    import scanner as real_scanner
+    real_scan = real_scanner.scan
+
+    def flaky_scan(root, db, *args, **kwargs):
+        if root == bad:
+            raise RuntimeError("scan boom")
+        return real_scan(root, db, *args, **kwargs)
+
+    monkeypatch.setattr("scanner.scan", flaky_scan)
+
+    # Cache invalidation fails only on the good root — its scan
+    # succeeded (photos indexed), but its cache invalidation raised.
+    import app as app_module
+    real_invalidate = app_module._invalidate_new_images_after_scan
+
+    def flaky_invalidate(db, root, *args, **kwargs):
+        if root == good:
+            raise RuntimeError("cache boom on good")
+        return real_invalidate(db, root, *args, **kwargs)
+
+    monkeypatch.setattr(
+        app_module, "_invalidate_new_images_after_scan", flaky_invalidate,
+    )
+
+    generate_calls = {"n": 0}
+    import thumbnails as real_thumb
+    real_generate_all = real_thumb.generate_all
+
+    def tracking_generate_all(*args, **kwargs):
+        generate_calls["n"] += 1
+        return real_generate_all(*args, **kwargs)
+
+    monkeypatch.setattr("thumbnails.generate_all", tracking_generate_all)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [bad, good]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"  # mixed outcome
+    assert generate_calls["n"] == 1, (
+        "generate_all must run when any root's scan succeeded, even if "
+        f"that root had a cache-invalidation failure (called "
+        f"{generate_calls['n']} times)"
+    )
+    thumb_step = next(s for s in data["steps"] if s["id"] == "thumbnails")
+    assert thumb_step["status"] != "skipped", thumb_step
+
+
 def test_cache_invalidation_failure_flips_job_to_failed(app_and_db, tmp_path, monkeypatch):
     """If _invalidate_new_images_after_scan raises after a scan, the
     job must NOT report success. Previously the error was logged and

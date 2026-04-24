@@ -5067,7 +5067,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # re-raised so a failure on root A doesn't prevent root B
             # from scanning. Any failure flips the job to "failed" at
             # the end (mixed-outcome rollup).
+            #
+            # Track roots by failure class so the rollup below can
+            # distinguish "this root's scan raised" (no photos indexed
+            # — thumbnails can skip) from "this root's scan succeeded
+            # but cache invalidation raised" (photos DID get indexed —
+            # thumbnails must still run). Using len(root_errors) alone
+            # double-counts roots that hit both failure classes and
+            # misclassifies cache-only failures as scan failures.
             root_errors = []
+            scan_failed_roots = set()
+            cache_failed_roots = set()
             for idx, root in enumerate(roots_list, 1):
                 phase = (
                     f"Scanning root {idx} of {len(roots_list)}: {root}"
@@ -5092,6 +5102,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 except Exception as exc:
                     log.exception("Scan failed for root %s", root)
+                    scan_failed_roots.add(root)
                     msg = f"[{root}] {exc}"
                     root_errors.append(msg)
                     if msg not in job["errors"]:
@@ -5113,6 +5124,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         log.exception(
                             "Failed to invalidate new-image cache for %s", root,
                         )
+                        cache_failed_roots.add(root)
                         cache_msg = (
                             f"[{root}] cache invalidation failed "
                             f"after scan: {cache_exc}"
@@ -5127,9 +5139,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # reflects the actual photos indexed while "total" includes
             # planned-but-unprocessed files from the failed root(s).
             photo_count = job["progress"].get("current", 0)
+            # Unique roots that hit any failure class. Counting unique
+            # roots (not error entries) avoids inflating the "N of M"
+            # summary when a single root raises in both scan and cache
+            # invalidation.
+            failed_root_count = len(scan_failed_roots | cache_failed_roots)
             if root_errors:
                 scan_summary = (
-                    f"{photo_count} photos ({len(root_errors)} of "
+                    f"{photo_count} photos ({failed_root_count} of "
                     f"{len(roots_list)} root"
                     f"{'s' if len(roots_list) != 1 else ''} failed)"
                 )
@@ -5142,14 +5159,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["id"], "scan", status="completed",
                     summary=f"{photo_count} photos",
                 )
-            # Skip the thumbnail phase when EVERY requested root failed.
-            # generate_all() walks the whole library looking for missing
-            # thumbnails — running it after a total scan failure does a
-            # long, unrelated pass and delays the failure feedback the
-            # user actually needs. When at least one root succeeded we
-            # still run thumbs so those newly-indexed photos get
-            # covered.
-            all_roots_failed = bool(root_errors) and len(root_errors) == len(roots_list)
+            # Skip the thumbnail phase when EVERY requested root's scan
+            # raised. generate_all() walks the whole library looking
+            # for missing thumbnails — running it after a total scan
+            # failure does a long, unrelated pass and delays the
+            # failure feedback the user actually needs. When at least
+            # one root's scan succeeded we still run thumbs so those
+            # newly-indexed photos get covered. Cache-invalidation
+            # failures do NOT gate this decision: the scan for that
+            # root did produce indexed photos that need thumbnails.
+            all_roots_failed = (
+                bool(roots_list) and len(scan_failed_roots) == len(roots_list)
+            )
 
             if all_roots_failed:
                 log.info(
