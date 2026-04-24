@@ -4963,16 +4963,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    def _build_scan_work(root, incremental, active_ws):
+    def _build_scan_work(roots, incremental, active_ws):
         """Build the background work function for a scan job.
 
         Shared by ``POST /api/jobs/scan`` and
         ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
         same scan + thumbnail pipeline as a full scan.
+
+        ``roots`` may be a single path string (back-compat, one root) or a
+        list of paths. When multiple roots are given they are scanned
+        **serially** inside this single job -- that's the whole point of
+        this wrapper: parallel scan jobs used to fight for the SQLite
+        writer lock, so we now process roots one after another. A failure
+        on one root does not abort the others; the error is recorded and
+        the job ends in ``"failed"`` (mixed-outcome rollup convention).
         """
         import config as cfg
 
         runner = app._job_runner
+
+        # Back-compat: accept a bare string in addition to a list.
+        if isinstance(roots, str):
+            roots_list = [roots]
+        else:
+            roots_list = list(roots)
 
         def work(job):
             from scanner import scan as do_scan
@@ -4982,24 +4996,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Check folder health before scanning to prevent duplicate imports
             thread_db.check_folder_health()
 
+            # Accumulator so multi-root progress doesn't rewind at each
+            # root boundary. scanner.scan() reports (current, total) local
+            # to its invocation; we fold those into cumulative counters
+            # that the SSE/status stream reads.
+            scan_acc = {"prior": 0, "last_total": 0}
+
             def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.update_step(job["id"], "scan",
-                                   progress={"current": current, "total": total})
+                scan_acc["last_total"] = total
+                cum_current = scan_acc["prior"] + current
+                cum_total = scan_acc["prior"] + total
+                job["progress"]["current"] = cum_current
+                job["progress"]["total"] = cum_total
+                runner.update_step(
+                    job["id"], "scan",
+                    progress={"current": cum_current, "total": cum_total},
+                )
                 runner.push_event(
                     job["id"],
                     "progress",
                     {
-                        "current": current,
-                        "total": total,
+                        "current": cum_current,
+                        "total": cum_total,
                         "current_file": job["progress"].get("current_file", ""),
                         "rate": round(
-                            current / max(time.time() - job["_start_time"], 0.01), 1
+                            cum_current / max(time.time() - job["_start_time"], 0.01), 1
                         ),
                         "phase": "Scanning photos",
                     },
                 )
+
+            def advance_scan_acc():
+                scan_acc["prior"] += scan_acc["last_total"]
+                scan_acc["last_total"] = 0
 
             job["_start_time"] = time.time()
             runner.set_steps(job["id"], [
@@ -5021,20 +5050,68 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            try:
-                do_scan(
-                    root, thread_db, progress_callback=progress_cb, incremental=incremental,
-                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                    status_callback=status_cb,
-                    vireo_dir=vireo_dir,
+
+            # Per-root failures are caught and recorded rather than
+            # re-raised so a failure on root A doesn't prevent root B
+            # from scanning. Any failure flips the job to "failed" at
+            # the end (mixed-outcome rollup).
+            root_errors = []
+            for idx, root in enumerate(roots_list, 1):
+                phase = (
+                    f"Scanning root {idx} of {len(roots_list)}: {root}"
+                    if len(roots_list) > 1
+                    else "Scanning photos"
                 )
-            finally:
-                # scanner.scan commits photo rows incrementally, so even a mid-scan
-                # failure can leave DB state that invalidates cached new-image counts.
-                _invalidate_new_images_after_scan(thread_db, root)
+                runner.push_event(job["id"], "progress", {
+                    "phase": phase,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": phase,
+                    "rate": 0,
+                })
+                try:
+                    do_scan(
+                        root, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=incremental,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        status_callback=status_cb,
+                        vireo_dir=vireo_dir,
+                    )
+                except Exception as exc:
+                    log.exception("Scan failed for root %s", root)
+                    msg = f"[{root}] {exc}"
+                    root_errors.append(msg)
+                    if msg not in job["errors"]:
+                        job["errors"].append(msg)
+                finally:
+                    # scanner.scan commits photo rows incrementally, so
+                    # even a mid-scan failure can leave DB state that
+                    # invalidates cached new-image counts.
+                    try:
+                        _invalidate_new_images_after_scan(thread_db, root)
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate new-image cache for %s", root,
+                        )
+                    advance_scan_acc()
+
             photo_count = job["progress"].get("total", 0)
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{photo_count} photos")
+            if root_errors:
+                scan_summary = (
+                    f"{photo_count} photos ({len(root_errors)} of "
+                    f"{len(roots_list)} root"
+                    f"{'s' if len(roots_list) != 1 else ''} failed)"
+                )
+                runner.update_step(
+                    job["id"], "scan", status="failed", summary=scan_summary,
+                    error=root_errors[0], error_count=len(root_errors),
+                )
+            else:
+                runner.update_step(
+                    job["id"], "scan", status="completed",
+                    summary=f"{photo_count} photos",
+                )
             runner.update_step(job["id"], "thumbnails", status="running")
 
             # Auto-generate thumbnails for new photos only
@@ -5078,42 +5155,87 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             runner.update_step(job["id"], "thumbnails", status="completed",
                                summary=thumb_summary(thumb_result))
 
+            # Mixed-outcome rollup: any failed root => job is "failed".
+            # JobRunner._run_job reads the raise to flip status; the
+            # error was already appended above so it won't be double-
+            # counted.
+            if root_errors:
+                raise RuntimeError(
+                    f"{len(root_errors)} of {len(roots_list)} scan root"
+                    f"{'s' if len(roots_list) != 1 else ''} failed: "
+                    + "; ".join(root_errors)
+                )
+
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
         return work
 
     @app.route("/api/jobs/scan", methods=["POST"])
     def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+        """Queue a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
+        Body accepts either:
+          * ``{"root": "/path"}`` -- single root (back-compat).
+          * ``{"roots": ["/a", "/b", ...]}`` -- multiple roots, scanned
+            serially inside a single job. Multi-root support avoids the
+            SQLite writer-lock contention that used to happen when the
+            UI enqueued one job per root (PR #634 added retry/backoff
+            as defense-in-depth; this is the root-cause fix).
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = body.get("incremental", False)
+
+        # Normalize inputs. Prefer the explicit plural form when both are
+        # provided; a caller who sends ``roots`` has opted into the new API.
+        if "roots" in body:
+            roots_in = body.get("roots")
+            if not isinstance(roots_in, list) or not roots_in:
+                return json_error("roots must be a non-empty list")
+            roots_list = [str(r) for r in roots_in if r]
+            if not roots_list:
+                return json_error("roots must be a non-empty list")
+        else:
+            root = body.get("root", "")
+            if not root:
+                return json_error("root path required")
+            roots_list = [root]
+
+        for r in roots_list:
+            if not os.path.isdir(r):
+                return json_error(f"directory not found: {r}")
+
+        # Remember scan roots (skip temp directories from tests)
         import tempfile
 
         import config as cfg
 
         tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
+        user_cfg = cfg.load()
+        saved_roots = user_cfg.get("scan_roots", [])
+        changed = False
+        for r in roots_list:
+            if os.path.realpath(r).startswith(tmp_prefix):
+                continue
+            if r not in saved_roots:
+                saved_roots.insert(0, r)
+                changed = True
+        if changed:
+            user_cfg["scan_roots"] = saved_roots
+            cfg.save(user_cfg)
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
-        work = _build_scan_work(root, incremental, active_ws)
+        work = _build_scan_work(roots_list, incremental, active_ws)
+
+        job_config = {"roots": roots_list, "incremental": incremental}
+        # Back-compat: keep ``root`` in config when exactly one was given,
+        # so existing consumers (history viewers, etc.) still find it.
+        if len(roots_list) == 1:
+            job_config["root"] = roots_list[0]
 
         job_id = runner.start(
-            "scan", work, config={"root": root, "incremental": incremental},
-            workspace_id=active_ws,
+            "scan", work, config=job_config, workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 
