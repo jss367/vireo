@@ -83,11 +83,8 @@ def test_accept_prediction(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
 
-    # Prediction status should be accepted
-    row = db.conn.execute(
-        "SELECT status FROM predictions WHERE id = ?", (pred['id'],)
-    ).fetchone()
-    assert row['status'] == 'accepted'
+    # Prediction status should be accepted (workspace-scoped via prediction_review)
+    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'accepted'
 
     # Species keyword should have been added to the photo
     keywords = db.get_photo_keywords(photos[2]['id'])
@@ -109,10 +106,7 @@ def test_reject_prediction(app_and_db):
     assert resp.status_code == 200
     assert resp.get_json()['ok'] is True
 
-    row = db.conn.execute(
-        "SELECT status FROM predictions WHERE id = ?", (pred['id'],)
-    ).fetchone()
-    assert row['status'] == 'rejected'
+    assert db.get_review_status(pred['id'], db._active_workspace_id) == 'rejected'
 
     # Verify no species keyword was added
     keywords = db.get_photo_keywords(photos[0]['id'])
@@ -170,19 +164,26 @@ def test_prediction_group_apply(app_and_db):
     reject_photo = db.get_photo(reject_id)
     assert reject_photo['flag'] == 'rejected'
 
-    # Predictions for the pick should be accepted
+    # Predictions for the pick should be accepted (review state in prediction_review)
+    ws_id = db._active_workspace_id
     pick_preds = db.conn.execute(
-        """SELECT pr.status FROM predictions pr
+        """SELECT COALESCE(pr_rev.status, 'pending') AS status
+           FROM predictions pr
            JOIN detections d ON d.id = pr.detection_id
-           WHERE d.photo_id = ?""", (pick_id,)
+           LEFT JOIN prediction_review pr_rev
+             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+           WHERE d.photo_id = ?""", (ws_id, pick_id)
     ).fetchall()
     assert all(p['status'] == 'accepted' for p in pick_preds)
 
     # Predictions for the reject should be rejected
     reject_preds = db.conn.execute(
-        """SELECT pr.status FROM predictions pr
+        """SELECT COALESCE(pr_rev.status, 'pending') AS status
+           FROM predictions pr
            JOIN detections d ON d.id = pr.detection_id
-           WHERE d.photo_id = ?""", (reject_id,)
+           LEFT JOIN prediction_review pr_rev
+             ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+           WHERE d.photo_id = ?""", (ws_id, reject_id)
     ).fetchall()
     assert all(p['status'] == 'rejected' for p in reject_preds)
 
@@ -213,14 +214,21 @@ def test_predictions_include_alternatives(app_and_db):
     photos = db.get_photos()
     det_ids = db.save_detections(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="MDV6")
     det_id = det_ids[0]
     db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
-                      model='test-model', status='pending')
+                      model='test-model')
     db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
-                      model='test-model', status='alternative')
+                      model='test-model')
     db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
-                      model='test-model', status='alternative')
+                      model='test-model')
+    # Mark alternatives in the prediction_review table for this workspace
+    ws_id = db._active_workspace_id
+    for sp in ('Sparrow', 'Finch'):
+        row = db.conn.execute(
+            "SELECT id FROM predictions WHERE species = ?", (sp,)
+        ).fetchone()
+        db.set_review_status(row['id'], ws_id, 'alternative')
 
     client = app.test_client()
     resp = client.get('/api/predictions')
@@ -243,33 +251,32 @@ def test_accept_alternative_prediction(app_and_db):
     photos = db.get_photos()
     det_ids = db.save_detections(photos[0]['id'], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="MDV6")
     det_id = det_ids[0]
     db.add_prediction(detection_id=det_id, species='Robin', confidence=0.85,
-                      model='test-model', status='pending')
+                      model='test-model')
     db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
-                      model='test-model', status='alternative')
+                      model='test-model')
 
-    # Get the alternative prediction ID
+    ws_id = db._active_workspace_id
+    # Mark Sparrow as an alternative in the workspace's review table.
     alt = db.conn.execute(
         "SELECT id FROM predictions WHERE species = 'Sparrow'"
     ).fetchone()
+    db.set_review_status(alt['id'], ws_id, 'alternative')
 
     client = app.test_client()
     resp = client.post(f'/api/predictions/{alt["id"]}/accept')
     assert resp.status_code == 200
 
     # Alternative should be accepted
-    row = db.conn.execute(
-        "SELECT status FROM predictions WHERE species = 'Sparrow'"
-    ).fetchone()
-    assert row['status'] == 'accepted'
+    assert db.get_review_status(alt['id'], ws_id) == 'accepted'
 
     # Original top-1 should be rejected
-    row = db.conn.execute(
-        "SELECT status FROM predictions WHERE species = 'Robin'"
+    robin = db.conn.execute(
+        "SELECT id FROM predictions WHERE species = 'Robin'"
     ).fetchone()
-    assert row['status'] == 'rejected'
+    assert db.get_review_status(robin['id'], ws_id) == 'rejected'
 
     # Sparrow keyword should be on the photo
     keywords = db.get_photo_keywords(photos[0]['id'])

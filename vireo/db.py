@@ -1220,11 +1220,13 @@ class Database:
     def move_folders_to_workspace(self, source_ws_id, target_ws_id, folder_ids):
         """Move folders and their workspace-scoped data to another workspace.
 
-        Moves: workspace_folders rows, detections (with child predictions),
-        and pending_changes. Collections and edit_history stay behind.
+        Moves: workspace_folders rows and pending_changes. Detections and
+        predictions are global (no workspace_id), so they follow the folder
+        via workspace_folders membership rather than being reassigned.
+        Collections and edit_history stay behind.
 
         Returns:
-            dict with keys: folders_moved, detections_moved, pending_changes_moved
+            dict with keys: folders_moved, pending_changes_moved
         """
         if not self.get_workspace(source_ws_id):
             raise ValueError(f"Source workspace {source_ws_id} not found")
@@ -1242,20 +1244,11 @@ class Database:
                 )
 
         if not folder_ids:
-            return {"folders_moved": 0, "detections_moved": 0, "pending_changes_moved": 0}
+            return {"folders_moved": 0, "pending_changes_moved": 0}
 
         placeholders = ",".join("?" for _ in folder_ids)
 
         try:
-            # Move detections (predictions follow via detection_id FK)
-            cur = self.conn.execute(
-                f"""UPDATE detections SET workspace_id = ?
-                    WHERE workspace_id = ?
-                    AND photo_id IN (SELECT id FROM photos WHERE folder_id IN ({placeholders}))""",
-                [target_ws_id, source_ws_id] + list(folder_ids),
-            )
-            detections_moved = cur.rowcount
-
             # Move pending_changes
             cur = self.conn.execute(
                 f"""UPDATE pending_changes SET workspace_id = ?
@@ -1289,7 +1282,6 @@ class Database:
 
         return {
             "folders_moved": len(folder_ids),
-            "detections_moved": detections_moved,
             "pending_changes_moved": pending_changes_moved,
         }
 
@@ -5214,13 +5206,12 @@ class Database:
             join_clause += " JOIN photo_keywords pk ON pk.photo_id = p.id"
             join_clause += " JOIN keywords k ON k.id = pk.keyword_id"
         if need_prediction_join:
+            # Detections are global (no workspace_id); workspace scoping is
+            # enforced by the folder_join on workspace_folders below.
             join_clause += (
                 " JOIN detections det ON det.photo_id = p.id"
-                " AND det.workspace_id = ?"
                 " JOIN predictions pred ON pred.detection_id = det.id"
             )
-            # Insert workspace param before the existing condition params
-            params.insert(0, self._ws_id())
 
         # Always join folders for folder-under rules, scoped to workspace
         folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'"
