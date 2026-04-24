@@ -748,6 +748,39 @@ def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     assert row['taxon_id'] == taxa_id
 
 
+def test_mark_species_keywords_fixes_type_taxonomy_with_is_species_zero(tmp_path):
+    """A keyword with type='taxonomy' but is_species=0 gets is_species=1.
+
+    This state is reachable via API-driven type edits or legacy drift.
+    Species-only flows filter on is_species=1, so leaving it at 0 while
+    type is 'taxonomy' hides the keyword from those flows.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword('Green heron')
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 0, type = 'taxonomy' WHERE id = ?", (kid,)
+    )
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == 'green heron':
+                return {"taxon_id": 5017}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['is_species'] == 1
+    assert row['type'] == 'taxonomy'
+
+
 def test_mark_species_keywords_backfills_taxon_id_on_existing_taxonomy(tmp_path):
     """Keywords already typed 'taxonomy' but with taxon_id=NULL get linked.
 
