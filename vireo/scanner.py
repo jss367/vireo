@@ -843,6 +843,21 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         except Exception:
             log.exception("Failed to flag folders partial after scan failure")
         raise
+    else:
+        # Per-file loop completed cleanly. Clear any stale 'partial' flag from
+        # a prior failed scan on the same folders so a successful rescan
+        # restores full visibility.
+        if touched_folder_ids:
+            try:
+                id_placeholders = ",".join("?" * len(touched_folder_ids))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'ok' "
+                    f"WHERE id IN ({id_placeholders}) AND status = 'partial'",
+                    tuple(touched_folder_ids),
+                )
+                commit_with_retry(db.conn)
+            except Exception:
+                log.exception("Failed to clear partial flag after scan success")
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
     # Wrap post-processing so folder counts are always updated, even on failure.

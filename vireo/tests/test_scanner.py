@@ -1352,3 +1352,60 @@ def test_scan_marks_folder_partial_on_unrecoverable_failure(tmp_path):
     assert row["status"] == "partial", (
         f"expected folder.status='partial' after mid-scan failure, got {row['status']!r}"
     )
+
+
+def test_partial_folder_is_visible_in_folder_tree(tmp_path):
+    """Folders flagged 'partial' must still render in the browse-page tree.
+
+    get_folder_tree() historically required status='ok'. After marking a
+    folder partial we need it to STILL appear so the user can see the badge
+    and initiate a rescan — otherwise 'partial' silently hides the folder.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/p")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    tree = db.get_folder_tree()
+    ids = {row["id"] for row in tree}
+    assert fid in ids, "partial folder should still appear in get_folder_tree"
+    # Status should be queryable so the UI can render the badge.
+    partial_row = next(row for row in tree if row["id"] == fid)
+    assert partial_row["status"] == "partial"
+
+
+def test_successful_scan_clears_partial_flag(tmp_path):
+    """A successful rescan of a previously-partial folder restores 'ok'."""
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # First scan: fail partway through to leave the folder 'partial'.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={2: sqlite3.OperationalError("disk I/O error")},
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db)
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "partial"
+
+    # Second scan: succeed and clear the flag.
+    db.conn = real_conn
+    scanner_mod.scan(root, db)
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "ok", (
+        f"successful rescan should flip partial → ok, got {row['status']!r}"
+    )
