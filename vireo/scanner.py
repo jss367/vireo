@@ -311,6 +311,60 @@ def _pair_raw_jpeg_companions(db):
     commit_with_retry(db.conn)
 
 
+def _invalidate_derived_caches(db, vireo_dir, photo_id):
+    """Delete cached thumbnail / working copy / preview files for a photo.
+
+    Called when the scanner detects that an existing photo's source content
+    has changed (different file_hash). Thumbnails, working copies, and
+    preview-pyramid sizes are all derived from the source bytes, so they're
+    stale as soon as the source changes. Clearing them forces the next
+    access to regenerate from current pixels — the self-healing path that
+    prevents thumbnail/full-image mismatches.
+
+    Also clears ``working_copy_path`` in the database so the scanner's
+    working-copy extraction pass at the end of ``scan()`` picks this row
+    back up and rebuilds the working copy.
+    """
+    if not vireo_dir:
+        return
+
+    thumb_path = os.path.join(vireo_dir, "thumbnails", f"{photo_id}.jpg")
+    if os.path.exists(thumb_path):
+        try:
+            os.remove(thumb_path)
+        except OSError:
+            log.debug("Could not delete stale thumbnail %s", thumb_path, exc_info=True)
+
+    wc_file = os.path.join(vireo_dir, "working", f"{photo_id}.jpg")
+    if os.path.exists(wc_file):
+        try:
+            os.remove(wc_file)
+        except OSError:
+            log.debug("Could not delete stale working copy %s", wc_file, exc_info=True)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = NULL WHERE id = ?",
+        (photo_id,),
+    )
+
+    preview_dir = os.path.join(vireo_dir, "previews")
+    if os.path.isdir(preview_dir):
+        prefix = f"{photo_id}_"
+        try:
+            entries = os.listdir(preview_dir)
+        except OSError:
+            entries = []
+        for fname in entries:
+            if fname.startswith(prefix):
+                try:
+                    os.remove(os.path.join(preview_dir, fname))
+                except OSError:
+                    log.debug(
+                        "Could not delete stale preview %s",
+                        os.path.join(preview_dir, fname),
+                        exc_info=True,
+                    )
+
+
 def _subtree_like_pattern(path, sep=None):
     """Build a SQLite LIKE parameter that matches ``path`` + any descendant.
 
@@ -784,6 +838,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 height=height,
             )
 
+            # Capture prior content identity so we can detect file replacement
+            # below. When the bytes on disk change, file_hash will differ from
+            # the stored value and we must drop cached thumbnails / working
+            # copies / previews before they diverge from the new source.
+            prev_row = db.conn.execute(
+                "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+            ).fetchone()
+            prev_file_hash = prev_row["file_hash"] if prev_row else None
+
             # Update metadata columns (also fixes existing photos that were
             # inserted before ExifTool metadata was available)
             updates = []
@@ -826,6 +889,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
                     update_params,
                 )
+                commit_with_retry(db.conn)
+
+            # Content-change self-heal: if the file's bytes have changed
+            # since the last scan, derived caches are now stale. Drop them
+            # so the next thumbnail / preview / working-copy access rebuilds
+            # from the current source. The working-copy extraction pass at
+            # the end of scan() picks this row back up because
+            # _invalidate_derived_caches also NULLs working_copy_path.
+            if (prev_file_hash is not None
+                    and file_hash is not None
+                    and prev_file_hash != file_hash
+                    and vireo_dir):
+                _invalidate_derived_caches(db, vireo_dir, photo_id)
                 commit_with_retry(db.conn)
 
             # Import XMP keywords if sidecar exists — must land BEFORE the

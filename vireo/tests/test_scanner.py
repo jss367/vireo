@@ -1568,3 +1568,115 @@ def test_pre_pass_failure_marks_folder_partial(tmp_path):
     assert row["status"] == "partial", (
         f"expected folder.status='partial' after pre-pass failure, got {row['status']!r}"
     )
+
+
+def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
+    """When a file's content changes on disk, re-scan must invalidate the
+    stale thumbnail so the next serve regenerates from fresh pixels.
+
+    Regression test for the _D851925.NEF bug where a photo's thumbnail showed
+    a bird but the full image (derived from the current file) was a squirrel:
+    the source had been replaced, file_hash was updated on re-scan, but the
+    thumbnail cache was never invalidated.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    # Original content: solid red
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=100)
+    assert len(photos) == 1
+    photo_id = photos[0]["id"]
+    original_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert original_hash is not None
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Replace file content (same filename, different pixels → new hash + new mtime)
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    # Ensure file_mtime differs from the DB value so incremental scan re-processes.
+    new_mtime = os.path.getmtime(img_path)
+    db_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert new_mtime != db_mtime
+
+    # Re-scan: scanner must detect the content change and drop the stale thumbnail.
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    updated_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert updated_hash != original_hash, "sanity: scanner should have updated file_hash"
+
+    assert not os.path.exists(thumb_path), (
+        "Scanner must invalidate the cached thumbnail when file content changes; "
+        "leaving it on disk is how thumbnail/full-image mismatches get baked in."
+    )
+
+
+def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
+    """When a large JPEG's content changes, re-scan must invalidate the stale
+    working copy so the subsequent extraction reflects current pixels."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "big.jpg")
+    # Larger than the default working_copy_max_size (4096) so a working copy is extracted.
+    Image.new("RGB", (5000, 3000), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=100)
+    assert len(photos) == 1
+    photo_id = photos[0]["id"]
+    assert photos[0]["working_copy_path"] is not None
+    wc_path = vireo_dir / photos[0]["working_copy_path"]
+    assert wc_path.exists()
+
+    # Record what the working copy looks like now (top-left pixel = red).
+    with Image.open(wc_path) as img:
+        assert img.convert("RGB").getpixel((0, 0))[0] > 200  # red channel dominant
+
+    # Replace file content with a very different image.
+    time.sleep(0.05)
+    Image.new("RGB", (5000, 3000), color=(0, 0, 255)).save(img_path, "JPEG")
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    # Working copy should point to a regenerated file whose pixels match the new source.
+    photos = db.get_photos(per_page=100)
+    wc_rel = photos[0]["working_copy_path"]
+    assert wc_rel is not None, "Scanner must re-set working_copy_path after invalidation"
+    wc_path = vireo_dir / wc_rel
+    assert wc_path.exists()
+    with Image.open(wc_path) as img:
+        pixel = img.convert("RGB").getpixel((0, 0))
+    assert pixel[2] > 200 and pixel[0] < 100, (
+        f"Working copy pixel {pixel} does not reflect updated (blue) source; "
+        "stale extraction from pre-change content was served."
+    )
