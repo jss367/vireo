@@ -3975,7 +3975,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         paths = body.get("paths", [])
         from audit import import_untracked
 
-        import_untracked(db, paths)
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        import_untracked(db, paths, vireo_dir=vireo_dir)
         return jsonify({"ok": True, "imported": len(paths)})
 
     # -- Scan status (kept, non-job) --

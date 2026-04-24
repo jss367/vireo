@@ -1818,27 +1818,35 @@ def test_rescan_preview_sweep_is_batched_not_per_photo(tmp_path, monkeypatch):
     )
 
 
-def test_audit_import_untracked_invalidates_stale_thumbnail(tmp_path):
-    """audit.import_untracked calls scan() without an explicit vireo_dir.
-    Invalidation must still fire so stale thumbnails don't survive a
-    re-import of a folder that contains content-changed files. Exercises
-    the db._db_path fallback inside _invalidate_derived_caches.
+def test_audit_import_untracked_invalidates_using_caller_vireo_dir(tmp_path):
+    """audit.import_untracked must accept vireo_dir and forward it to
+    scan() so invalidation hits the real cache root.
+
+    The DB and thumb directory are independently configurable (--db vs
+    --thumb-dir). A fallback that derives vireo_dir from ``db._db_path``
+    touches the wrong filesystem when those flags diverge, leaving the
+    actual thumbnails/previews stale. The caller knows the configured
+    cache root; it must pass it.
     """
     from audit import import_untracked
     from db import Database
     from scanner import scan
     from thumbnails import generate_thumbnail
 
+    # DB and thumb cache intentionally on different roots (simulates
+    # --db /fast-ssd/vireo.db --thumb-dir /big-hdd/cache).
+    db_dir = tmp_path / "dbstore"
+    db_dir.mkdir()
+    vireo_dir = tmp_path / "cache"
+    vireo_dir.mkdir()
+    (vireo_dir / "thumbnails").mkdir()
+
     root = tmp_path / "photos"
     root.mkdir()
     img = root / "photo.jpg"
     Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(img), "JPEG")
 
-    vireo_dir = tmp_path / "vireo"
-    vireo_dir.mkdir()
-    (vireo_dir / "thumbnails").mkdir()
-
-    db = Database(str(vireo_dir / "vireo.db"))
+    db = Database(str(db_dir / "vireo.db"))
     scan(str(root), db, vireo_dir=str(vireo_dir))
 
     photo_id = db.get_photos(per_page=100)[0]["id"]
@@ -1849,12 +1857,12 @@ def test_audit_import_untracked_invalidates_stale_thumbnail(tmp_path):
     time.sleep(0.05)
     Image.new("RGB", (800, 600), color=(0, 0, 255)).save(str(img), "JPEG")
 
-    # audit.import_untracked does scan(d, db, incremental=True) without vireo_dir.
-    import_untracked(db, [str(img)])
+    # Caller supplies the real cache root — no fallback guessing.
+    import_untracked(db, [str(img)], vireo_dir=str(vireo_dir))
 
     assert not thumb_path.exists(), (
-        "Invalidation must fire even when the caller omits vireo_dir; "
-        "otherwise audit-driven rescans bake stale thumbnails into the cache."
+        "audit.import_untracked must invalidate the caller-provided "
+        "cache root, not a path guessed from db._db_path."
     )
 
 

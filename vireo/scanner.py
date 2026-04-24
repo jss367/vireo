@@ -311,26 +311,6 @@ def _pair_raw_jpeg_companions(db):
     commit_with_retry(db.conn)
 
 
-def _resolve_vireo_dir(db, vireo_dir):
-    """Return an effective vireo_dir, falling back to the DB's parent.
-
-    Callers that forget the explicit ``vireo_dir`` kwarg (audit.py,
-    future entry points) would otherwise silently skip cache
-    invalidation. ``os.path.dirname(db._db_path)`` is the layout every
-    vireo data directory follows — thumbnails/, working/, previews/
-    all live as siblings of the SQLite file.
-
-    Returns an empty string for in-memory or otherwise pathless
-    databases; callers should treat that as "no cache dir, skip".
-    """
-    if vireo_dir:
-        return vireo_dir
-    db_path = getattr(db, "_db_path", None)
-    if not db_path or db_path == ":memory:":
-        return ""
-    return os.path.dirname(db_path)
-
-
 def _invalidate_derived_caches(db, vireo_dir, photo_id):
     """Delete cached thumbnail / working copy / tracked preview for a photo.
 
@@ -348,8 +328,11 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id):
     Also clears ``working_copy_path`` in the database so the scanner's
     working-copy extraction pass at the end of ``scan()`` picks this row
     back up and rebuilds the working copy.
+
+    Requires an explicit ``vireo_dir``: DB path and cache root are
+    independently configurable (--db vs --thumb-dir), so we can't guess
+    the cache location from the DB. No-op when the caller omits it.
     """
-    vireo_dir = _resolve_vireo_dir(db, vireo_dir)
     if not vireo_dir:
         return
 
@@ -417,7 +400,6 @@ def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
     keeps rows when unlink fails, and we must not orphan those files
     here either).
     """
-    vireo_dir = _resolve_vireo_dir(db, vireo_dir)
     if not vireo_dir or not photo_ids:
         return
     preview_dir = os.path.join(vireo_dir, "previews")
@@ -1003,12 +985,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # from the current source. The working-copy extraction pass at
             # the end of scan() picks this row back up because
             # _invalidate_derived_caches also NULLs working_copy_path.
-            # _invalidate_derived_caches self-resolves vireo_dir via the
-            # DB's parent dir, so no explicit guard here — any caller that
-            # forgets the kwarg (audit.import_untracked, etc.) still heals.
+            # Requires an explicit vireo_dir — we can't guess the cache
+            # root from db_path because --db and --thumb-dir are
+            # independently configurable. Callers that need invalidation
+            # on their entry points (audit, pipeline, Flask job routes)
+            # must pass it.
             if (prev_file_hash is not None
                     and file_hash is not None
-                    and prev_file_hash != file_hash):
+                    and prev_file_hash != file_hash
+                    and vireo_dir):
                 _invalidate_derived_caches(db, vireo_dir, photo_id)
                 invalidated_photo_ids.add(photo_id)
                 commit_with_retry(db.conn)
