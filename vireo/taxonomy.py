@@ -150,6 +150,28 @@ def _download_with_resume(url, dest_path, progress_callback=None,
 
 DWCA_URL = "https://www.inaturalist.org/taxa/inaturalist-taxonomy.dwca.zip"
 
+# Persistent path for the DWCA-based taxonomy.json. Lives under ~/.vireo so
+# it survives app restarts — in PyInstaller-bundled builds the package
+# directory is an ephemeral _MEI* extraction dir that's rebuilt per run.
+TAXONOMY_JSON_PATH = os.path.expanduser("~/.vireo/taxonomy.json")
+
+
+def find_taxonomy_json():
+    """Return the first existing taxonomy.json path, or the persistent path.
+
+    Prefers ~/.vireo/taxonomy.json, then falls back to a taxonomy.json next
+    to this module (for dev checkouts where a taxonomy.json was committed
+    or previously downloaded). Always returns a path — callers should check
+    os.path.exists() if they need to know whether data is actually present.
+    """
+    if os.path.exists(TAXONOMY_JSON_PATH):
+        return TAXONOMY_JSON_PATH
+    legacy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+    if os.path.exists(legacy_path):
+        return legacy_path
+    return TAXONOMY_JSON_PATH
+
+
 # --- AWS open-data taxa.csv.gz loader constants ---
 TAXA_URL = "https://inaturalist-open-data.s3.amazonaws.com/taxa.csv.gz"
 
@@ -516,6 +538,120 @@ def load_taxonomy(db, data_dir=None):
     return load_taxa_from_file(db, gz_path)
 
 
+_DB_MAJOR_RANKS = {"kingdom", "phylum", "class", "order",
+                   "family", "genus", "species"}
+
+
+def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
+    """Populate the taxa + taxa_common_names tables from a DWCA taxonomy.json.
+
+    Lets a DWCA download (which already has scientific + common names +
+    lineage) double as the data source for the local taxa DB that
+    add_keyword's auto-detect reads. Avoids the slow iNat API round-trip
+    that fetch_common_names would otherwise require.
+
+    Filters to major ranks (kingdom–species); skips subspecies.
+
+    Returns dict with taxa_loaded and common_names_loaded counts.
+    """
+
+    def _status(msg):
+        log.info(msg)
+        if progress_callback:
+            progress_callback(msg)
+
+    _status("Reading taxonomy.json...")
+    with open(taxonomy_json_path) as f:
+        data = json.load(f)
+
+    taxa_by_sci = data.get("taxa_by_scientific", {})
+    taxa_by_common = data.get("taxa_by_common", {})
+
+    # Dedupe by inat_id (same entry appears in both indices and multiple
+    # common-name keys can point to the same entry).
+    entries_by_inat_id = {}
+    for source in (taxa_by_sci, taxa_by_common):
+        for entry in source.values():
+            if entry.get("rank") not in _DB_MAJOR_RANKS:
+                continue
+            inat_id = entry.get("taxon_id")
+            if inat_id is None:
+                continue
+            entries_by_inat_id.setdefault(int(inat_id), entry)
+
+    _status(f"Inserting {len(entries_by_inat_id):,} taxa...")
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage_names = entry.get("lineage_names") or []
+        lineage_ranks = entry.get("lineage_ranks") or []
+        kingdom = None
+        if lineage_ranks and lineage_ranks[0] == "kingdom":
+            kingdom = lineage_names[0] if lineage_names else None
+        common_name = entry.get("common_name") or None
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, rank, kingdom, common_name) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(inat_id) DO UPDATE SET "
+            "name=excluded.name, rank=excluded.rank, kingdom=excluded.kingdom, "
+            "common_name=COALESCE(excluded.common_name, taxa.common_name)",
+            (inat_id, entry["scientific_name"], entry["rank"],
+             kingdom, common_name),
+        )
+
+    # Resolve parent_id by matching the second-to-last lineage scientific
+    # name to a local taxa.id.
+    _status("Resolving parent relationships...")
+    rows = db.conn.execute("SELECT id, name FROM taxa").fetchall()
+    local_id_by_sci = {r["name"]: r["id"] for r in rows}
+    for inat_id, entry in entries_by_inat_id.items():
+        lineage_names = entry.get("lineage_names") or []
+        if len(lineage_names) < 2:
+            continue
+        parent_sci = lineage_names[-2]
+        parent_local = local_id_by_sci.get(parent_sci)
+        if parent_local is None:
+            continue
+        own_row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
+        ).fetchone()
+        if own_row and own_row["id"] != parent_local:
+            db.conn.execute(
+                "UPDATE taxa SET parent_id = ? WHERE id = ?",
+                (parent_local, own_row["id"]),
+            )
+
+    # Populate taxa_common_names — index every English common name (including
+    # alternates) under its taxon so add_keyword's auto-detect can match
+    # regional/alt names like "Green heron" or "Common gallinule".
+    _status(f"Indexing {len(taxa_by_common):,} common names...")
+    cn_loaded = 0
+    for name_lower, entry in taxa_by_common.items():
+        inat_id = entry.get("taxon_id")
+        if inat_id is None:
+            continue
+        row = db.conn.execute(
+            "SELECT id FROM taxa WHERE inat_id = ?", (int(inat_id),)
+        ).fetchone()
+        if not row:
+            continue
+        db.conn.execute(
+            "INSERT OR IGNORE INTO taxa_common_names "
+            "(taxon_id, name, locale) VALUES (?, ?, 'en')",
+            (row["id"], name_lower),
+        )
+        cn_loaded += 1
+
+    db.conn.commit()
+    result = {
+        "taxa_loaded": len(entries_by_inat_id),
+        "common_names_loaded": cn_loaded,
+    }
+    _status(
+        f"Loaded {result['taxa_loaded']:,} taxa and "
+        f"{result['common_names_loaded']:,} common names into DB"
+    )
+    return result
+
+
 def fetch_common_names(db, locale='en'):
     """Fetch common names from the iNat API for all taxa in the database.
 
@@ -653,6 +789,7 @@ def download_taxonomy(output_path, progress_callback=None):
 
     # Download zip to a file (resumable) instead of holding in memory
     zip_dir = os.path.dirname(output_path) or "."
+    os.makedirs(zip_dir, exist_ok=True)
     zip_path = os.path.join(zip_dir, "taxonomy-dwca.zip")
     try:
         _download_with_resume(DWCA_URL, zip_path, progress_callback=_status)
@@ -866,7 +1003,7 @@ def main():
     )
     parser.add_argument(
         "--output",
-        default=os.path.join(os.path.dirname(__file__), "taxonomy.json"),
+        default=TAXONOMY_JSON_PATH,
         help="Output path for taxonomy.json",
     )
     args = parser.parse_args()

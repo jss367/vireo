@@ -1348,13 +1348,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             runner.update_step(job["id"], "model_loader", current_file=first_name)
 
             # Download taxonomy if missing and requested
-            taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+            from taxonomy import TAXONOMY_JSON_PATH, find_taxonomy_json
+            taxonomy_path = find_taxonomy_json()
             if params.download_taxonomy and not os.path.exists(taxonomy_path):
                 try:
                     from taxonomy import download_taxonomy
                     runner.push_event(job["id"], "progress", _progress_event(
                         stages, "model_loader", "Downloading taxonomy...",
                     ))
+                    # Always write new downloads to the persistent path.
+                    taxonomy_path = TAXONOMY_JSON_PATH
                     download_taxonomy(taxonomy_path, progress_callback=lambda msg:
                         runner.push_event(job["id"], "progress", _progress_event(
                             stages, "model_loader", msg,

@@ -352,9 +352,10 @@ def main():
     parser.add_argument(
         "--labels-file", required=True, help="Text file with one label per line"
     )
+    from taxonomy import find_taxonomy_json
     parser.add_argument(
         "--taxonomy",
-        default=os.path.join(os.path.dirname(__file__), "taxonomy.json"),
+        default=find_taxonomy_json(),
         help="Path to taxonomy.json",
     )
     parser.add_argument(

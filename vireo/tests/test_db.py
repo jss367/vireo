@@ -679,6 +679,107 @@ def test_add_keyword_updates_is_species(tmp_path):
     assert row['is_species'] == 1
 
 
+def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
+    """mark_species_keywords sets both is_species=1 AND type='taxonomy'.
+
+    Regression test: previously it only set is_species, so the UI keyword
+    type filter (which reads the `type` column) stayed on 'general' for
+    keywords imported via XMP sync or manual add.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # A keyword that arrived without is_species=True (e.g., from XMP sync).
+    kid = db.add_keyword('Green heron')
+    row = db.conn.execute(
+        "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['is_species'] == 0
+    assert row['type'] == 'general'
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == 'green heron':
+                return {"taxon_id": 5017, "scientific_name": "Butorides virescens"}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+
+    row = db.conn.execute(
+        "SELECT is_species, type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['is_species'] == 1
+    assert row['type'] == 'taxonomy'
+
+
+def test_mark_species_keywords_links_local_taxon_id(tmp_path):
+    """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    # Seed a row in the local taxa table so the inat_id lookup succeeds.
+    db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, rank, kingdom) VALUES (?, ?, ?, ?)",
+        (5017, 'Butorides virescens', 'species', 'Animalia'),
+    )
+    db.conn.commit()
+    taxa_id = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 5017"
+    ).fetchone()['id']
+
+    kid = db.add_keyword('Green heron')
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == 'green heron':
+                return {"taxon_id": 5017, "scientific_name": "Butorides virescens"}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    db.mark_species_keywords(FakeTaxonomy())
+
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['taxon_id'] == taxa_id
+
+
+def test_mark_species_keywords_retypes_when_is_species_already_set(tmp_path):
+    """A keyword with is_species=1 but type!='taxonomy' still gets retyped.
+
+    Defends against data-drift bugs where the two columns got out of sync.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword('Green heron')
+    # Simulate the pre-fix state: is_species set by a prior (now-removed)
+    # backfill pass that didn't update `type`.
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'general' WHERE id = ?", (kid,)
+    )
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == 'green heron':
+                return {"taxon_id": 5017}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row['type'] == 'taxonomy'
+
+
 def test_default_collections_created(tmp_path):
     """create_default_collections creates default collections."""
     from db import Database
