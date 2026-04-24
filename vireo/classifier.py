@@ -398,16 +398,51 @@ class Classifier:
                     "(first run -- will be cached for next time)...",
                     len(labels),
                 )
-                # Load text encoder session (self-healing on corruption;
-                # reuses the same redownloader resolved for the image
-                # encoder above since both files live in the same model
-                # directory).
+                # Load text encoder session (self-healing on corruption).
+                # A text-side heal invokes download_model which refreshes
+                # the ENTIRE model directory (image_encoder, text_encoder,
+                # config.json, tokenizer). If that happens, the already-
+                # loaded image session is stale — a version bump between
+                # the original install and the heal could leave us with
+                # an old image encoder paired with new text embeddings,
+                # producing silently incompatible features. Wrap the
+                # redownloader in a tracker and rebuild the image side
+                # if we see it fire.
+                text_heal_state = {"triggered": False}
+
+                if redownload is not None:
+                    def _tracked_redownload():
+                        text_heal_state["triggered"] = True
+                        redownload()
+
+                    text_redownload = _tracked_redownload
+                else:
+                    text_redownload = None
+
                 text_session = onnx_runtime.create_session_with_self_heal(
-                    text_encoder_path, redownload=redownload,
+                    text_encoder_path, redownload=text_redownload,
                 )
                 try:
                     text_input_name = text_session.get_inputs()[0].name
                     tokenizer = _load_tokenizer(tokenizer_path)
+
+                    if text_heal_state["triggered"]:
+                        log.info(
+                            "Text-encoder self-heal refreshed model dir; "
+                            "rebuilding image encoder and preprocessing "
+                            "config from the healed snapshot."
+                        )
+                        self._image_session = onnx_runtime.create_session(
+                            image_encoder_path,
+                        )
+                        self._image_input_name = (
+                            self._image_session.get_inputs()[0].name
+                        )
+                        with open(config_path) as f:
+                            preproc = json.load(f)
+                        self._input_size = tuple(preproc["input_size"][-2:])
+                        self._mean = preproc["mean"]
+                        self._std = preproc["std"]
 
                     self._txt_embeddings = _compute_embeddings_with_progress(
                         text_session,

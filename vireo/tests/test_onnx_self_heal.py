@@ -12,6 +12,7 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -360,3 +361,126 @@ def test_external_data_sidecar_is_also_deleted(tmp_path):
     assert files_at_redownload["sidecar"] is False, (
         "external-data .onnx.data sidecar must also be deleted"
     )
+
+
+def test_text_heal_rebuilds_image_session(tmp_path):
+    """When text-encoder self-heal refreshes the whole model dir,
+    the image session (loaded earlier from the old bytes) must be
+    rebuilt so the classifier doesn't end up with an old image
+    encoder paired with a new text encoder — which would produce
+    silently incompatible embeddings (img @ txt.T mismatch)."""
+    import json
+
+    from classifier import Classifier
+
+    model_dir = tmp_path / "bioclip-vit-b-16"
+    model_dir.mkdir()
+    image_encoder = model_dir / "image_encoder.onnx"
+    text_encoder = model_dir / "text_encoder.onnx"
+    tokenizer = model_dir / "tokenizer.json"
+    config_path = model_dir / "config.json"
+    image_encoder.write_bytes(b"old image bytes")
+    text_encoder.write_bytes(b"old text bytes")
+    tokenizer.write_text("dummy")
+    with open(config_path, "w") as f:
+        json.dump({
+            "input_size": [3, 224, 224],
+            "mean": [0.48, 0.45, 0.40],
+            "std": [0.26, 0.26, 0.27],
+        }, f)
+
+    # First two create_session calls succeed (image load + initial text
+    # load). Third call (post-heal image rebuild) also succeeds — the
+    # fix calls create_session directly on the healed bytes.
+    image_session_old = MagicMock(name="image_old")
+    image_session_old.get_inputs.return_value = [MagicMock(name="img_in")]
+    image_session_old.get_inputs.return_value[0].name = "pixel_values"
+
+    image_session_new = MagicMock(name="image_new")
+    image_session_new.get_inputs.return_value = [MagicMock(name="img_in_new")]
+    image_session_new.get_inputs.return_value[0].name = "pixel_values"
+
+    text_session_first = MagicMock(name="text_first")
+    text_session_second = MagicMock(name="text_second")
+    for s in (text_session_first, text_session_second):
+        s.get_inputs.return_value = [MagicMock()]
+        s.get_inputs.return_value[0].name = "input_ids"
+
+    call_log = []
+
+    def fake_create(path):
+        call_log.append(path)
+        n = len(call_log)
+        if path.endswith("image_encoder.onnx"):
+            # First image load -> old session. Any later image load
+            # (the rebuild) -> new session.
+            img_calls = [p for p in call_log if p.endswith("image_encoder.onnx")]
+            if len(img_calls) == 1:
+                return image_session_old
+            return image_session_new
+        # Text encoder: first call fails with corruption marker so
+        # the wrapper heals + retries; second call succeeds.
+        txt_calls = [p for p in call_log if p.endswith("text_encoder.onnx")]
+        if len(txt_calls) == 1:
+            raise Exception(
+                "[ONNXRuntimeError] : 7 : INVALID_PROTOBUF : "
+                "Protobuf parsing failed for text encoder."
+            )
+        return text_session_second
+
+    redownload_calls = {"n": 0}
+
+    def fake_redownload():
+        redownload_calls["n"] += 1
+        # Real download_model refreshes the whole directory. Simulate
+        # by bumping both onnx files + the config.
+        image_encoder.write_bytes(b"fresh image bytes")
+        text_encoder.write_bytes(b"fresh text bytes")
+        with open(config_path, "w") as f:
+            json.dump({
+                "input_size": [3, 336, 336],  # changed!
+                "mean": [0.5, 0.5, 0.5],
+                "std": [0.3, 0.3, 0.3],
+            }, f)
+
+    fake_tokenizer = MagicMock()
+
+    class FakeEncoding:
+        ids = list(range(10))
+
+    fake_tokenizer.encode.return_value = FakeEncoding()
+    fake_tokenizer.encode_batch.return_value = [FakeEncoding()]
+
+    with (
+        patch("classifier._MODELS_ROOT", str(tmp_path)),
+        patch("classifier.onnx_runtime.create_session", side_effect=fake_create),
+        patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+        patch(
+            "classifier._compute_embeddings_with_progress",
+            return_value=np.zeros((1, 512), dtype=np.float32),
+        ),
+        patch(
+            "models.build_self_heal_redownloader",
+            return_value=fake_redownload,
+        ),
+    ):
+        clf = Classifier(
+            labels=["bird"],
+            model_str="ViT-B-16",
+            pretrained_str=str(model_dir),
+        )
+
+    assert redownload_calls["n"] == 1, (
+        "text self-heal must invoke redownload exactly once"
+    )
+    # After text heal, the image session must be the REBUILT one,
+    # not the stale pre-heal session.
+    assert clf._image_session is image_session_new, (
+        "image session must be rebuilt from the healed model bytes"
+    )
+    # Preprocessing config must reflect the refreshed config.json.
+    assert clf._input_size == (336, 336), (
+        "preproc input_size must reflect the healed config.json"
+    )
+    assert clf._mean == [0.5, 0.5, 0.5]
+    assert clf._std == [0.3, 0.3, 0.3]
