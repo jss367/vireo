@@ -4189,12 +4189,16 @@ class Database:
                     [ws, *collection_photo_ids],
                 )
         else:
-            conditions = ["wf.workspace_id = ?"]
+            # Workspace scoping is already enforced by the JOIN ON clause
+            # (one ? bound to ws below). Keep the WHERE filter list only for
+            # the optional model predicate so the placeholder count matches
+            # the params list.
             params = [ws]
+            where_parts = []
             if model:
-                conditions.append("pr.classifier_model = ?")
+                where_parts.append("pr.classifier_model = ?")
                 params.append(model)
-            where = " AND ".join(conditions)
+            where_clause = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
             self.conn.execute(
                 f"""DELETE FROM predictions WHERE id IN (
                     SELECT pr.id FROM predictions pr
@@ -4202,7 +4206,7 @@ class Database:
                     JOIN photos ph ON ph.id = d.photo_id
                     JOIN workspace_folders wf
                       ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
-                    WHERE {where}
+                    {where_clause}
                 )""",
                 params,
             )
@@ -4384,17 +4388,40 @@ class Database:
         )
         self.conn.commit()
 
-    def get_existing_prediction_photo_ids(self, model):
-        """Return photo_ids with predictions for a model, scoped to the active workspace."""
-        rows = self.conn.execute(
-            """SELECT DISTINCT d.photo_id FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               JOIN photos p ON p.id = d.photo_id
-               JOIN workspace_folders wf
-                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
-               WHERE pr.classifier_model = ?""",
-            (self._ws_id(), model),
-        ).fetchall()
+    def get_existing_prediction_photo_ids(self, model, labels_fingerprint=None):
+        """Return photo_ids with predictions for a (model, fingerprint), scoped to active workspace.
+
+        The cache identity of a prediction is
+        ``(detection_id, classifier_model, labels_fingerprint, species)``, so
+        the photo-level short-circuit in classify_job / pipeline_job must key
+        on both model AND fingerprint. Keying only on model means changing
+        the workspace's label set leaves stale predictions and the classifier
+        is never re-run until the user forces ``reclassify``.
+
+        ``labels_fingerprint=None`` preserves the pre-fingerprint behavior
+        for callers that haven't plumbed the fingerprint through yet.
+        """
+        if labels_fingerprint is None:
+            rows = self.conn.execute(
+                """SELECT DISTINCT d.photo_id FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   WHERE pr.classifier_model = ?""",
+                (self._ws_id(), model),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT DISTINCT d.photo_id FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   WHERE pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?""",
+                (self._ws_id(), model, labels_fingerprint),
+            ).fetchall()
         return {r["photo_id"] for r in rows}
 
     def get_prediction_for_photo(self, photo_id, model):

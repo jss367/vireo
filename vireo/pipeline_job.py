@@ -1773,18 +1773,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         model=model_name, collection_photo_ids=photo_ids
                     )
 
-                existing_preds = set()
-                if not params.reclassify:
-                    existing_preds = thread_db.get_existing_prediction_photo_ids(
-                        model_name
-                    )
-
                 # The fingerprint for THIS model's label set — pinned by
                 # model_loader_stage for the first model and by _load_model_bundle
                 # for subsequent ones. Used to key the classifier_runs gate so
                 # a repeat pass over the same (detection, model, fingerprint)
                 # skips work instead of re-running inference.
                 spec_fp = loaded_models.get("labels_fingerprint", "legacy")
+
+                existing_preds = set()
+                if not params.reclassify:
+                    # Key the photo-level short-circuit on BOTH model and
+                    # fingerprint so changing the workspace's label set
+                    # doesn't leave stale predictions unprocessed.
+                    existing_preds = thread_db.get_existing_prediction_photo_ids(
+                        model_name, labels_fingerprint=spec_fp,
+                    )
 
                 raw_results: list = []
                 failed = 0

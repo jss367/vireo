@@ -1357,12 +1357,17 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
         # Phase 6: Classify each photo
         existing_preds = set()
         if not params.reclassify:
-            existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
+            # Key the photo-level short-circuit on BOTH model and fingerprint.
+            # Keying on model alone would cause workspace label changes to
+            # leave stale predictions until the user forces reclassify.
+            existing_preds = thread_db.get_existing_prediction_photo_ids(
+                model_name, labels_fingerprint=fp,
+            )
             if existing_preds:
                 log.info(
-                    "Skipping %d photos with existing predictions (model=%s)",
-                    len(existing_preds),
-                    model_name,
+                    "Skipping %d photos with existing predictions "
+                    "(model=%s, fingerprint=%s)",
+                    len(existing_preds), model_name, fp,
                 )
 
         job["_start_time"] = time.time()  # reset rate timer for classification phase

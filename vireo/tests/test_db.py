@@ -1166,6 +1166,61 @@ def test_get_existing_prediction_photo_ids(tmp_path):
     assert result == set()
 
 
+def test_clear_predictions_without_collection_photo_ids(tmp_path):
+    """The no-collection branch must bind every workspace_id placeholder it
+    uses. A bug where the list of bound params had fewer entries than the
+    ?-count in the SQL would raise sqlite3.ProgrammingError.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    det_ids = db.save_detections(
+        pids[0],
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+
+    # Must not raise. Both with and without the model filter.
+    db.clear_predictions()
+    assert db.get_existing_prediction_photo_ids('bioclip') == set()
+
+    # Restore and try the model branch.
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+    db.clear_predictions(model='bioclip')
+    assert db.get_existing_prediction_photo_ids('bioclip') == set()
+
+
+def test_get_existing_prediction_photo_ids_keyed_by_fingerprint(tmp_path):
+    """When a labels_fingerprint is given, the lookup scopes to that fingerprint.
+
+    The cache identity of a prediction is (detection, model, fingerprint,
+    species), so the photo-level short-circuit in classify_job must key on
+    fingerprint too — otherwise changing the workspace's label set would
+    leave stale predictions unprocessed.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    # Prediction was produced with label set fp="aaa"
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'aaa', 'Robin', 0.9)",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    # Same fingerprint → photo is skipped
+    assert db.get_existing_prediction_photo_ids(
+        'bioclip', labels_fingerprint='aaa',
+    ) == {pids[0]}
+    # Different fingerprint (label set changed) → photo is NOT skipped
+    assert db.get_existing_prediction_photo_ids(
+        'bioclip', labels_fingerprint='bbb',
+    ) == set()
+    # No fingerprint passed → pre-refactor behavior (skip any model match)
+    assert db.get_existing_prediction_photo_ids('bioclip') == {pids[0]}
+
+
 def test_get_prediction_for_photo(tmp_path):
     """Returns species and confidence for a photo's prediction by model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])

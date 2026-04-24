@@ -224,6 +224,7 @@ def test_compute_misses_groups_by_burst_and_writes_flags(tmp_path):
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
         )
 
     compute_misses_for_workspace(db, cfg.DEFAULTS["pipeline"])
@@ -270,6 +271,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         p_a,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
     )
 
     # Folder linked to B — add while B is active.
@@ -288,6 +290,7 @@ def test_compute_misses_scoped_to_active_workspace(tmp_path):
         p_b,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
     )
     db.conn.commit()
 
@@ -345,6 +348,7 @@ def test_compute_misses_scoped_to_collection_leaves_others_untouched(tmp_path):
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
         )
     db.conn.commit()
 
@@ -413,6 +417,7 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
         )
     db.conn.commit()
 
@@ -461,6 +466,7 @@ def test_compute_misses_uses_injected_now_timestamp(tmp_path):
         pid,
         [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
           "confidence": 0.95, "category": "animal"}],
+            detector_model="megadetector-v6",
     )
     db.conn.commit()
 
