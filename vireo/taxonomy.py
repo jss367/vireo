@@ -579,6 +579,40 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
                 continue
             entries_by_inat_id.setdefault(int(inat_id), entry)
 
+    # Prune stale taxa whose inat_id isn't in the new payload, so taxa
+    # that disappeared from iNat (or dropped out of our major-ranks
+    # filter) stop being matched by add_keyword's auto-detect. Build a
+    # temp table of fresh ids first — the set is too large for a
+    # parameterized IN clause. keywords.taxon_id has an FK to taxa(id)
+    # without ON DELETE SET NULL, so null those out before DELETE to
+    # avoid the FK violation. taxa_common_names and informal_group_taxa
+    # have ON DELETE CASCADE and go automatically; seed_informal_groups
+    # reseeds its side from the fresh taxa afterward.
+    _status("Pruning stale taxa...")
+    db.conn.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS fresh_inat_ids "
+        "(inat_id INTEGER PRIMARY KEY)"
+    )
+    db.conn.execute("DELETE FROM fresh_inat_ids")
+    db.conn.executemany(
+        "INSERT OR IGNORE INTO fresh_inat_ids (inat_id) VALUES (?)",
+        [(iid,) for iid in entries_by_inat_id],
+    )
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE taxon_id IN ("
+        "  SELECT id FROM taxa "
+        "  WHERE inat_id IS NOT NULL "
+        "    AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
+        ")"
+    )
+    pruned = db.conn.execute(
+        "DELETE FROM taxa WHERE inat_id IS NOT NULL "
+        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
+    ).rowcount
+    db.conn.execute("DROP TABLE fresh_inat_ids")
+    if pruned:
+        _status(f"Pruned {pruned:,} taxa no longer in the taxonomy")
+
     _status(f"Inserting {len(entries_by_inat_id):,} taxa...")
     for inat_id, entry in entries_by_inat_id.items():
         lineage_names = entry.get("lineage_names") or []

@@ -922,6 +922,85 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_populate_taxa_db_from_json_prunes_stale_taxa(tmp_path):
+    """Re-populate deletes taxa rows whose inat_id disappeared from the
+    new payload, and nulls out the corresponding keywords.taxon_id.
+
+    Regression: populate_taxa_db_from_json used only INSERT ... ON CONFLICT
+    DO UPDATE, so taxa rows for ids removed from the new taxonomy stuck
+    around. add_keyword's auto-detect queries taxa.name and
+    taxa.common_name before taxa_common_names, so stale rows kept
+    matching obsolete names across re-downloads.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {
+                "taxon_id": 1,
+                "scientific_name": "Animalia",
+                "common_name": "",
+                "rank": "kingdom",
+                "lineage_names": ["Animalia"],
+                "lineage_ranks": ["kingdom"],
+            },
+            "extinct species": {
+                "taxon_id": 42,
+                "scientific_name": "Deleted species",
+                "common_name": "Extinct Species",
+                "rank": "species",
+                "lineage_names": ["Animalia", "Deleted species"],
+                "lineage_ranks": ["kingdom", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    extinct_local_id = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 42"
+    ).fetchone()["id"]
+
+    # Simulate a keyword referring to the soon-to-be-removed taxon (the
+    # classifier-added-keyword path sets keywords.taxon_id).
+    kid = db.add_keyword("Deleted species", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (extinct_local_id, kid),
+    )
+    db.conn.commit()
+
+    # Newer release: taxon 42 is gone.
+    second = json.loads(json.dumps(first))
+    del second["taxa_by_scientific"]["extinct species"]
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    populate_taxa_db_from_json(db, tax_path)
+
+    gone = db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 42"
+    ).fetchone()
+    assert gone is None, "stale taxa row should be pruned on re-populate"
+
+    # The referring keyword survives with taxon_id nulled out so FK
+    # enforcement doesn't block the prune.
+    kw = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert kw is not None
+    assert kw["taxon_id"] is None
+
+
 def test_populate_taxa_db_from_json_clears_stale_taxa_common_name(tmp_path):
     """Re-populate drops taxa.common_name when upstream removed it.
 
