@@ -272,6 +272,51 @@ def test_build_self_heal_redownloader_unknown_path_returns_none(tmp_path):
     assert models.build_self_heal_redownloader("") is None
 
 
+def test_generic_load_failure_does_not_trigger_redownload(tmp_path):
+    """Generic onnxruntime load-failure messages (e.g. provider load
+    errors, ABI/compat mismatches) must NOT trigger delete+redownload.
+    Only the narrow set of corruption-specific markers should. Deleting
+    a valid model to recover from a CUDA provider error would be a
+    multi-GB waste and still leave the real issue unresolved."""
+    from onnx_runtime import create_session_with_self_heal
+
+    model_path = tmp_path / "model.onnx"
+    valid_bytes = b"valid model bytes we must not delete"
+    model_path.write_bytes(valid_bytes)
+
+    download_called = {"n": 0}
+
+    def fake_redownload():
+        download_called["n"] += 1
+
+    # A realistic non-corruption onnxruntime error: CUDA provider init
+    # fails, the message says "Load model from ... failed" but the file
+    # bytes are fine.
+    generic_msg = (
+        "[ONNXRuntimeError] : 1 : FAIL : Load model from "
+        "foo.onnx failed:Failed to load model because "
+        "CUDA provider could not be initialized"
+    )
+
+    def fake_create(path):
+        raise Exception(generic_msg)
+
+    with patch("onnx_runtime.create_session", side_effect=fake_create):
+        with pytest.raises(Exception) as excinfo:
+            create_session_with_self_heal(
+                str(model_path),
+                redownload=fake_redownload,
+            )
+
+    assert "CUDA provider" in str(excinfo.value)
+    assert download_called["n"] == 0, (
+        "generic load failure must NOT trigger redownload"
+    )
+    assert model_path.read_bytes() == valid_bytes, (
+        "valid model file must NOT be deleted for non-corruption errors"
+    )
+
+
 def test_external_data_sidecar_is_also_deleted(tmp_path):
     """When the model uses external data (.onnx.data sidecar), both the
     graph file and the sidecar must be deleted so a fresh download is
@@ -297,7 +342,10 @@ def test_external_data_sidecar_is_also_deleted(tmp_path):
 
     def fake_create(path):
         if not state["redownloaded"]:
-            raise _onnx_load_error("external data load failed")
+            raise _onnx_load_error(
+                "[ONNXRuntimeError] : 1 : FAIL : Failed to load external "
+                "data file: missing bytes"
+            )
         return good_session
 
     with patch("onnx_runtime.create_session", side_effect=fake_create):

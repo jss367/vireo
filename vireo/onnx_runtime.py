@@ -19,17 +19,20 @@ log = logging.getLogger(__name__)
 # data sidecar). Seeing one of these in an exception message means the
 # on-disk model is unusable and a fresh download is the right remedy.
 # Non-matching failures (permission denied, is-a-directory, out-of-memory,
-# CUDA init errors) must NOT trigger self-heal.
+# CUDA init errors, provider/compat issues) must NOT trigger self-heal.
+#
+# Intentionally narrow: generic phrases like "load model from" or
+# "failed to load model" appear in every onnxruntime load error
+# including non-corruption cases (provider load failures, ABI/compat
+# mismatches). Matching those would make us delete + redownload
+# multi-GB model files while the real root cause sits unresolved.
 _CORRUPT_MODEL_MARKERS = (
     "invalid_protobuf",
     "protobuf parsing failed",
-    "load model from",
-    "model_path must not be empty",
-    "external data",
-    "failed to load model",
-    "no graph",
-    "invalid model",
     "invalid_graph",
+    "model_path must not be empty",
+    "external data file",
+    "no graph",
 )
 
 

@@ -343,13 +343,6 @@ class Classifier:
                     "Download the model from the Models page in Settings."
                 )
 
-        # Load preprocessing config
-        with open(config_path) as f:
-            preproc = json.load(f)
-        self._input_size = tuple(preproc["input_size"][-2:])  # (H, W)
-        self._mean = preproc["mean"]
-        self._std = preproc["std"]
-
         # Load image encoder ONNX session. When this model lives in the
         # known-models directory we wrap the load in a self-heal retry so
         # a corrupt / truncated file triggers a single delete+redownload
@@ -363,6 +356,16 @@ class Classifier:
             image_encoder_path, redownload=redownload,
         )
         self._image_input_name = self._image_session.get_inputs()[0].name
+
+        # Load preprocessing config AFTER the session loads: a self-heal
+        # redownload may have replaced config.json alongside the ONNX
+        # bytes, and reading it before would leave us with stale
+        # input_size/mean/std causing silent mis-preprocessing.
+        with open(config_path) as f:
+            preproc = json.load(f)
+        self._input_size = tuple(preproc["input_size"][-2:])  # (H, W)
+        self._mean = preproc["mean"]
+        self._std = preproc["std"]
 
         if labels is not None:
             if not labels:
