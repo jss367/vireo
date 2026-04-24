@@ -311,6 +311,152 @@ def _pair_raw_jpeg_companions(db):
     commit_with_retry(db.conn)
 
 
+def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
+    """Delete cached thumbnail / working copy / tracked preview for a photo.
+
+    Called when the scanner detects that an existing photo's source content
+    has changed (different file_hash). Thumbnails, working copies, and
+    preview-pyramid sizes are all derived from the source bytes, so they're
+    stale as soon as the source changes.
+
+    Scope is intentionally O(1) per photo — untracked preview files
+    (no preview_cache row) are handled by
+    ``_sweep_untracked_previews_for_photos`` once at the end of
+    ``scan()`` instead, so large rescans don't re-enumerate previews/
+    for every invalidated photo (O(N × M) work).
+
+    Also clears ``working_copy_path`` in the database so the scanner's
+    working-copy extraction pass at the end of ``scan()`` picks this row
+    back up and rebuilds the working copy.
+
+    Requires an explicit ``vireo_dir``: DB path and cache root are
+    independently configurable (--db vs --thumb-dir), so we can't guess
+    the cache location from the DB. No-op when the caller omits it.
+
+    ``thumb_cache_dir`` overrides the thumbnail location. ``--thumb-dir``
+    may point to any directory name — it is not constrained to
+    ``vireo_dir/thumbnails``. Callers that have the configured value
+    (Flask routes, audit entry points) should pass it here or stale
+    thumbs survive; ``previews/`` and ``working/`` are always siblings
+    of ``vireo_dir`` by convention and need no override.
+    """
+    if not vireo_dir:
+        return
+
+    thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
+    if os.path.exists(thumb_path):
+        try:
+            os.remove(thumb_path)
+        except OSError:
+            log.debug("Could not delete stale thumbnail %s", thumb_path, exc_info=True)
+
+    wc_file = os.path.join(vireo_dir, "working", f"{photo_id}.jpg")
+    if os.path.exists(wc_file):
+        try:
+            os.remove(wc_file)
+        except OSError:
+            log.debug("Could not delete stale working copy %s", wc_file, exc_info=True)
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path = NULL WHERE id = ?",
+        (photo_id,),
+    )
+
+    # Preview pyramid + its LRU accounting. Only drop a preview_cache row
+    # for sizes whose file was successfully removed (or was already
+    # missing): if unlink fails (e.g. Windows file lock) and we drop the
+    # row anyway, the serve path's lazy-adoption shortcut re-adopts the
+    # stranded file and hands out stale pre-change bytes. Mirrors the
+    # self-healing semantics in preview_cache.evict_if_over_quota.
+    preview_dir = os.path.join(vireo_dir, "previews")
+    rows = db.conn.execute(
+        "SELECT size FROM preview_cache WHERE photo_id = ?", (photo_id,)
+    ).fetchall()
+    deleted_sizes = []
+    for row in rows:
+        size = row["size"]
+        path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            deleted_sizes.append(size)
+        except OSError:
+            log.debug("Could not delete stale preview %s", path, exc_info=True)
+        else:
+            deleted_sizes.append(size)
+
+    if deleted_sizes:
+        db.conn.executemany(
+            "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
+            [(photo_id, s) for s in deleted_sizes],
+        )
+
+
+def _sweep_untracked_previews_for_photos(db, vireo_dir, photo_ids):
+    """Batched sweep of preview files with no preview_cache row.
+
+    Legacy / orphan preview files (written by older code paths or left
+    over from interrupted inserts) would be lazy-adopted on the next
+    ``/photos/<id>/preview`` request and served as valid cache hits.
+    After a content change that's stale data — the app serves
+    pre-change bytes. We sweep them.
+
+    Runs once per ``scan()`` call, enumerating ``previews/`` at most
+    one time regardless of how many photos were invalidated. Files
+    whose ``(photo_id, size)`` still has a live preview_cache row are
+    preserved (row-driven cleanup in ``_invalidate_derived_caches``
+    keeps rows when unlink fails, and we must not orphan those files
+    here either).
+    """
+    if not vireo_dir or not photo_ids:
+        return
+    preview_dir = os.path.join(vireo_dir, "previews")
+    if not os.path.isdir(preview_dir):
+        return
+
+    photo_ids_set = {int(p) for p in photo_ids}
+    ids_list = list(photo_ids_set)
+    # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999 on
+    # older builds). Without this, a rescan that invalidates thousands
+    # of photos crashes scan post-processing with "too many SQL variables".
+    _CHUNK = 900
+    still_tracked: set[tuple[int, int]] = set()
+    for i in range(0, len(ids_list), _CHUNK):
+        chunk = ids_list[i : i + _CHUNK]
+        ph = ",".join("?" * len(chunk))
+        rows = db.conn.execute(
+            f"SELECT photo_id, size FROM preview_cache WHERE photo_id IN ({ph})",
+            chunk,
+        ).fetchall()
+        still_tracked.update((r["photo_id"], r["size"]) for r in rows)
+
+    try:
+        entries = os.listdir(preview_dir)
+    except OSError:
+        return
+    for fname in entries:
+        if not fname.endswith(".jpg"):
+            continue
+        stem = fname[: -len(".jpg")]
+        parts = stem.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+            size = int(parts[1])
+        except ValueError:
+            continue
+        if pid not in photo_ids_set:
+            continue
+        if (pid, size) in still_tracked:
+            continue
+        path = os.path.join(preview_dir, fname)
+        try:
+            os.remove(path)
+        except OSError:
+            log.debug("Could not delete untracked preview %s", path, exc_info=True)
+
+
 def _subtree_like_pattern(path, sep=None):
     """Build a SQLite LIKE parameter that matches ``path`` + any descendant.
 
@@ -447,7 +593,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     commit_with_retry(db.conn)
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -471,7 +617,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             touch only photos already in the DB.
         vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
             When provided, working copies are extracted for RAW photos after
-            companion pairing.
+            companion pairing, and derived-cache invalidation fires on
+            content-changed photos.
+        thumb_cache_dir: optional override for the thumbnail cache
+            directory. ``--thumb-dir`` is independently configurable and
+            can point anywhere — defaulting to ``vireo_dir/thumbnails``
+            silently misses the real cache when those diverge. Callers
+            with the configured value (Flask routes, audit entry points)
+            should pass it. When omitted, falls back to
+            ``vireo_dir/thumbnails``.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -563,6 +717,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # aborts before the main loop has added any folder, or a successful
     # no-op incremental scan that processes zero files.
     touched_folder_ids = set()
+    # Photo IDs whose derived caches were invalidated this scan. Collected
+    # so the untracked-preview sweep can run once as a batch instead of
+    # per-photo (avoids O(N × M) directory walks on large rescans).
+    invalidated_photo_ids: set[int] = set()
     scoped_paths = {str(root_path)}
     if restrict_dirs is not None:
         scoped_paths.update(str(d) for d in restrict_dirs)
@@ -772,6 +930,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if longitude is None:
                 longitude = exif_group.get("GPSLongitude")
 
+            # Pre-check: capture prior content identity AND whether the
+            # row existed before add_photo touches it. Brand-new rows
+            # have no derived caches to flush — skipping invalidation
+            # for them avoids O(N) wasted UPDATE + commit round-trips on
+            # large initial scans.
+            existing_row = db.conn.execute(
+                "SELECT file_hash FROM photos WHERE folder_id = ? AND filename = ?",
+                (folder_id, image_path.name),
+            ).fetchone()
+            row_already_existed = existing_row is not None
+            prev_file_hash = existing_row["file_hash"] if existing_row else None
+
             photo_id = db.add_photo(
                 folder_id=folder_id,
                 filename=image_path.name,
@@ -826,6 +996,27 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
                     update_params,
                 )
+                commit_with_retry(db.conn)
+
+            # Content-change self-heal: when the computed hash differs
+            # from what was stored before this scan, derived caches are
+            # stale. Includes the NULL → concrete transition for legacy
+            # rows that predate hash tracking — we can't prove their
+            # caches match current bytes, so safer to flush and
+            # regenerate. Gated on ``row_already_existed`` so brand-new
+            # inserts (prev_file_hash is always NULL there) don't
+            # trigger pointless UPDATE + commit round-trips on large
+            # initial scans. Requires explicit vireo_dir; callers must
+            # pass it (scan can't guess because --db and --thumb-dir
+            # are independently configurable).
+            if (row_already_existed
+                    and file_hash is not None
+                    and prev_file_hash != file_hash
+                    and vireo_dir):
+                _invalidate_derived_caches(
+                    db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
+                )
+                invalidated_photo_ids.add(photo_id)
                 commit_with_retry(db.conn)
 
             # Import XMP keywords if sidecar exists — must land BEFORE the
@@ -898,6 +1089,14 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 wc_scope = [str(root_path)]
             _extract_working_copies(
                 db, vireo_dir, progress_callback, status_callback, scope=wc_scope,
+            )
+
+        # Batched untracked-preview sweep. One os.listdir(previews/) for
+        # the whole scan instead of one per invalidated photo — essential
+        # when a rescan touches thousands of content-changed files.
+        if invalidated_photo_ids:
+            _sweep_untracked_previews_for_photos(
+                db, vireo_dir, invalidated_photo_ids,
             )
     except BaseException:
         db.conn.rollback()

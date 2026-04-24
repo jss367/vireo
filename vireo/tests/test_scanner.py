@@ -1568,3 +1568,534 @@ def test_pre_pass_failure_marks_folder_partial(tmp_path):
     assert row["status"] == "partial", (
         f"expected folder.status='partial' after pre-pass failure, got {row['status']!r}"
     )
+
+
+def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
+    """When a file's content changes on disk, re-scan must invalidate the
+    stale thumbnail so the next serve regenerates from fresh pixels.
+
+    Regression test for the _D851925.NEF bug where a photo's thumbnail showed
+    a bird but the full image (derived from the current file) was a squirrel:
+    the source had been replaced, file_hash was updated on re-scan, but the
+    thumbnail cache was never invalidated.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    # Original content: solid red
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=100)
+    assert len(photos) == 1
+    photo_id = photos[0]["id"]
+    original_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert original_hash is not None
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Replace file content (same filename, different pixels → new hash + new mtime)
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    # Ensure file_mtime differs from the DB value so incremental scan re-processes.
+    new_mtime = os.path.getmtime(img_path)
+    db_mtime = db.conn.execute(
+        "SELECT file_mtime FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert new_mtime != db_mtime
+
+    # Re-scan: scanner must detect the content change and drop the stale thumbnail.
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    updated_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert updated_hash != original_hash, "sanity: scanner should have updated file_hash"
+
+    assert not os.path.exists(thumb_path), (
+        "Scanner must invalidate the cached thumbnail when file content changes; "
+        "leaving it on disk is how thumbnail/full-image mismatches get baked in."
+    )
+
+
+def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_path):
+    """preview_cache LRU rows must be removed alongside preview files when
+    a photo's content changes, or total_bytes accounting reports ghost
+    bytes for files that no longer exist and quota eviction starts
+    targeting valid previews.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    # Seed a preview file + accounting row, as /photos/<id>/preview would.
+    preview_file = preview_dir / f"{photo_id}_1920.jpg"
+    Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    file_bytes = preview_file.stat().st_size
+    db.preview_cache_insert(photo_id, 1920, file_bytes)
+    assert db.preview_cache_total_bytes() == file_bytes
+
+    # Replace source pixels → new file_hash → invalidation should fire.
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert not preview_file.exists(), "preview file should be deleted"
+    assert db.preview_cache_get(photo_id, 1920) is None, (
+        "preview_cache row must be deleted alongside the file; "
+        "leaving it inflates preview_cache_total_bytes and triggers "
+        "unnecessary eviction of valid previews."
+    )
+    assert db.preview_cache_total_bytes() == 0
+
+
+def test_rescan_keeps_preview_cache_row_when_file_unlink_fails(tmp_path, monkeypatch):
+    """If a preview file can't be deleted (e.g. locked on Windows), the
+    matching preview_cache row must stay. Otherwise the serve path's
+    lazy-adoption shortcut (app.py ~L8131) re-adopts the stale file on
+    the next /photos/<id>/preview and hands out pre-change content, and
+    quota eviction stops accounting for the leaked bytes.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    preview_file = preview_dir / f"{photo_id}_1920.jpg"
+    Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    file_bytes = preview_file.stat().st_size
+    db.preview_cache_insert(photo_id, 1920, file_bytes)
+
+    # Simulate the preview file being un-removable (locked, ACL, etc.).
+    real_remove = os.remove
+    stuck = str(preview_file)
+
+    def selective_remove(path):
+        if os.fspath(path) == stuck:
+            raise PermissionError("simulated lock")
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", selective_remove)
+
+    # Force a content-change rescan so invalidation fires.
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert preview_file.exists(), "sanity: stuck preview file should remain"
+    assert db.preview_cache_get(photo_id, 1920) is not None, (
+        "When preview unlink fails, the cache row must stay so quota "
+        "accounting keeps the leaked bytes visible and the serve path "
+        "does not lazy-adopt stale content."
+    )
+
+
+def test_rescan_sweeps_untracked_preview_files(tmp_path):
+    """Legacy preview files that pre-date preview_cache accounting (no
+    row) must still be cleaned up when a photo's content changes.
+    Otherwise app.py's lazy-adoption path (~L8131) re-adopts them on
+    the next /photos/<id>/preview request and hands out pre-change
+    bytes.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    # Seed an *untracked* preview (file exists, no preview_cache row).
+    untracked = preview_dir / f"{photo_id}_800.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(untracked), "JPEG")
+    assert db.preview_cache_get(photo_id, 800) is None
+
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert not untracked.exists(), (
+        "Untracked preview files for invalidated photos must be swept "
+        "or serve's lazy-adoption path re-adopts stale pre-change bytes."
+    )
+
+
+def test_rescan_preview_sweep_is_batched_not_per_photo(tmp_path, monkeypatch):
+    """The untracked-preview sweep must run at most once per scan,
+    not once per invalidated photo. Per-photo os.listdir on the
+    preview dir turns large rescans into O(N × M) work.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    paths = []
+    for i in range(3):
+        p = os.path.join(root, f"photo_{i}.jpg")
+        Image.new("RGB", (800, 600), color=(255, i * 40, 0)).save(p, "JPEG")
+        paths.append(p)
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    # Replace all three files' contents so each invalidation fires.
+    time.sleep(0.05)
+    for i, p in enumerate(paths):
+        Image.new("RGB", (800, 600), color=(0, 0, 255 - i * 30)).save(p, "JPEG")
+
+    preview_listings = []
+    real_listdir = os.listdir
+
+    def counting_listdir(path):
+        if str(path).rstrip(os.sep).endswith("previews"):
+            preview_listings.append(str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", counting_listdir)
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert len(preview_listings) <= 1, (
+        f"previews/ must be enumerated at most once per scan regardless "
+        f"of how many photos were invalidated; got {len(preview_listings)} "
+        f"listings across 3 invalidations."
+    )
+
+
+def test_audit_import_untracked_invalidates_using_caller_vireo_dir(tmp_path):
+    """audit.import_untracked must accept vireo_dir and forward it to
+    scan() so invalidation hits the real cache root.
+
+    The DB and thumb directory are independently configurable (--db vs
+    --thumb-dir). A fallback that derives vireo_dir from ``db._db_path``
+    touches the wrong filesystem when those flags diverge, leaving the
+    actual thumbnails/previews stale. The caller knows the configured
+    cache root; it must pass it.
+    """
+    from audit import import_untracked
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    # DB and thumb cache intentionally on different roots (simulates
+    # --db /fast-ssd/vireo.db --thumb-dir /big-hdd/cache).
+    db_dir = tmp_path / "dbstore"
+    db_dir.mkdir()
+    vireo_dir = tmp_path / "cache"
+    vireo_dir.mkdir()
+    (vireo_dir / "thumbnails").mkdir()
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    img = root / "photo.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(str(img), "JPEG")
+
+    db = Database(str(db_dir / "vireo.db"))
+    scan(str(root), db, vireo_dir=str(vireo_dir))
+
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+    thumb_path = vireo_dir / "thumbnails" / f"{photo_id}.jpg"
+    generate_thumbnail(photo_id, str(img), str(vireo_dir / "thumbnails"))
+    assert thumb_path.exists()
+
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(str(img), "JPEG")
+
+    # Caller supplies the real cache root — no fallback guessing.
+    import_untracked(db, [str(img)], vireo_dir=str(vireo_dir))
+
+    assert not thumb_path.exists(), (
+        "audit.import_untracked must invalidate the caller-provided "
+        "cache root, not a path guessed from db._db_path."
+    )
+
+
+def test_preview_sweep_chunks_large_photo_id_sets(tmp_path):
+    """_sweep_untracked_previews_for_photos must chunk its IN (...) query.
+
+    Older SQLite builds cap bound parameters at 999
+    (SQLITE_MAX_VARIABLE_NUMBER). A rescan that invalidates thousands
+    of photos would otherwise raise ``too many SQL variables`` during
+    post-processing and fail the whole scan.
+    """
+    import scanner
+    from db import Database
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    (vireo_dir / "previews").mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+
+    real_conn = db.conn
+    max_params_seen = 0
+
+    class TrackingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            nonlocal max_params_seen
+            if isinstance(params, (list, tuple)):
+                max_params_seen = max(max_params_seen, len(params))
+            return self._inner.execute(sql, params)
+
+        def executemany(self, sql, seq):
+            return self._inner.executemany(sql, seq)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    db.conn = TrackingConn(real_conn)
+
+    scanner._sweep_untracked_previews_for_photos(
+        db, str(vireo_dir), list(range(1, 2001)),
+    )
+
+    assert max_params_seen <= 999, (
+        f"Preview sweep sent {max_params_seen} bound parameters in one "
+        f"query; would crash on SQLite builds with "
+        f"SQLITE_MAX_VARIABLE_NUMBER=999."
+    )
+
+
+def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
+    """``--thumb-dir`` can point to any directory — not necessarily a
+    ``thumbnails/`` subdirectory of the vireo data dir. Invalidation
+    must target the caller-supplied thumb cache dir directly, not
+    assume a ``vireo_dir/thumbnails/`` layout. Otherwise stale
+    thumbnails survive and an unrelated sibling ``thumbnails/`` can
+    have files removed.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    # Custom layout: thumb dir has a non-default basename, not adjacent
+    # to a "thumbnails" subdir of vireo_dir.
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = tmp_path / "custom-thumbs"
+    thumb_dir.mkdir()
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    img = root / "p.jpg"
+    Image.new("RGB", (400, 300), color=(255, 0, 0)).save(str(img), "JPEG")
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(str(root), db,
+         vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(thumb_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb = thumb_dir / f"{photo_id}.jpg"
+    generate_thumbnail(photo_id, str(img), str(thumb_dir))
+    assert thumb.exists()
+
+    time.sleep(0.05)
+    Image.new("RGB", (400, 300), color=(0, 0, 255)).save(str(img), "JPEG")
+
+    scan(str(root), db, incremental=True,
+         vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(thumb_dir))
+
+    assert not thumb.exists(), (
+        "Invalidation must target the configured thumb_cache_dir, not "
+        "the vireo_dir/thumbnails convention."
+    )
+    # Sanity: no accidental 'thumbnails/' directory got created either.
+    assert not (vireo_dir / "thumbnails").exists()
+
+
+def test_initial_scan_does_not_invoke_invalidation_for_new_photos(tmp_path, monkeypatch):
+    """Brand-new rows have no derived caches to flush. Firing
+    _invalidate_derived_caches for every new photo turns a 50k-file
+    initial scan into 50k pointless UPDATE/commit round-trips and
+    preview-sweep bookkeeping. Invalidation should only fire for rows
+    that already existed before this scan.
+    """
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    for i in range(3):
+        Image.new("RGB", (200, 150), color=(i * 80, 0, 0)).save(
+            os.path.join(root, f"photo_{i}.jpg"), "JPEG",
+        )
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    calls = []
+    real_invalidate = scanner._invalidate_derived_caches
+
+    def counting_invalidate(db, vireo_dir_arg, photo_id, thumb_cache_dir=None):
+        calls.append(photo_id)
+        return real_invalidate(db, vireo_dir_arg, photo_id, thumb_cache_dir=thumb_cache_dir)
+
+    monkeypatch.setattr(scanner, "_invalidate_derived_caches", counting_invalidate)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(root, db, vireo_dir=str(vireo_dir))
+
+    assert calls == [], (
+        f"Invalidation fired {len(calls)} times for brand-new rows with "
+        f"no derived caches to flush. On large initial scans that turns "
+        f"into O(N) wasted SQL + commit round-trips."
+    )
+
+
+def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
+    """Legacy photo rows predating file_hash tracking (or where prior
+    hash computation failed) have file_hash=NULL. When a later rescan
+    computes a concrete hash, derived caches written during the NULL
+    era must be invalidated — we can't prove the bytes are unchanged,
+    so safer to flush than leave a stale thumbnail in place.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "legacy.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    cache_dir = vireo_dir / "thumbnails"
+    cache_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb_path = str(cache_dir / f"{photo_id}.jpg")
+    generate_thumbnail(photo_id, img_path, str(cache_dir))
+    assert os.path.exists(thumb_path)
+
+    # Simulate a legacy row: wipe the hash as if it was recorded before
+    # file_hash tracking existed.
+    db.conn.execute("UPDATE photos SET file_hash = NULL WHERE id = ?", (photo_id,))
+    # Also bump file_mtime backwards so incremental scan reprocesses the row.
+    db.conn.execute("UPDATE photos SET file_mtime = 0 WHERE id = ?", (photo_id,))
+    db.conn.commit()
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    new_hash = db.conn.execute(
+        "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
+    ).fetchone()[0]
+    assert new_hash is not None, "sanity: rescan must populate the hash"
+
+    assert not os.path.exists(thumb_path), (
+        "Invalidation must fire on NULL → concrete transitions too; "
+        "otherwise legacy rows keep stale derived caches forever."
+    )
+
+
+def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
+    """When a large JPEG's content changes, re-scan must invalidate the stale
+    working copy so the subsequent extraction reflects current pixels."""
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "big.jpg")
+    # Larger than the default working_copy_max_size (4096) so a working copy is extracted.
+    Image.new("RGB", (5000, 3000), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photos = db.get_photos(per_page=100)
+    assert len(photos) == 1
+    photo_id = photos[0]["id"]
+    assert photos[0]["working_copy_path"] is not None
+    wc_path = vireo_dir / photos[0]["working_copy_path"]
+    assert wc_path.exists()
+
+    # Record what the working copy looks like now (top-left pixel = red).
+    with Image.open(wc_path) as img:
+        assert img.convert("RGB").getpixel((0, 0))[0] > 200  # red channel dominant
+
+    # Replace file content with a very different image.
+    time.sleep(0.05)
+    Image.new("RGB", (5000, 3000), color=(0, 0, 255)).save(img_path, "JPEG")
+
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    # Working copy should point to a regenerated file whose pixels match the new source.
+    photos = db.get_photos(per_page=100)
+    wc_rel = photos[0]["working_copy_path"]
+    assert wc_rel is not None, "Scanner must re-set working_copy_path after invalidation"
+    wc_path = vireo_dir / wc_rel
+    assert wc_path.exists()
+    with Image.open(wc_path) as img:
+        pixel = img.convert("RGB").getpixel((0, 0))
+    assert pixel[2] > 200 and pixel[0] < 100, (
+        f"Working copy pixel {pixel} does not reflect updated (blue) source; "
+        "stale extraction from pre-change content was served."
+    )

@@ -690,6 +690,171 @@ def test_pipeline_passes_recursive_false_to_scan(tmp_path, monkeypatch):
     assert scan_kwargs.get("recursive") is False
 
 
+def test_pipeline_passes_vireo_dir_to_scan(tmp_path, monkeypatch):
+    """Pipeline must forward vireo_dir to scanner.scan() so the
+    content-change cache invalidation (thumbnail/working-copy/preview)
+    actually fires for pipeline-triggered rescans.
+
+    Without this, _invalidate_derived_caches short-circuits (guard:
+    ``if not vireo_dir: return``) and the bird/squirrel divergence this
+    PR fixes still occurs for anyone using the pipeline to scan.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "vireo.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert scan_kwargs.get("vireo_dir") == os.path.dirname(db_path), (
+        "Pipeline must pass vireo_dir (the DB's parent dir) to scan() so "
+        "derived-cache invalidation is reachable on pipeline rescans."
+    )
+
+
+def test_pipeline_forwards_thumb_cache_dir_to_scan(tmp_path, monkeypatch):
+    """Pipeline must forward the configured thumb_cache_dir to scanner.scan().
+
+    ``--thumb-dir`` can point outside ``vireo_dir/thumbnails`` — scanner's
+    invalidation now accepts a ``thumb_cache_dir`` override for exactly
+    that reason. If pipeline scans drop it, the default fallback
+    (``vireo_dir/thumbnails``) targets the wrong directory on custom
+    layouts and stale thumbnails survive.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "vireo.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    custom_thumb_dir = str(tmp_path / "custom-thumbs")
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params,
+        thumb_cache_dir=custom_thumb_dir,
+    )
+
+    assert scan_kwargs.get("thumb_cache_dir") == custom_thumb_dir, (
+        "Pipeline must thread the configured thumb_cache_dir to scan() "
+        "so invalidation targets the real cache on custom --thumb-dir "
+        "layouts."
+    )
+
+
+def test_pipeline_vireo_dir_aligns_with_thumb_cache_dir_parent(tmp_path, monkeypatch):
+    """On custom --thumb-dir layouts, the Flask serve path computes
+    ``vireo_dir = os.path.dirname(THUMB_CACHE_DIR)`` — that's where it
+    reads previews/ and working/. Pipeline scans must align with that
+    convention, or invalidation runs against one tree while the app
+    serves from another (so stale previews/working_copies survive).
+    """
+    import config as cfg
+    from db import Database
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    # DB and thumb cache on *different* roots (simulates
+    # --db ~/.vireo/vireo.db --thumb-dir /data/thumbs).
+    db_dir = tmp_path / "dbstore"
+    db_dir.mkdir()
+    db_path = str(db_dir / "vireo.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    custom_thumb_dir = tmp_path / "cache" / "thumbs"
+    custom_thumb_dir.mkdir(parents=True)
+
+    src = tmp_path / "photos"
+    src.mkdir()
+    (src / "img.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+    scan_kwargs = {}
+
+    def fake_scan(root, db_arg, **kwargs):
+        scan_kwargs.update(kwargs)
+
+    monkeypatch.setattr("scanner.scan", fake_scan)
+
+    params = PipelineParams(
+        source=str(src),
+        recursive=False,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(
+        job, runner, db_path, ws_id, params,
+        thumb_cache_dir=str(custom_thumb_dir),
+    )
+
+    expected_vireo_dir = os.path.dirname(str(custom_thumb_dir))
+    assert scan_kwargs.get("vireo_dir") == expected_vireo_dir, (
+        f"Pipeline should derive vireo_dir from thumb_cache_dir's parent "
+        f"({expected_vireo_dir}); got {scan_kwargs.get('vireo_dir')!r}. "
+        "Otherwise scan's previews/working paths diverge from the "
+        "Flask serve paths."
+    )
+
+
 def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     """Scan progress events should include rate and eta_seconds fields."""
     import time

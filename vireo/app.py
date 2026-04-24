@@ -4066,7 +4066,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         paths = body.get("paths", [])
         from audit import import_untracked
 
-        import_untracked(db, paths)
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        import_untracked(
+            db, paths,
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+        )
         return jsonify({"ok": True, "imported": len(paths)})
 
     # -- Scan status (kept, non-job) --
@@ -5236,6 +5241,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                         status_callback=status_cb,
                         vireo_dir=vireo_dir,
+                        thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                     )
                 except Exception as exc:
                     log.exception("Scan failed for root %s", root)
@@ -6113,6 +6119,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     progress_callback=scan_cb,
                     skip_paths=exclude_paths or None,
                     vireo_dir=vireo_dir,
+                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                     restrict_dirs=restrict_dirs,
                 )
             finally:
@@ -7449,7 +7456,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            return run_pipeline_job(job, runner, db_path, active_ws, params)
+            return run_pipeline_job(
+                job, runner, db_path, active_ws, params,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
 
         job_id = runner.start(
             "pipeline", work,
