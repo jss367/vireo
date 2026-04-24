@@ -1224,6 +1224,101 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_migration_preserves_predictions_when_dropping_detections(tmp_path):
+    """Legacy DB with FK ON DELETE CASCADE from predictions→detections:
+    the global-detections rewrite must NOT cascade-delete predictions
+    when it drops the old detections table. Data loss regression.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        -- The REAL legacy schema: FK with ON DELETE CASCADE. Dropping the
+        -- old detections table with FKs enabled would nuke everything here.
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+            species TEXT, confidence REAL, model TEXT,
+            status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (1000, 100, 'Robin', 'bioclip-2', 'accepted');
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    # Prediction row must still be there after migration.
+    pred_count = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions"
+    ).fetchone()["n"]
+    assert pred_count == 1, (
+        "Migration cascade-deleted predictions when it dropped the old "
+        "detections table — data loss regression."
+    )
+    # And it must still be reachable via the new detection row.
+    row = db.conn.execute(
+        "SELECT p.species FROM predictions p "
+        "JOIN detections d ON d.id = p.detection_id WHERE p.id = 1000"
+    ).fetchone()
+    assert row is not None
+    assert row["species"] == "Robin"
+
+
+def test_get_top_prediction_for_photo_scoped_to_current_fingerprint(tmp_path):
+    """get_top_prediction_for_photo must return the highest-confidence row
+    from the *current* fingerprint only — a stale fingerprint with higher
+    confidence must NOT win. Used by iNat prefill/submit to avoid sending
+    a taxon from an old label set.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint wins by confidence but is from an old label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    pred = db.get_top_prediction_for_photo(pids[0])
+    assert pred is not None
+    assert pred["species"] == "Robin", (
+        "Helper returned stale-fingerprint species despite higher "
+        "confidence — would prefill iNat with the wrong taxon."
+    )
+
+
 def test_update_prediction_group_info_scoped_to_fingerprint(tmp_path):
     """Group metadata must land on the primary row for the ACTIVE label
     fingerprint, not whichever fingerprint happens to have higher

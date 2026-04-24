@@ -4408,14 +4408,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo:
             return json_error("Photo not found", 404)
 
-        pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name, pr.confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id,),
-        ).fetchone()
+        # Use the current-fingerprint helper so a photo with cached
+        # predictions from multiple label sets doesn't prefill iNat with
+        # a species from a stale label set.
+        pred = db.get_top_prediction_for_photo(photo_id)
 
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
@@ -4500,15 +4496,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isfile(photo_path):
             return json_error("Photo file not found on disk", 404)
 
-        # Use overrides from request, or fall back to DB data
-        pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id,),
-        ).fetchone()
+        # Use overrides from request, or fall back to DB data. The helper
+        # picks the highest-confidence prediction from the CURRENT
+        # fingerprint, scoped to the active workspace — submitting a stale
+        # taxon to iNaturalist is permanent and not easily reversible.
+        pred = db.get_top_prediction_for_photo(photo_id)
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
         observed_on = data.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
@@ -4569,14 +4561,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
                 continue
 
-            pred = db.conn.execute(
-                """SELECT pr.species, pr.scientific_name
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE d.photo_id = ?
-                   ORDER BY pr.confidence DESC LIMIT 1""",
-                (photo_id,),
-            ).fetchone()
+            # Current-fingerprint + workspace-scoped top prediction —
+            # avoids submitting a stale-label-set taxon to iNaturalist.
+            pred = db.get_top_prediction_for_photo(photo_id)
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
             observed_on = sub.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)

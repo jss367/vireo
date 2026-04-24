@@ -946,9 +946,24 @@ class Database:
                 FROM detections d
                 JOIN detection_canonical dc ON dc.canonical_id = d.id
             """)
+            # Turn OFF foreign keys before dropping the old detections table.
+            # predictions.detection_id has ON DELETE CASCADE against detections,
+            # so DROP TABLE detections with FKs enabled cascade-deletes every
+            # prediction row (and then prediction_review via its own cascade),
+            # which is irreversible data loss during startup migration. After
+            # RENAME, the predictions.detection_id FK consistently points at
+            # the new table (ids are preserved), so re-enabling FKs is safe.
+            #
+            # PRAGMA foreign_keys is a no-op inside an open transaction, so
+            # commit the pending writes (INSERTs into detections_new, etc.)
+            # first and commit again before re-enabling.
+            self.conn.commit()
+            self.conn.execute("PRAGMA foreign_keys=OFF")
             self.conn.execute("DROP TABLE detections")
             self.conn.execute("ALTER TABLE detections_new RENAME TO detections")
             self.conn.execute("DROP TABLE detection_canonical")
+            self.conn.commit()
+            self.conn.execute("PRAGMA foreign_keys=ON")
             # Recreate the indexes (the CREATE INDEX IF NOT EXISTS at the bottom of
             # __init__ will no-op if they already exist, but indexes tied to the
             # dropped table are gone).
@@ -4449,6 +4464,38 @@ class Database:
                 (self._ws_id(), model, labels_fingerprint),
             ).fetchall()
         return {r["photo_id"] for r in rows}
+
+    def get_top_prediction_for_photo(self, photo_id):
+        """Return the highest-confidence *current* prediction for a photo.
+
+        "Current" means: workspace-scoped via workspace_folders, and for
+        each (detection, classifier_model) only the most recent
+        labels_fingerprint's rows are considered — stale predictions from
+        prior label sets on the same detection are skipped so callers
+        like /api/inat/prepare don't prefill a taxon from an old label set.
+
+        Returns a dict with ``species``, ``scientific_name``, ``confidence``,
+        ``detection_id`` or None if no eligible prediction exists.
+        """
+        return self.conn.execute(
+            """SELECT pr.species, pr.scientific_name, pr.confidence,
+                      pr.detection_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.photo_id = ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC LIMIT 1""",
+            (self._ws_id(), photo_id),
+        ).fetchone()
 
     def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):
         """Return species, confidence, and detection_id for a photo's prediction.
