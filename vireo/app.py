@@ -3772,10 +3772,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Precompute workspace folder roots so we can express each file's
         # subfolder relative to the root it belongs to (matches the grouping
-        # that folder-preview produces).
-        folder_rows = db.conn.execute(
-            "SELECT path, name FROM folders"
-        ).fetchall()
+        # that folder-preview produces). Scope to the active workspace so a
+        # longer-prefix folder from another workspace can't steal the label.
+        folder_rows = db.get_workspace_folders(db._active_workspace_id)
         roots = sorted(
             [(r["path"], r["name"] or os.path.basename(r["path"].rstrip("/")))
              for r in folder_rows],

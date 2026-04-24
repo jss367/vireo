@@ -230,6 +230,49 @@ def test_new_images_preview_unknown_snapshot_returns_404(app_and_db):
         assert resp.status_code == 404
 
 
+def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
+    """Subfolder grouping must only consider folders in the active workspace.
+    A folder in a different workspace whose path is a longer prefix of a
+    snapshot file path must not win the prefix match and leak its name."""
+    app, db, ws_a, tmp_path = app_and_db
+
+    # Workspace A owns /photos/shoot_a (active when we add it, auto-linked)
+    shoot_a = tmp_path / "photos" / "shoot_a"
+    shoot_a.mkdir(parents=True)
+    _touch_image(str(shoot_a / "pic.jpg"))
+    db.add_folder(str(shoot_a), name="shoot_a-in-ws-A")
+
+    # Workspace B owns /photos/shoot_a/inner — a longer prefix that, if
+    # not filtered by workspace, would steal the subfolder label. Switch
+    # active workspace before creating so add_folder auto-links to B only.
+    ws_b = db.create_workspace("Other")
+    db.set_active_workspace(ws_b)
+    inner = shoot_a / "inner"
+    inner.mkdir()
+    _touch_image(str(inner / "deep.jpg"))
+    db.add_folder(str(inner), name="inner-in-ws-B")
+    db.set_active_workspace(ws_a)
+
+    snap_id = db.create_new_images_snapshot([
+        str(shoot_a / "pic.jpg"),
+        str(inner / "deep.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    subfolders = {f["subfolder"] for f in data["files"]}
+    for sf in subfolders:
+        assert "inner-in-ws-B" not in sf, (
+            f"Leaked folder label from workspace B: {sf}"
+        )
+
+
 def test_new_images_preview_skips_missing_files(app_and_db):
     """If a path in the snapshot no longer exists on disk, skip it rather
     than 500ing — the file may have been moved or deleted since snapshot."""
