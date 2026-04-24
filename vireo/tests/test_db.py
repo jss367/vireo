@@ -1224,6 +1224,86 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_add_prediction_duplicate_does_not_corrupt_review(tmp_path):
+    """When add_prediction is called twice with the same unique key and the
+    second call carries review metadata, the upsert into prediction_review
+    must target the EXISTING prediction_id — not whatever cur.lastrowid
+    happens to hold after the INSERT OR IGNORE is skipped.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Two distinct detections so we have two prediction ids to confuse.
+    det1 = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    det2 = db.save_detections(pids[1], [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5}, "confidence": 0.85, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # First prediction on det1 — no review state, fingerprint="x".
+    db.add_prediction(det1, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="x")
+    pred1_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=?", (det1,)
+    ).fetchone()["id"]
+
+    # Unrelated prediction on det2 to move cur.lastrowid forward.
+    db.add_prediction(det2, species="Sparrow", confidence=0.8,
+                      model="bioclip-2", labels_fingerprint="x")
+
+    # Re-add the SAME (det1, model, fp, species) with review metadata.
+    # INSERT OR IGNORE should skip; the upsert must target pred1_id, not
+    # the most-recent-insert id (which would be det2's prediction).
+    db.add_prediction(
+        det1, species="Robin", confidence=0.9,
+        model="bioclip-2", labels_fingerprint="x",
+        status="accepted", individual="Ruby",
+    )
+    rev_rows = db.conn.execute(
+        "SELECT prediction_id, status, individual FROM prediction_review "
+        "WHERE status = 'accepted'"
+    ).fetchall()
+    assert len(rev_rows) == 1
+    assert rev_rows[0]["prediction_id"] == pred1_id
+    assert rev_rows[0]["individual"] == "Ruby"
+
+
+def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
+    """The folder_ids branch must enforce workspace scoping so stray folder
+    ids from another workspace don't leak photos into the result.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    fa = db.add_folder("/a", name="a")
+    fb = db.add_folder("/b", name="b")
+    db.add_workspace_folder(ws_a, fa)
+    db.add_workspace_folder(ws_b, fb)
+
+    db._active_workspace_id = ws_a
+    pa = db.add_photo(fa, "x.jpg", extension=".jpg",
+                      file_size=100, file_mtime=1.0)
+    db._active_workspace_id = ws_b
+    pb = db.add_photo(fb, "y.jpg", extension=".jpg",
+                      file_size=100, file_mtime=2.0)
+
+    # Both photos have detections.
+    db.save_detections(pa, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.save_detections(pb, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+
+    # Active ws = A. Even if caller passes B's folder id by mistake,
+    # results must not include B's photo.
+    db._active_workspace_id = ws_a
+    hits = db.get_photos_missing_masks(folder_ids=[fa, fb])
+    hit_ids = {h["id"] for h in hits}
+    assert pa in hit_ids
+    assert pb not in hit_ids, "workspace B photo must not leak into workspace A"
+
+
 def test_clear_predictions_without_collection_photo_ids(tmp_path):
     """The no-collection branch must bind every workspace_id placeholder it
     uses. A bug where the list of bound params had fewer entries than the

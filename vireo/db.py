@@ -3469,18 +3469,24 @@ class Database:
             "detector_confidence", 0.2
         )
         if folder_ids:
+            # Detections are global post-refactor, so folder filtering alone
+            # leaks photos from folders that belong to other workspaces if
+            # the caller happens to pass foreign folder ids. Explicitly
+            # JOIN workspace_folders to keep this helper workspace-scoped.
             placeholders = ",".join("?" * len(folder_ids))
             rows = self.conn.execute(
                 f"""SELECT p.id, p.folder_id, p.filename,
                            d.box_x, d.box_y, d.box_w, d.box_h,
                            d.detector_confidence
                     FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                     JOIN detections d ON d.photo_id = p.id
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
                       AND d.detector_confidence >= ?
                     ORDER BY p.id, d.detector_confidence DESC""",
-                [*folder_ids, min_conf],
+                [ws_id, *folder_ids, min_conf],
             ).fetchall()
         else:
             rows = self.conn.execute(
@@ -4119,9 +4125,14 @@ class Database:
                 tax.get("scientific_name"),
             ),
         )
-        pred_id = cur.lastrowid
-        if not pred_id:
-            # INSERT IGNORE collided with the UNIQUE key; look up the existing row.
+        # SQLite's ``cur.lastrowid`` stays at the previous successful insert
+        # even when this INSERT OR IGNORE was skipped by the UNIQUE
+        # collision — relying on it silently upserted prediction_review for
+        # the wrong prediction_id. Use rowcount (0 on IGNORE, 1 on insert)
+        # to decide, then always re-query by the unique key.
+        if cur.rowcount == 1:
+            pred_id = cur.lastrowid
+        else:
             row = self.conn.execute(
                 """SELECT id FROM predictions
                    WHERE detection_id = ? AND classifier_model = ?
