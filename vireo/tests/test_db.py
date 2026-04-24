@@ -4243,6 +4243,38 @@ def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
     assert flag_old2 == "rejected"
 
 
+def test_bulk_reject_miss_category_preserves_null_flag_in_old_value(tmp_path):
+    """old_value must be None (not "") for rows with NULL flag, so undo
+    can restore the original NULL rather than writing a non-canonical
+    empty string that bypasses flag validation (none/flagged/rejected
+    or NULL)."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_null = db.add_photo(folder_id, "null.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id, "none.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_flagged = db.add_photo(folder_id, "flagged.jpg", ".jpg", file_size=100, file_mtime=3.0)
+
+    # p_null forced to NULL flag (add_photo defaults the column to 'none');
+    # p_none explicitly "none"; p_flagged "flagged".
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?, ?)",
+        (p_null, p_none, p_flagged),
+    )
+    db.conn.execute("UPDATE photos SET flag=NULL      WHERE id=?", (p_null,))
+    db.conn.execute("UPDATE photos SET flag='none'    WHERE id=?", (p_none,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (p_flagged,))
+    db.conn.commit()
+
+    affected = db.bulk_reject_miss_category("clipped")
+    by_id = {a["photo_id"]: a for a in affected}
+
+    assert by_id[p_null]["old_value"] is None
+    assert by_id[p_none]["old_value"] == "none"
+    assert by_id[p_flagged]["old_value"] == "flagged"
+
+
 def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
     """With >999 flagged misses, the detections IN (...) clause would exceed
     SQLite's SQLITE_MAX_VARIABLE_NUMBER. list_misses must chunk the lookup

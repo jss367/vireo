@@ -111,7 +111,7 @@ def classify_miss(row, siblings, config):
 
 
 def compute_misses_for_workspace(
-    db, pipeline_config, collection_id=None, exclude_photo_ids=None
+    db, pipeline_config, collection_id=None, exclude_photo_ids=None, now=None,
 ):
     """Compute and persist miss flags for photos in the active workspace.
 
@@ -135,6 +135,11 @@ def compute_misses_for_workspace(
     still contribute burst-sibling context but are not written to, so a
     run with deselections does not resurface or mass-flag deselected
     photos in /misses.
+
+    `now` lets the caller inject the timestamp that will be written to
+    `miss_computed_at`. The pipeline job passes the same value into both
+    this function and the saved pipeline-results cache so the review
+    UI's run-scoped `?since=` window matches what the DB stores.
     """
     if not pipeline_config.get("miss_enabled", True):
         log.info("Miss detection disabled via miss_enabled=false")
@@ -181,7 +186,8 @@ def compute_misses_for_workspace(
     # them). ISO-8601 timestamps still sort lexicographically when
     # precision varies, so this is backward-compatible with rows written
     # at seconds precision.
-    now = datetime.now(UTC).isoformat(timespec="microseconds")
+    if now is None:
+        now = datetime.now(UTC).isoformat(timespec="microseconds")
     updates = []
 
     for burst_rows in by_burst.values():

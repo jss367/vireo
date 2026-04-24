@@ -7454,6 +7454,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             reflow,
             run_grouping,
             save_results,
@@ -7479,8 +7480,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         encounters = run_grouping(photos, config=pipeline_cfg)
         results = reflow(encounters, config=pipeline_cfg)
 
-        # Save updated results
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. reflow/regroup-live do not recompute misses themselves.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
+        # Save updated results
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
@@ -7494,6 +7502,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             run_full_pipeline,
             save_results,
             serialize_results,
@@ -7514,7 +7523,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         results = run_full_pipeline(photos, config=pipeline_cfg)
 
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. regroup-live does not rerun the miss stage itself.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))

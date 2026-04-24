@@ -504,11 +504,19 @@ def serialize_results(results):
                 })
         serialized_encounters.append(s_enc)
 
-    return {
+    out = {
         "encounters": serialized_encounters,
         "photos": [_clean_photo(p) for p in results["photos"]],
         "summary": results["summary"],
     }
+    # miss_computed_at is attached by pipeline_job's miss_stage and
+    # consumed by pipeline_review's "Review misses" shortcut to gate
+    # on actual recomputation in this run. Pass it through when the
+    # caller has injected it into results (reflow/regroup-live read
+    # it from the cache so the shortcut stays visible after a tweak).
+    if results.get("miss_computed_at"):
+        out["miss_computed_at"] = results["miss_computed_at"]
+    return out
 
 
 def save_results(results, cache_dir, workspace_id):
@@ -524,6 +532,20 @@ def save_results(results, cache_dir, workspace_id):
     """
     serialized = serialize_results(results)
     path = os.path.join(cache_dir, f"pipeline_results_ws{workspace_id}.json")
+    # Preserve miss_computed_at across reflow/regroup-live saves: it's
+    # written by pipeline_job's miss_stage and gates the review UI's
+    # "Review misses" shortcut on whether misses were recomputed in
+    # this pipeline run. reflow/regroup-live don't touch miss flags,
+    # so overwriting this marker with a fresh save would make the
+    # shortcut hide itself after every threshold tweak.
+    if "miss_computed_at" not in serialized and os.path.exists(path):
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+            if existing.get("miss_computed_at"):
+                serialized["miss_computed_at"] = existing["miss_computed_at"]
+        except (OSError, json.JSONDecodeError):
+            pass
     with open(path, "w") as f:
         json.dump(serialized, f)
     log.info("Pipeline results saved to %s", path)

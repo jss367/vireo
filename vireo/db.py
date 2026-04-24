@@ -4212,8 +4212,13 @@ class Database:
             f"{since_clause}",
             params,
         ).fetchall()
+        # Preserve NULL flag values in old_value so undo is lossless.
+        # Coercing NULL to "" would make _apply_undo restore an empty
+        # string instead of the original NULL, leaving rows in a
+        # non-canonical state that bypasses code paths expecting
+        # none/flagged/rejected (or NULL).
         affected = [
-            {"photo_id": r["id"], "old_value": (r["flag"] or "")}
+            {"photo_id": r["id"], "old_value": r["flag"]}
             for r in rows
         ]
         if not affected:

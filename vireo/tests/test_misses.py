@@ -436,3 +436,41 @@ def test_compute_misses_respects_exclude_photo_ids(tmp_path):
     assert row_kept["miss_computed_at"] is not None
     assert row_excluded["miss_computed_at"] is None
     assert row_excluded["miss_clipped"] != 1
+
+
+def test_compute_misses_uses_injected_now_timestamp(tmp_path):
+    """Caller-supplied `now` lets pipeline_job share one timestamp between
+    the DB write and the saved pipeline-results cache, so the review UI's
+    run-scoped /misses?since=... window matches exactly what was written."""
+    import config as cfg
+    from db import Database
+    from misses import compute_misses_for_workspace
+
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake", name="fake")
+    pid = db.add_photo(
+        folder_id, "p.jpg", extension=".jpg", file_size=100,
+        file_mtime=1.0, timestamp="2026-04-22T10:00:00",
+    )
+    db.conn.execute(
+        "UPDATE photos SET subject_size=?, crop_complete=?, "
+        "subject_tenengrad=?, bg_tenengrad=? WHERE id=?",
+        (0.001, 1.0, 80.0, 40.0, pid),
+    )
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+          "confidence": 0.95, "category": "animal"}],
+    )
+    db.conn.commit()
+
+    fixed_ts = "2026-04-22T12:34:56.789012+00:00"
+    n = compute_misses_for_workspace(
+        db, cfg.DEFAULTS["pipeline"], now=fixed_ts,
+    )
+    assert n == 1
+
+    row = dict(db.conn.execute(
+        "SELECT miss_computed_at FROM photos WHERE id=?", (pid,),
+    ).fetchone())
+    assert row["miss_computed_at"] == fixed_ts

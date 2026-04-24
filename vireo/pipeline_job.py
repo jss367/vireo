@@ -2448,7 +2448,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
 
         try:
             import config as cfg
+            from datetime import UTC, datetime
             from misses import compute_misses_for_workspace
+            from pipeline import load_results_raw, save_results_raw
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
@@ -2456,11 +2458,19 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
+            # Share one timestamp between the DB write and the saved
+            # pipeline-results cache so pipeline_review's "Review misses"
+            # shortcut can gate on actual recomputation in this run and
+            # scope /misses?since=... to exactly what was just written.
+            now_ts = datetime.now(UTC).isoformat(timespec="microseconds")
+            miss_enabled = pipeline_cfg.get("miss_enabled", True)
+
             n = compute_misses_for_workspace(
                 thread_db,
                 pipeline_cfg,
                 collection_id=collection_id,
                 exclude_photo_ids=params.exclude_photo_ids,
+                now=now_ts,
             )
 
             stages["misses"]["status"] = "completed"
@@ -2468,6 +2478,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             runner.update_step(job["id"], "misses", status="completed",
                                summary=f"{n} photos evaluated")
             result["stages"]["misses"] = {"evaluated": n}
+
+            # Mark the cached results so the review UI knows misses
+            # were actually recomputed this run. Without this, the
+            # shortcut would surface stale miss flags from a prior
+            # run as "current-run misses" whenever miss_enabled=False
+            # or the stage was skipped.
+            if miss_enabled:
+                cache_dir = os.path.dirname(db_path)
+                cached = load_results_raw(cache_dir, workspace_id)
+                if cached is not None:
+                    cached["miss_computed_at"] = now_ts
+                    save_results_raw(cached, cache_dir, workspace_id)
         except Exception as e:
             errors.append(f"[misses] Fatal: {e}")
             log.exception("Pipeline miss-detection stage failed")

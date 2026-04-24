@@ -1779,36 +1779,29 @@ function initPipelineReviewPage() {
   });
 }
 
-/* Show a "Review misses (N)" shortcut in the summary bar when any photos
- * from the current pipeline run are flagged as misses. Scopes the link via
- * ?since=<earliest miss_computed_at within this run>, so the /misses page
- * only shows this run's misses. */
+/* Show a "Review misses (N)" shortcut in the summary bar when the current
+ * pipeline run actually recomputed miss flags. Gated on
+ * pipelineResults.miss_computed_at (set by pipeline_job's miss_stage);
+ * without the marker we'd surface stale miss flags from a prior run as
+ * current-run misses — e.g. when miss_enabled=false or the stage was
+ * skipped. The link is scoped to that same timestamp so /misses only
+ * shows misses written during this run. */
 function refreshMissesReviewBtn() {
   var btn = document.getElementById('missesReviewBtn');
-  if (!btn || !pipelineResults || !pipelineResults.photos) return;
-  var runIds = {};
-  pipelineResults.photos.forEach(function(p) { runIds[p.id] = true; });
+  if (!btn || !pipelineResults) return;
+  var sinceTs = pipelineResults.miss_computed_at;
+  if (!sinceTs) return;  // miss stage didn't run this pipeline
 
-  fetch('/api/misses').then(function(r) {
+  fetch('/api/misses?since=' + encodeURIComponent(sinceTs)).then(function(r) {
     if (!r.ok) return null;
     return r.json();
   }).then(function(data) {
     if (!data) return;
     var all = (data.no_subject || []).concat(data.clipped || []).concat(data.oof || []);
-    // Intersect with photos from the current run.
-    var seen = {};
-    var minTs = null;
-    var count = 0;
-    all.forEach(function(p) {
-      if (!runIds[p.id] || seen[p.id]) return;
-      seen[p.id] = true;
-      count += 1;
-      var ts = p.miss_computed_at;
-      if (ts && (minTs == null || ts < minTs)) minTs = ts;
-    });
+    var count = all.length;
     if (count === 0) return;  // stays hidden
     document.getElementById('missesReviewCount').textContent = count;
-    if (minTs) btn.href = '/misses?since=' + encodeURIComponent(minTs);
+    btn.href = '/misses?since=' + encodeURIComponent(sinceTs);
     btn.style.display = '';
   }).catch(function() { /* no-op */ });
 }
