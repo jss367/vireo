@@ -930,6 +930,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if longitude is None:
                 longitude = exif_group.get("GPSLongitude")
 
+            # Pre-check: capture prior content identity AND whether the
+            # row existed before add_photo touches it. Brand-new rows
+            # have no derived caches to flush — skipping invalidation
+            # for them avoids O(N) wasted UPDATE + commit round-trips on
+            # large initial scans.
+            existing_row = db.conn.execute(
+                "SELECT file_hash FROM photos WHERE folder_id = ? AND filename = ?",
+                (folder_id, image_path.name),
+            ).fetchone()
+            row_already_existed = existing_row is not None
+            prev_file_hash = existing_row["file_hash"] if existing_row else None
+
             photo_id = db.add_photo(
                 folder_id=folder_id,
                 filename=image_path.name,
@@ -941,15 +953,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 width=width,
                 height=height,
             )
-
-            # Capture prior content identity so we can detect file replacement
-            # below. When the bytes on disk change, file_hash will differ from
-            # the stored value and we must drop cached thumbnails / working
-            # copies / previews before they diverge from the new source.
-            prev_row = db.conn.execute(
-                "SELECT file_hash FROM photos WHERE id = ?", (photo_id,)
-            ).fetchone()
-            prev_file_hash = prev_row["file_hash"] if prev_row else None
 
             # Update metadata columns (also fixes existing photos that were
             # inserted before ExifTool metadata was available)
@@ -996,16 +999,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 commit_with_retry(db.conn)
 
             # Content-change self-heal: when the computed hash differs
-            # from what's stored, derived caches are stale. Includes the
-            # NULL → concrete transition for legacy rows that predate
-            # hash tracking — we can't prove their caches match current
-            # bytes, so safer to flush and regenerate. For brand-new
-            # photos the invalidation is a cheap no-op (no files yet).
-            # Skips only when the new hash is NULL (computation failed)
-            # — no reliable signal to act on. Requires explicit
-            # vireo_dir; callers must pass it (scan can't guess because
-            # --db and --thumb-dir are independently configurable).
-            if (file_hash is not None
+            # from what was stored before this scan, derived caches are
+            # stale. Includes the NULL → concrete transition for legacy
+            # rows that predate hash tracking — we can't prove their
+            # caches match current bytes, so safer to flush and
+            # regenerate. Gated on ``row_already_existed`` so brand-new
+            # inserts (prev_file_hash is always NULL there) don't
+            # trigger pointless UPDATE + commit round-trips on large
+            # initial scans. Requires explicit vireo_dir; callers must
+            # pass it (scan can't guess because --db and --thumb-dir
+            # are independently configurable).
+            if (row_already_existed
+                    and file_hash is not None
                     and prev_file_hash != file_hash
                     and vireo_dir):
                 _invalidate_derived_caches(

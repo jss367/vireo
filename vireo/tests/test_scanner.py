@@ -1964,6 +1964,45 @@ def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
     assert not (vireo_dir / "thumbnails").exists()
 
 
+def test_initial_scan_does_not_invoke_invalidation_for_new_photos(tmp_path, monkeypatch):
+    """Brand-new rows have no derived caches to flush. Firing
+    _invalidate_derived_caches for every new photo turns a 50k-file
+    initial scan into 50k pointless UPDATE/commit round-trips and
+    preview-sweep bookkeeping. Invalidation should only fire for rows
+    that already existed before this scan.
+    """
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    for i in range(3):
+        Image.new("RGB", (200, 150), color=(i * 80, 0, 0)).save(
+            os.path.join(root, f"photo_{i}.jpg"), "JPEG",
+        )
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+
+    calls = []
+    real_invalidate = scanner._invalidate_derived_caches
+
+    def counting_invalidate(db, vireo_dir_arg, photo_id, thumb_cache_dir=None):
+        calls.append(photo_id)
+        return real_invalidate(db, vireo_dir_arg, photo_id, thumb_cache_dir=thumb_cache_dir)
+
+    monkeypatch.setattr(scanner, "_invalidate_derived_caches", counting_invalidate)
+
+    db = Database(str(vireo_dir / "test.db"))
+    scanner.scan(root, db, vireo_dir=str(vireo_dir))
+
+    assert calls == [], (
+        f"Invalidation fired {len(calls)} times for brand-new rows with "
+        f"no derived caches to flush. On large initial scans that turns "
+        f"into O(N) wasted SQL + commit round-trips."
+    )
+
+
 def test_rescan_invalidates_when_prev_file_hash_was_null(tmp_path):
     """Legacy photo rows predating file_hash tracking (or where prior
     hash computation failed) have file_hash=NULL. When a later rescan
