@@ -2447,8 +2447,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
         _update_stages(runner, job["id"], stages)
 
         try:
-            import config as cfg
             from datetime import UTC, datetime
+
+            import config as cfg
             from misses import compute_misses_for_workspace
             from pipeline import load_results_raw, save_results_raw
 
