@@ -3751,6 +3751,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/new-images-preview", methods=["POST"])
+    def api_import_new_images_preview():
+        """Preview grid data for a new-images snapshot, matching the
+        folder-preview response shape so the same client renderer works."""
+        body = request.get_json(silent=True) or {}
+        snapshot_id = body.get("snapshot_id")
+        if not isinstance(snapshot_id, int):
+            return json_error("snapshot_id required", 400)
+
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        try:
+            snap = db.get_new_images_snapshot(snapshot_id)
+        except OverflowError:
+            snap = None
+        if snap is None:
+            abort(404)
+
+        # Precompute workspace folder roots so we can express each file's
+        # subfolder relative to the root it belongs to (matches the grouping
+        # that folder-preview produces).
+        folder_rows = db.conn.execute(
+            "SELECT path, name FROM folders"
+        ).fetchall()
+        roots = sorted(
+            [(r["path"], r["name"] or os.path.basename(r["path"].rstrip("/")))
+             for r in folder_rows],
+            key=lambda pn: len(pn[0]),
+            reverse=True,
+        )
+
+        def _subfolder_for(path):
+            for root_path, root_name in roots:
+                try:
+                    rel = Path(path).parent.relative_to(root_path)
+                except ValueError:
+                    continue
+                rel_str = str(rel)
+                return root_name if rel_str == "." else os.path.join(root_name, rel_str)
+            return os.path.dirname(path) or "."
+
+        files = []
+        type_breakdown = {}
+        total_size = 0
+        for path in snap["file_paths"]:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            files.append({
+                "path": path,
+                "filename": os.path.basename(path),
+                "subfolder": _subfolder_for(path),
+                "size": stat.st_size,
+                "extension": ext,
+                "mtime": stat.st_mtime,
+                "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(path),
+            })
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += stat.st_size
+
+        return jsonify({
+            "total_count": len(files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": files,
+        })
+
     @app.route("/api/import/check-duplicates", methods=["POST"])
     def api_import_check_duplicates():
         """Stream duplicate detection results via SSE.

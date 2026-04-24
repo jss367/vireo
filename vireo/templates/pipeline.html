@@ -1175,6 +1175,39 @@ var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-re
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
 
+  // New images mode: fetch from new-images-preview endpoint
+  if (_sourceMode === 'new_images') {
+    if (newImagesSnapshotId === null) {
+      showPreviewPlaceholder();
+      return;
+    }
+    showPreviewLoading();
+    _previewAbort = new AbortController();
+    fetch('/api/import/new-images-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshot_id: newImagesSnapshotId }),
+      signal: _previewAbort.signal,
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        _previewData = data;
+        _previewSelected = {};
+        data.files.forEach(function(f) {
+          _previewSelected[f.path] = !f.duplicate;
+        });
+        renderPreview();
+      })
+      .catch(function(err) {
+        if (err.name === 'AbortError') return;
+        showPreviewError('Failed to load preview: ' + err.message);
+      });
+    return;
+  }
+
   // Collection mode: fetch from collection-preview endpoint
   if (_sourceMode === 'collection') {
     var collId = document.getElementById('collectionPicker').value;
