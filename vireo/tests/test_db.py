@@ -1376,8 +1376,9 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     ], detector_model="MDV6")
     db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
-    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
-    db.conn.commit()
+    # Review status now lives in the workspace-scoped prediction_review
+    # table; absent rows are 'pending'.
+    db.set_review_status(preds[0]['id'], db._active_workspace_id, 'accepted')
 
     species = db.get_accepted_species()
     assert species == []
@@ -2104,7 +2105,12 @@ def test_database_supports_in_memory_sqlite():
 
 
 def test_detections_table_exists(tmp_path):
-    """The detections table should exist with expected columns."""
+    """The detections table should exist with expected columns.
+
+    ``workspace_id`` was dropped when detections became global (cached per
+    photo, not per workspace); the per-workspace scoping now happens via
+    ``workspace_folders`` joins at read time.
+    """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     row = db.conn.execute(
@@ -2113,7 +2119,7 @@ def test_detections_table_exists(tmp_path):
     assert row is not None
     schema = row[0].lower()
     assert "photo_id" in schema
-    assert "workspace_id" in schema
+    assert "workspace_id" not in schema
     assert "box_x" in schema
     assert "box_y" in schema
     assert "box_w" in schema
@@ -2485,10 +2491,25 @@ def test_init_purges_orphan_predictions(tmp_path):
     from db import Database
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
-    # Bypass the add_prediction guard to simulate a legacy orphan row.
+    # Simulate a legacy orphan row by dropping the NOT NULL constraint on
+    # detection_id — the current CREATE enforces NOT NULL (that guard was
+    # added after the purge was written), but pre-migration installs still
+    # hold orphans we want the purge to sweep.
+    db.conn.execute("DROP TABLE predictions")
     db.conn.execute(
-        "INSERT INTO predictions (detection_id, species, confidence, model, status) "
-        "VALUES (NULL, 'Elk', 0.9, 'bioclip', 'pending')"
+        """CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER,
+            classifier_model TEXT,
+            labels_fingerprint TEXT DEFAULT 'legacy',
+            species TEXT,
+            confidence REAL,
+            category TEXT
+        )"""
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, species, confidence, classifier_model) "
+        "VALUES (NULL, 'Elk', 0.9, 'bioclip')"
     )
     db.conn.commit()
     assert db.conn.execute(
@@ -2559,11 +2580,12 @@ def test_multiple_predictions_per_detection(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
     det_id = det_ids[0]
 
     db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
@@ -2586,11 +2608,12 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
     det_id = det_ids[0]
 
     db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
@@ -3370,14 +3393,23 @@ def test_get_highlights_candidates(tmp_path):
             "UPDATE photos SET quality_score = ? WHERE id = ?", (qs, pid)
         )
         if qs is not None and qs >= 0.5:
-            # Add a detection + accepted prediction for photos with decent quality
+            # Add a detection + accepted prediction for photos with decent quality.
+            # Detections are global (no workspace_id); the predictions table
+            # dropped ``model``/``status`` — review state lives in
+            # ``prediction_review``.
             did = db.conn.execute(
-                "INSERT INTO detections (photo_id, workspace_id, detector_confidence) VALUES (?, ?, 0.9)",
-                (pid, db._ws_id()),
+                "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+                (pid,),
+            ).lastrowid
+            pred_id = db.conn.execute(
+                "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+                "VALUES (?, 'test', ?, 0.95)",
+                (did, f"Species{i}"),
             ).lastrowid
             db.conn.execute(
-                "INSERT INTO predictions (detection_id, species, confidence, status) VALUES (?, ?, 0.95, 'accepted')",
-                (did, f"Species{i}"),
+                "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+                "VALUES (?, ?, 'accepted')",
+                (pred_id, db._ws_id()),
             )
     db.conn.commit()
 
@@ -4163,8 +4195,9 @@ def test_review_status_absence_is_pending(tmp_path):
         [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
         detector_model="megadetector-v6",
     )
+    # Predictions now carry ``classifier_model`` (the old ``model`` was renamed).
     pred_id = db.conn.execute(
-        """INSERT INTO predictions (detection_id, model, species, confidence)
+        """INSERT INTO predictions (detection_id, classifier_model, species, confidence)
            VALUES (?, 'bioclip-2', 'Robin', 0.8)""",
         (det_ids[0],),
     ).lastrowid

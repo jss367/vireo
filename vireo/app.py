@@ -6166,20 +6166,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/species/summary")
     def api_species_list():
-        """List all species with prediction counts, for the variant explorer."""
+        """List all species with prediction counts, for the variant explorer.
+
+        Scoped to photos in the active workspace via ``workspace_folders`` and
+        filtered at read time by the workspace-effective
+        ``detector_confidence`` threshold. Review status is sourced from the
+        workspace-scoped ``prediction_review`` table; rejected predictions
+        are excluded.
+        """
         db = _get_db()
-        # NOTE: `pr.status` is deferred to Task 25 (prediction_review refactor).
-        # For now we only drop the dropped-column `d.workspace_id` predicate so
-        # this endpoint stops throwing "no such column"; the status filter will
-        # be re-wired through prediction_review in Task 25.
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         rows = db.conn.execute(
             """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
                       pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
                       pr.scientific_name
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE d.detector_confidence >= ?
+                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
                GROUP BY pr.species
-               ORDER BY photo_count DESC"""
+               ORDER BY photo_count DESC""",
+            (ws, ws, min_conf),
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -7555,20 +7571,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
             result["detection_conf"] = primary["detector_confidence"]
 
-        # Get predictions for this photo (through detections JOIN).
-        # NOTE: pr.model / pr.status / pr.group_id / pr.vote_count /
-        # pr.total_votes / pr.individual are deferred to Task 25 (they now
-        # live in prediction_review). For this task we only drop the gone
-        # `d.workspace_id` predicate so the query's join shape is valid.
+        # Get predictions for this photo (through detections JOIN).  Per-
+        # workspace review state (status, group_id, individual, vote counts)
+        # is left-joined from prediction_review; absent rows are 'pending'.
+        ws = db._active_workspace_id
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category,
+                      COALESCE(pr_rev.status, 'pending') AS status,
+                      pr_rev.individual AS individual,
+                      pr_rev.group_id AS group_id,
+                      pr_rev.vote_count AS vote_count,
+                      pr_rev.total_votes AS total_votes,
                       d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.photo_id = ?
                ORDER BY pr.confidence DESC""",
-            (photo_id,),
+            (ws, photo_id),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
 

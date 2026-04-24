@@ -2107,8 +2107,17 @@ class Database:
         ).fetchone()[0]
 
     def get_pipeline_feature_counts(self):
-        """Return counts of photos with masks, detections, and sharpness data."""
+        """Return counts of photos with masks, detections, and sharpness data.
+
+        Detections are global: the per-workspace scope comes from
+        ``workspace_folders``, and low-confidence rows are filtered out at
+        read time using the workspace-effective ``detector_confidence``.
+        """
+        import config as cfg
         ws = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         row = self.conn.execute(
             """SELECT
                 SUM(CASE WHEN p.mask_path IS NOT NULL THEN 1 ELSE 0 END) as masks,
@@ -2123,8 +2132,9 @@ class Database:
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
-            (ws, ws),
+               WHERE wf.workspace_id = ?
+                 AND d.detector_confidence >= ?""",
+            (ws, min_conf),
         ).fetchone()[0]
         return {
             "masks": row["masks"] or 0,
@@ -2182,20 +2192,30 @@ class Database:
             (ws,),
         ).fetchall()
 
+        # Review status lives in prediction_review (workspace-scoped).
+        # Left-joining lets us count pending rows (those without a review row)
+        # and bucket them into the pending column via COALESCE.
         prediction_status = self.conn.execute(
-            """SELECT pr.status, COUNT(*) as count
-            FROM predictions pr
-            JOIN detections d ON d.id = pr.detection_id
-            WHERE d.workspace_id = ?
-            GROUP BY pr.status""",
-            (ws,),
+            """SELECT COALESCE(pr_rev.status, 'pending') AS status,
+                      COUNT(*) AS count
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               GROUP BY COALESCE(pr_rev.status, 'pending')""",
+            (ws, ws),
         ).fetchall()
 
         classified_count = self.conn.execute(
             """SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.workspace_id = ?""",
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?""",
             (ws,),
         ).fetchone()[0]
 
@@ -2226,14 +2246,19 @@ class Database:
             (ws,),
         ).fetchall()
 
+        import config as cfg
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         detected_count = self.conn.execute(
             """SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
-               WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
-            (ws, ws),
+               WHERE wf.workspace_id = ?
+                 AND d.detector_confidence >= ?""",
+            (ws, min_conf),
         ).fetchone()[0]
 
         return {
@@ -2540,20 +2565,26 @@ class Database:
             params,
         ).fetchone()[0]
 
-        # Classified vs unclassified (within filter)
+        # Classified vs unclassified (within filter).  Detections and
+        # predictions are global; workspace scoping comes from the outer
+        # join_clause and the detector_confidence read-time threshold.
+        import config as cfg
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         classified = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) FROM photos p
                 {join_clause}
-                JOIN detections det ON det.photo_id = p.id AND det.workspace_id = ?
+                JOIN detections det ON det.photo_id = p.id
                 JOIN predictions pred ON pred.detection_id = det.id
-                {where}""",
-            [ws] + params,
+                {where}
+                  AND det.detector_confidence >= ?""",
+            params + [min_conf],
         ).fetchone()[0]
 
-        # Top species (within filter)
-        # Use a CTE to select the single best prediction per photo (highest confidence,
-        # non-rejected) to avoid inflating species counts when multiple models have
-        # predicted different species for the same photo.
+        # Top species (within filter).  Review status is workspace-scoped via
+        # prediction_review; absent rows are treated as 'pending' (which is
+        # included — we only want to exclude 'rejected' reviews).
         top_species = self.conn.execute(
             f"""WITH best_pred AS (
                     SELECT det.photo_id, pred.species,
@@ -2563,7 +2594,11 @@ class Database:
                            ) AS rn
                     FROM predictions pred
                     JOIN detections det ON det.id = pred.detection_id
-                    WHERE det.workspace_id = ? AND pred.status != 'rejected'
+                    LEFT JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pred.id
+                     AND pr_rev.workspace_id = ?
+                    WHERE det.detector_confidence >= ?
+                      AND COALESCE(pr_rev.status, 'pending') != 'rejected'
                 )
                 SELECT bp.species, COUNT(DISTINCT p.id) as count
                 FROM photos p
@@ -2573,7 +2608,7 @@ class Database:
                 GROUP BY bp.species
                 ORDER BY count DESC
                 LIMIT 5""",
-            [ws] + params,
+            [ws, min_conf] + params,
         ).fetchall()
 
         # Folder breakdown (within filter)
@@ -3125,7 +3160,11 @@ class Database:
         Returns:
             list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
+        import config as cfg
         ws_id = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         if folder_ids:
             placeholders = ",".join("?" * len(folder_ids))
             rows = self.conn.execute(
@@ -3133,11 +3172,12 @@ class Database:
                            d.box_x, d.box_y, d.box_w, d.box_h,
                            d.detector_confidence
                     FROM photos p
-                    JOIN detections d ON d.photo_id = p.id AND d.workspace_id = ?
+                    JOIN detections d ON d.photo_id = p.id
                     WHERE p.folder_id IN ({placeholders})
                       AND p.mask_path IS NULL
+                      AND d.detector_confidence >= ?
                     ORDER BY p.id, d.detector_confidence DESC""",
-                [ws_id, *folder_ids],
+                [*folder_ids, min_conf],
             ).fetchall()
         else:
             rows = self.conn.execute(
@@ -3146,11 +3186,12 @@ class Database:
                           d.detector_confidence
                    FROM photos p
                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                   JOIN detections d ON d.photo_id = p.id AND d.workspace_id = ?
+                   JOIN detections d ON d.photo_id = p.id
                    WHERE wf.workspace_id = ?
                      AND p.mask_path IS NULL
+                     AND d.detector_confidence >= ?
                    ORDER BY p.id, d.detector_confidence DESC""",
-                (ws_id, ws_id),
+                (ws_id, min_conf),
             ).fetchall()
 
         # Deduplicate to one row per photo (primary detection = highest confidence)
@@ -3200,17 +3241,21 @@ class Database:
         box_x/y/w/h (normalized 0-1), species_conf, taxonomy_class,
         scientific_name, species.
         """
+        import config as cfg
         ws_id = self._ws_id()
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         if photo_ids is not None:
             photo_ids = list(photo_ids)
             if not photo_ids:
                 return []
             placeholders = ",".join("?" for _ in photo_ids)
             extra_where = f" AND p.id IN ({placeholders})"
-            params = (ws_id, ws_id, *photo_ids)
+            params = (ws_id, min_conf, *photo_ids)
         else:
             extra_where = ""
-            params = (ws_id, ws_id)
+            params = (ws_id, min_conf)
         rows = self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.width, p.height,
                       p.mask_path,
@@ -3225,8 +3270,8 @@ class Database:
                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                JOIN detections d
                  ON d.photo_id = p.id
-                AND d.workspace_id = ?
                 AND d.detector_model != 'full-image'
+                AND d.detector_confidence >= ?
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
                  AND p.eye_tenengrad IS NULL{extra_where}
@@ -3720,6 +3765,7 @@ class Database:
         total_votes=None,
         individual=None,
         taxonomy=None,
+        labels_fingerprint="legacy",
     ):
         """Store a classification prediction for a detection.
 
@@ -3727,10 +3773,18 @@ class Database:
         existing predictions that the user may have already reviewed.
         Use clear_predictions() first if you want a fresh start.
 
+        The `predictions` table stores only the raw, workspace-independent
+        classifier output (species, confidence, classifier_model, taxonomy).
+        Per-workspace review state (status, group_id, vote_count, individual)
+        is written to ``prediction_review`` for the active workspace when the
+        caller passes a non-default value.
+
         Args:
             detection_id: the detection ID (from detections table)
             taxonomy: optional dict with keys kingdom, phylum, class, order,
                       family, genus, scientific_name from taxonomy lookup
+            labels_fingerprint: fingerprint of the label set used to classify
+                (defaults to 'legacy' for backwards-compatible inserts).
         """
         if detection_id is None:
             raise ValueError(
@@ -3739,24 +3793,20 @@ class Database:
                 "invisible to workspace-scoped queries"
             )
         tax = taxonomy or {}
-        self.conn.execute(
+        cur = self.conn.execute(
             """INSERT OR IGNORE INTO predictions
-               (detection_id, species, confidence, model, category, status,
-                group_id, vote_count, total_votes, individual,
+               (detection_id, classifier_model, labels_fingerprint,
+                species, confidence, category,
                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
                 taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 detection_id,
+                model,
+                labels_fingerprint,
                 species,
                 confidence,
-                model,
                 category,
-                status,
-                group_id,
-                vote_count,
-                total_votes,
-                individual,
                 tax.get("kingdom"),
                 tax.get("phylum"),
                 tax.get("class"),
@@ -3766,10 +3816,54 @@ class Database:
                 tax.get("scientific_name"),
             ),
         )
+        pred_id = cur.lastrowid
+        if not pred_id:
+            # INSERT IGNORE collided with the UNIQUE key; look up the existing row.
+            row = self.conn.execute(
+                """SELECT id FROM predictions
+                   WHERE detection_id = ? AND classifier_model = ?
+                     AND labels_fingerprint = ? AND species IS ?""",
+                (detection_id, model, labels_fingerprint, species),
+            ).fetchone()
+            pred_id = row["id"] if row else None
+        # Write workspace-scoped review state only when the caller actually
+        # supplied something beyond the defaults. Keeping pending rows out of
+        # prediction_review is intentional: absence == pending.
+        has_review_state = (
+            status != "pending"
+            or group_id is not None
+            or vote_count is not None
+            or total_votes is not None
+            or individual is not None
+        )
+        if pred_id is not None and has_review_state:
+            ws_id = self._ws_id()
+            self.conn.execute(
+                """INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at,
+                      individual, group_id, vote_count, total_votes)
+                   VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status      = excluded.status,
+                                 reviewed_at = excluded.reviewed_at,
+                                 individual  = COALESCE(excluded.individual, individual),
+                                 group_id    = COALESCE(excluded.group_id,   group_id),
+                                 vote_count  = COALESCE(excluded.vote_count, vote_count),
+                                 total_votes = COALESCE(excluded.total_votes,total_votes)""",
+                (pred_id, ws_id, status, individual, group_id,
+                 vote_count, total_votes),
+            )
         self.conn.commit()
 
     def clear_predictions(self, model=None, collection_photo_ids=None):
-        """Clear predictions, optionally filtered by model and/or photo set."""
+        """Clear predictions, optionally filtered by model and/or photo set.
+
+        The ``predictions`` table is now global (no workspace_id).  This
+        still restricts the delete to photos visible in the active workspace
+        via ``workspace_folders`` so that calling "clear" in one workspace
+        does not nuke another workspace's cached classifier output.
+        """
+        ws = self._ws_id()
         if collection_photo_ids is not None:
             placeholders = ",".join("?" for _ in collection_photo_ids)
             if model:
@@ -3777,31 +3871,40 @@ class Database:
                     f"""DELETE FROM predictions WHERE id IN (
                         SELECT pr.id FROM predictions pr
                         JOIN detections d ON d.id = pr.detection_id
-                        WHERE d.workspace_id = ? AND pr.model = ?
-                        AND d.photo_id IN ({placeholders})
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN workspace_folders wf
+                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        WHERE pr.classifier_model = ?
+                          AND d.photo_id IN ({placeholders})
                     )""",
-                    [self._ws_id(), model, *collection_photo_ids],
+                    [ws, model, *collection_photo_ids],
                 )
             else:
                 self.conn.execute(
                     f"""DELETE FROM predictions WHERE id IN (
                         SELECT pr.id FROM predictions pr
                         JOIN detections d ON d.id = pr.detection_id
-                        WHERE d.workspace_id = ? AND d.photo_id IN ({placeholders})
+                        JOIN photos ph ON ph.id = d.photo_id
+                        JOIN workspace_folders wf
+                          ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                        WHERE d.photo_id IN ({placeholders})
                     )""",
-                    [self._ws_id(), *collection_photo_ids],
+                    [ws, *collection_photo_ids],
                 )
         else:
-            conditions = ["d.workspace_id = ?"]
-            params = [self._ws_id()]
+            conditions = ["wf.workspace_id = ?"]
+            params = [ws]
             if model:
-                conditions.append("pr.model = ?")
+                conditions.append("pr.classifier_model = ?")
                 params.append(model)
             where = " AND ".join(conditions)
             self.conn.execute(
                 f"""DELETE FROM predictions WHERE id IN (
                     SELECT pr.id FROM predictions pr
                     JOIN detections d ON d.id = pr.detection_id
+                    JOIN photos ph ON ph.id = d.photo_id
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
                     WHERE {where}
                 )""",
                 params,
@@ -3809,40 +3912,68 @@ class Database:
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):
-        """Get predictions with photo and detection info, optionally filtered."""
-        conditions = ["d.workspace_id = ?"]
-        params = [self._ws_id()]
+        """Get predictions with photo, detection and review info.
+
+        Workspace scoping is enforced by joining ``workspace_folders``; the
+        per-workspace review state (status, group_id, individual, vote_count)
+        is left-joined from ``prediction_review`` so absent rows naturally
+        surface as ``status = 'pending'``.
+        """
+        ws = self._ws_id()
+        conditions = ["wf.workspace_id = ?"]
+        params = [ws, ws]  # first ? = pr_rev.workspace_id, second = wf.workspace_id
         if photo_ids is not None:
             placeholders = ",".join("?" for _ in photo_ids)
             conditions.append(f"d.photo_id IN ({placeholders})")
             params.extend(photo_ids)
         if model:
-            conditions.append("pr.model = ?")
+            conditions.append("pr.classifier_model = ?")
             params.append(model)
         if status:
-            conditions.append("pr.status = ?")
+            conditions.append("COALESCE(pr_rev.status, 'pending') = ?")
             params.append(status)
         where = "WHERE " + " AND ".join(conditions)
         return self.conn.execute(
-            f"""SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+            f"""SELECT pr.*,
+                       pr.classifier_model AS model,
+                       COALESCE(pr_rev.status, 'pending') AS status,
+                       pr_rev.individual AS individual,
+                       pr_rev.group_id AS group_id,
+                       pr_rev.vote_count AS vote_count,
+                       pr_rev.total_votes AS total_votes,
+                       d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                        d.detector_confidence, d.detector_model,
                        p.filename, p.timestamp
                 FROM predictions pr
                 JOIN detections d ON d.id = pr.detection_id
                 JOIN photos p ON p.id = d.photo_id
+                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                LEFT JOIN prediction_review pr_rev
+                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                 {where} ORDER BY pr.confidence DESC""",
             params,
         ).fetchall()
 
     def update_prediction_status(self, prediction_id, status, _commit=True):
-        """Update prediction status ('pending', 'accepted', 'rejected').
+        """Update per-workspace review status for a prediction.
+
+        Review state lives in ``prediction_review`` keyed by
+        (prediction_id, workspace_id); we upsert here rather than UPDATE
+        so the "first review in a fresh workspace" path still writes a row.
 
         Args:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        ws = self._ws_id()
         self.conn.execute(
-            "UPDATE predictions SET status = ? WHERE id = ?", (status, prediction_id)
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status, reviewed_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET status = excluded.status,
+                             reviewed_at = excluded.reviewed_at""",
+            (prediction_id, ws, status),
         )
         if _commit:
             self.conn.commit()
@@ -3850,33 +3981,44 @@ class Database:
     def get_group_predictions(self, group_id):
         """Get all predictions and photo data for a burst group.
 
-        Each returned row is a dict with an ``alternatives`` list containing
-        the per-detection alternative species predictions (status='alternative'),
-        sorted by confidence descending.
+        ``group_id`` lives in the workspace-scoped ``prediction_review``
+        table now, so we join there to find the member predictions.  Each
+        returned row is a dict with an ``alternatives`` list containing the
+        per-detection alternative species predictions (review status
+        ``'alternative'``), sorted by confidence descending.
         """
+        ws = self._ws_id()
         primaries = self.conn.execute(
-            """SELECT pr.*, d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
+            """SELECT pr.*,
+                      pr.classifier_model AS model,
+                      COALESCE(pr_rev.status, 'pending') AS status,
+                      pr_rev.individual AS individual,
+                      pr_rev.group_id AS group_id,
+                      pr_rev.vote_count AS vote_count,
+                      pr_rev.total_votes AS total_votes,
+                      d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
                       d.detector_confidence, p.filename, p.timestamp, p.sharpness,
                       p.quality_score, p.subject_sharpness, p.subject_size,
                       p.rating, p.flag, p.width, p.height
                FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               WHERE pr.group_id = ? AND d.workspace_id = ?
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pr_rev.group_id = ?
                ORDER BY p.quality_score DESC""",
-            (group_id, self._ws_id()),
+            (ws, ws, group_id),
         ).fetchall()
         rows = [dict(r) for r in primaries]
         if not rows:
             return rows
-        # Alternatives are correlated by (detection_id, model): a detection may
-        # have been classified by multiple models (and those may even share a
-        # group), so we must not merge alternatives across models.
-        #
-        # Fetch all alternatives for the distinct detection_ids in one IN(...)
-        # query, then filter by model in Python. This keeps the SQL expression
-        # depth bounded even for very large burst groups (SQLite's default
-        # expression-depth limit breaks with one OR branch per row).
+        # Alternatives are correlated by (detection_id, classifier_model):
+        # a detection may have been classified by multiple models (and those
+        # may even share a group), so we must not merge alternatives across
+        # models.  Alternatives are scoped per-workspace through
+        # prediction_review.
         det_model_pairs = {
             (r['detection_id'], r.get('model'))
             for r in rows if r.get('detection_id') is not None
@@ -3886,11 +4028,15 @@ class Database:
         if det_ids:
             placeholders = ','.join('?' * len(det_ids))
             alt_rows = self.conn.execute(
-                f"""SELECT detection_id, model, species, confidence
-                    FROM predictions
-                    WHERE status = 'alternative' AND detection_id IN ({placeholders})
-                    ORDER BY confidence DESC""",
-                det_ids,
+                f"""SELECT pr.detection_id, pr.classifier_model AS model,
+                           pr.species, pr.confidence
+                    FROM predictions pr
+                    JOIN prediction_review pr_rev
+                      ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                    WHERE pr_rev.status = 'alternative'
+                      AND pr.detection_id IN ({placeholders})
+                    ORDER BY pr.confidence DESC""",
+                [ws, *det_ids],
             ).fetchall()
             for a in alt_rows:
                 key = (a['detection_id'], a['model'])
@@ -3903,45 +4049,71 @@ class Database:
         return rows
 
     def update_predictions_status_by_photo(self, photo_id, status):
-        """Update status for all predictions of a photo in the active workspace."""
-        self.conn.execute(
-            """UPDATE predictions SET status = ?
-               WHERE detection_id IN (
-                   SELECT id FROM detections
-                   WHERE photo_id = ? AND workspace_id = ?
-               )""",
-            (status, photo_id, self._ws_id()),
-        )
+        """Upsert review status for every prediction of a photo in the active workspace.
+
+        Review state is workspace-scoped (``prediction_review``); detections
+        and predictions are global.  We enumerate the prediction ids via the
+        detections join and upsert each review row.
+        """
+        ws = self._ws_id()
+        rows = self.conn.execute(
+            """SELECT pr.id FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               WHERE d.photo_id = ?""",
+            (photo_id,),
+        ).fetchall()
+        for r in rows:
+            self.conn.execute(
+                """INSERT INTO prediction_review
+                     (prediction_id, workspace_id, status, reviewed_at)
+                   VALUES (?, ?, ?, datetime('now'))
+                   ON CONFLICT(prediction_id, workspace_id)
+                   DO UPDATE SET status = excluded.status,
+                                 reviewed_at = excluded.reviewed_at""",
+                (r["id"], ws, status),
+            )
         self.conn.commit()
 
     def ungroup_prediction(self, prediction_id):
-        """Remove a prediction from its group."""
+        """Remove a prediction from its group in the active workspace.
+
+        ``group_id`` lives in ``prediction_review``; this only clears the
+        review row for the current workspace.
+        """
         self.conn.execute(
-            """UPDATE predictions SET group_id = NULL
-               WHERE id = ? AND detection_id IN (
-                   SELECT id FROM detections WHERE workspace_id = ?
-               )""",
+            """UPDATE prediction_review SET group_id = NULL
+               WHERE prediction_id = ? AND workspace_id = ?""",
             (prediction_id, self._ws_id()),
         )
         self.conn.commit()
 
     def get_existing_prediction_photo_ids(self, model):
-        """Return set of photo_ids that have predictions for a model."""
+        """Return photo_ids with predictions for a model, scoped to the active workspace."""
         rows = self.conn.execute(
             """SELECT DISTINCT d.photo_id FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE pr.model = ? AND d.workspace_id = ?""",
-            (model, self._ws_id()),
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pr.classifier_model = ?""",
+            (self._ws_id(), model),
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
     def get_prediction_for_photo(self, photo_id, model):
-        """Return species, confidence, and detection_id for a photo's prediction by model, or None."""
+        """Return species, confidence, and detection_id for a photo's prediction by model, or None.
+
+        Detections and predictions are global; the active workspace is
+        enforced through ``workspace_folders``.
+        """
         return self.conn.execute(
             """SELECT pr.species, pr.confidence, pr.detection_id FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND pr.model = ? AND d.workspace_id = ?""",
-            (photo_id, model, self._ws_id()),
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE d.photo_id = ? AND pr.classifier_model = ?""",
+            (self._ws_id(), photo_id, model),
         ).fetchone()
 
     def get_photo_embedding(self, photo_id):
@@ -3985,17 +4157,40 @@ class Database:
         return [(row["id"], row["embedding"]) for row in rows]
 
     def update_prediction_group_info(self, detection_id, model, group_id, vote_count, total_votes, individual):
-        """Update group info on an existing prediction.
+        """Upsert group info for the primary prediction of (detection, classifier_model)
+        in the active workspace's ``prediction_review``.
 
-        Only updates the primary (non-alternative) prediction row so that
-        alternative rows for the same detection+model are not assigned group
-        metadata they do not belong to.
+        Alternative rows (review status ``'alternative'``) are intentionally
+        skipped so they do not inherit grouping metadata that belongs to the
+        primary pick.
         """
+        ws = self._ws_id()
+        # Identify the primary prediction row: one per (detection_id, classifier_model),
+        # excluding any prediction already marked 'alternative' in this workspace.
+        row = self.conn.execute(
+            """SELECT pr.id FROM predictions pr
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                 AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+               ORDER BY pr.confidence DESC LIMIT 1""",
+            (ws, detection_id, model),
+        ).fetchone()
+        if not row:
+            return
+        pred_id = row["id"]
         self.conn.execute(
-            """UPDATE predictions
-               SET group_id=?, vote_count=?, total_votes=?, individual=?
-               WHERE detection_id=? AND model=? AND status != 'alternative'""",
-            (group_id, vote_count, total_votes, individual, detection_id, model),
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status, reviewed_at,
+                  individual, group_id, vote_count, total_votes)
+               VALUES (?, ?, 'pending', datetime('now'), ?, ?, ?, ?)
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET individual  = excluded.individual,
+                             group_id    = excluded.group_id,
+                             vote_count  = excluded.vote_count,
+                             total_votes = excluded.total_votes,
+                             reviewed_at = excluded.reviewed_at""",
+            (pred_id, ws, individual, group_id, vote_count, total_votes),
         )
         self.conn.commit()
 
@@ -4015,24 +4210,47 @@ class Database:
         All database changes are performed atomically in a single transaction.
         On failure, all changes are rolled back.
         """
+        ws = self._ws_id()
         pred = self.conn.execute(
-            """SELECT pr.*, d.photo_id
+            """SELECT pr.*,
+                      pr.classifier_model AS model,
+                      pr_rev.group_id AS group_id,
+                      pr_rev.individual AS individual,
+                      d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE pr.id = ?""",
-            (prediction_id,),
+            (ws, prediction_id),
         ).fetchone()
         if not pred:
             return None
 
         try:
-            # Reject sibling predictions for same detection+model
-            # (covers both accepting an alternative and accepting the top-1)
-            self.conn.execute(
-                """UPDATE predictions SET status = 'rejected'
-                   WHERE detection_id = ? AND model = ? AND id != ? AND status IN ('pending', 'alternative')""",
-                (pred["detection_id"], pred["model"], prediction_id),
-            )
+            # Reject sibling predictions for same detection+classifier_model
+            # in this workspace (covers both accepting an alternative and
+            # accepting the top-1).  Review state is workspace-scoped, so we
+            # upsert each row rather than UPDATE the base predictions table.
+            sibs = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND pr.id != ?
+                     AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
+                (ws, pred["detection_id"], pred["model"], prediction_id),
+            ).fetchall()
+            for s in sibs:
+                self.conn.execute(
+                    """INSERT INTO prediction_review
+                         (prediction_id, workspace_id, status, reviewed_at)
+                       VALUES (?, ?, 'rejected', datetime('now'))
+                       ON CONFLICT(prediction_id, workspace_id)
+                       DO UPDATE SET status = 'rejected',
+                                     reviewed_at = datetime('now')""",
+                    (s["id"], ws),
+                )
 
             # For grouped predictions, derive consensus from individual votes
             species = pred["species"]
@@ -4049,14 +4267,19 @@ class Database:
             kid = self.add_keyword(species, is_species=True, _commit=False)
             affected = []  # list of {"photo_id": int, "prediction_id": int}
 
-            # If grouped, accept all predictions in the group
+            # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:
                 group_preds = self.conn.execute(
-                    """SELECT pr.*, d.photo_id
+                    """SELECT pr.id, d.photo_id
                        FROM predictions pr
+                       JOIN prediction_review pr_rev
+                         ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                        JOIN detections d ON d.id = pr.detection_id
-                       WHERE pr.group_id = ? AND pr.model = ? AND d.workspace_id = ?""",
-                    (pred["group_id"], pred["model"], self._ws_id()),
+                       JOIN photos ph ON ph.id = d.photo_id
+                       JOIN workspace_folders wf
+                         ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                       WHERE pr_rev.group_id = ? AND pr.classifier_model = ?""",
+                    (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
                     self.update_prediction_status(gp["id"], "accepted", _commit=False)
@@ -4594,30 +4817,46 @@ class Database:
                     self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     pred_id = int(old_val)
+                    ws = self._ws_id()
                     # Restore all predictions for this detection to pre-accept state
                     pred_row = self.conn.execute(
-                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        """SELECT detection_id, classifier_model AS model
+                           FROM predictions WHERE id = ?""",
                         (pred_id,),
                     ).fetchone()
                     if pred_row:
-                        # Set all to 'alternative' first
+                        # Identify every sibling prediction for (detection, classifier_model).
+                        siblings = self.conn.execute(
+                            """SELECT id, confidence FROM predictions
+                               WHERE detection_id = ? AND classifier_model = ?
+                               ORDER BY confidence DESC""",
+                            (pred_row["detection_id"], pred_row["model"]),
+                        ).fetchall()
+                        # Flip any accepted/rejected review rows in this
+                        # workspace back to 'alternative'.
                         self.conn.execute(
-                            """UPDATE predictions SET status = 'alternative'
-                               WHERE detection_id = ? AND model = ?
-                               AND status IN ('accepted', 'rejected')""",
-                            (pred_row["detection_id"], pred_row["model"]),
+                            """UPDATE prediction_review SET status = 'alternative',
+                                                          reviewed_at = datetime('now')
+                               WHERE workspace_id = ?
+                                 AND status IN ('accepted', 'rejected')
+                                 AND prediction_id IN (
+                                    SELECT id FROM predictions
+                                    WHERE detection_id = ? AND classifier_model = ?
+                                 )""",
+                            (ws, pred_row["detection_id"], pred_row["model"]),
                         )
-                        # Promote highest-confidence to 'pending'
-                        top = self.conn.execute(
-                            """SELECT id FROM predictions
-                               WHERE detection_id = ? AND model = ?
-                               ORDER BY confidence DESC LIMIT 1""",
-                            (pred_row["detection_id"], pred_row["model"]),
-                        ).fetchone()
-                        if top:
+                        # Promote highest-confidence sibling back to 'pending'
+                        # in this workspace.
+                        if siblings:
+                            top_id = siblings[0]["id"]
                             self.conn.execute(
-                                "UPDATE predictions SET status = 'pending' WHERE id = ?",
-                                (top["id"],),
+                                """INSERT INTO prediction_review
+                                     (prediction_id, workspace_id, status, reviewed_at)
+                                   VALUES (?, ?, 'pending', datetime('now'))
+                                   ON CONFLICT(prediction_id, workspace_id)
+                                   DO UPDATE SET status = 'pending',
+                                                 reviewed_at = datetime('now')""",
+                                (top_id, ws),
                             )
                         self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
@@ -4682,19 +4921,37 @@ class Database:
                     self.queue_change(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
                     pred_id = int(item['old_value'])
+                    ws = self._ws_id()
                     self.update_prediction_status(pred_id, 'accepted')
-                    # Re-reject siblings (mirrors accept_prediction behavior)
+                    # Re-reject siblings (mirrors accept_prediction behavior).
                     pred_row = self.conn.execute(
-                        "SELECT detection_id, model FROM predictions WHERE id = ?",
+                        """SELECT detection_id, classifier_model AS model
+                           FROM predictions WHERE id = ?""",
                         (pred_id,),
                     ).fetchone()
                     if pred_row:
-                        self.conn.execute(
-                            """UPDATE predictions SET status = 'rejected'
-                               WHERE detection_id = ? AND model = ? AND id != ?
-                               AND status IN ('pending', 'alternative')""",
-                            (pred_row["detection_id"], pred_row["model"], pred_id),
-                        )
+                        sibs = self.conn.execute(
+                            """SELECT pr.id FROM predictions pr
+                               LEFT JOIN prediction_review pr_rev
+                                 ON pr_rev.prediction_id = pr.id
+                                AND pr_rev.workspace_id = ?
+                               WHERE pr.detection_id = ?
+                                 AND pr.classifier_model = ?
+                                 AND pr.id != ?
+                                 AND COALESCE(pr_rev.status, 'pending')
+                                     IN ('pending', 'alternative')""",
+                            (ws, pred_row["detection_id"], pred_row["model"], pred_id),
+                        ).fetchall()
+                        for s in sibs:
+                            self.conn.execute(
+                                """INSERT INTO prediction_review
+                                     (prediction_id, workspace_id, status, reviewed_at)
+                                   VALUES (?, ?, 'rejected', datetime('now'))
+                                   ON CONFLICT(prediction_id, workspace_id)
+                                   DO UPDATE SET status = 'rejected',
+                                                 reviewed_at = datetime('now')""",
+                                (s["id"], ws),
+                            )
                         self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.untag_photo(pid, int(entry['new_value']))
