@@ -466,6 +466,55 @@ def test_load_photo_features_includes_model_in_species(tmp_path):
             assert isinstance(entry[2], str), f"Model should be a string, got {type(entry[2])}"
 
 
+def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
+    """With multiple fingerprints cached for a (detection, model), only the
+    latest one surfaces — otherwise stale species from an old label set
+    would leak into the pipeline top-k.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(ws, folder_id)
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    # Older fingerprint row (stale label set) — Robin.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.9, '2026-01-01T00:00:00')",
+        (det_ids[0],),
+    )
+    # Newer fingerprint row (current label set) — Blue Jay.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Blue Jay', 0.85, '2026-04-24T00:00:00')",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    # Default behavior: most recent fingerprint only.
+    photos = load_photo_features(db)
+    species = [e[0] for e in photos[0]["species_top5"]]
+    assert species == ["Blue Jay"], "should surface only the latest fingerprint's species"
+
+    # Explicit override: pin to the stale fingerprint.
+    photos = load_photo_features(db, labels_fingerprint="fp-old")
+    species = [e[0] for e in photos[0]["species_top5"]]
+    assert species == ["Robin"]
+
+
 def test_load_photo_features_collection_scoped(tmp_path):
     """load_photo_features with collection_id returns only collection photos."""
     from db import Database

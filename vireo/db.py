@@ -1896,16 +1896,22 @@ class Database:
             conditions.append(f"p.folder_id IN ({fph})")
             params.extend(criteria["folder_ids"])
         if "has_predictions" in criteria:
+            # Predictions no longer carry photo_id/workspace_id — they reference
+            # a global detection, which references the photo. Workspace scoping
+            # is already enforced by the outer workspace_folders JOIN, so the
+            # EXISTS only needs to link prediction → detection → this photo.
             if criteria["has_predictions"]:
                 conditions.append(
-                    "EXISTS (SELECT 1 FROM predictions pr WHERE pr.photo_id = p.id AND pr.workspace_id = ?)"
+                    "EXISTS (SELECT 1 FROM predictions pr "
+                    "JOIN detections d ON d.id = pr.detection_id "
+                    "WHERE d.photo_id = p.id)"
                 )
-                params.append(self._ws_id())
             else:
                 conditions.append(
-                    "NOT EXISTS (SELECT 1 FROM predictions pr WHERE pr.photo_id = p.id AND pr.workspace_id = ?)"
+                    "NOT EXISTS (SELECT 1 FROM predictions pr "
+                    "JOIN detections d ON d.id = pr.detection_id "
+                    "WHERE d.photo_id = p.id)"
                 )
-                params.append(self._ws_id())
         if "imported_before" in criteria:
             conditions.append("p.timestamp < ?")
             params.append(criteria["imported_before"])

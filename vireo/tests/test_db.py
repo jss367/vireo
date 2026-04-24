@@ -1203,6 +1203,27 @@ def test_get_prediction_for_photo_keyed_by_fingerprint(tmp_path):
     ) is None
 
 
+def test_query_move_rule_matches_has_predictions(tmp_path):
+    """The has_predictions move-rule criterion must work post-refactor.
+
+    Predictions no longer carry photo_id/workspace_id; the EXISTS subquery
+    now routes through detections.photo_id instead. Previously this raised
+    `no such column: pr.photo_id` on any preview/apply of a rule using the
+    "Has predictions" criterion.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo 0 has a prediction; photo 1 does not.
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+
+    hits = db.query_move_rule_matches({"has_predictions": True})
+    assert hits == [pids[0]]
+    misses = db.query_move_rule_matches({"has_predictions": False})
+    assert misses == [pids[1]]
+
+
 def test_clear_predictions_without_collection_photo_ids(tmp_path):
     """The no-collection branch must bind every workspace_id placeholder it
     uses. A bug where the list of bound params had fewer entries than the
