@@ -114,6 +114,23 @@ def test_reject_prediction(app_and_db):
     assert 'Northern Cardinal' not in kw_names
 
 
+def test_reject_prediction_missing_id_returns_404(app_and_db):
+    """Stale prediction IDs should 404, not 500.
+
+    prediction_review has an FK on prediction_id, so blindly writing
+    review state for a non-existent prediction would now raise an
+    IntegrityError. The endpoint must check existence first.
+    """
+    app, db = app_and_db
+    _seed_predictions(db)
+    client = app.test_client()
+
+    resp = client.post('/api/predictions/999999/reject')
+    assert resp.status_code == 404
+    # And nothing got written to prediction_review for the stale id
+    assert db.get_review_status(999999, db._active_workspace_id) == 'pending'
+
+
 def test_get_prediction_group(app_and_db):
     """GET /api/predictions/group/1 returns both group members."""
     app, db = app_and_db

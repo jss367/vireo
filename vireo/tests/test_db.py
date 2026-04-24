@@ -4578,6 +4578,65 @@ def test_migration_dedupes_detections_and_repoints_predictions(tmp_path):
     assert "workspace_id" not in cols
 
 
+def test_migration_handles_prediction_collision_on_repoint(tmp_path):
+    """When two workspaces had the SAME (detection, model, species) prediction
+    on duplicate detection rows (one per workspace), repointing both to the
+    canonical detection_id would otherwise trip the legacy
+    UNIQUE(detection_id, model, species) index. The migration must delete
+    the non-canonical dup first.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        -- Critical: legacy predictions carries the real UNIQUE constraint.
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B');
+        -- Same box, two workspaces, same prediction in both:
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+          VALUES (100, 10, 1, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't1'),
+                 (200, 10, 2, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't2');
+        -- Same (model, species) prediction in both workspaces — would collide on
+        -- repoint to the canonical detection row without pre-deletion.
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (1000, 100, 'Robin', 'bioclip-2', 'approved'),
+            (2000, 200, 'Robin', 'bioclip-2', 'pending');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Init must not raise an IntegrityError.
+    from db import Database
+    db = Database(db_path)
+    # Exactly one surviving prediction for this (detection, model, species).
+    rows = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin' "
+        "AND classifier_model='bioclip-2'"
+    ).fetchall()
+    assert len(rows) == 1, "non-canonical duplicate must have been deleted"
+
+
 def test_predictions_has_labels_fingerprint(tmp_path):
     """Fresh DB's predictions table includes the labels_fingerprint column."""
     from db import Database

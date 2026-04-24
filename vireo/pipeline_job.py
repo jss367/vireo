@@ -1937,11 +1937,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         # the same (detection, model, fingerprint) short-
                         # circuits. prediction_count reflects how many rows
                         # _flush_batch added to raw_results for this detection.
+                        #
+                        # Only persist when the batch produced at least one
+                        # prediction. A count of 0 means the classifier
+                        # failed (transient load error, decode error, etc.);
+                        # caching that would strand the detection without
+                        # predictions until the user forces --reclassify.
                         new_count = len(raw_results) - pre_len
-                        thread_db.record_classifier_run(
-                            primary_det["id"], model_name, spec_fp,
-                            prediction_count=new_count,
-                        )
+                        if new_count > 0:
+                            thread_db.record_classifier_run(
+                                primary_det["id"], model_name, spec_fp,
+                                prediction_count=new_count,
+                            )
 
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,

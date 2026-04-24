@@ -2442,31 +2442,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                WHERE pr.id = ?""",
             (pred_id,),
         ).fetchone()
+        # prediction_review has an FK on prediction_id; writing review state
+        # for a missing pred would raise an IntegrityError and return 500
+        # where the legacy endpoint returned a harmless no-op. Gate the
+        # write on existence so stale IDs stay a clean 404.
+        if pred is None:
+            return json_error("prediction not found", 404)
         db.update_prediction_status(pred_id, "rejected", _commit=False)
-        if pred:
-            # Also reject sibling alternative predictions (same detection +
-            # classifier model, currently 'alternative' in this workspace).
-            sibling_ids = [row["id"] for row in db.conn.execute(
-                """SELECT pr.id
-                   FROM predictions pr
-                   JOIN prediction_review pr_rev
-                     ON pr_rev.prediction_id = pr.id
-                    AND pr_rev.workspace_id = ?
-                   WHERE pr.detection_id = ?
-                     AND pr.classifier_model = ?
-                     AND pr.id != ?
-                     AND pr_rev.status = 'alternative'""",
-                (ws, pred["detection_id"], pred["model"], pred_id),
-            ).fetchall()]
-            for sid in sibling_ids:
-                db.update_prediction_status(sid, "rejected", _commit=False)
-            db.conn.commit()
-            db.record_edit('prediction_reject',
-                           f'Rejected prediction "{pred["species"]}"',
-                           'rejected',
-                           [{'photo_id': pred['photo_id'], 'old_value': 'pending', 'new_value': 'rejected'}])
-        else:
-            db.conn.commit()
+        # Also reject sibling alternative predictions (same detection +
+        # classifier model, currently 'alternative' in this workspace).
+        sibling_ids = [row["id"] for row in db.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND pr.classifier_model = ?
+                 AND pr.id != ?
+                 AND pr_rev.status = 'alternative'""",
+            (ws, pred["detection_id"], pred["model"], pred_id),
+        ).fetchall()]
+        for sid in sibling_ids:
+            db.update_prediction_status(sid, "rejected", _commit=False)
+        db.conn.commit()
+        db.record_edit('prediction_reject',
+                       f'Rejected prediction "{pred["species"]}"',
+                       'rejected',
+                       [{'photo_id': pred['photo_id'], 'old_value': 'pending', 'new_value': 'rejected'}])
         return jsonify({"ok": True})
 
     @app.route("/api/predictions/group/<group_id>")

@@ -843,6 +843,62 @@ class Database:
                 GROUP BY photo_id, COALESCE(detector_model, 'megadetector-v6'),
                          box_x, box_y, box_w, box_h
             """)
+            # Legacy predictions carries UNIQUE(detection_id, model, species).
+            # When the same box was classified in multiple workspaces, each
+            # workspace has its own prediction row. Repointing both to the
+            # canonical detection_id would create a duplicate tuple and trip
+            # the UNIQUE. Preserve per-workspace review state on the survivor
+            # before deleting the loser.
+            #
+            # Only runs on truly legacy schemas (predictions still has the
+            # ``model`` column). Fresh installs go through CREATE with the
+            # new UNIQUE that already includes labels_fingerprint, so there
+            # are no collisions to pre-resolve.
+            legacy_pred_cols = {r[1] for r in self.conn.execute(
+                "PRAGMA table_info(predictions)"
+            ).fetchall()}
+            if "model" in legacy_pred_cols:
+                self.conn.execute("""
+                    CREATE TEMP TABLE predictions_to_dedup AS
+                    SELECT p.id AS loser_id,
+                           (SELECT p2.id FROM predictions p2
+                            WHERE p2.detection_id = dc.canonical_id
+                              AND COALESCE(p2.model, '') = COALESCE(p.model, '')
+                              AND COALESCE(p2.species, '') = COALESCE(p.species, '')
+                            LIMIT 1) AS canonical_pred_id
+                    FROM predictions p
+                    JOIN detections d ON d.id = p.detection_id
+                    JOIN detection_canonical dc
+                      ON dc.photo_id       = d.photo_id
+                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
+                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
+                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
+                    WHERE d.id <> dc.canonical_id
+                """)
+                # Move review rows from losers to canonicals so workspace-scoped
+                # status/individual/group_id survive the delete. INSERT OR IGNORE
+                # handles the case where a review row already exists on the
+                # canonical for the same workspace.
+                self.conn.execute("""
+                    INSERT OR IGNORE INTO prediction_review
+                        (prediction_id, workspace_id, status, reviewed_at,
+                         individual, group_id, vote_count, total_votes)
+                    SELECT ptd.canonical_pred_id, pr.workspace_id, pr.status,
+                           pr.reviewed_at, pr.individual, pr.group_id,
+                           pr.vote_count, pr.total_votes
+                    FROM prediction_review pr
+                    JOIN predictions_to_dedup ptd ON ptd.loser_id = pr.prediction_id
+                    WHERE ptd.canonical_pred_id IS NOT NULL
+                """)
+                # Delete the loser predictions whose canonical already covers
+                # (det, model, species) — their prediction_review rows cascade
+                # away, but the matching canonical rows were just created above.
+                self.conn.execute("""
+                    DELETE FROM predictions
+                    WHERE id IN (SELECT loser_id FROM predictions_to_dedup
+                                 WHERE canonical_pred_id IS NOT NULL)
+                """)
+                self.conn.execute("DROP TABLE predictions_to_dedup")
             # Re-point predictions that reference a non-canonical duplicate.
             self.conn.execute("""
                 UPDATE predictions
