@@ -922,6 +922,64 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_populate_taxa_db_from_json_clears_stale_taxa_common_name(tmp_path):
+    """Re-populate drops taxa.common_name when upstream removed it.
+
+    Regression: populate_taxa_db_from_json used
+    COALESCE(excluded.common_name, taxa.common_name) on conflict, which
+    preserved the old value whenever the new payload had no common name.
+    add_keyword's auto-detect reads taxa.common_name before consulting
+    taxa_common_names, so a stale value kept matching obsolete names
+    across re-downloads.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "aquila chrysaetos": {
+                "taxon_id": 4242,
+                "scientific_name": "Aquila chrysaetos",
+                "common_name": "Golden Eagle",
+                "rank": "species",
+                "lineage_names": ["Animalia", "Aquila", "Aquila chrysaetos"],
+                "lineage_ranks": ["kingdom", "genus", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+    before = db.conn.execute(
+        "SELECT common_name FROM taxa WHERE inat_id = 4242"
+    ).fetchone()
+    assert before["common_name"] == "Golden Eagle"
+
+    # Simulate a newer taxonomy release where the preferred English
+    # common name has been removed.
+    second = json.loads(json.dumps(first))
+    second["taxa_by_scientific"]["aquila chrysaetos"]["common_name"] = ""
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    populate_taxa_db_from_json(db, tax_path)
+
+    after = db.conn.execute(
+        "SELECT common_name FROM taxa WHERE inat_id = 4242"
+    ).fetchone()
+    assert after["common_name"] is None, (
+        "re-populate should overwrite taxa.common_name with the new "
+        "value (including NULL), not preserve the old one"
+    )
+
+
 def test_populate_taxa_db_from_json_drops_stale_common_names(tmp_path):
     """Re-downloading the taxonomy clears stale common-name mappings.
 

@@ -587,12 +587,17 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
         if lineage_ranks and lineage_ranks[0] == "kingdom":
             kingdom = lineage_names[0] if lineage_names else None
         common_name = entry.get("common_name") or None
+        # On conflict, overwrite every column including common_name —
+        # don't COALESCE. If upstream removed or emptied a preferred
+        # common name, we need to let it drop to NULL here, otherwise
+        # add_keyword's auto-detect (which reads taxa.common_name before
+        # taxa_common_names) keeps matching the obsolete name.
         db.conn.execute(
             "INSERT INTO taxa (inat_id, name, rank, kingdom, common_name) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(inat_id) DO UPDATE SET "
-            "name=excluded.name, rank=excluded.rank, kingdom=excluded.kingdom, "
-            "common_name=COALESCE(excluded.common_name, taxa.common_name)",
+            "name=excluded.name, rank=excluded.rank, "
+            "kingdom=excluded.kingdom, common_name=excluded.common_name",
             (inat_id, entry["scientific_name"], entry["rank"],
              kingdom, common_name),
         )
