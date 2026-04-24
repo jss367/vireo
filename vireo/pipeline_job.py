@@ -1487,6 +1487,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
             similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
 
             tax = loaded_models["tax"]
+            # Fingerprint for the FIRST model is preloaded by model_loader_stage.
+            # Each subsequent iteration reloads its own bundle (with its own fp)
+            # inside the loop, so we read loaded_models["labels_fingerprint"]
+            # per-spec below rather than capturing a single value here.
             resolved_specs_local = loaded_models.get("resolved_specs") or [
                 loaded_models["active_model"]
             ]
@@ -1582,6 +1586,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     existing_preds = thread_db.get_existing_prediction_photo_ids(
                         model_name
                     )
+
+                # The fingerprint for THIS model's label set — pinned by
+                # model_loader_stage for the first model and by _load_model_bundle
+                # for subsequent ones. Used to key the classifier_runs gate so
+                # a repeat pass over the same (detection, model, fingerprint)
+                # skips work instead of re-running inference.
+                spec_fp = loaded_models.get("labels_fingerprint", "legacy")
 
                 raw_results: list = []
                 failed = 0
@@ -1696,6 +1707,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         if primary_det is None:
                             continue
 
+                        # Classifier-run gate: skip work when this exact
+                        # (detection, classifier_model, labels_fingerprint)
+                        # triple was already classified. Reclassify bypasses
+                        # the gate so users can force a fresh pass.
+                        if not params.reclassify:
+                            run_keys = thread_db.get_classifier_run_keys(
+                                primary_det["id"]
+                            )
+                            if (model_name, spec_fp) in run_keys:
+                                continue
+
                         img, folder_path, image_path = _prepare_image(
                             photo, folders, primary_det,
                         )
@@ -1710,6 +1732,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                             "image_path": image_path,
                             "img": img,
                         }]
+                        pre_len = len(raw_results)
                         n_batch_failed = _flush_batch(
                             img_batch, clf, model_type, model_name,
                             thread_db, raw_results,
@@ -1717,6 +1740,16 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                         if n_batch_failed:
                             failed_photo_ids.add(photo["id"])
                         failed += n_batch_failed
+
+                        # Record the classifier_runs row so the next pass over
+                        # the same (detection, model, fingerprint) short-
+                        # circuits. prediction_count reflects how many rows
+                        # _flush_batch added to raw_results for this detection.
+                        new_count = len(raw_results) - pre_len
+                        thread_db.record_classifier_run(
+                            primary_det["id"], model_name, spec_fp,
+                            prediction_count=new_count,
+                        )
 
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,
