@@ -1237,3 +1237,118 @@ def test_resolve_worker_count_no_windows_cap_on_posix(monkeypatch):
     monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
     monkeypatch.setattr(scanner.sys, "platform", "linux")
     assert scanner._resolve_worker_count(list(range(200))) == 128
+
+
+# -- scan resilience: retry on locked DB, mark folder partial on abort --
+
+
+class _FlakyConn:
+    """Connection proxy that injects commit failures for testing.
+
+    sqlite3.Connection.commit is read-only at the instance level, so tests
+    that need to simulate transient commit failures wrap the real connection
+    in this proxy. All other attributes pass through to the real connection
+    so code that calls ``conn.execute(...)`` etc. behaves identically.
+    """
+
+    def __init__(self, real, fail_on_calls):
+        """fail_on_calls: dict {call_number: exception_to_raise}."""
+        self._real = real
+        self._fail_on_calls = dict(fail_on_calls)
+        self._call_count = 0
+
+    def commit(self):
+        self._call_count += 1
+        exc = self._fail_on_calls.get(self._call_count)
+        if exc is not None:
+            raise exc
+        return self._real.commit()
+
+    # sqlite3.Connection is used as a context manager in db.py
+    # (``with self.conn:`` for transactions). Python bypasses ``__getattr__``
+    # for dunder lookups, so we must forward these explicitly. Route commit
+    # through our own method so the fail injection still fires.
+    def __enter__(self):
+        self._real.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            try:
+                self.commit()
+            except BaseException:
+                self._real.rollback()
+                raise
+        else:
+            self._real.rollback()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_scan_retries_on_database_is_locked(tmp_path):
+    """If a commit hits 'database is locked', scan retries instead of aborting.
+
+    busy_timeout covers most cases, but a retry wrapper handles the tail where
+    a contended DB exceeds the timeout mid-scan. Without it, a single transient
+    lock aborts the whole scan and leaves the folder partially populated.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # First two commits raise 'database is locked'; subsequent commits succeed.
+    locked = sqlite3.OperationalError("database is locked")
+    db.conn = _FlakyConn(db.conn, fail_on_calls={1: locked, 2: locked})
+
+    scanner_mod.scan(root, db)
+
+    filenames = {
+        p["filename"]
+        for p in db.conn.execute("SELECT filename FROM photos").fetchall()
+    }
+    assert filenames == {"a.jpg", "b.jpg"}, (
+        f"expected both photos persisted after retries, got {filenames}"
+    )
+
+
+def test_scan_marks_folder_partial_on_unrecoverable_failure(tmp_path):
+    """When scan can't recover, the folder is marked 'partial' before raising.
+
+    Visible state: user sees the folder in its UI with a 'partial' badge and
+    knows to rescan, instead of believing the folder is fully imported.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg', 'c.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Second commit raises a non-lock OperationalError that retry won't
+    # swallow. Scan must mark the folder partial and re-raise.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={2: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db)
+
+    # Unwrap proxy for the final assertion.
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None, "folder row should exist despite aborted scan"
+    assert row["status"] == "partial", (
+        f"expected folder.status='partial' after mid-scan failure, got {row['status']!r}"
+    )

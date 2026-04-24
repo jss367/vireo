@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import uuid
 
 from new_images import get_shared_cache
@@ -11,6 +12,27 @@ from new_images import get_shared_cache
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
+
+
+def commit_with_retry(conn, max_retries=5, base_delay=0.1):
+    """Commit ``conn`` with retry on transient "locked"/"busy" errors.
+
+    Parallel scan workers can still race past the 30s ``busy_timeout`` PRAGMA
+    under sustained write pressure. This helper catches the resulting
+    ``sqlite3.OperationalError`` (``"database is locked"``/``"is busy"``) and
+    retries with exponential backoff. Non-transient OperationalErrors (disk
+    I/O, constraint violations) propagate immediately so the caller can mark
+    folders partial and surface the failure.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
 
 
 def _inclusive_date_to(date_to):
@@ -64,6 +86,7 @@ class Database:
         self.conn.execute("PRAGMA cache_size=-10000")  # 10 MB
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
+        self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
         self._active_workspace_id = None
         self._new_images_cache = get_shared_cache()
         self._create_tables()
@@ -1064,7 +1087,7 @@ class Database:
             "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
             (path, name, parent_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
         if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
@@ -1614,7 +1637,7 @@ class Database:
                 file_hash,
             ),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
         if cur.rowcount > 0:
             photo_id = cur.lastrowid
         else:

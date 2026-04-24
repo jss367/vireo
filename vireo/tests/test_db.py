@@ -3995,3 +3995,70 @@ def test_create_snapshot_empty_paths(tmp_path):
     snap = db.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
+
+
+# -- busy_timeout / lock resilience --
+
+
+def test_busy_timeout_pragma_is_set(tmp_path):
+    """Each connection explicitly sets PRAGMA busy_timeout to at least 30s.
+
+    Python's sqlite3 default (5000ms) is too tight under load — heavy
+    pipeline writes can hold the writer lock longer than that. A real-world
+    scan against a busy DB hit 'database is locked' with the implicit default.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    timeout_ms = db.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout_ms >= 30000
+
+
+def test_concurrent_writers_wait_rather_than_fail(tmp_path):
+    """A second writer queues behind the first instead of crashing.
+
+    Repro of the failure mode that killed 3 of 4 parallel scans in prod: the
+    default 5s busy_timeout wasn't enough under load. With a longer timeout
+    explicitly set, the second writer waits and succeeds.
+    """
+    import sqlite3
+    import threading
+    import time
+
+    from db import Database
+
+    db_path = str(tmp_path / "concurrent.db")
+    db = Database(db_path)
+    db.add_folder("/a")
+
+    blocker = sqlite3.connect(db_path, check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("UPDATE folders SET name = 'held' WHERE path = '/a'")
+
+    def release_after_delay():
+        time.sleep(0.8)
+        blocker.commit()
+        blocker.close()
+
+    threading.Thread(target=release_after_delay, daemon=True).start()
+
+    start = time.time()
+    db.add_folder("/b")
+    elapsed = time.time() - start
+
+    assert elapsed >= 0.5, f"writer did not wait for lock (elapsed={elapsed:.2f}s)"
+    assert elapsed < 5.0, f"writer waited too long (elapsed={elapsed:.2f}s)"
+    paths = {r["path"] for r in db.conn.execute("SELECT path FROM folders").fetchall()}
+    assert {"/a", "/b"}.issubset(paths)
+
+
+def test_folder_status_partial_value_allowed(tmp_path):
+    """folders.status accepts 'partial' as a value — scan abort marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/x")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert row["status"] == "partial"

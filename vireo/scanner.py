@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import imagehash
+from db import commit_with_retry
 from image_loader import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS, extract_working_copy
 from metadata import extract_metadata
 from PIL import Image
@@ -307,7 +308,7 @@ def _pair_raw_jpeg_companions(db):
         db.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (companion["id"],))
         db.conn.execute("DELETE FROM photos WHERE id = ?", (companion["id"],))
 
-    db.conn.commit()
+    commit_with_retry(db.conn)
 
 
 def _subtree_like_pattern(path, sep=None):
@@ -443,7 +444,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
                 (wc_rel, row["id"]),
             )
 
-    db.conn.commit()
+    commit_with_retry(db.conn)
 
 
 def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None):
@@ -604,7 +605,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         "UPDATE photos SET xmp_mtime = ? WHERE id = ?",
                         (xmp_mtime, existing["id"]),
                     )
-                    db.conn.commit()
+                    commit_with_retry(db.conn)
 
                 if file_unchanged and not metadata_missing:
                     processed_count += 1
@@ -657,143 +658,191 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             for image_path, path_str in zip(files_to_process, paths_to_extract, strict=True):
                 yield image_path, _compute_file_features(path_str)
 
-    for image_path, (phash, file_hash) in _iter_features():
-        folder_id = _ensure_folder(image_path.parent)
+    # Track folders whose scan touched them, so we can flag them 'partial'
+    # if the per-file loop dies midway (unrecoverable DB error, etc).
+    touched_folder_ids = set()
+    try:
+        for image_path, (phash, file_hash) in _iter_features():
+            folder_id = _ensure_folder(image_path.parent)
+            touched_folder_ids.add(folder_id)
 
-        # File stats
-        stat = image_path.stat()
-        file_size = stat.st_size
-        file_mtime = stat.st_mtime
+            # File stats
+            stat = image_path.stat()
+            file_size = stat.st_size
+            file_mtime = stat.st_mtime
 
-        # XMP sidecar
-        xmp_path = image_path.with_suffix(".xmp")
-        xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
+            # XMP sidecar
+            xmp_path = image_path.with_suffix(".xmp")
+            xmp_mtime = xmp_path.stat().st_mtime if xmp_path.exists() else None
 
-        # Get pre-extracted metadata for this file
-        file_meta = metadata_map.get(str(image_path), {})
-        file_group = file_meta.get("File", {})
-        exif_group = file_meta.get("EXIF", {})
-        composite = file_meta.get("Composite", {})
+            # Get pre-extracted metadata for this file
+            file_meta = metadata_map.get(str(image_path), {})
+            file_group = file_meta.get("File", {})
+            exif_group = file_meta.get("EXIF", {})
+            composite = file_meta.get("Composite", {})
 
-        # Dimensions from ExifTool (works for all file types including RAW)
-        width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
+            # Dimensions from ExifTool (works for all file types including RAW)
+            width, height = _extract_dimensions(exif_group, file_group, extension=image_path.suffix.lower())
 
-        # Fallback if ExifTool didn't provide dimensions
-        if width is None or height is None:
-            ext = image_path.suffix.lower()
-            if ext in RAW_EXTENSIONS:
-                try:
-                    import rawpy
+            # Fallback if ExifTool didn't provide dimensions
+            if width is None or height is None:
+                ext = image_path.suffix.lower()
+                if ext in RAW_EXTENSIONS:
+                    try:
+                        import rawpy
 
-                    with rawpy.imread(str(image_path)) as raw:
-                        width = raw.sizes.width
-                        height = raw.sizes.height
-                except Exception:
-                    log.debug("Could not read RAW dimensions from %s", image_path)
-            else:
-                try:
-                    with Image.open(str(image_path)) as img:
-                        width, height = img.size
-                except Exception:
-                    log.debug("Could not read dimensions from %s", image_path)
+                        with rawpy.imread(str(image_path)) as raw:
+                            width = raw.sizes.width
+                            height = raw.sizes.height
+                    except Exception:
+                        log.debug("Could not read RAW dimensions from %s", image_path)
+                else:
+                    try:
+                        with Image.open(str(image_path)) as img:
+                            width, height = img.size
+                    except Exception:
+                        log.debug("Could not read dimensions from %s", image_path)
 
-        # Timestamp from ExifTool
-        timestamp = _extract_timestamp(exif_group)
+            # Timestamp from ExifTool
+            timestamp = _extract_timestamp(exif_group)
 
-        # Focal length
-        focal_length = exif_group.get("FocalLength")
-        if focal_length is not None:
-            focal_length = float(focal_length)
+            # Focal length
+            focal_length = exif_group.get("FocalLength")
+            if focal_length is not None:
+                focal_length = float(focal_length)
 
-        # Burst ID (ImageUniqueID)
-        burst_id = exif_group.get("ImageUniqueID")
-        if burst_id:
-            burst_id = str(burst_id)
+            # Burst ID (ImageUniqueID)
+            burst_id = exif_group.get("ImageUniqueID")
+            if burst_id:
+                burst_id = str(burst_id)
 
-        # GPS coordinates — ExifTool with -n gives decimal degrees directly
-        latitude = composite.get("GPSLatitude")
-        if latitude is None:
-            latitude = exif_group.get("GPSLatitude")
-        longitude = composite.get("GPSLongitude")
-        if longitude is None:
-            longitude = exif_group.get("GPSLongitude")
+            # GPS coordinates — ExifTool with -n gives decimal degrees directly
+            latitude = composite.get("GPSLatitude")
+            if latitude is None:
+                latitude = exif_group.get("GPSLatitude")
+            longitude = composite.get("GPSLongitude")
+            if longitude is None:
+                longitude = exif_group.get("GPSLongitude")
 
-        photo_id = db.add_photo(
-            folder_id=folder_id,
-            filename=image_path.name,
-            extension=image_path.suffix.lower(),
-            file_size=file_size,
-            file_mtime=file_mtime,
-            xmp_mtime=xmp_mtime,
-            timestamp=timestamp,
-            width=width,
-            height=height,
-        )
-
-        # Update metadata columns (also fixes existing photos that were
-        # inserted before ExifTool metadata was available)
-        updates = []
-        update_params = []
-        if timestamp is not None:
-            updates.append("timestamp=?")
-            update_params.append(timestamp)
-        if width is not None:
-            updates.append("width=?")
-            update_params.append(width)
-        if height is not None:
-            updates.append("height=?")
-            update_params.append(height)
-        if latitude is not None:
-            updates.extend(["latitude=?", "longitude=?"])
-            update_params.extend([latitude, longitude])
-        if phash is not None:
-            updates.append("phash=?")
-            update_params.append(phash)
-        if focal_length is not None:
-            updates.append("focal_length=?")
-            update_params.append(focal_length)
-        if burst_id is not None:
-            updates.append("burst_id=?")
-            update_params.append(burst_id)
-        if file_hash is not None:
-            updates.append("file_hash=?")
-            update_params.append(file_hash)
-        if file_meta and extract_full_metadata:
-            updates.append("exif_data=?")
-            update_params.append(json.dumps(file_meta))
-        elif file_meta:
-            # Store minimal marker so we know ExifTool ran (even when
-            # extract_full_metadata is off) — prevents perpetual retry
-            updates.append("exif_data=COALESCE(exif_data, ?)")
-            update_params.append("{}")
-        if updates:
-            update_params.append(photo_id)
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                update_params,
+            photo_id = db.add_photo(
+                folder_id=folder_id,
+                filename=image_path.name,
+                extension=image_path.suffix.lower(),
+                file_size=file_size,
+                file_mtime=file_mtime,
+                xmp_mtime=xmp_mtime,
+                timestamp=timestamp,
+                width=width,
+                height=height,
             )
-            db.conn.commit()
 
-        # Import XMP keywords if sidecar exists — must land BEFORE the
-        # duplicate auto-resolve hook below, so if this row turns out to be
-        # the loser its keywords are visible to apply_duplicate_resolution's
-        # metadata query and get merged onto the winner. Otherwise the
-        # keywords would be stranded on the rejected row.
-        if xmp_path.exists():
-            _import_keywords_for_photo(db, photo_id, str(xmp_path))
+            # Update metadata columns (also fixes existing photos that were
+            # inserted before ExifTool metadata was available)
+            updates = []
+            update_params = []
+            if timestamp is not None:
+                updates.append("timestamp=?")
+                update_params.append(timestamp)
+            if width is not None:
+                updates.append("width=?")
+                update_params.append(width)
+            if height is not None:
+                updates.append("height=?")
+                update_params.append(height)
+            if latitude is not None:
+                updates.extend(["latitude=?", "longitude=?"])
+                update_params.extend([latitude, longitude])
+            if phash is not None:
+                updates.append("phash=?")
+                update_params.append(phash)
+            if focal_length is not None:
+                updates.append("focal_length=?")
+                update_params.append(focal_length)
+            if burst_id is not None:
+                updates.append("burst_id=?")
+                update_params.append(burst_id)
+            if file_hash is not None:
+                updates.append("file_hash=?")
+                update_params.append(file_hash)
+            if file_meta and extract_full_metadata:
+                updates.append("exif_data=?")
+                update_params.append(json.dumps(file_meta))
+            elif file_meta:
+                # Store minimal marker so we know ExifTool ran (even when
+                # extract_full_metadata is off) — prevents perpetual retry
+                updates.append("exif_data=COALESCE(exif_data, ?)")
+                update_params.append("{}")
+            if updates:
+                update_params.append(photo_id)
+                db.conn.execute(
+                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                    update_params,
+                )
+                commit_with_retry(db.conn)
 
-        # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
-        # are committed. add_photo was called without the hash, so the hook
-        # there was a no-op — we own firing it here.
-        if file_hash is not None:
-            db.check_and_resolve_duplicates_for_hash(file_hash)
+            # Import XMP keywords if sidecar exists — must land BEFORE the
+            # duplicate auto-resolve hook below, so if this row turns out to be
+            # the loser its keywords are visible to apply_duplicate_resolution's
+            # metadata query and get merged onto the winner. Otherwise the
+            # keywords would be stranded on the rejected row.
+            if xmp_path.exists():
+                _import_keywords_for_photo(db, photo_id, str(xmp_path))
 
-        if photo_callback:
-            photo_callback(photo_id, str(image_path))
+            # Trigger duplicate auto-resolve now that file_hash AND XMP keywords
+            # are committed. add_photo was called without the hash, so the hook
+            # there was a no-op — we own firing it here.
+            if file_hash is not None:
+                db.check_and_resolve_duplicates_for_hash(file_hash)
 
-        processed_count += 1
-        if progress_callback:
-            progress_callback(processed_count, total)
+            if photo_callback:
+                photo_callback(photo_id, str(image_path))
+
+            processed_count += 1
+            if progress_callback:
+                progress_callback(processed_count, total)
+    except BaseException:
+        # Per-file loop died mid-way (DB error, signal, etc). Roll back any
+        # half-applied write so the partial-status UPDATE below runs on a
+        # clean transaction, then flag every folder in scope as 'partial' so
+        # callers can detect and re-scan.
+        #
+        # We intentionally use the scanned scope (root + restrict_dirs) rather
+        # than ``touched_folder_ids`` alone: a failure inside ``_ensure_folder``
+        # commits the folder row but the exception propagates before the
+        # folder_id reaches the scanner loop, so the set can be empty even
+        # when a folder row exists.
+        try:
+            db.conn.rollback()
+        except Exception:
+            log.exception("Rollback after scan failure also failed")
+        scoped_paths = set()
+        scoped_paths.add(str(root_path))
+        if restrict_dirs is not None:
+            scoped_paths.update(str(d) for d in restrict_dirs)
+        if touched_folder_ids:
+            scoped_paths.add(None)  # sentinel to use id-list below too
+        try:
+            # Match by path for the in-scope roots.
+            if scoped_paths - {None}:
+                path_placeholders = ",".join(
+                    "?" * len(scoped_paths - {None})
+                )
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'partial' "
+                    f"WHERE path IN ({path_placeholders})",
+                    tuple(scoped_paths - {None}),
+                )
+            if touched_folder_ids:
+                id_placeholders = ",".join("?" * len(touched_folder_ids))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'partial' "
+                    f"WHERE id IN ({id_placeholders})",
+                    tuple(touched_folder_ids),
+                )
+            commit_with_retry(db.conn)
+        except Exception:
+            log.exception("Failed to flag folders partial after scan failure")
+        raise
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
     # Wrap post-processing so folder counts are always updated, even on failure.
