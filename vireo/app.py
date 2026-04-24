@@ -3775,9 +3775,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # source folders — otherwise longest-prefix match picks the
         # deepest descendant and hides which source a file came from.
         from new_images import mapped_roots as _ni_mapped_roots
+        root_paths = [r["path"] for r in _ni_mapped_roots(db, db._active_workspace_id)]
+
+        # Build unique display names across roots by taking the shortest
+        # trailing path segments that are unique — so /mnt/cardA/DCIM and
+        # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
+        # colliding on "DCIM". Mirrors folder-preview's disambiguation.
+        root_names = {}
+        if len(root_paths) > 1:
+            parts = [Path(rp).parts for rp in root_paths]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for rp, suffix in zip(root_paths, suffixes, strict=True):
+                        root_names[rp] = suffix
+                    break
+            else:
+                for rp in root_paths:
+                    root_names[rp] = rp
+        else:
+            for rp in root_paths:
+                root_names[rp] = os.path.basename(rp.rstrip("/")) or rp
+
         roots = sorted(
-            [(r["path"], os.path.basename(r["path"].rstrip("/")) or r["path"])
-             for r in _ni_mapped_roots(db, db._active_workspace_id)],
+            [(rp, root_names[rp]) for rp in root_paths],
             key=lambda pn: len(pn[0]),
             reverse=True,
         )

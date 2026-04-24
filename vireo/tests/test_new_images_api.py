@@ -313,6 +313,44 @@ def test_new_images_preview_groups_by_top_level_root_not_scanned_descendants(app
         )
 
 
+def test_new_images_preview_disambiguates_duplicate_basenames(app_and_db):
+    """Two mapped roots with the same basename (e.g. /mnt/cardA/DCIM and
+    /mnt/cardB/DCIM) must produce distinct subfolder labels — otherwise
+    the preview grid groups their files together and a single group-level
+    checkbox toggles photos from unrelated sources."""
+    app, db, ws_id, tmp_path = app_and_db
+
+    # Two sources with identical leaf names.
+    card_a = tmp_path / "mnt" / "cardA" / "DCIM"
+    card_b = tmp_path / "mnt" / "cardB" / "DCIM"
+    card_a.mkdir(parents=True)
+    card_b.mkdir(parents=True)
+    _touch_image(str(card_a / "a.jpg"))
+    _touch_image(str(card_b / "b.jpg"))
+    db.add_folder(str(card_a), name="DCIM")
+    db.add_folder(str(card_b), name="DCIM")
+
+    snap_id = db.create_new_images_snapshot([
+        str(card_a / "a.jpg"),
+        str(card_b / "b.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2, (
+        f"Expected two distinct group labels, got {subfolders!r}"
+    )
+    for sf in subfolders:
+        assert "DCIM" in sf
+
+
 def test_new_images_preview_skips_missing_files(app_and_db):
     """If a path in the snapshot no longer exists on disk, skip it rather
     than 500ing — the file may have been moved or deleted since snapshot."""
