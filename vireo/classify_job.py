@@ -375,6 +375,16 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
 
             detections = detect_animals(image_path)
 
+            if detections is None:
+                # Detector run itself failed (image decode error, ONNX
+                # error, etc.). Do NOT clear prior detections and do NOT
+                # record a run — otherwise future non-reclassify passes
+                # would skip the photo permanently, leaving it without
+                # detections unless the user forces --reclassify.
+                # The photo stays out of processed_ids so the caller
+                # treats it as "will be retried next pass".
+                continue
+
             if detections:
                 detected += 1
 
@@ -404,16 +414,17 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # place and allowing future non-reclassify runs to reuse them.
                 processed_ids.add(photo["id"])
             else:
-                # Intentionally clear any stale rows for this (photo, model) and
-                # record the run with box_count=0 below so reruns skip.
+                # Genuine empty scene (detector ran, produced zero boxes).
+                # Clear any stale rows for this (photo, model) and record
+                # the run below so reruns skip.
                 db.save_detections(
                     photo["id"], [], detector_model="megadetector-v6"
                 )
 
-            # Record the detector run for BOTH cases — boxes-found and
-            # empty-scene. Without this, empty-scene photos would have no
-            # detections row AND no detector_runs row, so the skip check on
-            # the next pass would miss and MegaDetector would re-run forever.
+            # Record the detector run ONLY for successful outcomes —
+            # boxes-found and real-empty-scene. Failures were handled by
+            # the ``is None`` early-continue above and must not poison
+            # the skip set.
             db.record_detector_run(
                 photo["id"], "megadetector-v6", box_count=len(detections)
             )
@@ -1025,8 +1036,15 @@ def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw
 
 def _store_grouped_predictions(
     raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
+    labels_fingerprint="legacy",
 ):
     """Group results by timestamp/similarity, compute consensus, store to DB.
+
+    ``labels_fingerprint`` is written verbatim onto each prediction row so
+    the fingerprint-aware skip gate (``get_existing_prediction_photo_ids``)
+    actually finds them. Defaulting to ``'legacy'`` would make cache
+    lookups miss and force reclassification on every pass — callers must
+    pass the active fingerprint.
 
     Returns:
         dict with predictions_stored, burst_groups, already_labeled counts.
@@ -1076,6 +1094,7 @@ def _store_grouped_predictions(
                 model=model_name,
                 category=category,
                 taxonomy=tax_hierarchy,
+                labels_fingerprint=labels_fingerprint,
             )
             # Store alternative predictions
             for alt in item.get("alternatives", []):
@@ -1090,6 +1109,7 @@ def _store_grouped_predictions(
                     category=category,
                     status="alternative",
                     taxonomy=alt_tax,
+                    labels_fingerprint=labels_fingerprint,
                 )
             predictions_stored += 1
         else:
@@ -1148,6 +1168,7 @@ def _store_grouped_predictions(
                         total_votes=cons["total_votes"],
                         individual=individual_json,
                         taxonomy=item.get("taxonomy") or cons_hierarchy,
+                        labels_fingerprint=labels_fingerprint,
                     )
                     # Store alternative predictions for this group member
                     for alt in item.get("alternatives", []):
@@ -1162,6 +1183,7 @@ def _store_grouped_predictions(
                             category=category,
                             status="alternative",
                             taxonomy=alt_tax,
+                            labels_fingerprint=labels_fingerprint,
                         )
             predictions_stored += len(group)
 
@@ -1448,6 +1470,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             similarity_threshold=params.similarity_threshold,
             tax=tax,
             db=thread_db,
+            labels_fingerprint=fp,
         )
         finalize_parts = [f"{group_result['predictions_stored']} predictions"]
         if group_result["burst_groups"]:

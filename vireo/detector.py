@@ -314,7 +314,11 @@ def detect_animals(image_path):
             box: {x, y, w, h} normalized 0-1
             confidence: float 0-1
             category: str ('animal', 'person', 'vehicle')
-        Returns empty list on failure.
+
+        ``[]`` means "ran successfully, no boxes above the raw floor"
+        (a real empty scene). ``None`` means "the run itself failed"
+        (image decode error, ONNX error, etc.) — callers should NOT
+        cache a zero-box result for this case.
     """
     session = _get_session()
 
@@ -326,7 +330,7 @@ def detect_animals(image_path):
         img = load_image(str(image_path), max_size=1280)
         if img is None:
             log.warning("Could not load image for detection: %s", image_path)
-            return []
+            return None
         img_array = np.array(img.convert("RGB"))
 
         input_tensor, preprocess_info = _preprocess(img_array)
@@ -337,7 +341,7 @@ def detect_animals(image_path):
         return _postprocess(outputs, preprocess_info, RAW_CONF_FLOOR)
     except Exception:
         log.warning("Detection failed for %s", image_path, exc_info=True)
-        return []
+        return None
 
 
 def get_primary_detection(detections):

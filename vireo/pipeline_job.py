@@ -1957,6 +1957,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,
                     grouping_window, similarity_threshold, tax, thread_db,
+                    labels_fingerprint=spec_fp,
                 )
                 preds = group_result["predictions_stored"]
                 total_predictions_stored += preds

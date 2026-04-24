@@ -575,6 +575,54 @@ def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
     assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
 
 
+def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch):
+    """When detect_animals returns None (image decode error, ONNX crash,
+    etc.), _detect_batch must NOT write a detector_runs row — otherwise
+    future non-reclassify passes would skip the photo permanently,
+    leaving it without detections unless the user forces --reclassify.
+    A legitimate empty scene still gets cached (separate test).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "broken.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    call_count = {"n": 0}
+    def failing_detect(image_path):
+        call_count["n"] += 1
+        return None  # simulate detector failure
+
+    monkeypatch.setattr("classify_job.detect_animals", failing_detect)
+    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+
+    import classify_job
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "broken.jpg"}]
+    folders = {folder_id: "/tmp/p"}
+
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1, "detector was called"
+    # No detector_run row should have been written for the failed run
+    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+
+    # A second pass must call the detector again (no cached "already done")
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 2, "failed photos must be retried on next pass"
+
+
 def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypatch):
     """When a photo has no real detections, classify_photos falls back to a
     synthetic ('full-image') detection. Because save_detections is
@@ -631,6 +679,65 @@ def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypa
         (original_det_id,),
     ).fetchone()["n"]
     assert n == 1
+
+
+def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
+    """Predictions produced under a given label set must be written with
+    that set's fingerprint, not the default 'legacy'. Otherwise the
+    fingerprint-aware skip gate (get_existing_prediction_photo_ids with
+    labels_fingerprint=...) would miss them and force reclassification
+    on every pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+
+    import classify_job
+    raw_results = [{
+        "photo": {
+            "id": photo_id, "filename": "a.jpg",
+            "folder_id": folder_id, "timestamp": None, "burst_id": None,
+        },
+        "folder_path": "/tmp/p",
+        "detection_id": det_ids[0],
+        "prediction": "Robin",
+        "confidence": 0.88,
+        "alternatives": [],
+        "taxonomy": {},
+        "timestamp": None,
+    }]
+    classify_job._store_grouped_predictions(
+        raw_results, job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=None,
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    row = db.conn.execute(
+        "SELECT labels_fingerprint FROM predictions WHERE species=?", ("Robin",)
+    ).fetchone()
+    assert row is not None, "prediction was not stored"
+    assert row["labels_fingerprint"] == "fp-active"
+
+    # And the fingerprint-aware cache lookup must now find it.
+    hits = db.get_existing_prediction_photo_ids(
+        "bioclip-2", labels_fingerprint="fp-active",
+    )
+    assert hits == {photo_id}
 
 
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
