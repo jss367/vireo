@@ -4,12 +4,149 @@ Provides ONNX session creation with automatic hardware provider selection,
 image preprocessing, and common post-processing operations.
 """
 
+import contextlib
 import logging
+import os
 
 import numpy as np
 from PIL import Image
 
 log = logging.getLogger(__name__)
+
+
+# Substrings that identify onnxruntime load failures rooted in the file
+# bytes themselves (corrupt protobuf, truncated graph, missing external
+# data sidecar). Seeing one of these in an exception message means the
+# on-disk model is unusable and a fresh download is the right remedy.
+# Non-matching failures (permission denied, is-a-directory, out-of-memory,
+# CUDA init errors, provider/compat issues) must NOT trigger self-heal.
+#
+# Intentionally narrow: generic phrases like "load model from" or
+# "failed to load model" appear in every onnxruntime load error
+# including non-corruption cases (provider load failures, ABI/compat
+# mismatches). Matching those would make us delete + redownload
+# multi-GB model files while the real root cause sits unresolved.
+_CORRUPT_MODEL_MARKERS = (
+    "invalid_protobuf",
+    "protobuf parsing failed",
+    "model_path must not be empty",
+    "external data file",
+    "no graph",
+)
+# Intentionally NOT included:
+# - "invalid_graph" / INVALID_GRAPH: also emitted for opset/op
+#   compatibility problems (e.g. installed onnxruntime is too old
+#   for the model's opset). Deleting a valid-but-incompatible
+#   model and redownloading the same bytes would not help and
+#   just masks the real root cause (upgrade onnxruntime).
+
+
+def _looks_like_corrupt_model(err):
+    """Return True when an exception from create_session looks like an
+    on-disk corruption signal (as opposed to an OS / environment error).
+
+    Purely a string-matching heuristic against the onnxruntime message.
+    OSError subclasses (PermissionError, IsADirectoryError, FileNotFoundError)
+    are explicitly excluded — those are environment issues, not corruption,
+    and blowing away the file would be actively harmful.
+    """
+    if isinstance(err, OSError):
+        return False
+    msg = str(err).lower()
+    return any(marker in msg for marker in _CORRUPT_MODEL_MARKERS)
+
+
+def _sibling_paths_to_purge(model_path):
+    """Return the set of paths that must be removed alongside ``model_path``
+    when self-healing a corrupt model.
+
+    For ONNX graphs that use external data the .onnx file references a
+    companion .onnx.data sidecar; purging both ensures the redownload
+    starts from a clean slate and no stale bytes from an aborted earlier
+    download can survive.
+    """
+    paths = [model_path]
+    sidecar = model_path + ".data"
+    if os.path.exists(sidecar):
+        paths.append(sidecar)
+    return paths
+
+
+def create_session_with_self_heal(model_path, redownload=None):
+    """Load an ONNX session, self-healing on corrupt / truncated model files.
+
+    Wraps :func:`create_session` so that a load failure rooted in the
+    on-disk bytes (corrupt protobuf, truncated graph, missing external
+    data sidecar) triggers a single recovery attempt: delete the broken
+    files, invoke the caller-supplied ``redownload`` callable, then retry
+    session creation exactly once. On the second failure raise a
+    user-facing :class:`RuntimeError` chained to the underlying
+    onnxruntime error — never loop.
+
+    Non-corruption errors (``PermissionError``, ``IsADirectoryError``,
+    out-of-memory, CUDA init failures) are re-raised unchanged so the
+    user or caller can react appropriately. We never delete the file in
+    that path — the bytes are almost certainly fine.
+
+    Args:
+        model_path: absolute path to the .onnx file.
+        redownload: optional zero-argument callable that replaces the
+            removed file(s) with a fresh copy. If ``None``, the wrapper
+            has no recovery strategy and re-raises the original error
+            without touching the filesystem.
+
+    Returns:
+        An ``onnxruntime.InferenceSession`` for ``model_path``.
+    """
+    try:
+        return create_session(model_path)
+    except Exception as first_err:
+        if not _looks_like_corrupt_model(first_err):
+            raise
+        if redownload is None:
+            # Caller has no recovery strategy (e.g. custom user-supplied
+            # model with no known download source). Re-raise the original
+            # error so the user isn't silently losing their file.
+            raise
+
+        log.warning(
+            "ONNX model %s failed to load, looks like corruption: %s. "
+            "Deleting on-disk files and triggering redownload.",
+            model_path, first_err,
+        )
+
+        # Delete the graph and any external-data sidecar BEFORE invoking
+        # redownload so a resumable downloader can't mistake the corrupt
+        # stub for a partial download to pick up from.
+        for path in _sibling_paths_to_purge(model_path):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+                log.info("Self-heal: removed %s", path)
+
+        try:
+            redownload()
+        except Exception as redl_err:
+            # Download itself failed (network, disk full, HF API down).
+            # Re-raise with context so the caller sees both errors.
+            raise RuntimeError(
+                f"Self-heal of {model_path} failed: redownload raised "
+                f"{type(redl_err).__name__}: {redl_err}"
+            ) from redl_err
+
+        try:
+            return create_session(model_path)
+        except Exception as second_err:
+            # A second failure means the fresh download is also unusable,
+            # or the root cause wasn't actually on-disk corruption. Do
+            # NOT loop — surface a clear message chained to the original
+            # error so logs show both.
+            raise RuntimeError(
+                f"Model at {model_path} still failed to load after "
+                f"self-heal redownload. Original error: {first_err}. "
+                f"Retry error: {second_err}. "
+                "Open Settings → Models and click Repair, or check "
+                "~/.vireo/vireo.log for details."
+            ) from second_err
 
 
 def get_providers():

@@ -635,19 +635,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     import threading
 
     def _mark_species():
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-        if not os.path.exists(taxonomy_path):
+        from taxonomy import load_local_taxonomy
+
+        tax = load_local_taxonomy()
+        if tax is None:
             return
         try:
-            from taxonomy import Taxonomy
-
-            tax = Taxonomy(taxonomy_path)
             bg_db = Database(db_path)
             updated = bg_db.mark_species_keywords(tax)
             if updated:
                 log.info("Marked %d keywords as species from taxonomy", updated)
         except Exception:
-            log.debug("Could not load taxonomy for species marking", exc_info=True)
+            log.debug("Could not mark species from taxonomy", exc_info=True)
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
@@ -865,7 +864,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except Exception:
                 pass
 
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+        from taxonomy import find_taxonomy_json
+        taxonomy_path = find_taxonomy_json()
         taxonomy_available = os.path.exists(taxonomy_path)
 
         return jsonify({
@@ -3751,6 +3751,97 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/new-images-preview", methods=["POST"])
+    def api_import_new_images_preview():
+        """Preview grid data for a new-images snapshot, matching the
+        folder-preview response shape so the same client renderer works."""
+        body = request.get_json(silent=True) or {}
+        snapshot_id = body.get("snapshot_id")
+        if not isinstance(snapshot_id, int):
+            return json_error("snapshot_id required", 400)
+
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        try:
+            snap = db.get_new_images_snapshot(snapshot_id)
+        except OverflowError:
+            snap = None
+        if snap is None:
+            abort(404)
+
+        # Use only top-level mapped roots (not every auto-registered
+        # subfolder the scanner created) so grouping matches the user's
+        # source folders — otherwise longest-prefix match picks the
+        # deepest descendant and hides which source a file came from.
+        from new_images import mapped_roots as _ni_mapped_roots
+        root_paths = [r["path"] for r in _ni_mapped_roots(db, db._active_workspace_id)]
+
+        # Build unique display names across roots by taking the shortest
+        # trailing path segments that are unique — so /mnt/cardA/DCIM and
+        # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
+        # colliding on "DCIM". Mirrors folder-preview's disambiguation.
+        root_names = {}
+        if len(root_paths) > 1:
+            parts = [Path(rp).parts for rp in root_paths]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for rp, suffix in zip(root_paths, suffixes, strict=True):
+                        root_names[rp] = suffix
+                    break
+            else:
+                for rp in root_paths:
+                    root_names[rp] = rp
+        else:
+            for rp in root_paths:
+                root_names[rp] = os.path.basename(rp.rstrip("/")) or rp
+
+        roots = sorted(
+            [(rp, root_names[rp]) for rp in root_paths],
+            key=lambda pn: len(pn[0]),
+            reverse=True,
+        )
+
+        def _subfolder_for(path):
+            for root_path, root_name in roots:
+                try:
+                    rel = Path(path).parent.relative_to(root_path)
+                except ValueError:
+                    continue
+                rel_str = str(rel)
+                return root_name if rel_str == "." else os.path.join(root_name, rel_str)
+            return os.path.dirname(path) or "."
+
+        files = []
+        type_breakdown = {}
+        total_size = 0
+        for path in snap["file_paths"]:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            files.append({
+                "path": path,
+                "filename": os.path.basename(path),
+                "subfolder": _subfolder_for(path),
+                "size": stat.st_size,
+                "extension": ext,
+                "mtime": stat.st_mtime,
+                "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(path),
+            })
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += stat.st_size
+
+        return jsonify({
+            "total_count": len(files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": files,
+        })
+
     @app.route("/api/import/check-duplicates", methods=["POST"])
     def api_import_check_duplicates():
         """Stream duplicate detection results via SSE.
@@ -4153,7 +4244,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from taxonomy import download_taxonomy
+            from taxonomy import (
+                TAXONOMY_JSON_PATH,
+                Taxonomy,
+                download_taxonomy,
+                populate_taxa_db_from_json,
+                seed_informal_groups,
+            )
 
             def progress_cb(msg):
                 runner.push_event(
@@ -4167,9 +4264,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     },
                 )
 
-            taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-            download_taxonomy(taxonomy_path, progress_callback=progress_cb)
-            return {"ok": True}
+            download_taxonomy(TAXONOMY_JSON_PATH, progress_callback=progress_cb)
+
+            bg_db = Database(db_path)
+            bg_db.set_active_workspace(active_ws)
+
+            # Populate the SQLite taxa table from the same DWCA data so
+            # add_keyword's auto-detect (which queries the DB, not the JSON)
+            # can type newly-imported keywords as 'taxonomy' going forward.
+            # Roll back and fail the job on error — populate_taxa_db_from_json
+            # issues many INSERTs within a single open transaction, and
+            # letting the subsequent mark_species_keywords call commit
+            # would flush the partial writes onto disk and leave the taxa
+            # table silently inconsistent.
+            try:
+                populate_taxa_db_from_json(
+                    bg_db, TAXONOMY_JSON_PATH, progress_callback=progress_cb,
+                )
+                seed_informal_groups(bg_db)
+            except Exception:
+                log.error("Post-download taxa DB population failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
+
+            # Retype existing keywords that match the new taxonomy so the
+            # user sees the effect immediately, without restarting the app.
+            # Roll back and fail the job on error: mark_species_keywords
+            # accumulates UPDATEs before its own commit, so a mid-flight
+            # failure (e.g., transient "database is locked") would leave
+            # a pending transaction that a later commit could flush, and
+            # reporting success would hide the retype failure from the UI.
+            # The download + populate + seed steps already committed, so
+            # the user keeps that progress — retrying the download re-runs
+            # retype for free (it's idempotent).
+            progress_cb("Retyping existing keywords...")
+            try:
+                tax = Taxonomy(TAXONOMY_JSON_PATH)
+                updated = bg_db.mark_species_keywords(tax)
+                log.info("Retyped %d existing keywords as taxonomy after download", updated)
+            except Exception:
+                log.error("Post-download keyword retype failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
+            return {"ok": True, "keywords_retyped": updated}
 
         job_id = runner.start("download-taxonomy", work, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
@@ -4968,16 +5105,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    def _build_scan_work(root, incremental, active_ws):
+    def _build_scan_work(roots, incremental, active_ws):
         """Build the background work function for a scan job.
 
         Shared by ``POST /api/jobs/scan`` and
         ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
         same scan + thumbnail pipeline as a full scan.
+
+        ``roots`` may be a single path string (back-compat, one root) or a
+        list of paths. When multiple roots are given they are scanned
+        **serially** inside this single job -- that's the whole point of
+        this wrapper: parallel scan jobs used to fight for the SQLite
+        writer lock, so we now process roots one after another. A failure
+        on one root does not abort the others; the error is recorded and
+        the job ends in ``"failed"`` (mixed-outcome rollup convention).
         """
         import config as cfg
 
         runner = app._job_runner
+
+        # Back-compat: accept a bare string in addition to a list.
+        if isinstance(roots, str):
+            roots_list = [roots]
+        else:
+            roots_list = list(roots)
 
         def work(job):
             from scanner import scan as do_scan
@@ -4987,24 +5138,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Check folder health before scanning to prevent duplicate imports
             thread_db.check_folder_health()
 
+            # Accumulator so multi-root progress doesn't rewind at each
+            # root boundary. scanner.scan() reports (current, total) local
+            # to its invocation; we fold those into cumulative counters
+            # that the SSE/status stream reads.
+            # Track both the last reported *processed* count and the
+            # last reported *total* for the current root. On root
+            # boundary we advance the cumulative baseline by the
+            # processed count (not the planned total) so a root that
+            # fails mid-scan doesn't inflate the baseline with phantom
+            # files the next root would start above.
+            scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
+
             def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.update_step(job["id"], "scan",
-                                   progress={"current": current, "total": total})
+                scan_acc["last_current"] = current
+                scan_acc["last_total"] = total
+                cum_current = scan_acc["prior"] + current
+                cum_total = scan_acc["prior"] + total
+                job["progress"]["current"] = cum_current
+                job["progress"]["total"] = cum_total
+                runner.update_step(
+                    job["id"], "scan",
+                    progress={"current": cum_current, "total": cum_total},
+                )
                 runner.push_event(
                     job["id"],
                     "progress",
                     {
-                        "current": current,
-                        "total": total,
+                        "current": cum_current,
+                        "total": cum_total,
                         "current_file": job["progress"].get("current_file", ""),
                         "rate": round(
-                            current / max(time.time() - job["_start_time"], 0.01), 1
+                            cum_current / max(time.time() - job["_start_time"], 0.01), 1
                         ),
                         "phase": "Scanning photos",
                     },
                 )
+
+            def advance_scan_acc():
+                # Use processed count, not planned total — a root that
+                # raised mid-scan will have last_current < last_total,
+                # and starting the next root above the actual processed
+                # count would overreport photos indexed.
+                scan_acc["prior"] += scan_acc["last_current"]
+                scan_acc["last_current"] = 0
+                scan_acc["last_total"] = 0
 
             job["_start_time"] = time.time()
             runner.set_steps(job["id"], [
@@ -5026,63 +5204,180 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-            try:
-                do_scan(
-                    root, thread_db, progress_callback=progress_cb, incremental=incremental,
-                    extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
-                    status_callback=status_cb,
-                    vireo_dir=vireo_dir,
-                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+
+            # Per-root failures are caught and recorded rather than
+            # re-raised so a failure on root A doesn't prevent root B
+            # from scanning. Any failure flips the job to "failed" at
+            # the end (mixed-outcome rollup).
+            #
+            # Track roots by failure class so the rollup below can
+            # distinguish "this root's scan raised" (no photos indexed
+            # — thumbnails can skip) from "this root's scan succeeded
+            # but cache invalidation raised" (photos DID get indexed —
+            # thumbnails must still run). Using len(root_errors) alone
+            # double-counts roots that hit both failure classes and
+            # misclassifies cache-only failures as scan failures.
+            root_errors = []
+            scan_failed_roots = set()
+            cache_failed_roots = set()
+            for idx, root in enumerate(roots_list, 1):
+                phase = (
+                    f"Scanning root {idx} of {len(roots_list)}: {root}"
+                    if len(roots_list) > 1
+                    else "Scanning photos"
                 )
-            finally:
-                # scanner.scan commits photo rows incrementally, so even a mid-scan
-                # failure can leave DB state that invalidates cached new-image counts.
-                _invalidate_new_images_after_scan(thread_db, root)
-            photo_count = job["progress"].get("total", 0)
-            runner.update_step(job["id"], "scan", status="completed",
-                               summary=f"{photo_count} photos")
-            runner.update_step(job["id"], "thumbnails", status="running")
-
-            # Auto-generate thumbnails for new photos only
-            from thumbnails import generate_all
-
-            log.info("Generating thumbnails...")
-            runner.push_event(
-                job["id"],
-                "progress",
-                {
-                    "current": 0,
-                    "total": 0,
-                    "current_file": "Checking for new thumbnails...",
+                runner.push_event(job["id"], "progress", {
+                    "phase": phase,
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": phase,
                     "rate": 0,
-                    "phase": "Generating thumbnails",
-                },
+                })
+                try:
+                    do_scan(
+                        root, thread_db,
+                        progress_callback=progress_cb,
+                        incremental=incremental,
+                        extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
+                        status_callback=status_cb,
+                        vireo_dir=vireo_dir,
+                        thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                    )
+                except Exception as exc:
+                    log.exception("Scan failed for root %s", root)
+                    scan_failed_roots.add(root)
+                    msg = f"[{root}] {exc}"
+                    root_errors.append(msg)
+                    if msg not in job["errors"]:
+                        job["errors"].append(msg)
+                finally:
+                    # scanner.scan commits photo rows incrementally, so
+                    # even a mid-scan failure can leave DB state that
+                    # invalidates cached new-image counts. A failure
+                    # here must surface: the shared cache has a 5-min
+                    # TTL, so users would see stale "new images" counts
+                    # with no job-level failure signal if we swallowed
+                    # these errors. Keep the try/except so we still
+                    # advance scan_acc and try the remaining roots,
+                    # but record the failure into root_errors so the
+                    # job is flagged failed at the rollup below.
+                    try:
+                        _invalidate_new_images_after_scan(thread_db, root)
+                    except Exception as cache_exc:
+                        log.exception(
+                            "Failed to invalidate new-image cache for %s", root,
+                        )
+                        cache_failed_roots.add(root)
+                        cache_msg = (
+                            f"[{root}] cache invalidation failed "
+                            f"after scan: {cache_exc}"
+                        )
+                        root_errors.append(cache_msg)
+                        if cache_msg not in job["errors"]:
+                            job["errors"].append(cache_msg)
+                    advance_scan_acc()
+
+            # Use cumulative processed count, not planned total — on a
+            # clean run they're equal; on mixed-outcome runs "current"
+            # reflects the actual photos indexed while "total" includes
+            # planned-but-unprocessed files from the failed root(s).
+            photo_count = job["progress"].get("current", 0)
+            # Unique roots that hit any failure class. Counting unique
+            # roots (not error entries) avoids inflating the "N of M"
+            # summary when a single root raises in both scan and cache
+            # invalidation.
+            failed_root_count = len(scan_failed_roots | cache_failed_roots)
+            if root_errors:
+                scan_summary = (
+                    f"{photo_count} photos ({failed_root_count} of "
+                    f"{len(roots_list)} root"
+                    f"{'s' if len(roots_list) != 1 else ''} failed)"
+                )
+                runner.update_step(
+                    job["id"], "scan", status="failed", summary=scan_summary,
+                    error=root_errors[0], error_count=len(root_errors),
+                )
+            else:
+                runner.update_step(
+                    job["id"], "scan", status="completed",
+                    summary=f"{photo_count} photos",
+                )
+            # Skip the thumbnail phase when EVERY requested root's scan
+            # raised. generate_all() walks the whole library looking
+            # for missing thumbnails — running it after a total scan
+            # failure does a long, unrelated pass and delays the
+            # failure feedback the user actually needs. When at least
+            # one root's scan succeeded we still run thumbs so those
+            # newly-indexed photos get covered. Cache-invalidation
+            # failures do NOT gate this decision: the scan for that
+            # root did produce indexed photos that need thumbnails.
+            all_roots_failed = (
+                bool(roots_list) and len(scan_failed_roots) == len(roots_list)
             )
 
-            def thumb_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
+            if all_roots_failed:
+                log.info(
+                    "All %d scan root(s) failed; skipping thumbnail phase",
+                    len(roots_list),
+                )
+                runner.update_step(
+                    job["id"], "thumbnails", status="skipped",
+                    summary="skipped (all scan roots failed)",
+                )
+                thumb_result = None
+            else:
+                runner.update_step(job["id"], "thumbnails", status="running")
+
+                # Auto-generate thumbnails for new photos only
+                from thumbnails import generate_all
+
+                log.info("Generating thumbnails...")
                 runner.push_event(
                     job["id"],
                     "progress",
                     {
-                        "current": current,
-                        "total": total,
-                        "current_file": "",
-                        "rate": round(
-                            current / max(time.time() - job["_start_time"], 0.01), 1
-                        ),
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "Checking for new thumbnails...",
+                        "rate": 0,
                         "phase": "Generating thumbnails",
                     },
                 )
 
-            thumb_result = generate_all(
-                thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
-                vireo_dir=vireo_dir,
-            )
-            from thumbnails import format_summary as thumb_summary
-            runner.update_step(job["id"], "thumbnails", status="completed",
-                               summary=thumb_summary(thumb_result))
+                def thumb_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "current_file": "",
+                            "rate": round(
+                                current / max(time.time() - job["_start_time"], 0.01), 1
+                            ),
+                            "phase": "Generating thumbnails",
+                        },
+                    )
+
+                thumb_result = generate_all(
+                    thread_db, app.config["THUMB_CACHE_DIR"], progress_callback=thumb_cb,
+                    vireo_dir=vireo_dir,
+                )
+                from thumbnails import format_summary as thumb_summary
+                runner.update_step(job["id"], "thumbnails", status="completed",
+                                   summary=thumb_summary(thumb_result))
+
+            # Mixed-outcome rollup: any failed root => job is "failed".
+            # JobRunner._run_job dedupes job["errors"] by exact string
+            # match. Raise the first per-root message (already recorded
+            # above) so no extra aggregate entry is appended — that
+            # would inflate error_count in job/history output. The
+            # "N of M roots failed" context is already visible via the
+            # scan step's summary and error_count set above.
+            if root_errors:
+                raise RuntimeError(root_errors[0])
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
@@ -5090,36 +5385,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/scan", methods=["POST"])
     def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+        """Queue a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
+        Body accepts either:
+          * ``{"root": "/path"}`` -- single root (back-compat).
+          * ``{"roots": ["/a", "/b", ...]}`` -- multiple roots, scanned
+            serially inside a single job. Multi-root support avoids the
+            SQLite writer-lock contention that used to happen when the
+            UI enqueued one job per root (PR #634 added retry/backoff
+            as defense-in-depth; this is the root-cause fix).
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = body.get("incremental", False)
+
+        # Normalize inputs. Prefer the explicit plural form when both are
+        # provided; a caller who sends ``roots`` has opted into the new API.
+        if "roots" in body:
+            roots_in = body.get("roots")
+            if not isinstance(roots_in, list) or not roots_in:
+                return json_error("roots must be a non-empty list")
+            roots_list = [str(r) for r in roots_in if r]
+            if not roots_list:
+                return json_error("roots must be a non-empty list")
+        else:
+            root = body.get("root", "")
+            if not root:
+                return json_error("root path required")
+            roots_list = [root]
+
+        for r in roots_list:
+            if not os.path.isdir(r):
+                return json_error(f"directory not found: {r}")
+
+        # Remember scan roots (skip temp directories from tests)
         import tempfile
 
         import config as cfg
 
         tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
+        user_cfg = cfg.load()
+        saved_roots = user_cfg.get("scan_roots", [])
+        changed = False
+        for r in roots_list:
+            if os.path.realpath(r).startswith(tmp_prefix):
+                continue
+            if r not in saved_roots:
+                saved_roots.insert(0, r)
+                changed = True
+        if changed:
+            user_cfg["scan_roots"] = saved_roots
+            cfg.save(user_cfg)
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
-        work = _build_scan_work(root, incremental, active_ws)
+        work = _build_scan_work(roots_list, incremental, active_ws)
+
+        job_config = {"roots": roots_list, "incremental": incremental}
+        # Back-compat: keep ``root`` in config when exactly one was given,
+        # so existing consumers (history viewers, etc.) still find it.
+        if len(roots_list) == 1:
+            job_config["root"] = roots_list[0]
 
         job_id = runner.start(
-            "scan", work, config={"root": root, "incremental": incremental},
-            workspace_id=active_ws,
+            "scan", work, config=job_config, workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
 

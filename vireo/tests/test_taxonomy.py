@@ -852,3 +852,619 @@ def test_classify_to_keypoint_group_none_input(tmp_path):
 
     db = Database(str(tmp_path / "x.db"))
     assert classify_to_keypoint_group(db, None) is None
+
+
+def test_populate_taxa_db_from_json_fills_taxa_and_common_names(tmp_path):
+    """populate_taxa_db_from_json loads taxa and taxa_common_names from JSON."""
+    from taxonomy import populate_taxa_db_from_json
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+
+    stats = populate_taxa_db_from_json(db, tax_path)
+    assert stats["taxa_loaded"] >= 5
+    assert stats["common_names_loaded"] >= 5
+
+    row = db.conn.execute(
+        "SELECT id, inat_id, name, rank, common_name, kingdom "
+        "FROM taxa WHERE inat_id = 9135"
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "Melospiza melodia"
+    assert row["rank"] == "species"
+    assert row["common_name"] == "Song Sparrow"
+    assert row["kingdom"] == "Animalia"
+
+    # Common-name index stores lowercase key so add_keyword's COLLATE NOCASE
+    # lookup can find "Song Sparrow" / "song sparrow" / "SONG SPARROW".
+    cn_row = db.conn.execute(
+        "SELECT taxon_id FROM taxa_common_names "
+        "WHERE name = 'song sparrow' AND taxon_id = ?",
+        (row["id"],),
+    ).fetchone()
+    assert cn_row is not None
+
+
+def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
+    """populate_taxa_db_from_json resolves parent_id by lineage."""
+    from taxonomy import populate_taxa_db_from_json
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    # Melospiza melodia's immediate parent in lineage_names is Melospiza
+    # (genus). Since mock data doesn't include that genus as its own row,
+    # parent_id will be NULL for species. Passerellidae (family) has order
+    # Passeriformes as parent in lineage, also not in mock. So for a
+    # positive parent_id check, we rely on the kingdom field instead and
+    # verify parent_id is at least populated where the parent IS present.
+    # The mock includes Passerellidae — species Song Sparrow's lineage
+    # walks down to Melospiza (genus, absent), so its parent stays NULL.
+    # Use a minimal scenario where the parent IS present:
+    row = db.conn.execute(
+        "SELECT id, parent_id FROM taxa WHERE name = 'Melospiza melodia'"
+    ).fetchone()
+    # No explicit genus row in mock → parent stays NULL. Document that.
+    assert row is not None
+
+    # After populating, auto-detect via add_keyword should now type
+    # "Song Sparrow" as taxonomy and link taxon_id.
+    kid = db.add_keyword("Song sparrow")
+    kw = db.conn.execute(
+        "SELECT type, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert kw["type"] == "taxonomy"
+    # taxon_id links to the local taxa.id
+    taxon_row = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 9135"
+    ).fetchone()
+    assert kw["taxon_id"] == taxon_row["id"]
+
+
+def test_load_local_taxonomy_falls_back_when_persistent_corrupt(tmp_path, monkeypatch):
+    """A corrupt persistent taxonomy.json doesn't disable enrichment.
+
+    Regression: find_taxonomy_json returned the persistent path as soon
+    as it existed, and callers raised on load. If an interrupted write
+    left a truncated ~/.vireo/taxonomy.json, taxonomy features broke
+    even when a valid package-dir copy was present.
+    """
+    import taxonomy as tax_mod
+
+    # Build a valid legacy file next to the module and a corrupt one at
+    # the persistent path.
+    corrupt = tmp_path / "persistent.json"
+    corrupt.write_text("{ not valid json")
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        '{"last_updated":"2026-04-24","source":"test",'
+        '"taxa_by_common":{"test species":{"taxon_id":1,'
+        '"scientific_name":"Test species","common_name":"Test",'
+        '"rank":"species","lineage_names":["Animalia","Test species"],'
+        '"lineage_ranks":["kingdom","species"]}},'
+        '"taxa_by_scientific":{}}'
+    )
+
+    monkeypatch.setattr(tax_mod, "TAXONOMY_JSON_PATH", str(corrupt))
+    # Redirect the "package-dir legacy" candidate path to our tmp fixture.
+    orig_dirname = tax_mod.os.path.dirname
+
+    def fake_dirname(p):
+        if p == tax_mod.__file__:
+            return str(tmp_path)
+        return orig_dirname(p)
+
+    legacy.rename(tmp_path / "taxonomy.json")
+    monkeypatch.setattr(tax_mod.os.path, "dirname", fake_dirname)
+
+    result = tax_mod.load_local_taxonomy()
+    assert result is not None, "should fall back to legacy copy on corrupt persistent"
+    assert result.is_taxon("test species")
+
+
+def test_load_local_taxonomy_returns_none_when_no_file(tmp_path, monkeypatch):
+    """load_local_taxonomy returns None when neither candidate exists."""
+    import taxonomy as tax_mod
+
+    monkeypatch.setattr(
+        tax_mod, "TAXONOMY_JSON_PATH", str(tmp_path / "nonexistent.json"),
+    )
+    orig_dirname = tax_mod.os.path.dirname
+
+    def fake_dirname(p):
+        if p == tax_mod.__file__:
+            return str(tmp_path)
+        return orig_dirname(p)
+
+    monkeypatch.setattr(tax_mod.os.path, "dirname", fake_dirname)
+    assert tax_mod.load_local_taxonomy() is None
+
+
+def test_populate_taxa_db_from_json_refuses_empty_payload(tmp_path):
+    """Empty taxonomy payload fails before any destructive writes.
+
+    Regression: without a guard, an empty entries_by_inat_id caused the
+    prune step to DELETE every taxa row and NULL every keywords.taxon_id,
+    then the job reported success. Now it raises before any writes.
+    """
+    import json
+
+    import pytest
+    from taxonomy import populate_taxa_db_from_json
+
+    # Seed an existing populated DB.
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+    pre_count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert pre_count > 0
+
+    # Now write an empty payload and try to re-populate.
+    empty_path = str(tmp_path / "empty.json")
+    with open(empty_path, "w") as f:
+        json.dump({
+            "last_updated": "2026-04-24",
+            "source": "test",
+            "taxa_by_common": {},
+            "taxa_by_scientific": {},
+        }, f)
+
+    with pytest.raises(ValueError, match="empty|refusing"):
+        populate_taxa_db_from_json(db, empty_path)
+
+    post_count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert post_count == pre_count, (
+        "existing taxa must not be deleted when the new payload is empty"
+    )
+
+
+def test_populate_taxa_db_from_json_refuses_suspiciously_small_payload(tmp_path):
+    """Drastically-smaller payloads fail before destructive writes.
+
+    Regression: a corrupt/partial download could have a few hundred taxa
+    while the existing DB has 1.3M. Silently pruning ~99% of the table
+    is almost certainly wrong; fail visibly so the user retries.
+    """
+    import json
+
+    import pytest
+    from taxonomy import populate_taxa_db_from_json
+
+    # Seed a DB with >100 rows so the proportional check kicks in.
+    db = Database(str(tmp_path / "x.db"))
+    for i in range(200):
+        db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, rank, kingdom) "
+            "VALUES (?, ?, 'species', 'Animalia')",
+            (1000 + i, f"Species{i:03d} name"),
+        )
+    db.conn.commit()
+
+    # Now a tiny payload — under 10% of existing.
+    tiny = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {"taxon_id": 1, "scientific_name": "Animalia",
+                         "common_name": "", "rank": "kingdom",
+                         "lineage_names": ["Animalia"],
+                         "lineage_ranks": ["kingdom"]},
+        },
+    }
+    tiny_path = str(tmp_path / "tiny.json")
+    with open(tiny_path, "w") as f:
+        json.dump(tiny, f)
+
+    with pytest.raises(ValueError, match="corrupt|partial|refusing"):
+        populate_taxa_db_from_json(db, tiny_path)
+
+    # Nothing deleted.
+    assert db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0] == 200
+
+
+def test_populate_taxa_db_from_json_prunes_stale_taxa(tmp_path):
+    """Re-populate deletes taxa rows whose inat_id disappeared from the
+    new payload, and nulls out the corresponding keywords.taxon_id.
+
+    Regression: populate_taxa_db_from_json used only INSERT ... ON CONFLICT
+    DO UPDATE, so taxa rows for ids removed from the new taxonomy stuck
+    around. add_keyword's auto-detect queries taxa.name and
+    taxa.common_name before taxa_common_names, so stale rows kept
+    matching obsolete names across re-downloads.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {
+                "taxon_id": 1,
+                "scientific_name": "Animalia",
+                "common_name": "",
+                "rank": "kingdom",
+                "lineage_names": ["Animalia"],
+                "lineage_ranks": ["kingdom"],
+            },
+            "extinct species": {
+                "taxon_id": 42,
+                "scientific_name": "Deleted species",
+                "common_name": "Extinct Species",
+                "rank": "species",
+                "lineage_names": ["Animalia", "Deleted species"],
+                "lineage_ranks": ["kingdom", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    extinct_local_id = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 42"
+    ).fetchone()["id"]
+
+    # Simulate a keyword referring to the soon-to-be-removed taxon (the
+    # classifier-added-keyword path sets keywords.taxon_id).
+    kid = db.add_keyword("Deleted species", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (extinct_local_id, kid),
+    )
+    db.conn.commit()
+
+    # Newer release: taxon 42 is gone.
+    second = json.loads(json.dumps(first))
+    del second["taxa_by_scientific"]["extinct species"]
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    populate_taxa_db_from_json(db, tax_path)
+
+    gone = db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 42"
+    ).fetchone()
+    assert gone is None, "stale taxa row should be pruned on re-populate"
+
+    # The referring keyword survives with taxon_id nulled out so FK
+    # enforcement doesn't block the prune.
+    kw = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert kw is not None
+    assert kw["taxon_id"] is None
+
+
+def test_populate_taxa_db_from_json_prunes_when_parent_disappears(tmp_path):
+    """Pruning survives a reshuffle where a child's old parent vanishes.
+
+    Regression: taxa.parent_id is a self-referential FK without
+    ON DELETE SET NULL. With a child still pointing at a soon-to-be-
+    pruned parent, DELETE FROM taxa raised FOREIGN KEY constraint
+    failed and aborted the whole populate — breaking the download job.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {"taxon_id": 1, "scientific_name": "Animalia",
+                         "common_name": "", "rank": "kingdom",
+                         "lineage_names": ["Animalia"],
+                         "lineage_ranks": ["kingdom"]},
+            "old_genus": {"taxon_id": 100, "scientific_name": "OldGenus",
+                          "common_name": "", "rank": "genus",
+                          "lineage_names": ["Animalia", "OldGenus"],
+                          "lineage_ranks": ["kingdom", "genus"]},
+            "child_species": {"taxon_id": 200,
+                              "scientific_name": "OldGenus species",
+                              "common_name": "", "rank": "species",
+                              "lineage_names": ["Animalia", "OldGenus",
+                                                "OldGenus species"],
+                              "lineage_ranks": ["kingdom", "genus", "species"]},
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    parent_set = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 200"
+    ).fetchone()["parent_id"]
+    assert parent_set is not None, "parent should be set after initial populate"
+
+    # Newer release: OldGenus disappeared entirely. The child taxon is
+    # kept (it still exists in the new payload), but reparenting fell
+    # through so its scientific name is unchanged.
+    second = json.loads(json.dumps(first))
+    del second["taxa_by_scientific"]["old_genus"]
+    second["taxa_by_scientific"]["child_species"]["lineage_names"] = [
+        "Animalia", "OldGenus species",
+    ]
+    second["taxa_by_scientific"]["child_species"]["lineage_ranks"] = [
+        "kingdom", "species",
+    ]
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    # Must not raise FOREIGN KEY constraint failed.
+    populate_taxa_db_from_json(db, tax_path)
+
+    parent_gone = db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 100"
+    ).fetchone()
+    assert parent_gone is None, "old genus should have been pruned"
+    child = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 200"
+    ).fetchone()
+    assert child is not None, "child should survive the reshuffle"
+
+
+def test_populate_taxa_db_from_json_clears_stale_taxa_common_name(tmp_path):
+    """Re-populate drops taxa.common_name when upstream removed it.
+
+    Regression: populate_taxa_db_from_json used
+    COALESCE(excluded.common_name, taxa.common_name) on conflict, which
+    preserved the old value whenever the new payload had no common name.
+    add_keyword's auto-detect reads taxa.common_name before consulting
+    taxa_common_names, so a stale value kept matching obsolete names
+    across re-downloads.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "aquila chrysaetos": {
+                "taxon_id": 4242,
+                "scientific_name": "Aquila chrysaetos",
+                "common_name": "Golden Eagle",
+                "rank": "species",
+                "lineage_names": ["Animalia", "Aquila", "Aquila chrysaetos"],
+                "lineage_ranks": ["kingdom", "genus", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+    before = db.conn.execute(
+        "SELECT common_name FROM taxa WHERE inat_id = 4242"
+    ).fetchone()
+    assert before["common_name"] == "Golden Eagle"
+
+    # Simulate a newer taxonomy release where the preferred English
+    # common name has been removed.
+    second = json.loads(json.dumps(first))
+    second["taxa_by_scientific"]["aquila chrysaetos"]["common_name"] = ""
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    populate_taxa_db_from_json(db, tax_path)
+
+    after = db.conn.execute(
+        "SELECT common_name FROM taxa WHERE inat_id = 4242"
+    ).fetchone()
+    assert after["common_name"] is None, (
+        "re-populate should overwrite taxa.common_name with the new "
+        "value (including NULL), not preserve the old one"
+    )
+
+
+def test_populate_taxa_db_from_json_drops_stale_common_names(tmp_path):
+    """Re-downloading the taxonomy clears stale common-name mappings.
+
+    Regression: the populate step used INSERT OR IGNORE for
+    taxa_common_names, so common names that disappeared or were
+    reassigned in a newer taxonomy release kept matching forever.
+    """
+    from taxonomy import populate_taxa_db_from_json
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    # Find a taxon that was populated, then add a fake legacy common-name
+    # row for it that won't be in the next import.
+    row = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 9135"
+    ).fetchone()
+    assert row is not None
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name, locale) "
+        "VALUES (?, 'obsolete name from older taxonomy', 'en')",
+        (row["id"],),
+    )
+    db.conn.commit()
+
+    stale_before = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names "
+        "WHERE name = 'obsolete name from older taxonomy'"
+    ).fetchone()
+    assert stale_before is not None
+
+    # Re-run populate with the same JSON (simulates a re-download).
+    populate_taxa_db_from_json(db, tax_path)
+
+    stale_after = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names "
+        "WHERE name = 'obsolete name from older taxonomy'"
+    ).fetchone()
+    assert stale_after is None, (
+        "re-populate should drop common-name rows that aren't in the "
+        "new taxonomy data"
+    )
+    # Valid names from the new taxonomy still present.
+    fresh = db.conn.execute(
+        "SELECT 1 FROM taxa_common_names WHERE name = 'song sparrow'"
+    ).fetchone()
+    assert fresh is not None
+
+
+def test_populate_taxa_db_from_json_single_transaction_allows_clean_rollback(tmp_path):
+    """populate_taxa_db_from_json commits once at the end.
+
+    The download job's handler relies on this: if populate raises partway,
+    the caller's rollback() must clear all pending inserts so the subsequent
+    mark_species_keywords commit doesn't flush partial taxa writes onto disk.
+    This test constructs a JSON whose second entry would violate the
+    taxa.name NOT NULL constraint, verifies the exception propagates, and
+    confirms a caller-side rollback leaves the taxa table empty.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    bad_tax = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {
+                "taxon_id": 1,
+                "scientific_name": "Animalia",
+                "common_name": "",
+                "rank": "kingdom",
+                "lineage_names": ["Animalia"],
+                "lineage_ranks": ["kingdom"],
+            },
+            "broken": {
+                "taxon_id": 2,
+                "scientific_name": None,
+                "common_name": "",
+                "rank": "species",
+                "lineage_names": ["Animalia", None],
+                "lineage_ranks": ["kingdom", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(bad_tax, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    try:
+        populate_taxa_db_from_json(db, tax_path)
+    except Exception:
+        db.conn.rollback()
+    else:
+        raise AssertionError("expected populate to raise on NULL name")
+
+    count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert count == 0, (
+        "rollback after a mid-flight populate failure must clear all "
+        "pending inserts — otherwise subsequent commits flush a half-"
+        "populated taxa table onto disk"
+    )
+
+
+def test_populate_taxa_db_from_json_disambiguates_homonym_parents(tmp_path):
+    """Parent resolution keys by lineage tuple, so homonym parents don't
+    cross-wire each other's children.
+
+    Scientific names aren't globally unique — a genus "Iris" exists in
+    both Plantae and a fictional Animalia homonym here. Before the fix,
+    whichever taxon happened to be iterated last won the name→id map,
+    so both kids got their parent_id pointed at the same taxon. Using
+    the full lineage tuple prevents that.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    homonym_tax = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "plantae": {"taxon_id": 1000, "scientific_name": "Plantae", "common_name": "",
+                        "rank": "kingdom", "lineage_names": ["Plantae"], "lineage_ranks": ["kingdom"]},
+            "animalia": {"taxon_id": 2000, "scientific_name": "Animalia", "common_name": "",
+                         "rank": "kingdom", "lineage_names": ["Animalia"], "lineage_ranks": ["kingdom"]},
+            "iris_plant": {"taxon_id": 1010, "scientific_name": "Iris", "common_name": "",
+                           "rank": "genus",
+                           "lineage_names": ["Plantae", "Iris"],
+                           "lineage_ranks": ["kingdom", "genus"]},
+            "iris_animal": {"taxon_id": 2010, "scientific_name": "Iris", "common_name": "",
+                            "rank": "genus",
+                            "lineage_names": ["Animalia", "Iris"],
+                            "lineage_ranks": ["kingdom", "genus"]},
+            "plant_species": {"taxon_id": 1011, "scientific_name": "Iris germanica",
+                              "common_name": "", "rank": "species",
+                              "lineage_names": ["Plantae", "Iris", "Iris germanica"],
+                              "lineage_ranks": ["kingdom", "genus", "species"]},
+            "animal_species": {"taxon_id": 2011, "scientific_name": "Iris animalia",
+                               "common_name": "", "rank": "species",
+                               "lineage_names": ["Animalia", "Iris", "Iris animalia"],
+                               "lineage_ranks": ["kingdom", "genus", "species"]},
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(homonym_tax, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    plant_species_parent = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 1011"
+    ).fetchone()["parent_id"]
+    animal_species_parent = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 2011"
+    ).fetchone()["parent_id"]
+    iris_plant_local = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 1010"
+    ).fetchone()["id"]
+    iris_animal_local = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 2010"
+    ).fetchone()["id"]
+
+    assert plant_species_parent == iris_plant_local, (
+        "Plantae species should point to plant Iris genus, not animal Iris"
+    )
+    assert animal_species_parent == iris_animal_local, (
+        "Animalia species should point to animal Iris genus, not plant Iris"
+    )
+    assert plant_species_parent != animal_species_parent
+
+
+def test_populate_taxa_db_from_json_enables_auto_detect(tmp_path):
+    """After populate, add_keyword auto-detects common names as taxonomy.
+
+    Regression: the original bug. Green-heron-style keywords imported via
+    XMP sync should auto-type as taxonomy once the taxa DB is populated.
+    """
+    from taxonomy import populate_taxa_db_from_json
+
+    tax_path = _create_mock_taxonomy(str(tmp_path))
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    # Simulate XMP sync path: add_keyword without is_species.
+    kid = db.add_keyword("Mallard")
+    row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"

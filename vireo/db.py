@@ -5090,21 +5090,53 @@ class Database:
     def mark_species_keywords(self, taxonomy):
         """Mark keywords that are recognized species in the taxonomy.
 
+        Retypes any keyword whose name matches a taxon lookup: sets
+        is_species=1, type='taxonomy', and (if the local taxa table is
+        populated) links taxon_id to the matching taxa row by inat_id.
+
         Uses the local taxonomy only (no network requests).
 
         Args:
-            taxonomy: a Taxonomy instance with an is_taxon() method
+            taxonomy: a Taxonomy instance with a lookup() method
         """
+        # Also include already-typed taxonomy keywords whose taxon_id is
+        # still NULL — those were created before the local taxa table was
+        # populated (e.g. via add_keyword(..., is_species=True) from the
+        # classifier), and still need their hierarchy link filled in.
         keywords = self.conn.execute(
-            "SELECT id, name FROM keywords WHERE is_species = 0"
+            "SELECT id, name, type, taxon_id, is_species FROM keywords "
+            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy' "
+            "   OR taxon_id IS NULL"
         ).fetchall()
         updated = 0
         for kw in keywords:
-            if taxonomy.is_taxon(kw["name"]):
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1 WHERE id = ?", (kw["id"],)
-                )
-                updated += 1
+            taxon = taxonomy.lookup(kw["name"])
+            if not taxon:
+                continue
+            local_taxon_id = kw["taxon_id"]
+            if local_taxon_id is None:
+                inat_id = taxon.get("taxon_id")
+                if inat_id is not None:
+                    row = self.conn.execute(
+                        "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
+                    ).fetchone()
+                    if row:
+                        local_taxon_id = row["id"]
+            # Skip no-op updates so the "updated" count reflects real
+            # changes. A matched row is fully consistent when type is
+            # 'taxonomy', is_species is 1, and (taxon_id is already set
+            # OR we have no local id to link it to).
+            is_type_change = kw["type"] != "taxonomy"
+            is_species_fix = kw["is_species"] != 1
+            is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
+            if not (is_type_change or is_species_fix or is_taxon_link):
+                continue
+            self.conn.execute(
+                "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
+                (local_taxon_id, kw["id"]),
+            )
+            updated += 1
         if updated:
             self.conn.commit()
         return updated

@@ -1175,6 +1175,39 @@ var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-re
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
 
+  // New images mode: fetch from new-images-preview endpoint
+  if (_sourceMode === 'new_images') {
+    if (newImagesSnapshotId === null) {
+      showPreviewPlaceholder();
+      return;
+    }
+    showPreviewLoading();
+    _previewAbort = new AbortController();
+    fetch('/api/import/new-images-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshot_id: newImagesSnapshotId }),
+      signal: _previewAbort.signal,
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        _previewData = data;
+        _previewSelected = {};
+        data.files.forEach(function(f) {
+          _previewSelected[f.path] = !f.duplicate;
+        });
+        renderPreview();
+      })
+      .catch(function(err) {
+        if (err.name === 'AbortError') return;
+        showPreviewError('Failed to load preview: ' + err.message);
+      });
+    return;
+  }
+
   // Collection mode: fetch from collection-preview endpoint
   if (_sourceMode === 'collection') {
     var collId = document.getElementById('collectionPicker').value;
@@ -2078,6 +2111,15 @@ async function startPipeline() {
     delete body.source;
     delete body.sources;
     delete body.file_types;
+    // Honor per-file deselections from the preview grid — otherwise the
+    // user can uncheck photos and still see them run through the pipeline.
+    if (_previewData && _previewSelected) {
+      var excluded = [];
+      _previewData.files.forEach(function(f) {
+        if (!_previewSelected[f.path]) excluded.push(f.path);
+      });
+      if (excluded.length > 0) body.exclude_paths = excluded;
+    }
   } else {
     body.collection_id = parseInt(document.getElementById('collectionPicker').value);
     // Add excluded photo IDs from preview selection

@@ -252,6 +252,40 @@ def get_models():
     return result
 
 
+def build_self_heal_redownloader(model_dir):
+    """Return a zero-arg callable that re-downloads the known model living
+    at ``model_dir``, or ``None`` when no known model matches.
+
+    Used by the classifier / timm_classifier self-heal path so that when
+    ONNXRuntime rejects a model file on load, the on-disk copy is replaced
+    with a fresh download from HuggingFace. Custom user-registered models
+    and unknown paths return ``None`` — the self-heal wrapper then surfaces
+    the original ONNX load error instead of silently deleting bytes we
+    have no way to replace.
+    """
+    if not model_dir:
+        return None
+    try:
+        normalized = os.path.realpath(model_dir)
+    except OSError:
+        normalized = model_dir
+    for km in KNOWN_MODELS:
+        km_dir = os.path.join(DEFAULT_MODELS_DIR, km["id"])
+        if os.path.realpath(km_dir) == normalized or km_dir == model_dir:
+            # Bind via default args so the closure captures the current
+            # loop values rather than late-binding references (ruff B023).
+            def _redownload(_model_id=km["id"], _model_dir=model_dir):
+                log.warning(
+                    "Self-heal: re-downloading %s into %s after corrupt "
+                    "model load failure",
+                    _model_id, _model_dir,
+                )
+                download_model(_model_id)
+
+            return _redownload
+    return None
+
+
 def get_active_model():
     """Return the currently active model config, or the first downloaded one."""
     config = _load_config()
@@ -909,7 +943,8 @@ def download_hf_model(repo_id, progress_callback=None):
 
 def get_taxonomy_info():
     """Return taxonomy status info."""
-    taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
+    from taxonomy import find_taxonomy_json
+    taxonomy_path = find_taxonomy_json()
     if not os.path.exists(taxonomy_path):
         return {
             "available": False,

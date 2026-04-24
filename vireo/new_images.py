@@ -20,7 +20,7 @@ def _known_paths_for_workspace(db, workspace_id):
     return {os.path.join(r["folder_path"], r["filename"]) for r in rows}
 
 
-def _mapped_roots(db, workspace_id):
+def mapped_roots(db, workspace_id):
     """Return the workspace's mapped roots — linked folders whose ancestor chain
     contains no other linked folder. Skips folders marked 'missing'. Folders
     flagged ``'partial'`` from an interrupted scan are kept so a rescan can
@@ -71,7 +71,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
     the set of photo paths already ingested into the workspace.
     """
     known = _known_paths_for_workspace(db, workspace_id)
-    roots = _mapped_roots(db, workspace_id)
+    roots = mapped_roots(db, workspace_id)
 
     per_root = []
     sample = []

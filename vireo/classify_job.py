@@ -1021,8 +1021,8 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
                 "phase": "Step 1/5: Loading taxonomy",
             },
         )
-        taxonomy_path = os.path.join(os.path.dirname(__file__), "taxonomy.json")
-        tax = _load_taxonomy(taxonomy_path)
+        from taxonomy import load_local_taxonomy
+        tax = load_local_taxonomy()
 
         # Phase 2: Load labels
         labels, use_tol = _load_labels(
