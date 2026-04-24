@@ -29,11 +29,16 @@ log = logging.getLogger(__name__)
 _CORRUPT_MODEL_MARKERS = (
     "invalid_protobuf",
     "protobuf parsing failed",
-    "invalid_graph",
     "model_path must not be empty",
     "external data file",
     "no graph",
 )
+# Intentionally NOT included:
+# - "invalid_graph" / INVALID_GRAPH: also emitted for opset/op
+#   compatibility problems (e.g. installed onnxruntime is too old
+#   for the model's opset). Deleting a valid-but-incompatible
+#   model and redownloading the same bytes would not help and
+#   just masks the real root cause (upgrade onnxruntime).
 
 
 def _looks_like_corrupt_model(err):

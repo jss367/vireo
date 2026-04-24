@@ -273,6 +273,46 @@ def test_build_self_heal_redownloader_unknown_path_returns_none(tmp_path):
     assert models.build_self_heal_redownloader("") is None
 
 
+def test_invalid_graph_does_not_trigger_redownload(tmp_path):
+    """INVALID_GRAPH is emitted for both corruption AND opset/op
+    compatibility problems (e.g. onnxruntime too old for the model's
+    opset). Deleting a valid-but-incompatible model and redownloading
+    the same bytes would masquerade the real root cause. Must NOT
+    self-heal on INVALID_GRAPH alone."""
+    from onnx_runtime import create_session_with_self_heal
+
+    model_path = tmp_path / "model.onnx"
+    valid_bytes = b"valid model, just needs newer onnxruntime"
+    model_path.write_bytes(valid_bytes)
+
+    download_called = {"n": 0}
+
+    def fake_redownload():
+        download_called["n"] += 1
+
+    compat_msg = (
+        "[ONNXRuntimeError] : 10 : INVALID_GRAPH : "
+        "This is an invalid model. Opset 19 is not supported."
+    )
+
+    def fake_create(path):
+        raise Exception(compat_msg)
+
+    with patch("onnx_runtime.create_session", side_effect=fake_create):
+        with pytest.raises(Exception) as excinfo:
+            create_session_with_self_heal(
+                str(model_path),
+                redownload=fake_redownload,
+            )
+
+    assert "Opset" in str(excinfo.value) or "INVALID_GRAPH" in str(excinfo.value)
+    assert download_called["n"] == 0, (
+        "INVALID_GRAPH alone must NOT trigger redownload — it's often "
+        "a compatibility issue, not corruption"
+    )
+    assert model_path.read_bytes() == valid_bytes
+
+
 def test_generic_load_failure_does_not_trigger_redownload(tmp_path):
     """Generic onnxruntime load-failure messages (e.g. provider load
     errors, ABI/compat mismatches) must NOT trigger delete+redownload.
@@ -484,3 +524,104 @@ def test_text_heal_rebuilds_image_session(tmp_path):
     )
     assert clf._mean == [0.5, 0.5, 0.5]
     assert clf._std == [0.3, 0.3, 0.3]
+
+
+def test_image_heal_invalidates_stale_text_embedding_cache(tmp_path, monkeypatch):
+    """When image-encoder self-heal refreshes the model dir, the
+    on-disk text_encoder bytes change too. Any cached label embeddings
+    (keyed only by labels+model_str+model_dir) were computed against
+    the OLD text weights, so loading them would pair old-derived text
+    features with new image features — silent score drift. The cache
+    must be invalidated before the cache-lookup branch."""
+    import json
+
+    import classifier
+    from classifier import Classifier
+
+    model_dir = tmp_path / "bioclip-vit-b-16"
+    model_dir.mkdir()
+    (model_dir / "image_encoder.onnx").write_bytes(b"old img")
+    (model_dir / "text_encoder.onnx").write_bytes(b"old txt")
+    (model_dir / "tokenizer.json").write_text("dummy")
+    with open(model_dir / "config.json", "w") as f:
+        json.dump({
+            "input_size": [3, 224, 224],
+            "mean": [0.48, 0.45, 0.40],
+            "std": [0.26, 0.26, 0.27],
+        }, f)
+
+    # Redirect the cache dir into tmp so we can pre-seed a stale cache.
+    cache_dir = tmp_path / "embedding_cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(cache_dir))
+
+    labels = ["bird"]
+    cache_path = classifier._embedding_cache_path(
+        labels, "ViT-B-16", str(model_dir),
+    )
+    stale_embeddings = np.ones((1, 512), dtype=np.float32) * 999.0
+    np.save(cache_path, stale_embeddings)
+    assert os.path.exists(cache_path)
+
+    # Image session: first call fails with protobuf corruption, heal
+    # runs, second call succeeds with fresh session.
+    image_session = MagicMock(name="image_healed")
+    image_session.get_inputs.return_value = [MagicMock()]
+    image_session.get_inputs.return_value[0].name = "pixel_values"
+
+    text_session = MagicMock(name="text_fresh")
+    text_session.get_inputs.return_value = [MagicMock()]
+    text_session.get_inputs.return_value[0].name = "input_ids"
+
+    call_log = []
+
+    def fake_create(path):
+        call_log.append(path)
+        img_calls = [p for p in call_log if p.endswith("image_encoder.onnx")]
+        if path.endswith("image_encoder.onnx"):
+            if len(img_calls) == 1:
+                raise Exception(
+                    "[ONNXRuntimeError] : 7 : INVALID_PROTOBUF : "
+                    "Protobuf parsing failed."
+                )
+            return image_session
+        return text_session
+
+    def fake_redownload():
+        (model_dir / "image_encoder.onnx").write_bytes(b"fresh img")
+        (model_dir / "text_encoder.onnx").write_bytes(b"fresh txt")
+
+    fresh_embeddings = np.zeros((1, 512), dtype=np.float32)
+    fake_tokenizer = MagicMock()
+
+    class FakeEncoding:
+        ids = list(range(10))
+
+    fake_tokenizer.encode.return_value = FakeEncoding()
+    fake_tokenizer.encode_batch.return_value = [FakeEncoding()]
+
+    with (
+        patch("classifier._MODELS_ROOT", str(tmp_path)),
+        patch("classifier.onnx_runtime.create_session", side_effect=fake_create),
+        patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+        patch(
+            "classifier._compute_embeddings_with_progress",
+            return_value=fresh_embeddings,
+        ),
+        patch(
+            "models.build_self_heal_redownloader",
+            return_value=fake_redownload,
+        ),
+    ):
+        clf = Classifier(
+            labels=labels,
+            model_str="ViT-B-16",
+            pretrained_str=str(model_dir),
+        )
+
+    # Cache was invalidated and re-computed; the classifier must hold
+    # the fresh embeddings, not the pre-seeded stale ones.
+    assert clf._txt_embeddings is fresh_embeddings or (
+        clf._txt_embeddings.shape == fresh_embeddings.shape
+        and not np.allclose(clf._txt_embeddings, stale_embeddings)
+    ), "stale cached embeddings must not survive an image-side self-heal"

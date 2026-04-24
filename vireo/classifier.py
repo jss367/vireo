@@ -351,9 +351,26 @@ class Classifier:
         import models as _models_mod
 
         redownload = _models_mod.build_self_heal_redownloader(self._model_dir)
+
+        # Track whether image-side self-heal fires. If it does, the
+        # refreshed model dir may have new text_encoder bytes, making
+        # any cached label embeddings (computed against old text
+        # weights) produce silent score drift. We invalidate the
+        # cache before the cache-lookup branch below.
+        image_heal_state = {"triggered": False}
+
+        if redownload is not None:
+            def _image_redownload():
+                image_heal_state["triggered"] = True
+                redownload()
+
+            _image_redownload_cb = _image_redownload
+        else:
+            _image_redownload_cb = None
+
         log.info("Loading BioCLIP image encoder: %s", image_encoder_path)
         self._image_session = onnx_runtime.create_session_with_self_heal(
-            image_encoder_path, redownload=redownload,
+            image_encoder_path, redownload=_image_redownload_cb,
         )
         self._image_input_name = self._image_session.get_inputs()[0].name
 
@@ -385,6 +402,24 @@ class Classifier:
             self._classes = [cls.strip() for cls in labels]
 
             cache_path = _embedding_cache_path(labels, model_str, self._model_dir)
+
+            # If image self-heal refreshed the model dir, the on-disk
+            # text_encoder bytes are different from what any previously-
+            # cached embeddings were computed against. Invalidate the
+            # cache so we re-compute embeddings from the healed weights.
+            if image_heal_state["triggered"] and os.path.exists(cache_path):
+                log.info(
+                    "Image self-heal refreshed model dir; invalidating "
+                    "stale text embedding cache at %s",
+                    cache_path,
+                )
+                try:
+                    os.unlink(cache_path)
+                except OSError:
+                    log.exception(
+                        "Failed to invalidate text embedding cache %s",
+                        cache_path,
+                    )
 
             if os.path.exists(cache_path):
                 log.info(
