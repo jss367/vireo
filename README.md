@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="circle_logo.png" width="200" alt="Vireo logo — a songbird integrated with a camera aperture">
+  <img src="logo.png" width="200" alt="Vireo logo — a songbird integrated with a camera aperture">
 </p>
 
 <h1 align="center">Vireo</h1>
