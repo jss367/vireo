@@ -1224,6 +1224,48 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_update_prediction_group_info_scoped_to_fingerprint(tmp_path):
+    """Group metadata must land on the primary row for the ACTIVE label
+    fingerprint, not whichever fingerprint happens to have higher
+    confidence on the same detection.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Stale fingerprint has HIGHER confidence than current — so the old
+    # (by-confidence-only) SELECT would pick the wrong one.
+    db.add_prediction(det_id, species="Finch", confidence=0.95,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    pred_old = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-old'"
+    ).fetchone()["id"]
+    db.add_prediction(det_id, species="Robin", confidence=0.80,
+                      model="bioclip-2", labels_fingerprint="fp-new")
+    pred_new = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-new'"
+    ).fetchone()["id"]
+
+    db.update_prediction_group_info(
+        detection_id=det_id, model="bioclip-2",
+        group_id="g1", vote_count=2, total_votes=3, individual=None,
+        labels_fingerprint="fp-new",
+    )
+
+    # Only the fp-new row got the group metadata.
+    new_row = db.conn.execute(
+        "SELECT group_id FROM prediction_review WHERE prediction_id=?",
+        (pred_new,),
+    ).fetchone()
+    old_row = db.conn.execute(
+        "SELECT group_id FROM prediction_review WHERE prediction_id=?",
+        (pred_old,),
+    ).fetchone()
+    assert new_row is not None and new_row["group_id"] == "g1"
+    assert old_row is None, "stale-fingerprint row must not receive group metadata"
+
+
 def test_accept_prediction_sibling_rejection_scoped_to_fingerprint(tmp_path):
     """Accepting a prediction under one labels_fingerprint must not mark
     predictions with OTHER fingerprints on the same detection as rejected.

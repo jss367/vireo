@@ -4522,26 +4522,48 @@ class Database:
         ).fetchall()
         return [(row["id"], row["embedding"]) for row in rows]
 
-    def update_prediction_group_info(self, detection_id, model, group_id, vote_count, total_votes, individual):
-        """Upsert group info for the primary prediction of (detection, classifier_model)
-        in the active workspace's ``prediction_review``.
+    def update_prediction_group_info(self, detection_id, model, group_id,
+                                     vote_count, total_votes, individual,
+                                     labels_fingerprint=None):
+        """Upsert group info for the primary prediction of
+        (detection, classifier_model, labels_fingerprint) in the active
+        workspace's ``prediction_review``.
 
         Alternative rows (review status ``'alternative'``) are intentionally
         skipped so they do not inherit grouping metadata that belongs to the
         primary pick.
+
+        ``labels_fingerprint`` scopes the "primary" pick to one label set;
+        omitting it picks the highest-confidence row across all fingerprints
+        for back-compat with legacy callers, but current callers should
+        always pass the active fingerprint so group metadata doesn't land
+        on a row produced under a stale label set.
         """
         ws = self._ws_id()
-        # Identify the primary prediction row: one per (detection_id, classifier_model),
-        # excluding any prediction already marked 'alternative' in this workspace.
-        row = self.conn.execute(
-            """SELECT pr.id FROM predictions pr
-               LEFT JOIN prediction_review pr_rev
-                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
-               WHERE pr.detection_id = ? AND pr.classifier_model = ?
-                 AND COALESCE(pr_rev.status, 'pending') != 'alternative'
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (ws, detection_id, model),
-        ).fetchone()
+        # Identify the primary prediction row for this (detection, model,
+        # [fingerprint]), excluding any prediction already marked
+        # 'alternative' in this workspace.
+        if labels_fingerprint is not None:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND pr.labels_fingerprint = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model, labels_fingerprint),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """SELECT pr.id FROM predictions pr
+                   LEFT JOIN prediction_review pr_rev
+                     ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+                   WHERE pr.detection_id = ? AND pr.classifier_model = ?
+                     AND COALESCE(pr_rev.status, 'pending') != 'alternative'
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (ws, detection_id, model),
+            ).fetchone()
         if not row:
             return
         pred_id = row["id"]
@@ -5373,22 +5395,34 @@ class Database:
                 if entry['action_type'] == 'prediction_accept' and old_val:
                     pred_id = int(old_val)
                     ws = self._ws_id()
-                    # Restore all predictions for this detection to pre-accept state
+                    # Restore predictions to pre-accept state. Scope by
+                    # labels_fingerprint too — without it, undoing an accept
+                    # in one label set would flip statuses of predictions
+                    # produced under a different fingerprint and could
+                    # promote the wrong fingerprint's top-confidence row
+                    # back to 'pending'.
                     pred_row = self.conn.execute(
-                        """SELECT detection_id, classifier_model AS model
+                        """SELECT detection_id, classifier_model AS model,
+                                  labels_fingerprint
                            FROM predictions WHERE id = ?""",
                         (pred_id,),
                     ).fetchone()
                     if pred_row:
-                        # Identify every sibling prediction for (detection, classifier_model).
+                        # Identify every sibling prediction for
+                        # (detection, classifier_model, labels_fingerprint).
                         siblings = self.conn.execute(
                             """SELECT id, confidence FROM predictions
-                               WHERE detection_id = ? AND classifier_model = ?
+                               WHERE detection_id = ?
+                                 AND classifier_model = ?
+                                 AND labels_fingerprint = ?
                                ORDER BY confidence DESC""",
-                            (pred_row["detection_id"], pred_row["model"]),
+                            (pred_row["detection_id"], pred_row["model"],
+                             pred_row["labels_fingerprint"]),
                         ).fetchall()
                         # Flip any accepted/rejected review rows in this
-                        # workspace back to 'alternative'.
+                        # workspace back to 'alternative' — scoped to the
+                        # same fingerprint so other label sets' statuses
+                        # are preserved.
                         self.conn.execute(
                             """UPDATE prediction_review SET status = 'alternative',
                                                           reviewed_at = datetime('now')
@@ -5396,9 +5430,12 @@ class Database:
                                  AND status IN ('accepted', 'rejected')
                                  AND prediction_id IN (
                                     SELECT id FROM predictions
-                                    WHERE detection_id = ? AND classifier_model = ?
+                                    WHERE detection_id = ?
+                                      AND classifier_model = ?
+                                      AND labels_fingerprint = ?
                                  )""",
-                            (ws, pred_row["detection_id"], pred_row["model"]),
+                            (ws, pred_row["detection_id"], pred_row["model"],
+                             pred_row["labels_fingerprint"]),
                         )
                         # Promote highest-confidence sibling back to 'pending'
                         # in this workspace.
@@ -5478,9 +5515,12 @@ class Database:
                     pred_id = int(item['old_value'])
                     ws = self._ws_id()
                     self.update_prediction_status(pred_id, 'accepted')
-                    # Re-reject siblings (mirrors accept_prediction behavior).
+                    # Re-reject siblings, scoped to the same labels_fingerprint
+                    # so the redo matches the original accept's scope and
+                    # doesn't touch predictions from other label sets.
                     pred_row = self.conn.execute(
-                        """SELECT detection_id, classifier_model AS model
+                        """SELECT detection_id, classifier_model AS model,
+                                  labels_fingerprint
                            FROM predictions WHERE id = ?""",
                         (pred_id,),
                     ).fetchone()
@@ -5492,10 +5532,12 @@ class Database:
                                 AND pr_rev.workspace_id = ?
                                WHERE pr.detection_id = ?
                                  AND pr.classifier_model = ?
+                                 AND pr.labels_fingerprint = ?
                                  AND pr.id != ?
                                  AND COALESCE(pr_rev.status, 'pending')
                                      IN ('pending', 'alternative')""",
-                            (ws, pred_row["detection_id"], pred_row["model"], pred_id),
+                            (ws, pred_row["detection_id"], pred_row["model"],
+                             pred_row["labels_fingerprint"], pred_id),
                         ).fetchall()
                         for s in sibs:
                             self.conn.execute(

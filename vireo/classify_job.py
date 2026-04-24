@@ -1155,6 +1155,7 @@ def _store_grouped_predictions(
                         vote_count=cons["vote_count"],
                         total_votes=cons["total_votes"],
                         individual=individual_json,
+                        labels_fingerprint=labels_fingerprint,
                     )
                 else:
                     db.add_prediction(
