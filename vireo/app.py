@@ -3751,6 +3751,97 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "files": all_files,
         })
 
+    @app.route("/api/import/new-images-preview", methods=["POST"])
+    def api_import_new_images_preview():
+        """Preview grid data for a new-images snapshot, matching the
+        folder-preview response shape so the same client renderer works."""
+        body = request.get_json(silent=True) or {}
+        snapshot_id = body.get("snapshot_id")
+        if not isinstance(snapshot_id, int):
+            return json_error("snapshot_id required", 400)
+
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        try:
+            snap = db.get_new_images_snapshot(snapshot_id)
+        except OverflowError:
+            snap = None
+        if snap is None:
+            abort(404)
+
+        # Use only top-level mapped roots (not every auto-registered
+        # subfolder the scanner created) so grouping matches the user's
+        # source folders — otherwise longest-prefix match picks the
+        # deepest descendant and hides which source a file came from.
+        from new_images import mapped_roots as _ni_mapped_roots
+        root_paths = [r["path"] for r in _ni_mapped_roots(db, db._active_workspace_id)]
+
+        # Build unique display names across roots by taking the shortest
+        # trailing path segments that are unique — so /mnt/cardA/DCIM and
+        # /mnt/cardB/DCIM become cardA/DCIM and cardB/DCIM rather than
+        # colliding on "DCIM". Mirrors folder-preview's disambiguation.
+        root_names = {}
+        if len(root_paths) > 1:
+            parts = [Path(rp).parts for rp in root_paths]
+            for depth in range(1, max(len(p) for p in parts) + 1):
+                suffixes = [str(Path(*p[-depth:])) for p in parts]
+                if len(set(suffixes)) == len(suffixes):
+                    for rp, suffix in zip(root_paths, suffixes, strict=True):
+                        root_names[rp] = suffix
+                    break
+            else:
+                for rp in root_paths:
+                    root_names[rp] = rp
+        else:
+            for rp in root_paths:
+                root_names[rp] = os.path.basename(rp.rstrip("/")) or rp
+
+        roots = sorted(
+            [(rp, root_names[rp]) for rp in root_paths],
+            key=lambda pn: len(pn[0]),
+            reverse=True,
+        )
+
+        def _subfolder_for(path):
+            for root_path, root_name in roots:
+                try:
+                    rel = Path(path).parent.relative_to(root_path)
+                except ValueError:
+                    continue
+                rel_str = str(rel)
+                return root_name if rel_str == "." else os.path.join(root_name, rel_str)
+            return os.path.dirname(path) or "."
+
+        files = []
+        type_breakdown = {}
+        total_size = 0
+        for path in snap["file_paths"]:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            files.append({
+                "path": path,
+                "filename": os.path.basename(path),
+                "subfolder": _subfolder_for(path),
+                "size": stat.st_size,
+                "extension": ext,
+                "mtime": stat.st_mtime,
+                "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(path),
+            })
+            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+            total_size += stat.st_size
+
+        return jsonify({
+            "total_count": len(files),
+            "total_size": total_size,
+            "type_breakdown": type_breakdown,
+            "duplicate_count": 0,
+            "files": files,
+        })
+
     @app.route("/api/import/check-duplicates", methods=["POST"])
     def api_import_check_duplicates():
         """Stream duplicate detection results via SSE.

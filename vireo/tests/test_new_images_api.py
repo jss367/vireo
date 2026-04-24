@@ -170,3 +170,208 @@ def test_get_snapshot_cross_workspace_returns_404(app_and_db):
     with app.test_client() as client:
         resp = client.get(f"/api/workspaces/active/new-images/snapshot/{snap_id}")
         assert resp.status_code == 404
+
+
+def test_new_images_preview_returns_folder_preview_shape(app_and_db):
+    """POST /api/import/new-images-preview returns the same shape as
+    folder-preview so the pipeline renderer can group and display files."""
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    db.add_folder(str(folder), name="shoot")
+    _touch_image(str(folder / "IMG_001.JPG"))
+    _touch_image(str(folder / "sub" / "IMG_002.JPG"))
+
+    with app.test_client() as client:
+        post = client.post("/api/workspaces/active/new-images/snapshot")
+        snap_id = post.get_json()["snapshot_id"]
+
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    assert data["total_count"] == 2
+    assert data["total_size"] > 0
+    assert data["duplicate_count"] == 0
+    assert ".jpg" in data["type_breakdown"]
+    assert data["type_breakdown"][".jpg"] == 2
+    assert len(data["files"]) == 2
+
+    files_by_name = {f["filename"]: f for f in data["files"]}
+    assert set(files_by_name) == {"IMG_001.JPG", "IMG_002.JPG"}
+    for f in data["files"]:
+        assert f["path"]
+        assert f["extension"] == ".jpg"
+        assert f["size"] > 0
+        assert "thumb_url" in f
+        assert f["subfolder"]
+
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2
+
+
+def test_new_images_preview_missing_snapshot_id(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/import/new-images-preview", json={})
+        assert resp.status_code == 400
+
+
+def test_new_images_preview_unknown_snapshot_returns_404(app_and_db):
+    app, db, ws_id, tmp_path = app_and_db
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": 99999},
+        )
+        assert resp.status_code == 404
+
+
+def test_new_images_preview_scopes_roots_to_active_workspace(app_and_db):
+    """Subfolder grouping must only consider folders in the active workspace.
+    A folder in a different workspace whose path is a longer prefix of a
+    snapshot file path must not win the prefix match and leak its name."""
+    app, db, ws_a, tmp_path = app_and_db
+
+    # Workspace A owns /photos/shoot_a (active when we add it, auto-linked)
+    shoot_a = tmp_path / "photos" / "shoot_a"
+    shoot_a.mkdir(parents=True)
+    _touch_image(str(shoot_a / "pic.jpg"))
+    db.add_folder(str(shoot_a), name="shoot_a-in-ws-A")
+
+    # Workspace B owns /photos/shoot_a/inner — a longer prefix that, if
+    # not filtered by workspace, would steal the subfolder label. Switch
+    # active workspace before creating so add_folder auto-links to B only.
+    ws_b = db.create_workspace("Other")
+    db.set_active_workspace(ws_b)
+    inner = shoot_a / "inner"
+    inner.mkdir()
+    _touch_image(str(inner / "deep.jpg"))
+    db.add_folder(str(inner), name="inner-in-ws-B")
+    db.set_active_workspace(ws_a)
+
+    snap_id = db.create_new_images_snapshot([
+        str(shoot_a / "pic.jpg"),
+        str(inner / "deep.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    subfolders = {f["subfolder"] for f in data["files"]}
+    for sf in subfolders:
+        assert "inner-in-ws-B" not in sf, (
+            f"Leaked folder label from workspace B: {sf}"
+        )
+
+
+def test_new_images_preview_groups_by_top_level_root_not_scanned_descendants(app_and_db):
+    """The scanner auto-registers every descendant folder and auto-links
+    it to the active workspace (db.py:1108, scanner.py _ensure_folder).
+    A preview that uses all linked folders as candidate roots would pick
+    the deepest nested descendant as the subfolder label, hiding the
+    actual top-level source root. Verify grouping resolves to the
+    user-mapped root, not an auto-registered subfolder."""
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    (root / "trip1").mkdir(parents=True)
+    _touch_image(str(root / "edge.jpg"))
+    _touch_image(str(root / "trip1" / "bird.jpg"))
+
+    # Simulate the post-scan state: top-level root + auto-registered
+    # descendant both linked to the active workspace.
+    root_id = db.add_folder(str(root), name="shoot")
+    db.add_folder(str(root / "trip1"), name="trip1", parent_id=root_id)
+
+    snap_id = db.create_new_images_snapshot([
+        str(root / "edge.jpg"),
+        str(root / "trip1" / "bird.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    files_by_name = {f["filename"]: f for f in data["files"]}
+    # The top-level root's basename must appear in every subfolder so the
+    # user sees which source the files came from — not just "trip1".
+    for fname, f in files_by_name.items():
+        assert "shoot" in f["subfolder"], (
+            f"{fname} grouped under {f['subfolder']!r} — lost its top-level root"
+        )
+
+
+def test_new_images_preview_disambiguates_duplicate_basenames(app_and_db):
+    """Two mapped roots with the same basename (e.g. /mnt/cardA/DCIM and
+    /mnt/cardB/DCIM) must produce distinct subfolder labels — otherwise
+    the preview grid groups their files together and a single group-level
+    checkbox toggles photos from unrelated sources."""
+    app, db, ws_id, tmp_path = app_and_db
+
+    # Two sources with identical leaf names.
+    card_a = tmp_path / "mnt" / "cardA" / "DCIM"
+    card_b = tmp_path / "mnt" / "cardB" / "DCIM"
+    card_a.mkdir(parents=True)
+    card_b.mkdir(parents=True)
+    _touch_image(str(card_a / "a.jpg"))
+    _touch_image(str(card_b / "b.jpg"))
+    db.add_folder(str(card_a), name="DCIM")
+    db.add_folder(str(card_b), name="DCIM")
+
+    snap_id = db.create_new_images_snapshot([
+        str(card_a / "a.jpg"),
+        str(card_b / "b.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+
+    subfolders = {f["subfolder"] for f in data["files"]}
+    assert len(subfolders) == 2, (
+        f"Expected two distinct group labels, got {subfolders!r}"
+    )
+    for sf in subfolders:
+        assert "DCIM" in sf
+
+
+def test_new_images_preview_skips_missing_files(app_and_db):
+    """If a path in the snapshot no longer exists on disk, skip it rather
+    than 500ing — the file may have been moved or deleted since snapshot."""
+    app, db, ws_id, tmp_path = app_and_db
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    db.add_folder(str(folder), name="shoot")
+    _touch_image(str(folder / "here.jpg"))
+
+    # Snapshot includes a path that doesn't exist on disk.
+    snap_id = db.create_new_images_snapshot([
+        str(folder / "here.jpg"),
+        str(folder / "gone.jpg"),
+    ])
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/import/new-images-preview",
+            json={"snapshot_id": snap_id},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+    assert data["total_count"] == 1
+    assert data["files"][0]["filename"] == "here.jpg"
