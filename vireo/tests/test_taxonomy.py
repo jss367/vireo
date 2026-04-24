@@ -922,6 +922,63 @@ def test_populate_taxa_db_from_json_sets_parent_id(tmp_path):
     assert kw["taxon_id"] == taxon_row["id"]
 
 
+def test_populate_taxa_db_from_json_single_transaction_allows_clean_rollback(tmp_path):
+    """populate_taxa_db_from_json commits once at the end.
+
+    The download job's handler relies on this: if populate raises partway,
+    the caller's rollback() must clear all pending inserts so the subsequent
+    mark_species_keywords commit doesn't flush partial taxa writes onto disk.
+    This test constructs a JSON whose second entry would violate the
+    taxa.name NOT NULL constraint, verifies the exception propagates, and
+    confirms a caller-side rollback leaves the taxa table empty.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    bad_tax = {
+        "last_updated": "2026-04-24",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {
+                "taxon_id": 1,
+                "scientific_name": "Animalia",
+                "common_name": "",
+                "rank": "kingdom",
+                "lineage_names": ["Animalia"],
+                "lineage_ranks": ["kingdom"],
+            },
+            "broken": {
+                "taxon_id": 2,
+                "scientific_name": None,
+                "common_name": "",
+                "rank": "species",
+                "lineage_names": ["Animalia", None],
+                "lineage_ranks": ["kingdom", "species"],
+            },
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(bad_tax, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    try:
+        populate_taxa_db_from_json(db, tax_path)
+    except Exception:
+        db.conn.rollback()
+    else:
+        raise AssertionError("expected populate to raise on NULL name")
+
+    count = db.conn.execute("SELECT COUNT(*) FROM taxa").fetchone()[0]
+    assert count == 0, (
+        "rollback after a mid-flight populate failure must clear all "
+        "pending inserts — otherwise subsequent commits flush a half-"
+        "populated taxa table onto disk"
+    )
+
+
 def test_populate_taxa_db_from_json_disambiguates_homonym_parents(tmp_path):
     """Parent resolution keys by lineage tuple, so homonym parents don't
     cross-wire each other's children.

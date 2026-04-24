@@ -4179,13 +4179,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # Populate the SQLite taxa table from the same DWCA data so
             # add_keyword's auto-detect (which queries the DB, not the JSON)
             # can type newly-imported keywords as 'taxonomy' going forward.
+            # Roll back and fail the job on error — populate_taxa_db_from_json
+            # issues many INSERTs within a single open transaction, and
+            # letting the subsequent mark_species_keywords call commit
+            # would flush the partial writes onto disk and leave the taxa
+            # table silently inconsistent.
             try:
                 populate_taxa_db_from_json(
                     bg_db, TAXONOMY_JSON_PATH, progress_callback=progress_cb,
                 )
                 seed_informal_groups(bg_db)
             except Exception:
-                log.warning("Post-download taxa DB population failed", exc_info=True)
+                log.error("Post-download taxa DB population failed", exc_info=True)
+                bg_db.conn.rollback()
+                raise
 
             # Retype existing keywords that match the new taxonomy so the
             # user sees the effect immediately, without restarting the app.
