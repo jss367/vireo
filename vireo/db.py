@@ -1194,13 +1194,25 @@ class Database:
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
+        ``'partial'`` is preserved while the path still exists on disk — only
+        a successful rescan clears it. Otherwise the 10-minute health loop
+        would auto-promote a partially-scanned folder back to ``'ok'`` and
+        users would lose the visible marker that tells them to rescan. If
+        the disk path is gone we still flip to ``'missing'`` regardless of
+        prior status, since rescanning won't recover data that isn't there.
+
         Returns the number of folders whose status changed.
         """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
         changed = 0
         for row in rows:
             exists = os.path.exists(row["path"])
-            new_status = "ok" if exists else "missing"
+            if not exists:
+                new_status = "missing"
+            elif row["status"] == "partial":
+                new_status = "partial"
+            else:
+                new_status = "ok"
             if new_status != row["status"]:
                 self.conn.execute(
                     "UPDATE folders SET status = ? WHERE id = ?",

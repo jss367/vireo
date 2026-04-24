@@ -2574,6 +2574,60 @@ def test_check_folder_health_recovers(tmp_path):
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
 
 
+def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
+    """check_folder_health must NOT overwrite 'partial' with 'ok'.
+
+    Regression: the app runs this health check in a 10-minute background loop.
+    If it blindly sets every existing folder to 'ok', a folder flagged
+    'partial' by a failed scan gets auto-cleared before the user has a chance
+    to rescan, and the UI badge silently disappears. Only a successful rescan
+    should clear partial.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = str(tmp_path / "partial_folder")
+    os.makedirs(folder)
+    fid = db.add_folder(folder, name="partial_folder")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 0, "partial folder on disk should not change status"
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "partial"
+
+
+def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
+    """A 'partial' folder whose path disappears still flips to 'missing'.
+
+    Rescanning a vanished directory can't recover the data, so the usual
+    missing-folder UX (relocate or remove) is more useful than keeping the
+    partial badge.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/nope/partial_gone", name="partial_gone")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 1
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "missing"
+
+
 def test_get_missing_folders(tmp_path):
     """get_missing_folders returns missing folders with photo counts."""
     from db import Database
