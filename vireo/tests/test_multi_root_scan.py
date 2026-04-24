@@ -382,3 +382,37 @@ def test_thumbnails_still_run_when_some_roots_succeed(app_and_db, tmp_path, monk
     assert generate_calls["n"] == 1, (
         "generate_all must run when at least one root succeeded"
     )
+
+
+def test_cache_invalidation_failure_flips_job_to_failed(app_and_db, tmp_path, monkeypatch):
+    """If _invalidate_new_images_after_scan raises after a scan, the
+    job must NOT report success. Previously the error was logged and
+    swallowed, so a scan that completed successfully would appear as
+    "completed" even though the shared new-images cache (5-min TTL)
+    was left stale — users would see wrong 'new images' counts with
+    no job-level failure signal.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    root = str(tmp_path / "r")
+    _make_photo(root, "a.jpg")
+
+    import app as app_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("cache invalidation exploded")
+
+    monkeypatch.setattr(app_module, "_invalidate_new_images_after_scan", boom)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [root]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    # Scan itself succeeded but cache invalidation failed → job failed.
+    assert data["status"] == "failed", data
+    # The cache failure must be visible in the recorded errors.
+    assert any(
+        "cache invalidation" in e and "exploded" in e
+        for e in data["errors"]
+    ), data["errors"]

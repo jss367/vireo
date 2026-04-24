@@ -5099,13 +5099,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 finally:
                     # scanner.scan commits photo rows incrementally, so
                     # even a mid-scan failure can leave DB state that
-                    # invalidates cached new-image counts.
+                    # invalidates cached new-image counts. A failure
+                    # here must surface: the shared cache has a 5-min
+                    # TTL, so users would see stale "new images" counts
+                    # with no job-level failure signal if we swallowed
+                    # these errors. Keep the try/except so we still
+                    # advance scan_acc and try the remaining roots,
+                    # but record the failure into root_errors so the
+                    # job is flagged failed at the rollup below.
                     try:
                         _invalidate_new_images_after_scan(thread_db, root)
-                    except Exception:
+                    except Exception as cache_exc:
                         log.exception(
                             "Failed to invalidate new-image cache for %s", root,
                         )
+                        cache_msg = (
+                            f"[{root}] cache invalidation failed "
+                            f"after scan: {cache_exc}"
+                        )
+                        root_errors.append(cache_msg)
+                        if cache_msg not in job["errors"]:
+                            job["errors"].append(cache_msg)
                     advance_scan_acc()
 
             # Use cumulative processed count, not planned total — on a
