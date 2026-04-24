@@ -583,11 +583,16 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
     # that disappeared from iNat (or dropped out of our major-ranks
     # filter) stop being matched by add_keyword's auto-detect. Build a
     # temp table of fresh ids first — the set is too large for a
-    # parameterized IN clause. keywords.taxon_id has an FK to taxa(id)
-    # without ON DELETE SET NULL, so null those out before DELETE to
-    # avoid the FK violation. taxa_common_names and informal_group_taxa
-    # have ON DELETE CASCADE and go automatically; seed_informal_groups
-    # reseeds its side from the fresh taxa afterward.
+    # parameterized IN clause. Several FKs point at taxa(id); none have
+    # ON DELETE SET NULL, so we preempt them:
+    #   - keywords.taxon_id: null out to preserve the keyword row.
+    #   - taxa.parent_id (self-ref): null out on children whose parent
+    #     is being pruned, so a parent-gone-but-child-kept reshuffle
+    #     doesn't trip FK enforcement. The parent-resolve pass below
+    #     reinstates parent_id from the new lineage.
+    #   - taxa_common_names and informal_group_taxa have ON DELETE
+    #     CASCADE and go automatically; seed_informal_groups reseeds
+    #     its side from the fresh taxa afterward.
     _status("Pruning stale taxa...")
     db.conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS fresh_inat_ids "
@@ -598,12 +603,18 @@ def populate_taxa_db_from_json(db, taxonomy_json_path, progress_callback=None):
         "INSERT OR IGNORE INTO fresh_inat_ids (inat_id) VALUES (?)",
         [(iid,) for iid in entries_by_inat_id],
     )
+    stale_local_ids_sql = (
+        "SELECT id FROM taxa "
+        "WHERE inat_id IS NOT NULL "
+        "  AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
+    )
     db.conn.execute(
-        "UPDATE keywords SET taxon_id = NULL WHERE taxon_id IN ("
-        "  SELECT id FROM taxa "
-        "  WHERE inat_id IS NOT NULL "
-        "    AND inat_id NOT IN (SELECT inat_id FROM fresh_inat_ids)"
-        ")"
+        f"UPDATE keywords SET taxon_id = NULL "
+        f"WHERE taxon_id IN ({stale_local_ids_sql})"
+    )
+    db.conn.execute(
+        f"UPDATE taxa SET parent_id = NULL "
+        f"WHERE parent_id IN ({stale_local_ids_sql})"
     )
     pruned = db.conn.execute(
         "DELETE FROM taxa WHERE inat_id IS NOT NULL "

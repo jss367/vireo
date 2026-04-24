@@ -1001,6 +1001,78 @@ def test_populate_taxa_db_from_json_prunes_stale_taxa(tmp_path):
     assert kw["taxon_id"] is None
 
 
+def test_populate_taxa_db_from_json_prunes_when_parent_disappears(tmp_path):
+    """Pruning survives a reshuffle where a child's old parent vanishes.
+
+    Regression: taxa.parent_id is a self-referential FK without
+    ON DELETE SET NULL. With a child still pointing at a soon-to-be-
+    pruned parent, DELETE FROM taxa raised FOREIGN KEY constraint
+    failed and aborted the whole populate — breaking the download job.
+    """
+    import json
+
+    from taxonomy import populate_taxa_db_from_json
+
+    first = {
+        "last_updated": "2026-01-01",
+        "source": "test",
+        "taxa_by_common": {},
+        "taxa_by_scientific": {
+            "animalia": {"taxon_id": 1, "scientific_name": "Animalia",
+                         "common_name": "", "rank": "kingdom",
+                         "lineage_names": ["Animalia"],
+                         "lineage_ranks": ["kingdom"]},
+            "old_genus": {"taxon_id": 100, "scientific_name": "OldGenus",
+                          "common_name": "", "rank": "genus",
+                          "lineage_names": ["Animalia", "OldGenus"],
+                          "lineage_ranks": ["kingdom", "genus"]},
+            "child_species": {"taxon_id": 200,
+                              "scientific_name": "OldGenus species",
+                              "common_name": "", "rank": "species",
+                              "lineage_names": ["Animalia", "OldGenus",
+                                                "OldGenus species"],
+                              "lineage_ranks": ["kingdom", "genus", "species"]},
+        },
+    }
+    tax_path = str(tmp_path / "taxonomy.json")
+    with open(tax_path, "w") as f:
+        json.dump(first, f)
+
+    db = Database(str(tmp_path / "x.db"))
+    populate_taxa_db_from_json(db, tax_path)
+
+    parent_set = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 200"
+    ).fetchone()["parent_id"]
+    assert parent_set is not None, "parent should be set after initial populate"
+
+    # Newer release: OldGenus disappeared entirely. The child taxon is
+    # kept (it still exists in the new payload), but reparenting fell
+    # through so its scientific name is unchanged.
+    second = json.loads(json.dumps(first))
+    del second["taxa_by_scientific"]["old_genus"]
+    second["taxa_by_scientific"]["child_species"]["lineage_names"] = [
+        "Animalia", "OldGenus species",
+    ]
+    second["taxa_by_scientific"]["child_species"]["lineage_ranks"] = [
+        "kingdom", "species",
+    ]
+    with open(tax_path, "w") as f:
+        json.dump(second, f)
+
+    # Must not raise FOREIGN KEY constraint failed.
+    populate_taxa_db_from_json(db, tax_path)
+
+    parent_gone = db.conn.execute(
+        "SELECT 1 FROM taxa WHERE inat_id = 100"
+    ).fetchone()
+    assert parent_gone is None, "old genus should have been pruned"
+    child = db.conn.execute(
+        "SELECT parent_id FROM taxa WHERE inat_id = 200"
+    ).fetchone()
+    assert child is not None, "child should survive the reshuffle"
+
+
 def test_populate_taxa_db_from_json_clears_stale_taxa_common_name(tmp_path):
     """Re-populate drops taxa.common_name when upstream removed it.
 
