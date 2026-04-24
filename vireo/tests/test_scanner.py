@@ -1482,3 +1482,89 @@ def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
         f"coverage should count photos in partial folders, "
         f"got total={stats['total']!r}"
     )
+
+
+def test_successful_noop_incremental_scan_clears_partial(tmp_path):
+    """A no-op incremental rescan must still clear 'partial' on scoped folders.
+
+    If the success-path reset is gated only on the main loop's
+    ``touched_folder_ids`` set, a successful incremental scan that processes
+    zero files (all photos unchanged) leaves ``status='partial'`` stuck and
+    the folder hidden from ``status='ok'`` read paths. The reset must also
+    run for the outer scan scope (root + restrict_dirs).
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Initial clean scan so photos are indexed.
+    scanner_mod.scan(root, db)
+
+    # Simulate the after-failure state: folder got flagged 'partial' by a
+    # prior aborted scan even though all photo rows are already present.
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE path = ?", (root,)
+    )
+    db.conn.commit()
+
+    # Incremental rescan — no files changed, so the main loop touches zero
+    # folders. The scan scope fallback should still clear 'partial'.
+    scanner_mod.scan(root, db, incremental=True)
+
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "ok", (
+        f"no-op incremental scan should flip partial → ok, got {row['status']!r}"
+    )
+
+
+def test_pre_pass_failure_marks_folder_partial(tmp_path):
+    """A non-retryable DB error during the pre-pass XMP commit flags the folder.
+
+    Pre-pass XMP re-imports commit before the main scan loop begins. If that
+    commit raises a non-transient error, the scan aborts with the folder row
+    still ``status='ok'`` unless the pre-pass is wrapped in the same partial-
+    status recovery path as the main loop.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Initial clean scan so the photo row exists for incremental mode.
+    scanner_mod.scan(root, db)
+
+    # Touch the XMP sidecar so the pre-pass re-imports keywords and commits.
+    xmp_path = os.path.join(root, "a.xmp")
+    with open(xmp_path, "w") as f:
+        f.write("<x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>")
+    # Make the existing row's xmp_mtime stale so pre-pass treats it as changed.
+    db.conn.execute("UPDATE photos SET xmp_mtime = 0 WHERE filename = 'a.jpg'")
+    db.conn.commit()
+
+    # First commit after scan starts is the pre-pass XMP UPDATE. Raise a
+    # non-retryable OperationalError there.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={1: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db, incremental=True)
+
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "partial", (
+        f"expected folder.status='partial' after pre-pass failure, got {row['status']!r}"
+    )
