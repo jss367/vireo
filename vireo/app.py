@@ -4091,9 +4091,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             """SELECT pr.species, pr.scientific_name, pr.confidence
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
+               WHERE d.photo_id = ?
                ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
+            (photo_id,),
         ).fetchone()
 
         species = pred["species"] if pred else ""
@@ -4184,9 +4184,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             """SELECT pr.species, pr.scientific_name
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
+               WHERE d.photo_id = ?
                ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
+            (photo_id,),
         ).fetchone()
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
@@ -4252,9 +4252,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 """SELECT pr.species, pr.scientific_name
                    FROM predictions pr
                    JOIN detections d ON d.id = pr.detection_id
-                   WHERE d.photo_id = ? AND d.workspace_id = ?
+                   WHERE d.photo_id = ?
                    ORDER BY pr.confidence DESC LIMIT 1""",
-                (photo_id, db._active_workspace_id),
+                (photo_id,),
             ).fetchone()
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
@@ -6058,8 +6058,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               WHERE pr.species = ? AND d.workspace_id = ? AND p.embedding IS NOT NULL""",
-            (species_name, db._active_workspace_id),
+               WHERE pr.species = ? AND p.embedding IS NOT NULL""",
+            (species_name,),
         ).fetchall()
 
         if len(rows) < 2:
@@ -6168,16 +6168,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_species_list():
         """List all species with prediction counts, for the variant explorer."""
         db = _get_db()
+        # NOTE: `pr.status` is deferred to Task 25 (prediction_review refactor).
+        # For now we only drop the dropped-column `d.workspace_id` predicate so
+        # this endpoint stops throwing "no such column"; the status filter will
+        # be re-wired through prediction_review in Task 25.
         rows = db.conn.execute(
             """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
                       pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
                       pr.scientific_name
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE pr.status != 'rejected' AND d.workspace_id = ?
                GROUP BY pr.species
-               ORDER BY photo_count DESC""",
-            (db._active_workspace_id,),
+               ORDER BY photo_count DESC"""
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -6423,20 +6425,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                # Filter to photos with detections but no masks
-                ws_id = thread_db._active_workspace_id
+                # Filter to photos with detections but no masks. Detection
+                # threshold is resolved at read time from the workspace's
+                # effective config (detections table is global now).
                 photos = []
                 for p in coll_photos:
                     if p["mask_path"]:
                         continue
-                    det = thread_db.conn.execute(
-                        """SELECT box_x, box_y, box_w, box_h, detector_confidence
-                           FROM detections
-                           WHERE photo_id = ? AND workspace_id = ?
-                           ORDER BY detector_confidence DESC LIMIT 1""",
-                        (p["id"], ws_id),
-                    ).fetchone()
-                    if det:
+                    dets = thread_db.get_detections(p["id"])
+                    if dets:
+                        det = dets[0]
                         photos.append({
                             "id": p["id"],
                             "folder_id": p["folder_id"],
@@ -7037,15 +7035,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
+        # Get primary detection from global detections table (threshold
+        # resolved from workspace-effective config inside get_detections).
+        dets = db.get_detections(photo_id)
+        if dets:
+            det = dets[0]
             result["detection_box"] = {
                 "x": det["box_x"], "y": det["box_y"],
                 "w": det["box_w"], "h": det["box_h"],
@@ -7547,35 +7541,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result.pop("detection_box", None)
         result.pop("detection_conf", None)
 
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
-            result["detection_box"] = {
-                "x": det["box_x"], "y": det["box_y"],
-                "w": det["box_w"], "h": det["box_h"],
-            }
-            result["detection_conf"] = det["detector_confidence"]
-
-        # Get detections for this photo (from detections table)
+        # Get detections for this photo — threshold resolved at read time
+        # from the workspace-effective config.
         dets = db.get_detections(photo_id)
         result["detections"] = [dict(d) for d in dets]
 
-        # Get predictions for this photo (through detections JOIN)
+        # Primary detection = highest-confidence above threshold.
+        if dets:
+            primary = dets[0]
+            result["detection_box"] = {
+                "x": primary["box_x"], "y": primary["box_y"],
+                "w": primary["box_w"], "h": primary["box_h"],
+            }
+            result["detection_conf"] = primary["detector_confidence"]
+
+        # Get predictions for this photo (through detections JOIN).
+        # NOTE: pr.model / pr.status / pr.group_id / pr.vote_count /
+        # pr.total_votes / pr.individual are deferred to Task 25 (they now
+        # live in prediction_review). For this task we only drop the gone
+        # `d.workspace_id` predicate so the query's join shape is valid.
         preds = db.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.model, pr.category, pr.status,
-                      pr.group_id, pr.vote_count, pr.total_votes, pr.individual,
+            """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
+                      pr.category,
                       d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
+               WHERE d.photo_id = ?
                ORDER BY pr.confidence DESC""",
-            (photo_id, db._active_workspace_id),
+            (photo_id,),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
 
@@ -7630,16 +7623,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if img is None:
             return "Could not load image", 500
 
-        # Get primary detection box from detections table
-        det_row = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
+        # Get primary detection box — global detections table, threshold
+        # resolved from workspace-effective config in get_detections.
+        dets = db.get_detections(photo_id)
         det_box = None
-        if det_row:
+        if dets:
+            det_row = dets[0]
             det_box = {
                 "x": det_row["box_x"], "y": det_row["box_y"],
                 "w": det_row["box_w"], "h": det_row["box_h"],

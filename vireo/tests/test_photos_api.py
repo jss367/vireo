@@ -93,6 +93,52 @@ def test_api_photos_includes_all_detections(app_and_db):
     assert bird3['detections'] == []
 
 
+def test_api_photos_detections_honor_workspace_threshold(app_and_db):
+    """Lowering the workspace's `detector_confidence` surfaces more boxes at
+    read time, without rewriting any detection rows.
+
+    Exercises the global-detections design: boxes are cached once, each
+    workspace filters on its own threshold when reading.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
+
+    # Save two boxes: one above the default 0.2 threshold, one below it.
+    db.save_detections(target['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    client = app.test_client()
+
+    # Default workspace threshold (0.2) hides the low-confidence box.
+    resp = client.get('/api/photos')
+    bird1 = [p for p in resp.get_json()['photos'] if p['filename'] == 'bird1.jpg'][0]
+    assert len(bird1['detections']) == 1
+    assert bird1['detections'][0]['confidence'] == 0.95
+
+    # Lower the workspace threshold via a per-workspace config override —
+    # no detection rows are rewritten, only the read-time filter changes.
+    db.update_workspace(db._active_workspace_id,
+                        config_overrides={"detector_confidence": 0.01})
+
+    resp = client.get('/api/photos')
+    bird1 = [p for p in resp.get_json()['photos'] if p['filename'] == 'bird1.jpg'][0]
+    assert len(bird1['detections']) == 2, (
+        "lowering detector_confidence should surface more cached boxes"
+    )
+    # Still ordered by confidence DESC.
+    assert bird1['detections'][0]['confidence'] == 0.95
+    assert bird1['detections'][1]['confidence'] == 0.05
+
+    # And no new rows were written.
+    raw = db.conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (target['id'],)
+    ).fetchone()[0]
+    assert raw == 2
+
+
 def test_api_photos_filter_keyword(app_and_db):
     """GET /api/photos?keyword= filters by keyword."""
     app, _ = app_and_db
