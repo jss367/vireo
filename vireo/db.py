@@ -4551,7 +4551,7 @@ class Database:
             ).fetchall()
         return {r["photo_id"] for r in rows}
 
-    def get_top_prediction_for_photo(self, photo_id):
+    def get_top_prediction_for_photo(self, photo_id, min_detector_confidence=None):
         """Return the highest-confidence *current* prediction for a photo.
 
         "Current" means: workspace-scoped via workspace_folders, and for
@@ -4560,9 +4560,36 @@ class Database:
         prior label sets on the same detection are skipped so callers
         like /api/inat/prepare don't prefill a taxon from an old label set.
 
+        ``min_detector_confidence``: optional read-time threshold applied to
+        the joined detection. With read-time thresholding, predictions tied
+        to detections below the active threshold are visually hidden in the
+        UI; callers like the iNat endpoints should pass the workspace-
+        effective threshold so they don't surface a species from a now-
+        hidden detection.
+
         Returns a dict with ``species``, ``scientific_name``, ``confidence``,
         ``detection_id`` or None if no eligible prediction exists.
         """
+        if min_detector_confidence is None:
+            return self.conn.execute(
+                """SELECT pr.species, pr.scientific_name, pr.confidence,
+                          pr.detection_id
+                   FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                   WHERE d.photo_id = ?
+                     AND pr.labels_fingerprint = (
+                        SELECT pr2.labels_fingerprint FROM predictions pr2
+                        WHERE pr2.detection_id = pr.detection_id
+                          AND pr2.classifier_model = pr.classifier_model
+                        ORDER BY pr2.created_at DESC, pr2.id DESC
+                        LIMIT 1
+                     )
+                   ORDER BY pr.confidence DESC LIMIT 1""",
+                (self._ws_id(), photo_id),
+            ).fetchone()
         return self.conn.execute(
             """SELECT pr.species, pr.scientific_name, pr.confidence,
                       pr.detection_id
@@ -4572,6 +4599,7 @@ class Database:
                JOIN workspace_folders wf
                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE d.photo_id = ?
+                 AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
                     WHERE pr2.detection_id = pr.detection_id
@@ -4580,7 +4608,7 @@ class Database:
                     LIMIT 1
                  )
                ORDER BY pr.confidence DESC LIMIT 1""",
-            (self._ws_id(), photo_id),
+            (self._ws_id(), photo_id, min_detector_confidence),
         ).fetchone()
 
     def get_prediction_for_photo(self, photo_id, model, labels_fingerprint=None):

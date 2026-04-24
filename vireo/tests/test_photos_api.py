@@ -352,6 +352,43 @@ def test_api_species_empty(app_and_db):
     assert data['species'] == []
 
 
+def test_api_species_summary_filters_to_latest_fingerprint(app_and_db):
+    """GET /api/species/summary must surface only the most recent
+    labels_fingerprint per (detection, classifier_model). Stale species
+    cached under an old label set must NOT contribute to counts —
+    otherwise the variant explorer mixes pre- and post-relabel results.
+    """
+    app, db = app_and_db
+    det_ids = db.save_detections(1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    # Stale fingerprint: species the user used to track.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.9, '2026-01-01')",
+        (det_ids[0],),
+    )
+    # Current fingerprint: species under the active label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.8, '2026-04-24')",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/species/summary')
+    assert resp.status_code == 200
+    species = [r['species'] for r in resp.get_json()]
+    assert 'Robin' in species
+    assert 'Finch' not in species, (
+        "Species summary leaked a stale-fingerprint species into counts "
+        "— variant explorer would mix pre- and post-relabel results."
+    )
+
+
 def test_photo_detail_includes_metadata(app_and_db):
     """GET /api/photos/<id> includes parsed metadata when exif_data is populated."""
     app, db = app_and_db

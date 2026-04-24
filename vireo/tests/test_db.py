@@ -1470,6 +1470,50 @@ def test_get_top_prediction_for_photo_scoped_to_current_fingerprint(tmp_path):
     )
 
 
+def test_get_top_prediction_for_photo_respects_detector_confidence(tmp_path):
+    """get_top_prediction_for_photo must drop predictions whose backing
+    detection is below the supplied detector_confidence floor — otherwise
+    iNat prefill/submit can use species from detections the UI threshold
+    is supposed to hide (e.g. lower threshold to classify, then raise it).
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    # Two detections on the same photo: one above the upcoming threshold
+    # with a LOWER-confidence prediction, one below with a HIGHER-
+    # confidence prediction. Without the floor, the below-threshold
+    # detection's species wins by confidence.
+    det_high_conf, det_low_conf = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 1, "y": 1, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_high_conf, species="Robin", confidence=0.4,
+                      model="bioclip-2", labels_fingerprint="fp")
+    db.add_prediction(det_low_conf, species="Finch", confidence=0.95,
+                      model="bioclip-2", labels_fingerprint="fp")
+
+    # Without a floor: confidence-only ranking returns the (now-hidden)
+    # below-threshold detection's species.
+    pred_unfiltered = db.get_top_prediction_for_photo(pids[0])
+    assert pred_unfiltered is not None
+    assert pred_unfiltered["species"] == "Finch"
+
+    # With the floor matching a typical UI threshold, only the above-
+    # threshold detection is eligible, so we get the visible species.
+    pred = db.get_top_prediction_for_photo(
+        pids[0], min_detector_confidence=0.2,
+    )
+    assert pred is not None
+    assert pred["species"] == "Robin", (
+        "Helper returned a species from a below-threshold detection — "
+        "iNat would submit a taxon from a detection the UI hides."
+    )
+
+    # If the floor excludes every detection, the helper returns None
+    # rather than falling back to a hidden detection.
+    assert db.get_top_prediction_for_photo(
+        pids[0], min_detector_confidence=0.99,
+    ) is None
+
+
 def test_update_prediction_group_info_scoped_to_fingerprint(tmp_path):
     """Group metadata must land on the primary row for the ACTIVE label
     fingerprint, not whichever fingerprint happens to have higher

@@ -4410,8 +4410,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Use the current-fingerprint helper so a photo with cached
         # predictions from multiple label sets doesn't prefill iNat with
-        # a species from a stale label set.
-        pred = db.get_top_prediction_for_photo(photo_id)
+        # a species from a stale label set. Apply the workspace-effective
+        # detector_confidence floor so we never prefill a taxon from a
+        # detection the UI threshold hides.
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        pred = db.get_top_prediction_for_photo(
+            photo_id, min_detector_confidence=min_conf,
+        )
 
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
@@ -4498,9 +4505,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Use overrides from request, or fall back to DB data. The helper
         # picks the highest-confidence prediction from the CURRENT
-        # fingerprint, scoped to the active workspace — submitting a stale
-        # taxon to iNaturalist is permanent and not easily reversible.
-        pred = db.get_top_prediction_for_photo(photo_id)
+        # fingerprint, scoped to the active workspace, and respecting the
+        # workspace-effective detector_confidence floor — submitting a
+        # stale or below-threshold taxon to iNaturalist is permanent and
+        # not easily reversible.
+        min_conf = db.get_effective_config(user_cfg).get(
+            "detector_confidence", 0.2
+        )
+        pred = db.get_top_prediction_for_photo(
+            photo_id, min_detector_confidence=min_conf,
+        )
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
         observed_on = data.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
@@ -4544,6 +4558,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("submissions array is required")
 
         db = _get_db()
+        # Resolve the workspace-effective detector_confidence floor once for
+        # the whole batch — read-time thresholding means below-threshold
+        # detections should never seed an iNat submission.
+        min_conf = db.get_effective_config(user_cfg).get(
+            "detector_confidence", 0.2
+        )
         results = []
         for sub in submissions:
             photo_id = sub.get("photo_id")
@@ -4561,9 +4581,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
                 continue
 
-            # Current-fingerprint + workspace-scoped top prediction —
-            # avoids submitting a stale-label-set taxon to iNaturalist.
-            pred = db.get_top_prediction_for_photo(photo_id)
+            # Current-fingerprint + workspace-scoped top prediction,
+            # respecting the active detector_confidence floor — avoids
+            # submitting a stale-label-set or now-hidden taxon to iNaturalist.
+            pred = db.get_top_prediction_for_photo(
+                photo_id, min_detector_confidence=min_conf,
+            )
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
             observed_on = sub.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
@@ -6556,7 +6579,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         filtered at read time by the workspace-effective
         ``detector_confidence`` threshold. Review status is sourced from the
         workspace-scoped ``prediction_review`` table; rejected predictions
-        are excluded.
+        are excluded. Predictions are filtered to the most recent
+        ``labels_fingerprint`` per ``(detection, classifier_model)`` so that
+        stale species from old label sets do not contaminate counts after
+        re-classification.
         """
         db = _get_db()
         import config as cfg
@@ -6577,6 +6603,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.detector_confidence >= ?
                  AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                GROUP BY pr.species
                ORDER BY photo_count DESC""",
             (ws, ws, min_conf),
