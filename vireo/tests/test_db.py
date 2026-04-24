@@ -2574,6 +2574,60 @@ def test_check_folder_health_recovers(tmp_path):
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
 
 
+def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
+    """check_folder_health must NOT overwrite 'partial' with 'ok'.
+
+    Regression: the app runs this health check in a 10-minute background loop.
+    If it blindly sets every existing folder to 'ok', a folder flagged
+    'partial' by a failed scan gets auto-cleared before the user has a chance
+    to rescan, and the UI badge silently disappears. Only a successful rescan
+    should clear partial.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = str(tmp_path / "partial_folder")
+    os.makedirs(folder)
+    fid = db.add_folder(folder, name="partial_folder")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 0, "partial folder on disk should not change status"
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "partial"
+
+
+def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
+    """A 'partial' folder whose path disappears still flips to 'missing'.
+
+    Rescanning a vanished directory can't recover the data, so the usual
+    missing-folder UX (relocate or remove) is more useful than keeping the
+    partial badge.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/nope/partial_gone", name="partial_gone")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 1
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "missing"
+
+
 def test_get_missing_folders(tmp_path):
     """get_missing_folders returns missing folders with photo counts."""
     from db import Database
@@ -4398,3 +4452,104 @@ def test_create_snapshot_empty_paths(tmp_path):
     snap = db.get_new_images_snapshot(snap_id)
     assert snap["file_count"] == 0
     assert snap["file_paths"] == []
+
+
+# -- busy_timeout / lock resilience --
+
+
+def test_busy_timeout_pragma_is_set(tmp_path):
+    """Each connection explicitly sets PRAGMA busy_timeout to at least 30s.
+
+    Python's sqlite3 default (5000ms) is too tight under load — heavy
+    pipeline writes can hold the writer lock longer than that. A real-world
+    scan against a busy DB hit 'database is locked' with the implicit default.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    timeout_ms = db.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout_ms >= 30000
+
+
+def test_concurrent_writers_wait_rather_than_fail(tmp_path):
+    """A second writer queues behind the first instead of crashing.
+
+    Repro of the failure mode that killed 3 of 4 parallel scans in prod: the
+    default 5s busy_timeout wasn't enough under load. With a longer timeout
+    explicitly set, the second writer waits and succeeds.
+    """
+    import sqlite3
+    import threading
+    import time
+
+    from db import Database
+
+    db_path = str(tmp_path / "concurrent.db")
+    db = Database(db_path)
+    db.add_folder("/a")
+
+    blocker = sqlite3.connect(db_path, check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("UPDATE folders SET name = 'held' WHERE path = '/a'")
+
+    def release_after_delay():
+        time.sleep(0.8)
+        blocker.commit()
+        blocker.close()
+
+    threading.Thread(target=release_after_delay, daemon=True).start()
+
+    start = time.time()
+    db.add_folder("/b")
+    elapsed = time.time() - start
+
+    assert elapsed >= 0.5, f"writer did not wait for lock (elapsed={elapsed:.2f}s)"
+    assert elapsed < 5.0, f"writer waited too long (elapsed={elapsed:.2f}s)"
+    paths = {r["path"] for r in db.conn.execute("SELECT path FROM folders").fetchall()}
+    assert {"/a", "/b"}.issubset(paths)
+
+
+def test_folder_status_partial_value_allowed(tmp_path):
+    """folders.status accepts 'partial' as a value — scan abort marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/x")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert row["status"] == "partial"
+
+
+def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
+    """Partial folders must stay in the tree so the browse sidebar can render
+    a badge and the user can rescan. Also, the returned rows must carry
+    ``status`` so the UI can tell ok from partial. Missing folders are still
+    excluded — they have their own ``get_missing_folders`` path.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "tree.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    ok_id = db.add_folder("/ok", name="ok")
+    partial_id = db.add_folder("/partial", name="partial")
+    missing_id = db.add_folder("/missing", name="missing")
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE id = ?", (partial_id,)
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_id,)
+    )
+    db.conn.commit()
+
+    rows = {row["id"]: dict(row) for row in db.get_folder_tree()}
+
+    assert ok_id in rows, "ok folder must appear in tree"
+    assert partial_id in rows, (
+        "partial folder must appear in tree so badge renders and rescan works"
+    )
+    assert missing_id not in rows, "missing folder must not appear in tree"
+    assert rows[ok_id]["status"] == "ok"
+    assert rows[partial_id]["status"] == "partial"

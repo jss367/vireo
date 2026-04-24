@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import uuid
 
 from new_images import get_shared_cache
@@ -11,6 +12,27 @@ from new_images import get_shared_cache
 log = logging.getLogger(__name__)
 
 _UNSET = object()  # sentinel for "not provided" vs explicit None
+
+
+def commit_with_retry(conn, max_retries=5, base_delay=0.1):
+    """Commit ``conn`` with retry on transient "locked"/"busy" errors.
+
+    Parallel scan workers can still race past the 30s ``busy_timeout`` PRAGMA
+    under sustained write pressure. This helper catches the resulting
+    ``sqlite3.OperationalError`` (``"database is locked"``/``"is busy"``) and
+    retries with exponential backoff. Non-transient OperationalErrors (disk
+    I/O, constraint violations) propagate immediately so the caller can mark
+    folders partial and surface the failure.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
 
 
 def _inclusive_date_to(date_to):
@@ -64,6 +86,7 @@ class Database:
         self.conn.execute("PRAGMA cache_size=-10000")  # 10 MB
         self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA mmap_size=30000000")  # 30 MB
+        self.conn.execute("PRAGMA busy_timeout=30000")  # 30 s — tolerate parallel scan writers
         self._active_workspace_id = None
         self._new_images_cache = get_shared_cache()
         self._create_tables()
@@ -1073,7 +1096,7 @@ class Database:
             "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
             (path, name, parent_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
         if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
@@ -1089,12 +1112,17 @@ class Database:
     def get_folder_tree(self):
         """Return folders for the active workspace.
 
+        Includes folders whose status is ``'ok'`` or ``'partial'`` — a
+        partially-scanned folder must stay in the tree so the browse sidebar
+        can render its badge and the user can trigger a rescan. ``'missing'``
+        folders are still excluded (they go through ``get_missing_folders``).
+
         ``parent_id`` is rewritten to the nearest ancestor that is also linked
-        to the active workspace AND has ``status='ok'``. If no such ancestor
-        exists, ``parent_id`` is NULL. This keeps the returned set a
-        well-formed tree: callers that group by ``parent_id`` (notably the
-        browse-page folder sidebar) never leave a linked folder dangling under
-        an ancestor that was filtered out of the result.
+        to the active workspace AND visible here. If no such ancestor exists,
+        ``parent_id`` is NULL. This keeps the returned set a well-formed tree:
+        callers that group by ``parent_id`` (notably the browse-page folder
+        sidebar) never leave a linked folder dangling under an ancestor that
+        was filtered out of the result.
         """
         ws = self._ws_id()
         return self.conn.execute(
@@ -1102,7 +1130,7 @@ class Database:
                visible(id) AS (
                    SELECT f.id FROM folders f
                    JOIN workspace_folders wf ON wf.folder_id = f.id
-                   WHERE wf.workspace_id = ? AND f.status = 'ok'
+                   WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
                ),
                walk(start_id, current_id) AS (
                    SELECT v.id, f.parent_id
@@ -1123,7 +1151,7 @@ class Database:
                )
                SELECT f.id, f.path, f.name,
                       e.parent_id AS parent_id,
-                      f.photo_count
+                      f.photo_count, f.status
                FROM folders f
                JOIN visible v ON v.id = f.id
                JOIN effective e ON e.start_id = f.id
@@ -1175,13 +1203,25 @@ class Database:
     def check_folder_health(self):
         """Check all folders for existence on disk. Update status column.
 
+        ``'partial'`` is preserved while the path still exists on disk — only
+        a successful rescan clears it. Otherwise the 10-minute health loop
+        would auto-promote a partially-scanned folder back to ``'ok'`` and
+        users would lose the visible marker that tells them to rescan. If
+        the disk path is gone we still flip to ``'missing'`` regardless of
+        prior status, since rescanning won't recover data that isn't there.
+
         Returns the number of folders whose status changed.
         """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
         changed = 0
         for row in rows:
             exists = os.path.exists(row["path"])
-            new_status = "ok" if exists else "missing"
+            if not exists:
+                new_status = "missing"
+            elif row["status"] == "partial":
+                new_status = "partial"
+            else:
+                new_status = "ok"
             if new_status != row["status"]:
                 self.conn.execute(
                     "UPDATE folders SET status = ? WHERE id = ?",
@@ -1513,7 +1553,7 @@ class Database:
         conditions = ["wf.workspace_id = ?"]
         params = [self._ws_id()]
         joins = ["JOIN workspace_folders wf ON wf.folder_id = p.folder_id",
-                 "JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'"]
+                 "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"]
 
         if "rating_min" in criteria:
             conditions.append("p.rating >= ?")
@@ -1623,7 +1663,7 @@ class Database:
                 file_hash,
             ),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
         if cur.rowcount > 0:
             photo_id = cur.lastrowid
         else:
@@ -1846,7 +1886,7 @@ class Database:
         return self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]
@@ -1856,7 +1896,7 @@ class Database:
         return self.conn.execute(
             """SELECT COUNT(*) FROM folders f
                JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ? AND f.status = 'ok'""",
+               WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
             (self._ws_id(),),
         ).fetchone()[0]
 
@@ -1867,7 +1907,7 @@ class Database:
                FROM photo_keywords pk
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (self._ws_id(),),
         ).fetchone()[0]
@@ -1912,8 +1952,8 @@ class Database:
     def get_coverage_stats(self):
         """Return per-stage coverage counts for the active workspace.
 
-        ``total`` is the number of photos in active (status='ok') folders of
-        the workspace. Each other key is the count of those photos for which
+        ``total`` is the number of photos in active (status ``'ok'`` or
+        ``'partial'``) folders of the workspace. Each other key is the count of those photos for which
         the named pipeline stage has produced output. ``detected`` and
         ``classified`` are joined from the detections/predictions tables;
         everything else is a simple NOT NULL check on ``photos``.
@@ -1925,7 +1965,7 @@ class Database:
                 {self._coverage_select_fragment()}
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?""",
             (ws,),
         ).fetchone()
@@ -1934,7 +1974,7 @@ class Database:
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
             (ws, ws),
         ).fetchone()[0] or 0
@@ -1944,7 +1984,7 @@ class Database:
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
             (ws, ws),
         ).fetchone()[0] or 0
@@ -1959,7 +1999,7 @@ class Database:
         """Return a list of per-folder coverage counts for the active workspace.
 
         One row per folder that is linked to the workspace and has
-        ``status='ok'``. Each row carries ``folder_id``, ``path``, ``name``,
+        ``status`` of ``'ok'`` or ``'partial'``. Each row carries ``folder_id``, ``path``, ``name``,
         ``total`` (photos in that folder only — descendants are NOT rolled
         in), and the same coverage keys as :meth:`get_coverage_stats`.
         Folders with zero photos are included so the dashboard can still
@@ -1976,7 +2016,7 @@ class Database:
             FROM folders f
             JOIN workspace_folders wf ON wf.folder_id = f.id
             LEFT JOIN photos p ON p.folder_id = f.id
-            WHERE wf.workspace_id = ? AND f.status = 'ok'
+            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
             GROUP BY f.id
             ORDER BY f.path""",
             (ws,),
@@ -1987,7 +2027,7 @@ class Database:
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.workspace_id = ? AND wf.workspace_id = ?
                GROUP BY p.folder_id""",
             (ws, ws),
@@ -1999,7 +2039,7 @@ class Database:
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.workspace_id = ? AND wf.workspace_id = ?
                GROUP BY p.folder_id""",
             (ws, ws),
@@ -2057,7 +2097,7 @@ class Database:
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                GROUP BY k.id
                ORDER BY photo_count DESC
@@ -2069,7 +2109,7 @@ class Database:
             """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
             GROUP BY month
             ORDER BY month""",
@@ -2080,7 +2120,7 @@ class Database:
             """SELECT p.rating, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY p.rating
             ORDER BY p.rating""",
@@ -2091,7 +2131,7 @@ class Database:
             """SELECT p.flag, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY p.flag""",
             (ws,),
@@ -2118,7 +2158,7 @@ class Database:
             """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
             GROUP BY hour
             ORDER BY hour""",
@@ -2134,7 +2174,7 @@ class Database:
                 COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
             GROUP BY bucket
             ORDER BY bucket""",
@@ -2146,7 +2186,7 @@ class Database:
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE d.workspace_id = ? AND wf.workspace_id = ?""",
             (ws, ws),
         ).fetchone()[0]
@@ -2172,7 +2212,7 @@ class Database:
         where_params = [ws, str(year)]
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
 
         if folder_id is not None:
             subtree = self.get_folder_subtree_ids(folder_id)
@@ -2215,7 +2255,7 @@ class Database:
                       MAX(substr(p.timestamp, 1, 4)) as max_y
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ? AND p.timestamp IS NOT NULL""",
             (ws,),
         ).fetchone()
@@ -2260,7 +2300,7 @@ class Database:
             where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -2339,7 +2379,7 @@ class Database:
             where_params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -2418,7 +2458,7 @@ class Database:
                 where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -2444,7 +2484,7 @@ class Database:
         total = self.conn.execute(
             """SELECT COUNT(*) FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?""",
             (ws,),
         ).fetchone()[0]
@@ -2548,7 +2588,7 @@ class Database:
             params.append(_inclusive_date_to(date_to))
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status = 'ok'")
+                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
         if keyword is not None:
             join_clause += """
                 LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
@@ -2615,7 +2655,7 @@ class Database:
                 SELECT DISTINCT k.name
                 FROM photos p
                 JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                 JOIN photo_keywords pk ON pk.photo_id = p.id
                 JOIN keywords k ON k.id = pk.keyword_id AND k.is_species = 1
                 WHERE wf.workspace_id = ?
@@ -2633,7 +2673,7 @@ class Database:
             """
             SELECT COUNT(*) FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
             WHERE wf.workspace_id = ?
               AND (p.latitude IS NULL OR p.longitude IS NULL)
             """,
@@ -3500,7 +3540,7 @@ class Database:
                       bp.species
                FROM photos p
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'
+               JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                LEFT JOIN (
                    SELECT photo_id, name AS species FROM (
                        SELECT pk.photo_id, k.name,
@@ -3541,7 +3581,7 @@ class Database:
             """WITH RECURSIVE ancestors(photo_id, folder_id, timestamp) AS (
                    SELECT p.id, p.folder_id, p.timestamp
                    FROM photos p
-                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status = 'ok'
+                   JOIN folders f0 ON f0.id = p.folder_id AND f0.status IN ('ok', 'partial')
                    JOIN workspace_folders wf0
                      ON wf0.folder_id = p.folder_id AND wf0.workspace_id = ?
                    WHERE p.quality_score IS NOT NULL
@@ -3560,7 +3600,7 @@ class Database:
                JOIN workspace_folders wf ON wf.folder_id = f.id
                JOIN ancestors a ON a.folder_id = f.id
                WHERE wf.workspace_id = ?
-                 AND f.status = 'ok'
+                 AND f.status IN ('ok', 'partial')
                GROUP BY f.id
                ORDER BY latest_photo DESC""",
             (ws, ws, ws),
@@ -4967,7 +5007,7 @@ class Database:
             params.insert(0, self._ws_id())
 
         # Always join folders for folder-under rules, scoped to workspace
-        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status = 'ok'"
+        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
         folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
 
         # folder_join comes before join_clause in the query, so its param goes first
