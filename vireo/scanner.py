@@ -363,6 +363,13 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id):
                         os.path.join(preview_dir, fname),
                         exc_info=True,
                     )
+    # Drop the LRU accounting rows alongside the files. Leaving them would
+    # inflate preview_cache_total_bytes with bytes for files that no longer
+    # exist, and push quota eviction to target valid previews before the
+    # ghost rows are eventually cleaned up.
+    db.conn.execute(
+        "DELETE FROM preview_cache WHERE photo_id = ?", (photo_id,)
+    )
 
 
 def _subtree_like_pattern(path, sep=None):

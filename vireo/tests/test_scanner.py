@@ -1633,6 +1633,51 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     )
 
 
+def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_path):
+    """preview_cache LRU rows must be removed alongside preview files when
+    a photo's content changes, or total_bytes accounting reports ghost
+    bytes for files that no longer exist and quota eviction starts
+    targeting valid previews.
+    """
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    img_path = os.path.join(root, "photo.jpg")
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(img_path, "JPEG")
+
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    preview_dir = vireo_dir / "previews"
+    preview_dir.mkdir()
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(root, db, vireo_dir=str(vireo_dir))
+
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    # Seed a preview file + accounting row, as /photos/<id>/preview would.
+    preview_file = preview_dir / f"{photo_id}_1920.jpg"
+    Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    file_bytes = preview_file.stat().st_size
+    db.preview_cache_insert(photo_id, 1920, file_bytes)
+    assert db.preview_cache_total_bytes() == file_bytes
+
+    # Replace source pixels → new file_hash → invalidation should fire.
+    time.sleep(0.05)
+    Image.new("RGB", (800, 600), color=(0, 0, 255)).save(img_path, "JPEG")
+    scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
+
+    assert not preview_file.exists(), "preview file should be deleted"
+    assert db.preview_cache_get(photo_id, 1920) is None, (
+        "preview_cache row must be deleted alongside the file; "
+        "leaving it inflates preview_cache_total_bytes and triggers "
+        "unnecessary eviction of valid previews."
+    )
+    assert db.preview_cache_total_bytes() == 0
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""
