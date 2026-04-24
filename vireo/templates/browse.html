@@ -62,6 +62,17 @@ body {
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+.tree-item .folder-status-partial {
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--warning-bg, #fef3c7);
+  color: var(--warning-fg, #92400e);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 .tree-indent { width: 16px; flex-shrink: 0; }
 .tree-toggle {
   width: 16px;
@@ -1172,7 +1183,7 @@ function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
     var count = c.photo_count != null ? c.photo_count : '';
-    html += '<div class="tree-item" onclick="filterByCollection(' + c.id + ')">' +
+    html += '<div class="tree-item" data-collection-id="' + c.id + '" onclick="filterByCollection(' + c.id + ')">' +
       '<span>' + escapeHtml(c.name) + '</span>' +
       '<span class="count">' + count + '</span></div>';
   });
@@ -1215,9 +1226,13 @@ function renderFolderTree(folders) {
       for (var i = 0; i < depth; i++) indent += '<span class="tree-indent"></span>';
       var toggle = hasChildren ? '<span class="tree-toggle" onclick="toggleTree(event,this)">&#9654;</span>' : '<span class="tree-indent"></span>';
       var activeClass = activeFolderId === f.id ? ' active' : '';
+      var partialBadge = f.status === 'partial'
+        ? '<span class="folder-status-partial" title="Scan did not complete — re-scan to finish">partial</span>'
+        : '';
       html += '<div class="tree-item' + activeClass + '" onclick="filterByFolder(' + f.id + ')" data-folder-id="' + f.id + '">' +
         indent + toggle +
         '<span>' + escapeHtml(f.name) + '</span>' +
+        partialBadge +
         '<span class="count">' + rolledUp[f.id] + '</span>' +
       '</div>';
       if (hasChildren) {
@@ -1332,10 +1347,14 @@ async function loadCollectionCounts() {
     var countsById = {};
     data.forEach(function(c) { countsById[c.id] = c.photo_count; });
     items.forEach(function(el) {
-      var onclick = el.getAttribute('onclick') || '';
-      var m = onclick.match(/filterByCollection\((\d+)\)/);
-      if (m) {
-        var id = parseInt(m[1], 10);
+      var id = parseInt(el.dataset.collectionId, 10);
+      if (isNaN(id)) {
+        // Fallback for any stragglers without data-collection-id.
+        var onclick = el.getAttribute('onclick') || '';
+        var m = onclick.match(/filterByCollection\((\d+)\)/);
+        if (m) id = parseInt(m[1], 10);
+      }
+      if (!isNaN(id)) {
         var span = el.querySelector('.count');
         if (span && countsById[id] != null) span.textContent = countsById[id];
       }
@@ -2861,6 +2880,317 @@ function openInEditorBatch() {
   }
   openInEditor(ids);
 }
+
+/* ---------- Right-click context menu on grid cards ---------- */
+// Single-photo wrappers around the existing batch endpoints. The detail-panel
+// helpers (setFlag, setColorLabel) are coupled to selectedPhotoId; the context
+// menu needs to target an arbitrary id without mutating that focus, so we
+// post directly to the batch endpoints with a 1-photo list.
+async function setRatingFor(photoId, rating) {
+  try {
+    await safeFetch('/api/batch/rating', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], rating: rating}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (p) p.rating = rating;
+  renderGrid();
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+}
+
+async function setFlagFor(photoId, flag) {
+  try {
+    await safeFetch('/api/batch/flag', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], flag: flag}),
+    });
+  } catch(e) { return; }
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (p) p.flag = flag;
+  renderGrid();
+  if (selectedPhotoId === photoId) loadDetail(photoId);
+}
+
+async function setColorLabelFor(photoId, color) {
+  colorLabelGen++;
+  try {
+    await safeFetch('/api/batch/color_label', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: [photoId], color: color}),
+    });
+  } catch(e) { return; }
+  if (color) colorLabels[photoId] = color;
+  else delete colorLabels[photoId];
+  renderGrid();
+  if (selectedPhotoId === photoId) updateDetailColors();
+}
+
+function revealPhoto(photoId) {
+  safeFetch('/api/files/reveal', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_id: photoId}),
+  }, { toast: false }).catch(function(){});
+}
+
+async function copyPhotoPaths(photoIds) {
+  var settled = await Promise.allSettled(photoIds.map(function(id) {
+    return safeFetch('/api/photos/' + id, {}, { toast: false });
+  }));
+  var paths = settled
+    .filter(function(s) { return s.status === 'fulfilled' && s.value && s.value.path; })
+    .map(function(s) { return s.value.path; });
+  var failed = settled.length - paths.length;
+  if (!paths.length) {
+    if (failed > 0) {
+      console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+      showToast(failed === 1 ? '1 path could not be copied' : failed + ' paths could not be copied');
+    }
+    return;
+  }
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(paths.join('\n'));
+      showToast(photoIds.length === 1 ? 'Path copied' : 'Paths copied');
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  if (failed > 0) {
+    console.warn('copyPhotoPaths: ' + failed + ' path(s) failed');
+  }
+}
+
+// Re-apply the .selected highlight to match the current state of
+// selectedPhotos / selectedPhotoId. Mirrors the refresh block at the tail
+// of selectPhoto(); factored out so the context-menu handler can coerce
+// selection without paying the full selectPhoto side-effects.
+function refreshCardSelectionVisuals() {
+  document.querySelectorAll('.grid-card').forEach(function(el) {
+    var cardId = parseInt(el.dataset.id, 10);
+    el.classList.toggle('selected', cardId === selectedPhotoId || selectedPhotos.has(cardId));
+  });
+}
+
+function buildPhotoContextMenu(photoIds) {
+  var one = photoIds.length === 1;
+  var hint = one ? undefined : 'Select a single photo';
+
+  var rateChip = function(n) {
+    return {
+      label: n === 0 ? '\u2606' : String(n),
+      title: n === 0 ? 'No rating' : 'Rate ' + n,
+      onClick: function() {
+        photoIds.forEach(function(id) { setRatingFor(id, n); });
+      },
+    };
+  };
+  var colorChip = function(c, icon, title) {
+    return {
+      label: icon,
+      title: title,
+      onClick: function() {
+        photoIds.forEach(function(id) { setColorLabelFor(id, c); });
+      },
+    };
+  };
+  var flagChip = function(f, icon, title) {
+    return {
+      label: icon, title: title,
+      onClick: function() {
+        photoIds.forEach(function(id) { setFlagFor(id, f); });
+      },
+    };
+  };
+
+  return [
+    { chips: [0, 1, 2, 3, 4, 5].map(rateChip) },
+    { chips: [
+      colorChip(null, '\u25CB', 'No color'),
+      colorChip('red', '\u25CF', 'Red'),
+      colorChip('yellow', '\u25CF', 'Yellow'),
+      colorChip('green', '\u25CF', 'Green'),
+      colorChip('blue', '\u25CF', 'Blue'),
+    ] },
+    { chips: [
+      flagChip('flagged', '\u2691', 'Flag as pick'),
+      flagChip('rejected', '\u2715', 'Reject'),
+      flagChip('none', '\u25CB', 'Unflag'),
+    ] },
+    { separator: true },
+    { label: 'Find Similar', disabled: !one, disabledHint: hint,
+      onClick: function() { if (typeof findSimilar === 'function') findSimilar(photoIds[0]); } },
+    { label: 'Open in Editor',
+      onClick: function() { if (typeof openInEditor === 'function') openInEditor(photoIds); } },
+    { label: 'Reveal in Finder/Folder', disabled: !one, disabledHint: hint,
+      onClick: function() { revealPhoto(photoIds[0]); } },
+    { label: 'Copy Path',
+      onClick: function() { copyPhotoPaths(photoIds); } },
+    { separator: true },
+    { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
+    { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
+    { separator: true },
+    { label: 'Delete', onClick: function() { batchDelete(); } },
+  ];
+}
+
+// Document-level delegation: grids re-render on sort/filter/scroll, so
+// per-card listeners would go stale.
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.grid-card');
+  if (!card || !card.dataset.id) return;
+  // Ignore right-clicks that came from inside the lightbox or a modal; this
+  // handler owns only grid-card context menus. Modal right-clicks are either
+  // handled by their own delegation (lightbox) or fall through to the browser.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  var pid = parseInt(card.dataset.id, 10);
+  // Finder-style coercion: right-click on an item outside the selection
+  // replaces the selection with that one item. Fold selectedPhotoId in first
+  // so a single-focus click doesn't get silently dropped.
+  if (selectedPhotos.size === 0 && selectedPhotoId !== null) {
+    selectedPhotos.add(selectedPhotoId);
+  }
+  var ids = coerceSelectionOnContext(selectedPhotos, pid);
+  // If coercion replaced the set, align selectedPhotoId (so the detail panel
+  // reflects the right-clicked photo) and selectedIndex (the Shift-range
+  // anchor — a subsequent Shift-click must range-select from this card).
+  if (ids.length === 1 && ids[0] === pid && selectedPhotoId !== pid) {
+    selectedPhotoId = pid;
+    selectedIndex = photos.findIndex(function(p) { return p.id === pid; });
+    loadDetail(pid);
+  }
+  refreshCardSelectionVisuals();
+  updateBatchBar();
+  openContextMenu(e, buildPhotoContextMenu(ids));
+});
+
+/* ---------- Folder tree context menu ---------- */
+function revealFolder(fid) {
+  // Fire-and-forget: user-visible feedback is the OS file manager opening.
+  // Server logs any failure via the reason field on the response body.
+  fetch('/api/files/reveal', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({folder_id: fid}),
+  }).catch(function(err) { console.error('revealFolder failed', err); });
+}
+
+async function copyFolderPath(fid) {
+  try {
+    var resp = await fetch('/api/folders/' + fid);
+    if (!resp.ok) return;
+    var folder = await resp.json();
+    if (folder && folder.path) {
+      await navigator.clipboard.writeText(folder.path);
+    }
+  } catch (err) {
+    console.error('copyFolderPath failed', err);
+  }
+}
+
+function rescanFolder(fid) {
+  fetch('/api/folders/' + fid + '/rescan', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({incremental: true}),
+  }).catch(function(err) { console.error('rescanFolder failed', err); });
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-folder-id]');
+  if (!ti) return;
+  // Don't fire if the right-click landed on another context menu.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  e.preventDefault();
+  var fid = parseInt(ti.dataset.folderId, 10);
+  if (isNaN(fid)) return;
+  openContextMenu(e, [
+    { label: 'Filter by this folder', onClick: function() { filterByFolder(fid); } },
+    { separator: true },
+    { label: 'Reveal in Finder/Folder', onClick: function() { revealFolder(fid); } },
+    { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
+    { separator: true },
+    { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
+  ]);
+});
+
+/* ---------- Collection sidebar context menu ---------- */
+async function renameCollection(cid, currentName) {
+  var next = window.prompt('Rename collection', currentName || '');
+  if (next === null) return;             // user cancelled
+  next = next.trim();
+  if (!next || next === currentName) return;
+  try {
+    await safeFetch('/api/collections/' + cid, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: next}),
+    });
+  } catch (err) {
+    console.error('renameCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function duplicateCollection(cid) {
+  try {
+    await safeFetch('/api/collections/' + cid + '/duplicate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+  } catch (err) {
+    console.error('duplicateCollection failed', err);
+    return;
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+async function deleteCollectionById(cid, name) {
+  if (!window.confirm('Delete collection "' + (name || '') + '"?')) return;
+  try {
+    await safeFetch('/api/collections/' + cid, { method: 'DELETE' });
+  } catch (err) {
+    console.error('deleteCollectionById failed', err);
+    return;
+  }
+  // If we were filtering by the deleted collection, clear the filter.
+  if (activeCollectionId === cid) {
+    activeCollectionId = null;
+    resetAndLoad();
+  }
+  await loadCollections();
+  loadCollectionCounts();
+}
+
+document.addEventListener('contextmenu', function(e) {
+  var ti = e.target.closest('.tree-item[data-collection-id]');
+  if (!ti) return;
+  // Don't fire inside another menu, and don't collide with folder-tree delegate.
+  if (e.target.closest('.vireo-ctx-menu')) return;
+  if (ti.hasAttribute('data-folder-id')) return;
+  e.preventDefault();
+  var cid = parseInt(ti.dataset.collectionId, 10);
+  if (isNaN(cid)) return;
+  var nameEl = ti.querySelector('span');
+  var name = nameEl ? nameEl.textContent : '';
+  openContextMenu(e, [
+    { label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } },
+    { separator: true },
+    { label: 'Rename',
+      onClick: function() { renameCollection(cid, name); } },
+    { label: 'Duplicate',
+      onClick: function() { duplicateCollection(cid); } },
+    { separator: true },
+    { label: 'Delete Collection',
+      onClick: function() { deleteCollectionById(cid, name); } },
+  ]);
+});
 
 /* ---------- Deep-link: scroll to photo_id if present in URL ---------- */
 (async function() {

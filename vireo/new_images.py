@@ -22,7 +22,9 @@ def _known_paths_for_workspace(db, workspace_id):
 
 def _mapped_roots(db, workspace_id):
     """Return the workspace's mapped roots — linked folders whose ancestor chain
-    contains no other linked folder. Skips folders marked 'missing'.
+    contains no other linked folder. Skips folders marked 'missing'. Folders
+    flagged ``'partial'`` from an interrupted scan are kept so a rescan can
+    pick up where the previous one stopped.
 
     Checking only the immediate parent would over-include when an intermediate
     folder was unlinked but a deeper descendant is still linked (e.g. /A linked,
@@ -33,7 +35,7 @@ def _mapped_roots(db, workspace_id):
         """SELECT f.id, f.path, f.parent_id
            FROM folders f
            JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ? AND f.status = 'ok'""",
+           WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
         (workspace_id,),
     ).fetchall()
     linked_ids = {r["id"] for r in rows}
@@ -96,7 +98,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5):
                 if full in known:
                     continue
                 root_new += 1
-                if len(sample) < sample_limit:
+                if sample_limit is None or len(sample) < sample_limit:
                     sample.append(full)
 
         total += root_new

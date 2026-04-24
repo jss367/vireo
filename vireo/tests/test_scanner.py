@@ -1237,3 +1237,334 @@ def test_resolve_worker_count_no_windows_cap_on_posix(monkeypatch):
     monkeypatch.setattr(scanner.os, "cpu_count", lambda: 128)
     monkeypatch.setattr(scanner.sys, "platform", "linux")
     assert scanner._resolve_worker_count(list(range(200))) == 128
+
+
+# -- scan resilience: retry on locked DB, mark folder partial on abort --
+
+
+class _FlakyConn:
+    """Connection proxy that injects commit failures for testing.
+
+    sqlite3.Connection.commit is read-only at the instance level, so tests
+    that need to simulate transient commit failures wrap the real connection
+    in this proxy. All other attributes pass through to the real connection
+    so code that calls ``conn.execute(...)`` etc. behaves identically.
+    """
+
+    def __init__(self, real, fail_on_calls):
+        """fail_on_calls: dict {call_number: exception_to_raise}."""
+        self._real = real
+        self._fail_on_calls = dict(fail_on_calls)
+        self._call_count = 0
+
+    def commit(self):
+        self._call_count += 1
+        exc = self._fail_on_calls.get(self._call_count)
+        if exc is not None:
+            raise exc
+        return self._real.commit()
+
+    # sqlite3.Connection is used as a context manager in db.py
+    # (``with self.conn:`` for transactions). Python bypasses ``__getattr__``
+    # for dunder lookups, so we must forward these explicitly. Route commit
+    # through our own method so the fail injection still fires.
+    def __enter__(self):
+        self._real.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            try:
+                self.commit()
+            except BaseException:
+                self._real.rollback()
+                raise
+        else:
+            self._real.rollback()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_scan_retries_on_database_is_locked(tmp_path):
+    """If a commit hits 'database is locked', scan retries instead of aborting.
+
+    busy_timeout covers most cases, but a retry wrapper handles the tail where
+    a contended DB exceeds the timeout mid-scan. Without it, a single transient
+    lock aborts the whole scan and leaves the folder partially populated.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # First two commits raise 'database is locked'; subsequent commits succeed.
+    locked = sqlite3.OperationalError("database is locked")
+    db.conn = _FlakyConn(db.conn, fail_on_calls={1: locked, 2: locked})
+
+    scanner_mod.scan(root, db)
+
+    filenames = {
+        p["filename"]
+        for p in db.conn.execute("SELECT filename FROM photos").fetchall()
+    }
+    assert filenames == {"a.jpg", "b.jpg"}, (
+        f"expected both photos persisted after retries, got {filenames}"
+    )
+
+
+def test_scan_marks_folder_partial_on_unrecoverable_failure(tmp_path):
+    """When scan can't recover, the folder is marked 'partial' before raising.
+
+    Visible state: user sees the folder in its UI with a 'partial' badge and
+    knows to rescan, instead of believing the folder is fully imported.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg', 'c.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Second commit raises a non-lock OperationalError that retry won't
+    # swallow. Scan must mark the folder partial and re-raise.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={2: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db)
+
+    # Unwrap proxy for the final assertion.
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None, "folder row should exist despite aborted scan"
+    assert row["status"] == "partial", (
+        f"expected folder.status='partial' after mid-scan failure, got {row['status']!r}"
+    )
+
+
+def test_partial_folder_is_visible_in_folder_tree(tmp_path):
+    """Folders flagged 'partial' must still render in the browse-page tree.
+
+    get_folder_tree() historically required status='ok'. After marking a
+    folder partial we need it to STILL appear so the user can see the badge
+    and initiate a rescan — otherwise 'partial' silently hides the folder.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/p")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    tree = db.get_folder_tree()
+    ids = {row["id"] for row in tree}
+    assert fid in ids, "partial folder should still appear in get_folder_tree"
+    # Status should be queryable so the UI can render the badge.
+    partial_row = next(row for row in tree if row["id"] == fid)
+    assert partial_row["status"] == "partial"
+
+
+def test_successful_scan_clears_partial_flag(tmp_path):
+    """A successful rescan of a previously-partial folder restores 'ok'."""
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # First scan: fail partway through to leave the folder 'partial'.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={2: sqlite3.OperationalError("disk I/O error")},
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db)
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "partial"
+
+    # Second scan: succeed and clear the flag.
+    db.conn = real_conn
+    scanner_mod.scan(root, db)
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "ok", (
+        f"successful rescan should flip partial → ok, got {row['status']!r}"
+    )
+
+
+def test_successful_scan_clears_partial_on_touched_subfolders(tmp_path):
+    """Recursive scan clears 'partial' on subfolders the scan actually touched.
+
+    The exception path flags every touched subfolder as partial; the success
+    path must reset those same subfolders so a user who rescans after a
+    failure sees a clean tree.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['root.jpg'],
+        'sub': ['nested.jpg'],
+    })
+    db = Database(str(tmp_path / "test.db"))
+
+    scanner_mod.scan(root, db)
+    # Mark both folders partial to simulate a prior mid-scan abort.
+    db.conn.execute("UPDATE folders SET status = 'partial'")
+    db.conn.commit()
+
+    scanner_mod.scan(root, db)
+
+    rows = db.conn.execute(
+        "SELECT path, status FROM folders ORDER BY path"
+    ).fetchall()
+    statuses = {r["path"]: r["status"] for r in rows}
+    assert statuses[root] == "ok", (
+        f"root should be cleared back to ok, got {statuses[root]!r}"
+    )
+    sub_path = os.path.join(root, "sub")
+    assert statuses[sub_path] == "ok", (
+        f"touched subfolder should be cleared back to ok, "
+        f"got {statuses[sub_path]!r}"
+    )
+
+
+def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
+    """Photos in 'partial' folders must stay queryable through read paths.
+
+    Before this fix, `f.status = 'ok'` joins across `db.py` excluded photos
+    from partial folders, so an interrupted scan could make already-imported
+    photos disappear from the UI.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['seen.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    scanner_mod.scan(root, db)
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE path = ?", (root,)
+    )
+    db.conn.commit()
+
+    # Photo queries should still return the photo.
+    photos = db.get_photos(per_page=100)
+    filenames = {p["filename"] for p in photos}
+    assert "seen.jpg" in filenames, (
+        f"photo in partial folder should remain visible, got {filenames}"
+    )
+
+    # And coverage stats should still count it.
+    stats = db.get_coverage_stats()
+    assert stats["total"] >= 1, (
+        f"coverage should count photos in partial folders, "
+        f"got total={stats['total']!r}"
+    )
+
+
+def test_successful_noop_incremental_scan_clears_partial(tmp_path):
+    """A no-op incremental rescan must still clear 'partial' on scoped folders.
+
+    If the success-path reset is gated only on the main loop's
+    ``touched_folder_ids`` set, a successful incremental scan that processes
+    zero files (all photos unchanged) leaves ``status='partial'`` stuck and
+    the folder hidden from ``status='ok'`` read paths. The reset must also
+    run for the outer scan scope (root + restrict_dirs).
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg', 'b.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Initial clean scan so photos are indexed.
+    scanner_mod.scan(root, db)
+
+    # Simulate the after-failure state: folder got flagged 'partial' by a
+    # prior aborted scan even though all photo rows are already present.
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE path = ?", (root,)
+    )
+    db.conn.commit()
+
+    # Incremental rescan — no files changed, so the main loop touches zero
+    # folders. The scan scope fallback should still clear 'partial'.
+    scanner_mod.scan(root, db, incremental=True)
+
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row["status"] == "ok", (
+        f"no-op incremental scan should flip partial → ok, got {row['status']!r}"
+    )
+
+
+def test_pre_pass_failure_marks_folder_partial(tmp_path):
+    """A non-retryable DB error during the pre-pass XMP commit flags the folder.
+
+    Pre-pass XMP re-imports commit before the main scan loop begins. If that
+    commit raises a non-transient error, the scan aborts with the folder row
+    still ``status='ok'`` unless the pre-pass is wrapped in the same partial-
+    status recovery path as the main loop.
+    """
+    import sqlite3
+
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['a.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    # Initial clean scan so the photo row exists for incremental mode.
+    scanner_mod.scan(root, db)
+
+    # Touch the XMP sidecar so the pre-pass re-imports keywords and commits.
+    xmp_path = os.path.join(root, "a.xmp")
+    with open(xmp_path, "w") as f:
+        f.write("<x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>")
+    # Make the existing row's xmp_mtime stale so pre-pass treats it as changed.
+    db.conn.execute("UPDATE photos SET xmp_mtime = 0 WHERE filename = 'a.jpg'")
+    db.conn.commit()
+
+    # First commit after scan starts is the pre-pass XMP UPDATE. Raise a
+    # non-retryable OperationalError there.
+    db.conn = _FlakyConn(
+        db.conn,
+        fail_on_calls={1: sqlite3.OperationalError("disk I/O error")},
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        scanner_mod.scan(root, db, incremental=True)
+
+    real_conn = db.conn._real
+    row = real_conn.execute(
+        "SELECT status FROM folders WHERE path = ?", (root,)
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "partial", (
+        f"expected folder.status='partial' after pre-pass failure, got {row['status']!r}"
+    )

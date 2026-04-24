@@ -284,6 +284,74 @@ def test_load_results_missing(tmp_path):
     assert load_results(str(tmp_path), workspace_id=999) is None
 
 
+def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
+    """save_results must preserve an existing miss_computed_at marker
+    when the caller's results dict doesn't carry one. reflow and
+    regroup-live don't recompute misses, so overwriting the marker
+    would make the pipeline_review "Review misses" shortcut hide itself
+    after every threshold tweak even though miss flags are still valid."""
+    from pipeline import (
+        load_photo_features,
+        load_results,
+        run_full_pipeline,
+        save_results,
+        save_results_raw,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+
+    cache_dir = str(tmp_path)
+    save_results(results, cache_dir, workspace_id=1)
+
+    # Simulate pipeline_job's miss_stage stamping the marker.
+    raw = load_results(cache_dir, workspace_id=1)
+    raw["miss_computed_at"] = "2026-04-22T12:00:00.000000+00:00"
+    save_results_raw(raw, cache_dir, workspace_id=1)
+
+    # Reflow: save new results (without marker) and confirm the marker
+    # survives, matching what the UI needs.
+    fresh = run_full_pipeline(photos)
+    assert "miss_computed_at" not in fresh
+    save_results(fresh, cache_dir, workspace_id=1)
+
+    loaded = load_results(cache_dir, workspace_id=1)
+    assert loaded["miss_computed_at"] == "2026-04-22T12:00:00.000000+00:00"
+
+
+def test_save_results_new_marker_overrides_existing(tmp_path):
+    """When the caller's results dict does carry miss_computed_at (e.g.
+    a fresh full pipeline run restamping the marker), it must win over
+    any marker already in the cache — otherwise reruns couldn't
+    advance the /misses?since= review window."""
+    from pipeline import (
+        load_photo_features,
+        load_results,
+        run_full_pipeline,
+        save_results,
+        save_results_raw,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+
+    cache_dir = str(tmp_path)
+    save_results(results, cache_dir, workspace_id=1)
+
+    raw = load_results(cache_dir, workspace_id=1)
+    raw["miss_computed_at"] = "2026-04-22T12:00:00.000000+00:00"
+    save_results_raw(raw, cache_dir, workspace_id=1)
+
+    fresh = run_full_pipeline(photos)
+    fresh["miss_computed_at"] = "2026-04-23T15:00:00.000000+00:00"
+    save_results(fresh, cache_dir, workspace_id=1)
+
+    loaded = load_results(cache_dir, workspace_id=1)
+    assert loaded["miss_computed_at"] == "2026-04-23T15:00:00.000000+00:00"
+
+
 # -- Species encounter labels --
 
 

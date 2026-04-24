@@ -907,6 +907,117 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+# --- Cluster 2b: Coverage Stats ---
+
+def test_get_coverage_stats_empty_workspace(tmp_path):
+    """Totals are zero when the workspace has no photos at all."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    stats = db.get_coverage_stats()
+    assert stats['total'] == 0
+    for key in ('thumbnail', 'phash', 'quality', 'detected', 'classified',
+                'gps', 'file_hash', 'working_copy', 'mask', 'rating'):
+        assert stats[key] == 0, f"{key} should be 0 on empty workspace"
+
+
+def test_get_coverage_stats_counts_each_stage(tmp_path):
+    """Each pipeline stage is counted independently based on its column."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {'thumb_path': '/t/1.jpg', 'phash': 'abc', 'quality_score': 0.9,
+         'latitude': 10.0, 'longitude': 20.0, 'file_hash': 'h1',
+         'working_copy_path': '/wc/1.jpg', 'mask_path': '/m/1.png',
+         'subject_tenengrad': 1.5, 'bg_tenengrad': 0.2,
+         'eye_x': 0.5, 'embedding': b'e', 'burst_id': 'b1',
+         'rating': 4, 'exif_data': '{}',
+         'timestamp': '2024-01-01T00:00:00'},
+        {'thumb_path': '/t/2.jpg', 'phash': 'def',
+         'timestamp': '2024-02-01T00:00:00'},
+        {},  # Nothing set
+    ])
+    # Add a detection + prediction for the first photo only.
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], 'Robin', 0.95, 'test')
+
+    stats = db.get_coverage_stats()
+    assert stats['total'] == 3
+    assert stats['thumbnail'] == 2
+    assert stats['phash'] == 2
+    assert stats['quality'] == 1
+    assert stats['gps'] == 1
+    assert stats['file_hash'] == 1
+    assert stats['working_copy'] == 1
+    assert stats['mask'] == 1
+    assert stats['subject_sharpness'] == 1
+    assert stats['bg_sharpness'] == 1
+    assert stats['eye'] == 1
+    assert stats['label_embedding'] == 1
+    assert stats['burst'] == 1
+    assert stats['rating'] == 1  # rating > 0
+    assert stats['exif'] == 1
+    assert stats['timestamp'] == 2
+    assert stats['detected'] == 1
+    assert stats['classified'] == 1
+
+
+def test_coverage_stats_scoped_to_active_workspace(tmp_path):
+    """Photos and detections in other workspaces must not leak in."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws1 = db.ensure_default_workspace()
+    ws2 = db.create_workspace('Other')
+    db.set_active_workspace(ws1)
+    fid1 = db.add_folder('/ws1', name='ws1')
+    db.add_workspace_folder(ws1, fid1)
+    db.add_photo(folder_id=fid1, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.set_active_workspace(ws2)
+    fid2 = db.add_folder('/ws2', name='ws2')
+    db.add_workspace_folder(ws2, fid2)
+    db.add_photo(folder_id=fid2, filename='b.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid2, filename='c.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.set_active_workspace(ws1)
+    assert db.get_coverage_stats()['total'] == 1
+    db.set_active_workspace(ws2)
+    assert db.get_coverage_stats()['total'] == 2
+
+
+def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
+    """Returned rows are one per workspace folder with correct per-folder totals."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid_a = db.add_folder('/A', name='A')
+    fid_b = db.add_folder('/B', name='B')
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+    pa = db.add_photo(folder_id=fid_a, filename='1.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET thumb_path = '/t/1.jpg', "
+                    "phash = 'x' WHERE id = ?", (pa,))
+    db.add_photo(folder_id=fid_b, filename='2.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.add_photo(folder_id=fid_b, filename='3.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+    db.conn.commit()
+
+    folders = db.get_folder_coverage_stats()
+    by_path = {f['path']: f for f in folders}
+    assert by_path['/A']['total'] == 1
+    assert by_path['/A']['thumbnail'] == 1
+    assert by_path['/A']['phash'] == 1
+    assert by_path['/B']['total'] == 2
+    assert by_path['/B']['thumbnail'] == 0
+    assert by_path['/B']['phash'] == 0
+
+
 # --- Cluster 3: Prediction Management ---
 
 def test_get_group_predictions(tmp_path):
@@ -2695,6 +2806,60 @@ def test_check_folder_health_recovers(tmp_path):
     assert db.conn.execute("SELECT status FROM folders WHERE id = ?", (fid,)).fetchone()["status"] == "ok"
 
 
+def test_check_folder_health_preserves_partial_when_path_exists(tmp_path):
+    """check_folder_health must NOT overwrite 'partial' with 'ok'.
+
+    Regression: the app runs this health check in a 10-minute background loop.
+    If it blindly sets every existing folder to 'ok', a folder flagged
+    'partial' by a failed scan gets auto-cleared before the user has a chance
+    to rescan, and the UI badge silently disappears. Only a successful rescan
+    should clear partial.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = str(tmp_path / "partial_folder")
+    os.makedirs(folder)
+    fid = db.add_folder(folder, name="partial_folder")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 0, "partial folder on disk should not change status"
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "partial"
+
+
+def test_check_folder_health_partial_becomes_missing_when_path_gone(tmp_path):
+    """A 'partial' folder whose path disappears still flips to 'missing'.
+
+    Rescanning a vanished directory can't recover the data, so the usual
+    missing-folder UX (relocate or remove) is more useful than keeping the
+    partial badge.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    fid = db.add_folder("/nope/partial_gone", name="partial_gone")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+
+    changed = db.check_folder_health()
+    assert changed == 1
+    status = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()["status"]
+    assert status == "missing"
+
+
 def test_get_missing_folders(tmp_path):
     """get_missing_folders returns missing folders with photo counts."""
     from db import Database
@@ -4439,3 +4604,569 @@ def test_predictions_has_new_unique_and_no_legacy_columns(tmp_path):
         "labels_fingerprint" in (idx["sql"] or "") and "species" in (idx["sql"] or "")
         for idx in indexes
     )
+
+
+def test_miss_columns_present(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT miss_no_subject, miss_clipped, miss_oof, miss_computed_at "
+        "FROM photos LIMIT 0"
+    ).description
+    names = {c[0] for c in row}
+    assert names == {
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
+    }
+
+
+def test_list_misses_returns_flagged_photos_only(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22' "
+        "WHERE id=?", (p1,)
+    )
+    db.conn.commit()
+
+    misses = db.list_misses()
+    ids = [m["id"] for m in misses]
+    assert p1 in ids
+    assert p2 not in ids
+
+
+def test_list_misses_filters_by_category(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_clip = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_oof = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_clip,))
+    db.conn.execute("UPDATE photos SET miss_oof=1     WHERE id=?", (p_oof,))
+    db.conn.commit()
+
+    assert [m["id"] for m in db.list_misses(category="clipped")] == [p_clip]
+    assert [m["id"] for m in db.list_misses(category="oof")] == [p_oof]
+
+
+def test_clear_miss_flag_on_photo(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_oof=1 WHERE id=?", (p,)
+    )
+    db.conn.commit()
+
+    db.clear_miss_flag(p, "clipped")
+    row = db.conn.execute(
+        "SELECT miss_clipped, miss_oof FROM photos WHERE id=?", (p,)
+    ).fetchone()
+    assert row["miss_clipped"] == 0
+    assert row["miss_oof"] == 1
+
+
+def test_bulk_reject_category_sets_flag_rejected(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p1 = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p2 = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)", (p1, p2)
+    )
+    db.conn.commit()
+
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 2
+    assert {a["photo_id"] for a in affected} == {p1, p2}
+    for pid in (p1, p2):
+        flag = db.conn.execute(
+            "SELECT flag FROM photos WHERE id=?", (pid,)
+        ).fetchone()["flag"]
+        assert flag == "rejected"
+
+
+def test_misses_helpers_exclude_already_rejected_photos(tmp_path):
+    """Neither list_misses nor bulk_reject should touch photos already rejected.
+
+    The exclusion clause (flag IS NULL OR flag != 'rejected') is load-bearing:
+    a photo that's already been rejected must not show up again as a miss
+    (it's done) and must not inflate the bulk-reject rowcount (it's not news).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_miss = db.add_photo(
+        folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_already = db.add_photo(
+        folder_id, "b.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
+        (p_miss, p_already),
+    )
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (p_already,))
+    db.conn.commit()
+
+    listed = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_miss in listed
+    assert p_already not in listed
+
+    affected = db.bulk_reject_miss_category("clipped")
+    # only p_miss got rejected; p_already was already rejected
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_miss
+    flag_already = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_already,)
+    ).fetchone()["flag"]
+    assert flag_already == "rejected"  # unchanged
+
+
+def test_list_misses_since_filter(tmp_path):
+    """`since` restricts results to photos whose miss_computed_at >= since.
+
+    Used by the pipeline-review "Review misses" step to scope the grid to
+    photos from the current pipeline run.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p_old = db.add_photo(
+        folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0
+    )
+    p_new = db.add_photo(
+        folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-20T00:00:00+00:00' "
+        "WHERE id=?", (p_old,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at='2026-04-22T10:00:00+00:00' "
+        "WHERE id=?", (p_new,),
+    )
+    db.conn.commit()
+
+    all_ids = [m["id"] for m in db.list_misses(category="clipped")]
+    assert p_old in all_ids and p_new in all_ids
+
+    recent = [m["id"] for m in db.list_misses(category="clipped",
+                                              since="2026-04-21T00:00:00+00:00")]
+    assert recent == [p_new]
+
+    grouped = db.list_misses(since="2026-04-21T00:00:00+00:00")
+    assert [m["id"] for m in grouped] == [p_new]
+
+
+def test_list_misses_scoped_to_active_workspace(tmp_path):
+    """Misses in folders linked only to workspace A must not appear or get
+    rejected when workspace B is active."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    fb = db.add_folder("/tmp/b", name="b")
+    p_b = db.add_photo(fb, "b.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_b,))
+    db.conn.commit()
+
+    # Workspace B sees only its own miss.
+    ids_b = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_b == [p_b]
+
+    # Bulk reject in B must not touch A's photo.
+    affected = db.bulk_reject_miss_category("clipped")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_b
+    flag_a = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_a,)
+    ).fetchone()["flag"]
+    assert flag_a != "rejected"
+    flag_b = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_b,)
+    ).fetchone()["flag"]
+    assert flag_b == "rejected"
+
+    # Switching back to A should still reveal its untouched miss.
+    db.set_active_workspace(ws_a)
+    ids_a = [m["id"] for m in db.list_misses(category="clipped")]
+    assert ids_a == [p_a]
+
+
+def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
+    """list_misses must source detection_box/detection_conf from the
+    canonical `detections` table (highest-confidence row per photo, workspace-
+    scoped), not the legacy photos.detection_* columns that aren't populated
+    by normal pipeline runs."""
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p,))
+    db.conn.commit()
+    # Two detections; the primary is the higher-confidence one.
+    db.save_detections(
+        p,
+        [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1},
+             "confidence": 0.40, "category": "animal"},
+            {"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
+             "confidence": 0.85, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == 1
+    m = misses[0]
+    assert m["detection_conf"] == 0.85
+    box = _json.loads(m["detection_box"])
+    assert box == {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2}
+
+
+def test_list_misses_returns_null_detection_when_no_detections(tmp_path):
+    """A no_subject miss has no detection — detection_box/conf are None."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+    p = db.add_photo(folder_id, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_no_subject=1 WHERE id=?", (p,))
+    db.conn.commit()
+
+    misses = db.list_misses(category="no_subject")
+    assert len(misses) == 1
+    assert misses[0]["detection_box"] is None
+    assert misses[0]["detection_conf"] is None
+
+
+def test_bulk_reject_miss_category_scoped_by_since(tmp_path):
+    """Bulk reject must honor the same `since` filter as list_misses so
+    clicking "Reject all" on /misses?since=... doesn't silently reject
+    older misses from prior pipeline runs that aren't shown on screen."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_old = db.add_photo(folder_id, "old.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_new = db.add_photo(folder_id, "new.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-10T00:00:00+00:00", p_old),
+    )
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1, miss_computed_at=? WHERE id=?",
+        ("2026-04-22T10:00:00+00:00", p_new),
+    )
+    db.conn.commit()
+
+    # Since filter matches only the new miss.
+    affected = db.bulk_reject_miss_category("clipped", since="2026-04-20T00:00:00+00:00")
+    assert len(affected) == 1
+    assert affected[0]["photo_id"] == p_new
+
+    flag_old = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    flag_new = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_new,)
+    ).fetchone()["flag"]
+    assert flag_old != "rejected"
+    assert flag_new == "rejected"
+
+    # Without since, the old miss is now eligible.
+    affected2 = db.bulk_reject_miss_category("clipped")
+    assert len(affected2) == 1
+    assert affected2[0]["photo_id"] == p_old
+    flag_old2 = db.conn.execute(
+        "SELECT flag FROM photos WHERE id=?", (p_old,)
+    ).fetchone()["flag"]
+    assert flag_old2 == "rejected"
+
+
+def test_bulk_reject_miss_category_preserves_null_flag_in_old_value(tmp_path):
+    """old_value must be None (not "") for rows with NULL flag, so undo
+    can restore the original NULL rather than writing a non-canonical
+    empty string that bypasses flag validation (none/flagged/rejected
+    or NULL)."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    p_null = db.add_photo(folder_id, "null.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id, "none.jpg", ".jpg", file_size=100, file_mtime=2.0)
+    p_flagged = db.add_photo(folder_id, "flagged.jpg", ".jpg", file_size=100, file_mtime=3.0)
+
+    # p_null forced to NULL flag (add_photo defaults the column to 'none');
+    # p_none explicitly "none"; p_flagged "flagged".
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?, ?)",
+        (p_null, p_none, p_flagged),
+    )
+    db.conn.execute("UPDATE photos SET flag=NULL      WHERE id=?", (p_null,))
+    db.conn.execute("UPDATE photos SET flag='none'    WHERE id=?", (p_none,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (p_flagged,))
+    db.conn.commit()
+
+    affected = db.bulk_reject_miss_category("clipped")
+    by_id = {a["photo_id"]: a for a in affected}
+
+    assert by_id[p_null]["old_value"] is None
+    assert by_id[p_none]["old_value"] == "none"
+    assert by_id[p_flagged]["old_value"] == "flagged"
+
+
+def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
+    """With >999 flagged misses, the detections IN (...) clause would exceed
+    SQLite's SQLITE_MAX_VARIABLE_NUMBER. list_misses must chunk the lookup
+    so /api/misses doesn't raise ``OperationalError: too many SQL variables``
+    for workspaces with many flagged photos."""
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+    folder_id = db.add_folder("/tmp/fake")
+
+    # Insert 1100 photos, all flagged as clipped, each with one detection.
+    # This pushes the IN clause well past the default 999-var limit and would
+    # crash without chunking.
+    N = 1100
+    photo_ids = []
+    for i in range(N):
+        pid = db.add_photo(
+            folder_id, f"p{i:04d}.jpg", ".jpg",
+            file_size=100, file_mtime=float(i + 1),
+        )
+        photo_ids.append(pid)
+    db.conn.executemany(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?",
+        [(pid,) for pid in photo_ids],
+    )
+    db.conn.commit()
+    for pid in photo_ids:
+        db.save_detections(
+            pid,
+            [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+              "confidence": 0.9, "category": "animal"}],
+            detector_model="megadetector-v6",
+        )
+
+    misses = db.list_misses(category="clipped")
+    assert len(misses) == N
+    # Every row must have a detection attached (proving chunking visited all).
+    assert all(m["detection_conf"] == 0.9 for m in misses)
+    assert all(m["detection_box"] is not None for m in misses)
+
+
+def test_clear_miss_flag_scoped_to_active_workspace(tmp_path):
+    """clear_miss_flag must refuse to touch a photo from another workspace."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "m.db"))
+
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("Other")
+
+    db.set_active_workspace(ws_a)
+    fa = db.add_folder("/tmp/a", name="a")
+    p_a = db.add_photo(fa, "a.jpg", ".jpg", file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET miss_clipped=1 WHERE id=?", (p_a,))
+    db.conn.commit()
+
+    db.set_active_workspace(ws_b)
+    with pytest.raises(ValueError):
+        db.clear_miss_flag(p_a, "clipped")
+
+    # A's miss flag must still be set.
+    row = db.conn.execute(
+        "SELECT miss_clipped FROM photos WHERE id=?", (p_a,)
+    ).fetchone()
+    assert row["miss_clipped"] == 1
+
+
+def test_new_image_snapshots_tables_exist(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = {
+        r["name"]
+        for r in db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "new_image_snapshots" in tables
+    assert "new_image_snapshot_files" in tables
+
+
+def test_create_and_get_new_images_snapshot(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    assert isinstance(snap_id, int)
+
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap is not None
+    assert snap["file_count"] == 2
+    assert snap["workspace_id"] == ws_id
+    assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    other_ws = db.create_workspace("Other")
+    paths = ["/tmp/a/IMG_001.JPG"]
+    snap_id = db.create_new_images_snapshot(paths)
+    db.set_active_workspace(other_ws)
+    assert db.get_new_images_snapshot(snap_id) is None
+
+
+def test_snapshot_deleted_with_workspace(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    throwaway_ws = db.create_workspace("Throwaway")
+    db.set_active_workspace(throwaway_ws)
+    snap_id = db.create_new_images_snapshot(["/tmp/a.jpg"])
+    db.delete_workspace(throwaway_ws)
+    row = db.conn.execute(
+        "SELECT id FROM new_image_snapshots WHERE id = ?", (snap_id,)
+    ).fetchone()
+    assert row is None
+
+
+def test_create_snapshot_empty_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    snap_id = db.create_new_images_snapshot([])
+    snap = db.get_new_images_snapshot(snap_id)
+    assert snap["file_count"] == 0
+    assert snap["file_paths"] == []
+
+
+# -- busy_timeout / lock resilience --
+
+
+def test_busy_timeout_pragma_is_set(tmp_path):
+    """Each connection explicitly sets PRAGMA busy_timeout to at least 30s.
+
+    Python's sqlite3 default (5000ms) is too tight under load — heavy
+    pipeline writes can hold the writer lock longer than that. A real-world
+    scan against a busy DB hit 'database is locked' with the implicit default.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    timeout_ms = db.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert timeout_ms >= 30000
+
+
+def test_concurrent_writers_wait_rather_than_fail(tmp_path):
+    """A second writer queues behind the first instead of crashing.
+
+    Repro of the failure mode that killed 3 of 4 parallel scans in prod: the
+    default 5s busy_timeout wasn't enough under load. With a longer timeout
+    explicitly set, the second writer waits and succeeds.
+    """
+    import sqlite3
+    import threading
+    import time
+
+    from db import Database
+
+    db_path = str(tmp_path / "concurrent.db")
+    db = Database(db_path)
+    db.add_folder("/a")
+
+    blocker = sqlite3.connect(db_path, check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("UPDATE folders SET name = 'held' WHERE path = '/a'")
+
+    def release_after_delay():
+        time.sleep(0.8)
+        blocker.commit()
+        blocker.close()
+
+    threading.Thread(target=release_after_delay, daemon=True).start()
+
+    start = time.time()
+    db.add_folder("/b")
+    elapsed = time.time() - start
+
+    assert elapsed >= 0.5, f"writer did not wait for lock (elapsed={elapsed:.2f}s)"
+    assert elapsed < 5.0, f"writer waited too long (elapsed={elapsed:.2f}s)"
+    paths = {r["path"] for r in db.conn.execute("SELECT path FROM folders").fetchall()}
+    assert {"/a", "/b"}.issubset(paths)
+
+
+def test_folder_status_partial_value_allowed(tmp_path):
+    """folders.status accepts 'partial' as a value — scan abort marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/x")
+    db.conn.execute("UPDATE folders SET status = 'partial' WHERE id = ?", (fid,))
+    db.conn.commit()
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert row["status"] == "partial"
+
+
+def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
+    """Partial folders must stay in the tree so the browse sidebar can render
+    a badge and the user can rescan. Also, the returned rows must carry
+    ``status`` so the UI can tell ok from partial. Missing folders are still
+    excluded — they have their own ``get_missing_folders`` path.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "tree.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    ok_id = db.add_folder("/ok", name="ok")
+    partial_id = db.add_folder("/partial", name="partial")
+    missing_id = db.add_folder("/missing", name="missing")
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE id = ?", (partial_id,)
+    )
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (missing_id,)
+    )
+    db.conn.commit()
+
+    rows = {row["id"]: dict(row) for row in db.get_folder_tree()}
+
+    assert ok_id in rows, "ok folder must appear in tree"
+    assert partial_id in rows, (
+        "partial folder must appear in tree so badge renders and rescan works"
+    )
+    assert missing_id not in rows, "missing folder must not appear in tree"
+    assert rows[ok_id]["status"] == "ok"
+    assert rows[partial_id]["status"] == "partial"

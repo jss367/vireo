@@ -497,3 +497,185 @@ def test_import_full_copy_false_still_scans_source_root(setup, tmp_path, monkeyp
     assert call["restrict_dirs"] is None, (
         f"copy=false must leave restrict_dirs unset; got {call['restrict_dirs']!r}"
     )
+
+
+def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
+    """POST /api/jobs/pipeline should propagate source_snapshot_id from the
+    request body into the PipelineParams passed to run_pipeline_job."""
+    app, db_path = setup
+
+    # Create a snapshot in the active workspace so the request body references
+    # a real id (run_pipeline_job itself is spied — we only assert what gets
+    # passed to it).
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    # The handler does ``from pipeline_job import PipelineParams, run_pipeline_job``
+    # inside the request, so patching the attribute on the module swaps what
+    # the handler's local binding will see on next request.
+    import threading
+
+    import pipeline_job
+    captured = {}
+    called = threading.Event()
+    original = pipeline_job.run_pipeline_job
+
+    def spy_run(job, runner, db_path_arg, ws_id, params):
+        captured["source_snapshot_id"] = params.source_snapshot_id
+        called.set()
+
+    pipeline_job.run_pipeline_job = spy_run
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "source_snapshot_id": snap_id,
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, resp.get_json()
+
+        # JobRunner runs work() on a worker thread; wait briefly for spy to fire.
+        assert called.wait(timeout=5.0), "run_pipeline_job spy was not invoked"
+        assert captured["source_snapshot_id"] == snap_id
+    finally:
+        pipeline_job.run_pipeline_job = original
+
+
+def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
+    """When a valid source_snapshot_id is present, the job overrides any
+    source/sources the caller passed. The handler must not preflight-validate
+    those stale paths — rejecting an otherwise-valid snapshot run because
+    the accompanying placeholder folder no longer exists is a false 400."""
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    import pipeline_job
+    original = pipeline_job.run_pipeline_job
+    pipeline_job.run_pipeline_job = lambda *a, **kw: None
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "source_snapshot_id": snap_id,
+                "sources": ["/does/not/exist/stale"],  # stale placeholder
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, (
+                f"snapshot should override stale sources, got "
+                f"{resp.status_code}: {resp.get_json()}"
+            )
+    finally:
+        pipeline_job.run_pipeline_job = original
+
+
+def test_pipeline_rejects_destination_with_snapshot(setup, tmp_path):
+    """A snapshot-backed run walks the folders that already hold the files
+    — there is no valid `destination` combination. If the handler accepted
+    both, the copy stage would ingest entire source folders (not just the
+    snapshot set), snapshot filtering would then drop the destination-scanned
+    photos, and the user would pay for an expensive copy that produces
+    nothing downstream. Reject synchronously."""
+    app, db_path = setup
+
+    from db import Database
+    db = Database(db_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db.add_folder(str(folder))
+    snap_id = db.create_new_images_snapshot([str(img_path)])
+    db.conn.close()
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": snap_id,
+            "destination": str(dest),
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 400, (
+            f"destination is incompatible with snapshot runs, got "
+            f"{resp.status_code}: {resp.get_json()}"
+        )
+
+
+def test_pipeline_rejects_unknown_snapshot_id(setup, tmp_path):
+    """A pipeline request with a non-existent source_snapshot_id must be
+    rejected synchronously with 404 rather than accepted and failing later
+    on the worker thread with a generic job error. This gives the client
+    an actionable response at request time."""
+    app, db_path = setup
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": 99999,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 404, (
+            f"stale snapshot id must be rejected synchronously, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )
+
+
+def test_pipeline_rejects_oversized_snapshot_id(setup):
+    """An integer outside SQLite's signed 64-bit range would raise
+    OverflowError during parameter binding, surfacing as a 500. The endpoint
+    must reject it cleanly before reaching SQLite."""
+    app, _ = setup
+    huge = 10 ** 100
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": huge,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert 400 <= resp.status_code < 500, (
+            f"oversized snapshot id must be rejected with 4xx, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )
+
+
+@pytest.mark.parametrize("bad_id", [{}, [], [1, 2], {"id": 3}, "abc", 1.5, True])
+def test_pipeline_rejects_non_integer_snapshot_id(setup, bad_id):
+    """Malformed source_snapshot_id values (objects, arrays, non-numeric
+    strings, floats, booleans) must be rejected with a 4xx before reaching
+    the DB layer. Without validation, SQLite raises InterfaceError and the
+    client sees an opaque 500."""
+    app, _ = setup
+
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json={
+            "source_snapshot_id": bad_id,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert 400 <= resp.status_code < 500, (
+            f"bad snapshot id {bad_id!r} must be rejected with 4xx, "
+            f"got {resp.status_code}: {resp.get_json()}"
+        )

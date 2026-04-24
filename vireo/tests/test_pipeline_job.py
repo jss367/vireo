@@ -8,7 +8,13 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from pipeline_job import PipelineParams, run_pipeline_job
+from pipeline_job import (
+    STAGE_WEIGHTS,
+    PipelineParams,
+    _stage_fraction,
+    _weighted_progress,
+    run_pipeline_job,
+)
 
 
 def _drop_jpeg(folder_path, filename):
@@ -746,6 +752,186 @@ def test_pipeline_scan_progress_includes_rate_and_eta(tmp_path, monkeypatch):
     assert "eta_seconds" in last, "Progress event should include eta_seconds"
     assert isinstance(last["rate"], (int, float))
     assert isinstance(last["eta_seconds"], (int, float))
+
+
+def test_pipeline_multi_folder_scan_progress_is_monotonic(tmp_path, monkeypatch):
+    """Scan progress must not move backward at folder boundaries.
+
+    When sources is a list of folders, pipeline_job loops calling scan()
+    once per folder. Each scan() reports progress as local (current, total).
+    The weighted overall bar reads stages["scan"]["count"]/.total, so if
+    those get overwritten rather than accumulated, the UI progress jumps
+    backward when folder N+1 starts.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    folder_a = tmp_path / "folderA"
+    folder_a.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "blue").save(str(folder_a / f"a{i:02d}.jpg"))
+    folder_b = tmp_path / "folderB"
+    folder_b.mkdir()
+    for i in range(6):
+        Image.new("RGB", (40, 40), "red").save(str(folder_b / f"b{i:02d}.jpg"))
+
+    runner = JobRunner()
+    scan_counts = []
+    scan_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            scan_info = stages.get("scan") or {}
+            if scan_info.get("status") == "running":
+                scan_counts.append(scan_info.get("count") or 0)
+                scan_totals.append(scan_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(folder_a), str(folder_b)],
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-scan-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(scan_counts) > 0, "Expected at least one running scan progress event"
+    for i in range(1, len(scan_counts)):
+        assert scan_counts[i] >= scan_counts[i - 1], (
+            f"scan count moved backward: {scan_counts[i - 1]} -> "
+            f"{scan_counts[i]} at event {i}; full sequence={scan_counts}"
+        )
+    for i in range(1, len(scan_totals)):
+        assert scan_totals[i] >= scan_totals[i - 1], (
+            f"scan total moved backward: {scan_totals[i - 1]} -> "
+            f"{scan_totals[i]} at event {i}; full sequence={scan_totals}"
+        )
+    assert scan_totals[-1] >= 12, (
+        f"final scan total should cover both folders (>=12), got {scan_totals[-1]}"
+    )
+
+
+def test_pipeline_multi_source_ingest_progress_is_monotonic(tmp_path, monkeypatch):
+    """Ingest progress must not move backward at source folder boundaries.
+
+    Copy mode with sources=[folderA, folderB] calls do_ingest() once per
+    folder. Each call reports (current, total) local to that folder. The
+    weighted overall bar reads stages["ingest"]["count"]/.total, so if
+    those get overwritten rather than accumulated, overall progress
+    rewinds each time a new source starts — the exact regression the
+    scan accumulator already prevents. Same treatment needed for ingest.
+    """
+    import time
+
+    import config as cfg
+    from db import Database
+    from jobs import JobRunner
+    from pipeline_job import PipelineParams, run_pipeline_job
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    from PIL import Image
+    src_a = tmp_path / "srcA"
+    src_a.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "blue").save(str(src_a / f"a{i:02d}.jpg"))
+    src_b = tmp_path / "srcB"
+    src_b.mkdir()
+    for i in range(5):
+        Image.new("RGB", (40, 40), "red").save(str(src_b / f"b{i:02d}.jpg"))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    runner = JobRunner()
+    ingest_counts = []
+    ingest_totals = []
+    orig_push = runner.push_event
+
+    def capture_push(job_id, event_type, data):
+        if event_type == "progress":
+            stages = data.get("stages") or {}
+            ingest_info = stages.get("ingest") or {}
+            if ingest_info.get("status") == "running":
+                ingest_counts.append(ingest_info.get("count") or 0)
+                ingest_totals.append(ingest_info.get("total") or 0)
+        orig_push(job_id, event_type, data)
+
+    monkeypatch.setattr(runner, "push_event", capture_push)
+
+    params = PipelineParams(
+        sources=[str(src_a), str(src_b)],
+        destination=str(dest),
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    job = {
+        "id": "test-multi-ingest-mono",
+        "type": "pipeline",
+        "status": "running",
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "finished_at": None,
+        "progress": {"current": 0, "total": 0, "current_file": ""},
+        "result": None,
+        "errors": [],
+        "config": {},
+        "workspace_id": ws_id,
+        "steps": [],
+    }
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert len(ingest_counts) > 0, "Expected at least one running ingest progress event"
+    for i in range(1, len(ingest_counts)):
+        assert ingest_counts[i] >= ingest_counts[i - 1], (
+            f"ingest count moved backward: {ingest_counts[i - 1]} -> "
+            f"{ingest_counts[i]} at event {i}; full sequence={ingest_counts}"
+        )
+    for i in range(1, len(ingest_totals)):
+        assert ingest_totals[i] >= ingest_totals[i - 1], (
+            f"ingest total moved backward: {ingest_totals[i - 1]} -> "
+            f"{ingest_totals[i]} at event {i}; full sequence={ingest_totals}"
+        )
+    assert ingest_totals[-1] >= 10, (
+        f"final ingest total should cover both sources (>=10), got {ingest_totals[-1]}"
+    )
 
 
 def test_pipeline_ingest_updates_step_progress(tmp_path, monkeypatch):
@@ -4228,3 +4414,525 @@ def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
         f"stages['thumbnails']['count'] must include failed items (was {thumb_stage_count}). "
         f"Last event stages: {last['stages']}"
     )
+
+
+def test_pipeline_with_snapshot_scans_only_snapshot_folders(tmp_path, monkeypatch):
+    """When source_snapshot_id is provided, the scan stage must walk only the
+    parent directories of the snapshot's files — sibling folders registered
+    with the workspace but not in the snapshot must NOT be scanned."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Two sibling folders each with one JPEG. Only folder A is in the snapshot.
+    folder_a = tmp_path / "folderA"
+    folder_b = tmp_path / "folderB"
+    folder_a.mkdir()
+    folder_b.mkdir()
+    folder_a_id = db.add_folder(str(folder_a))
+    folder_b_id = db.add_folder(str(folder_b))
+    _drop_jpeg(str(folder_a), "IMG_001.JPG")
+    _drop_jpeg(str(folder_b), "IMG_002.JPG")
+
+    snap_id = db.create_new_images_snapshot([str(folder_a / "IMG_001.JPG")])
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify via DB state: folder A has its photo ingested, folder B does not.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+    a_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_a_id,),
+    ).fetchall()
+    b_photos = verify_db.conn.execute(
+        "SELECT filename FROM photos WHERE folder_id = ?", (folder_b_id,),
+    ).fetchall()
+    assert [r["filename"] for r in a_photos] == ["IMG_001.JPG"], (
+        f"folder A should have its snapshot file ingested, got {list(a_photos)}"
+    )
+    assert list(b_photos) == [], (
+        f"folder B must NOT be scanned (not in snapshot), got {list(b_photos)}"
+    )
+
+
+def test_pipeline_snapshot_excludes_late_arriving_files(tmp_path, monkeypatch):
+    """Files that land in a registered folder AFTER a snapshot is captured
+    must still be scanned (we walk the folder), but downstream stages
+    (classify, extract_masks, regroup) must be constrained to the snapshot's
+    photo-id set. Verified via DB state: only the early (snapshot) photo
+    should have a predictions row after the pipeline completes.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    db.add_folder(str(folder))
+
+    # "Early" file — exists at snapshot time, goes into the snapshot.
+    # Use distinct pixel content so the scanner's hash-based duplicate
+    # resolver doesn't collapse the two files into one photo row (same
+    # 16x16 black rectangle hashes to the same bytes).
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(
+        str(folder / "IMG_early.JPG")
+    )
+    snap_id = db.create_new_images_snapshot([str(folder / "IMG_early.JPG")])
+
+    # "Late" file — arrives after the snapshot but before the pipeline runs.
+    # The scanner will ingest it (same folder), but downstream stages must
+    # skip it.
+    Image.new("RGB", (16, 16), (200, 50, 50)).save(
+        str(folder / "IMG_late.JPG")
+    )
+
+    # Wire up fake classifier + detect_batch so classify_stage actually runs
+    # and writes a predictions row for whatever photo it sees.
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # detect_stage calls ensure_megadetector_weights() whenever any photo
+    # lacks a cached detection — which is every fresh-scan run. Short-circuit
+    # to avoid a real network download in the test.
+    import detector as detector_mod
+    monkeypatch.setattr(
+        detector_mod, "ensure_megadetector_weights",
+        lambda progress_callback=None: "/tmp/fake-md-weights.onnx",
+    )
+
+    # Map filename → synthetic detection_id; we need a real detection row per
+    # photo fed to classify so _flush_batch has a valid FK to bind to.
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        det_map = {}
+        processed = set()
+        for p in batch:
+            det_ids = db_.save_detections(
+                p["id"],
+                [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                  "confidence": 0.95, "category": "animal"}],
+                detector_model="MegaDetector",
+            )
+            det_map[p["id"]] = [{
+                "id": det_ids[0],
+                "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
+                "confidence": 0.95, "category": "animal",
+            }]
+            processed.add(p["id"])
+        return det_map, len(det_map), processed
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    def fake_prepare_image(photo, folders, detection, vireo_dir=None):
+        return (
+            Image.new("RGB", (32, 32), "white"),
+            folders.get(photo["folder_id"], ""),
+            os.path.join(folders.get(photo["folder_id"], ""), photo["filename"]),
+        )
+
+    monkeypatch.setattr(classify_job, "_prepare_image", fake_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            emb = np.zeros(512, dtype=np.float32)
+            return [
+                ([{"species": "Red-tailed Hawk", "score": 0.99}], emb)
+                for _ in images
+            ]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Verify via DB: both files were scanned (scan walks the folder), but
+    # only the early one should have a prediction row.
+    verify_db = Database(db_path)
+    verify_db.set_active_workspace(ws_id)
+
+    scanned = {
+        r["filename"] for r in verify_db.conn.execute(
+            "SELECT filename FROM photos"
+        ).fetchall()
+    }
+    assert scanned == {"IMG_early.JPG", "IMG_late.JPG"}, (
+        f"scan should ingest both files in the folder, got {scanned}"
+    )
+
+    classified_names = {
+        r["filename"] for r in verify_db.conn.execute(
+            """SELECT p.filename
+                 FROM predictions pr
+                 JOIN detections d ON d.id = pr.detection_id
+                 JOIN photos p ON p.id = d.photo_id"""
+        ).fetchall()
+    }
+    assert "IMG_early.JPG" in classified_names, (
+        f"early (snapshot) file should be classified, got {classified_names}"
+    )
+    assert "IMG_late.JPG" not in classified_names, (
+        f"late (post-snapshot) file must NOT be classified, got "
+        f"{classified_names}"
+    )
+
+
+def test_pipeline_snapshot_collapses_overlapping_scan_roots(tmp_path, monkeypatch):
+    """When the snapshot contains files at both a folder and a nested subfolder
+    (e.g. /root/a.jpg and /root/sub/b.jpg), deriving scan roots naively would
+    produce overlapping paths (/root and /root/sub). The scanner would then
+    walk the subtree twice. params.sources must be collapsed to the minimal
+    non-overlapping ancestor set."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    root = tmp_path / "root"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    db.add_folder(str(root))
+    db.add_folder(str(sub))
+
+    top_path = root / "a.jpg"
+    sub_path = sub / "b.jpg"
+    _drop_jpeg(str(root), "a.jpg")
+    _drop_jpeg(str(sub), "b.jpg")
+
+    snap_id = db.create_new_images_snapshot([str(top_path), str(sub_path)])
+
+    # Spy on scanner.scan to count how many distinct roots it walks.
+    import scanner as scanner_mod
+    scan_calls = []
+    original_scan = scanner_mod.scan
+
+    def spy_scan(root_path, db_, **kwargs):
+        scan_calls.append(root_path)
+        return original_scan(root_path, db_, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "scan", spy_scan)
+
+    params = PipelineParams(
+        source_snapshot_id=snap_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # The nested path is a descendant of the top path; the scanner walks root
+    # recursively, so sub must NOT be re-scanned as a separate root.
+    assert str(root) in scan_calls, f"top root must be scanned, got {scan_calls}"
+    assert str(sub) not in scan_calls, (
+        f"sub is a descendant of root and must not be scanned separately, "
+        f"got {scan_calls}"
+    )
+
+
+def test_collapse_scan_roots_handles_filesystem_root():
+    """Unit test for the collapse helper's edge case where a kept root IS
+    the filesystem root ('/' on POSIX, 'C:\\' on Windows). The naive
+    `kept + os.sep` prefix becomes '//' for '/' and fails to match child
+    paths like '/sub'. Descendants of the filesystem root must still be
+    collapsed away."""
+    from pipeline_job import _collapse_scan_roots
+
+    collapsed = _collapse_scan_roots([os.sep, os.path.join(os.sep, "sub")])
+    assert collapsed == [os.sep], (
+        f"descendants of filesystem root must collapse, got {collapsed}"
+    )
+
+    # Non-overlapping peers are preserved.
+    a = os.path.join(os.sep, "a")
+    b = os.path.join(os.sep, "b")
+    collapsed = _collapse_scan_roots([a, b])
+    assert collapsed == sorted([a, b]), (
+        f"peers must both be kept, got {collapsed}"
+    )
+
+    # Prefix-but-not-descendant isn't collapsed (/foo vs /foobar).
+    foo = os.path.join(os.sep, "foo")
+    foobar = os.path.join(os.sep, "foobar")
+    collapsed = _collapse_scan_roots([foo, foobar])
+    assert collapsed == sorted([foo, foobar]), (
+        f"/foo and /foobar are peers, got {collapsed}"
+    )
+
+
+def test_pipeline_miss_stage_skipped_when_regroup_fails(tmp_path, monkeypatch):
+    """miss_stage depends on burst_id written by regroup. If regroup_stage
+    throws, running miss_stage would overwrite miss_* flags with stale
+    context during an already-failing job. The gate must check the
+    stage's failed status, not just the global abort flag (regroup_stage
+    marks itself failed without setting abort)."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    # Force regroup to fail before it finishes. pipeline_job imports
+    # run_full_pipeline lazily inside regroup_stage; patch at module level.
+    import pipeline as pipeline_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("synthetic regroup failure")
+
+    monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _boom)
+
+    # Also mark the single photo with an arbitrary miss_computed_at so we
+    # can detect mutation by miss_stage.
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        # Intentionally NOT skip_regroup — regroup must be attempted and fail.
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    import contextlib
+    with contextlib.suppress(Exception):
+        result = run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    # Inspect the stages dict from the last progress event — if miss_stage
+    # ran, it would transition out of "pending" to "running"/"completed"/
+    # "failed"/"skipped". The fix must leave it "pending" (never entered).
+    progress_events = [
+        data for (_, evt, data) in runner.events
+        if evt == "progress" and "stages" in data
+    ]
+    assert progress_events, "pipeline emitted no progress events"
+    last_stages = progress_events[-1]["stages"]
+    assert last_stages["regroup"]["status"] == "failed"
+    # Miss stage must not have mutated any miss_* row. Verify by reading
+    # miss_computed_at on the scanned photos — all should still be NULL.
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    rows = db2.conn.execute(
+        "SELECT miss_computed_at FROM photos"
+    ).fetchall()
+    assert rows, "scan produced no photo rows"
+    for r in rows:
+        assert r["miss_computed_at"] is None, (
+            "miss_stage ran after regroup failure and overwrote miss state"
+        )
+
+
+# --- Weighted overall progress ---------------------------------------------
+
+def _empty_stages():
+    return {name: {"status": "pending", "count": 0} for name in STAGE_WEIGHTS}
+
+
+def test_stage_fraction_pending_is_zero():
+    assert _stage_fraction({"status": "pending", "count": 0}) == 0.0
+
+
+def test_stage_fraction_completed_is_one():
+    assert _stage_fraction({"status": "completed", "count": 5, "total": 10}) == 1.0
+
+
+def test_stage_fraction_skipped_is_one():
+    """Skipped stages are "done" for overall-progress purposes — their
+    weight has been paid out, so don't stall the bar at the last skip."""
+    assert _stage_fraction({"status": "skipped"}) == 1.0
+
+
+def test_stage_fraction_running_uses_count_over_total():
+    assert _stage_fraction({"status": "running", "count": 25, "total": 100}) == 0.25
+
+
+def test_stage_fraction_running_without_total_is_zero():
+    """A running stage that hasn't yet reported a total can't compute a
+    fraction; report 0 rather than dividing by zero or claiming completion."""
+    assert _stage_fraction({"status": "running", "count": 5}) == 0.0
+
+
+def test_stage_fraction_clamps_to_one():
+    """Stage counters sometimes overshoot total (last batch rounding)."""
+    assert _stage_fraction({"status": "running", "count": 105, "total": 100}) == 1.0
+
+
+def test_stage_fraction_failed_counts_partial_work():
+    """Stages like classify can process most items and then mark themselves
+    'failed' due to per-item errors. Their partial completion must still
+    count toward the weighted overall — otherwise the bar drops sharply
+    when a near-done heavy stage fails."""
+    assert _stage_fraction({"status": "failed", "count": 80, "total": 100}) == 0.8
+
+
+def test_stage_fraction_failed_without_progress_is_zero():
+    """A failed stage with no count/total contributes nothing, same as
+    pending/unknown."""
+    assert _stage_fraction({"status": "failed"}) == 0.0
+
+
+def test_stage_fraction_failed_clamps_to_one():
+    assert _stage_fraction({"status": "failed", "count": 105, "total": 100}) == 1.0
+
+
+def test_weighted_progress_all_pending_is_zero():
+    current, total = _weighted_progress(_empty_stages())
+    assert current == 0
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_all_completed_is_full():
+    stages = {name: {"status": "completed"} for name in STAGE_WEIGHTS}
+    current, total = _weighted_progress(stages)
+    assert current == total
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_fast_stage_done_heavy_pending():
+    """After a fast stage finishes and a heavy one hasn't started, the bar
+    should reflect the fast stage's small weight — NOT 100%. This is the
+    bug the helper fixes: previously the last-pushed stage-local current/total
+    dominated the overall bar."""
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"  # weight 2
+    stages["scan"]["status"] = "completed"    # weight 8
+    # classify (weight 30) still pending
+    current, total = _weighted_progress(stages)
+    pct = current / total * 100
+    assert pct < 15, f"Expected <15% with only ingest+scan done, got {pct:.1f}%"
+
+
+def test_weighted_progress_running_stage_partial():
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "completed"
+    stages["thumbnails"]["status"] = "completed"
+    stages["previews"]["status"] = "completed"
+    stages["model_loader"]["status"] = "completed"
+    stages["detect"]["status"] = "completed"
+    stages["classify"].update(status="running", count=50, total=100)
+    current, total = _weighted_progress(stages)
+    # ingest+scan+thumbs+previews+model_loader+detect = 2+8+6+6+2+15 = 39
+    # classify half-done = 15
+    # total weight sum via STAGE_WEIGHTS
+    expected_done = 39 + 15
+    assert current == expected_done
+    assert total == sum(STAGE_WEIGHTS.values())
+
+
+def test_weighted_progress_does_not_round_up_to_full():
+    """Overall must not report `current == total` before every stage is
+    actually complete. int(round(done)) would report 100/100 when done is
+    99.5+, falsely showing 100% while a stage is still running."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    # Override the last stage to running at 99/100. Contribution = 5.94
+    # (weight 6 * 0.99); others fully completed = 94. Total done = 99.94.
+    # A naive round(99.94) = 100 would hit total and falsely signal done.
+    stages["regroup"].update(status="running", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) before last stage completed"
+    )
+
+
+def test_weighted_progress_does_not_round_up_with_failed_stage():
+    """Same premature-100 guard, but via a failed stage that finished
+    processing most items. If failed now counts partial work, the weighted
+    sum can land at 99.x when only one stage hasn't fully completed."""
+    stages = _empty_stages()
+    for name in STAGE_WEIGHTS:
+        stages[name]["status"] = "completed"
+    stages["regroup"].update(status="failed", count=99, total=100)
+    current, total = _weighted_progress(stages)
+    assert current < total, (
+        f"overall hit total ({current}/{total}) with a non-complete stage"
+    )
+
+
+def test_weighted_progress_monotonic_through_pipeline():
+    """Completing stages in order should produce a monotonically increasing
+    overall percentage — no drops between phases."""
+    stages = _empty_stages()
+    order = ["ingest", "scan", "thumbnails", "previews", "model_loader",
+             "detect", "classify", "extract_masks", "eye_keypoints", "regroup",
+             "misses"]
+    last_pct = -1.0
+    for name in order:
+        stages[name]["status"] = "completed"
+        current, total = _weighted_progress(stages)
+        pct = current / total * 100
+        assert pct > last_pct, f"Progress went backwards at {name}: {last_pct} -> {pct}"
+        last_pct = pct
+    assert last_pct == 100.0
+
+
+def test_update_stages_emits_weighted_current_total():
+    """_update_stages must send the weighted overall to push_event instead
+    of hardcoded 0/0. This is what makes the 'Overall %' visible in the UI."""
+    from pipeline_job import _update_stages
+
+    stages = _empty_stages()
+    stages["ingest"]["status"] = "completed"
+    stages["scan"]["status"] = "running"
+    stages["scan"]["count"] = 50
+    stages["scan"]["total"] = 100
+
+    runner = FakeRunner()
+    _update_stages(runner, "job-x", stages)
+    assert runner.events, "no events pushed"
+    _, evt, data = runner.events[-1]
+    assert evt == "progress"
+    assert data["total"] == sum(STAGE_WEIGHTS.values())
+    # ingest (2) + scan half (4) = 6
+    assert data["current"] == 6

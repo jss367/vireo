@@ -493,6 +493,54 @@
         </div>
       </div>
 
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Miss Detection</div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Enable miss detection
+          <small>After regrouping, flag frames where no subject was detected, the subject is clipped/tiny, or the subject is out of focus. Surfaced on the /misses page and in pipeline review.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="cfgMissEnabled" checked
+                 onchange="saveConfig()" style="accent-color:var(--accent);">
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Subject-present confidence
+          <small>Detector confidence below this flags the frame as "no subject". Burst siblings relax the bar; singletons use the full threshold.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgMissDetConf" min="10" max="50" step="1" value="25"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgMissDetConfVal').textContent = this.value + '%'; saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgMissDetConfVal">25%</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          Minimum subject area
+          <small>Subjects smaller than this fraction of the frame are flagged as "clipped / tiny" in a burst (a tiny bbox next to larger siblings signals lost framing). Singletons require an even smaller subject (40% of this) before being flagged, since without siblings a small subject may be intentional framing.</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgMissBboxMin" min="1" max="20" step="1" value="5"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgMissBboxMinVal').textContent = (this.value / 1000).toFixed(3); saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:44px;" id="cfgMissBboxMinVal">0.005</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          OOF ratio (subject / background)
+          <small>When the subject's Tenengrad is below this ratio of the background's, flag as "out of focus".</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="range" id="cfgMissOofRatio" min="30" max="80" step="5" value="50"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('cfgMissOofRatioVal').textContent = (this.value / 100).toFixed(2); saveConfig()">
+          <span style="font-size:13px;color:var(--text-primary);min-width:44px;" id="cfgMissOofRatioVal">0.50</span>
+        </div>
+      </div>
+
       <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin:16px 0 8px 0;border-bottom:1px solid var(--border-primary);padding-bottom:6px;">Eye-Focus Detection</div>
       <div class="setting-row">
         <div class="setting-label">
@@ -1118,6 +1166,18 @@ async function loadConfig() {
     document.getElementById('cfgRejectComposite').value = rco;
     document.getElementById('cfgRejectCompositeVal').textContent = rco + '%';
 
+    // Miss detection tunables
+    document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
+    var mdc = Math.round((p.miss_det_confidence != null ? p.miss_det_confidence : 0.25) * 100);
+    document.getElementById('cfgMissDetConf').value = mdc;
+    document.getElementById('cfgMissDetConfVal').textContent = mdc + '%';
+    var mbm = Math.round((p.miss_bbox_area_min != null ? p.miss_bbox_area_min : 0.005) * 1000);
+    document.getElementById('cfgMissBboxMin').value = mbm;
+    document.getElementById('cfgMissBboxMinVal').textContent = (mbm / 1000).toFixed(3);
+    var mor = Math.round((p.miss_oof_ratio != null ? p.miss_oof_ratio : 0.50) * 100);
+    document.getElementById('cfgMissOofRatio').value = mor;
+    document.getElementById('cfgMissOofRatioVal').textContent = (mor / 100).toFixed(2);
+
     // Eye-focus detection tunables
     document.getElementById('cfgEyeDetectEnabled').checked =
       p.eye_detect_enabled !== false;  // default true
@@ -1256,6 +1316,34 @@ function saveConfig() {
             reject_focus: parseInt(document.getElementById('cfgRejectFocus').value, 10) / 100,
             reject_clip_high: parseInt(document.getElementById('cfgRejectClip').value, 10) / 100,
             reject_composite: parseInt(document.getElementById('cfgRejectComposite').value, 10) / 100,
+            miss_enabled: document.getElementById('cfgMissEnabled').checked,
+            // Keep paired thresholds consistent: the UI exposes one slider
+            // per pair, but classify_miss reads the sibling value (burst
+            // vs singleton) independently. If we only save one side, the
+            // other falls back to defaults, which can break the paired
+            // relationship when the user picks a value below the paired
+            // default. Derive the paired value from the same slider using
+            // the default ratio. Burst context and singleton context
+            // move in opposite numeric directions because they describe
+            // different kinds of evidence:
+            //   - det_conf: siblings confirm a subject, so a burst is
+            //     forgiving of low confidence (lower threshold). Default
+            //     det_conf=0.25 / det_conf_burst=0.15 → burst = 0.60 * singleton.
+            //   - bbox_min: siblings showing a larger subject make a tiny
+            //     bbox look like lost framing, so a burst flags more
+            //     aggressively (higher threshold). Default bbox_min=0.005 /
+            //     bbox_min_singleton=0.002 → singleton = 0.40 * burst.
+            ...(function() {
+              var det = parseInt(document.getElementById('cfgMissDetConf').value, 10) / 100;
+              var bbox = parseInt(document.getElementById('cfgMissBboxMin').value, 10) / 1000;
+              return {
+                miss_det_confidence: det,
+                miss_det_confidence_burst: +(det * 0.60).toFixed(4),
+                miss_bbox_area_min: bbox,
+                miss_bbox_area_min_singleton: +(bbox * 0.40).toFixed(5),
+              };
+            })(),
+            miss_oof_ratio: parseInt(document.getElementById('cfgMissOofRatio').value, 10) / 100,
             eye_detect_enabled: document.getElementById('cfgEyeDetectEnabled').checked,
             eye_classifier_conf_gate: parseInt(document.getElementById('cfgEyeClassifierConfGate').value, 10) / 100,
             eye_detection_conf_gate: parseInt(document.getElementById('cfgEyeDetectionConfGate').value, 10) / 100,
@@ -1310,6 +1398,14 @@ function resetPipelineDefaults() {
   document.getElementById('cfgEyeWindowK').value = 8;
   document.getElementById('cfgEyeWindowKVal').textContent = '0.08';
   document.getElementById('cfgEyeDetectEnabled').checked = true;
+  // Miss-detection defaults (non-percent display values).
+  document.getElementById('cfgMissEnabled').checked = true;
+  document.getElementById('cfgMissDetConf').value = 25;
+  document.getElementById('cfgMissDetConfVal').textContent = '25%';
+  document.getElementById('cfgMissBboxMin').value = 5;
+  document.getElementById('cfgMissBboxMinVal').textContent = '0.005';
+  document.getElementById('cfgMissOofRatio').value = 50;
+  document.getElementById('cfgMissOofRatioVal').textContent = '0.50';
   document.getElementById('cfgBurstMaxKeep').value = 3;
   document.getElementById('cfgEncMaxKeep').value = 5;
   document.getElementById('cfgWTime').value = 35;

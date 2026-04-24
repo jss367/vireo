@@ -11,6 +11,7 @@ import logging.handlers
 import os
 import queue
 import subprocess
+import sys
 import time
 import webbrowser
 from datetime import UTC
@@ -21,6 +22,7 @@ from db import Database
 from flask import (
     Flask,
     Response,
+    abort,
     g,
     jsonify,
     make_response,
@@ -766,6 +768,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def highlights_page():
         return render_template("highlights.html")
 
+    @app.route("/misses")
+    def misses_page():
+        return render_template("misses.html")
+
     # -- API routes --
 
     def _attach_species(db, photo_dicts):
@@ -898,6 +904,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "changed": changed,
             "missing": [dict(f) for f in missing],
+        })
+
+    @app.route("/api/folders/<int:folder_id>", methods=["GET"])
+    def api_folder_get(folder_id):
+        """Return a single folder's id, name, and path.
+
+        Powers the folder-tree context menu's "Copy Path" action. A lean
+        response on purpose: callers that want the richer tree data already
+        have /api/folders for that. Scoped to the active workspace so
+        absolute paths from folders hidden in this workspace don't leak.
+        """
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        return jsonify({
+            "id": folder["id"],
+            "name": folder["name"],
+            "path": folder["path"],
         })
 
     @app.route("/api/folders/<int:folder_id>/relocate", methods=["POST"])
@@ -1079,6 +1110,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
         ).fetchone()
         if folder:
+            # Full on-disk path: mirrors the folder-join logic in
+            # api_files_reveal. Exposed so the browse-grid "Copy Path"
+            # right-click action can read a real filesystem path from the
+            # detail response.
+            result["path"] = os.path.join(folder["path"], photo["filename"])
             xmp_path = os.path.join(
                 folder["path"],
                 os.path.splitext(photo["filename"])[0] + ".xmp",
@@ -1093,6 +1129,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result["xmp_keywords"] = xmp_keywords
             result["xmp_path"] = xmp_path
         else:
+            result["path"] = ""
             result["xmp_exists"] = False
             result["xmp_keywords"] = []
             result["xmp_path"] = ""
@@ -1271,6 +1308,104 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.remove_color_label(photo_id)
         db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
                        [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
+        return jsonify({"ok": True})
+
+    @app.route("/api/files/reveal", methods=["POST"])
+    def api_files_reveal():
+        """Reveal a photo or folder in the OS file manager.
+
+        Body: {"photo_id": <int>} OR {"folder_id": <int>}
+
+        Photo reveals select the file in its parent directory (macOS ``open
+        -R``, Windows ``explorer /select,``, Linux ``xdg-open <parent dir>``).
+        Folder reveals open the folder itself (macOS ``open -R <dir>``,
+        Windows ``explorer <dir>``, Linux ``xdg-open <dir>``) — this differs
+        from the photo case on Windows where we deliberately skip ``/select,``
+        so the user sees the folder's contents rather than its parent.
+
+        Returns: {"ok": True} on success; {"ok": False, "reason": "..."} if
+        the subprocess failed to launch; 404 if the id is unknown; 400 if
+        neither id was provided or either is malformed.
+        """
+        body = request.get_json(silent=True) or {}
+        pid_raw = body.get("photo_id")
+        fid_raw = body.get("folder_id")
+
+        if pid_raw is None and fid_raw is None:
+            return json_error("photo_id or folder_id required")
+
+        db = _get_db()
+        is_folder = False
+        path = ""
+
+        if pid_raw is not None:
+            try:
+                pid_int = int(pid_raw)
+            except (TypeError, ValueError):
+                return json_error("photo_id must be an integer")
+            # verify_workspace=True enforces that the photo's folder is
+            # linked to the active workspace — otherwise this endpoint would
+            # expose absolute filesystem paths for photos hidden from the
+            # current workspace.
+            photo = db.get_photo(pid_int, verify_workspace=True)
+            if not photo:
+                return json_error("photo not found", 404)
+            folder_row = db.conn.execute(
+                "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+            ).fetchone()
+            folder_path = folder_row["path"] if folder_row else ""
+            if not folder_path or not photo["filename"]:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = os.path.join(folder_path, photo["filename"])
+        else:
+            try:
+                fid_int = int(fid_raw)
+            except (TypeError, ValueError):
+                return json_error("folder_id must be an integer")
+            folder = db.get_folder(fid_int)
+            if not folder:
+                return json_error("folder not found", 404)
+            # Reject reveal for folders not linked to the active workspace,
+            # matching the photo branch's verify_workspace gate.
+            linked = db.conn.execute(
+                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                (db._active_workspace_id, fid_int),
+            ).fetchone()
+            if not linked:
+                return json_error("folder not found", 404)
+            folder_path = folder["path"]
+            if not folder_path:
+                return jsonify({"ok": False, "reason": "no path"})
+            path = folder_path
+            is_folder = True
+
+        try:
+            if sys.platform == "darwin":
+                # "open -R <dir>" reveals the folder inside its parent; that's
+                # the right behavior for folder reveals too, consistent with
+                # how Finder treats folder-targeted reveal.
+                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+            elif sys.platform.startswith("win"):
+                if is_folder:
+                    # Open the folder itself so the user sees its contents.
+                    subprocess.run(["explorer", path], timeout=5, check=False)
+                else:
+                    subprocess.run(
+                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    )
+            else:
+                # xdg-open on a file has inconsistent behavior across desktops
+                # (some open the image viewer, not the file manager), so for
+                # photo reveals we open the parent directory instead. Passing
+                # a directory to xdg-open opens the folder in the file manager,
+                # which is exactly what we want for folder reveals.
+                target = path if is_folder else (os.path.dirname(path) or path)
+                # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
+                # so a crafted leading-dash path can't be parsed as a flag.
+                target = os.path.abspath(target)
+                subprocess.run(["xdg-open", target], timeout=5, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/keywords", methods=["POST"])
@@ -1612,6 +1747,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         stats["total_photos"] = db.count_photos()
         return jsonify(stats)
 
+    @app.route("/api/coverage")
+    def api_coverage():
+        """Return per-stage processing coverage for the active workspace.
+
+        ``overall`` is the workspace-wide count for each pipeline stage, and
+        ``folders`` is a per-folder breakdown (one row per top-level folder
+        linked to the workspace). Both share the same coverage keys.
+        """
+        db = _get_db()
+        return jsonify({
+            "overall": db.get_coverage_stats(),
+            "folders": db.get_folder_coverage_stats(),
+        })
+
     @app.route("/api/sync/status")
     def api_sync_status():
         db = _get_db()
@@ -1719,6 +1868,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.delete_collection(collection_id)
         return jsonify({"ok": True})
 
+    @app.route("/api/collections/<int:collection_id>", methods=["PUT"])
+    def api_update_collection(collection_id):
+        """Rename a collection. Body: {"name": "..."}."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return json_error("name required")
+        try:
+            db.rename_collection(collection_id, name)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True})
+
     @app.route("/api/collections/<int:collection_id>/add-photos", methods=["POST"])
     def api_collection_add_photos(collection_id):
         """Add photos to a static collection by appending to its photo_ids rule."""
@@ -1762,6 +1925,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         db.conn.commit()
         return jsonify({"ok": True, "total": len(ids_rule["value"])})
+
+    @app.route("/api/collections/<int:collection_id>/duplicate", methods=["POST"])
+    def api_collection_duplicate(collection_id):
+        """Duplicate a collection within the active workspace. Returns {id}."""
+        db = _get_db()
+        try:
+            new_id = db.duplicate_collection(collection_id)
+        except ValueError:
+            return json_error("collection not found", 404)
+        return jsonify({"ok": True, "id": new_id})
 
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
@@ -2095,6 +2268,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         payload["workspace_id"] = ws_id
         return jsonify(payload)
 
+    @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
+    def api_workspace_new_images_snapshot_create():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"error": "no active workspace"}), 400
+        from new_images import count_new_images_for_workspace
+        result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+        file_paths = list(result["sample"])
+        snap_id = db.create_new_images_snapshot(file_paths)
+        folders = sorted({os.path.dirname(p) for p in file_paths})
+        return jsonify({
+            "snapshot_id": snap_id,
+            "file_count": len(file_paths),
+            "folders": folders,
+        })
+
+    @app.route(
+        "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
+        methods=["GET"],
+    )
+    def api_workspace_new_images_snapshot_get(snapshot_id):
+        db = _get_db()
+        if db._active_workspace_id is None:
+            abort(404)
+        snap = db.get_new_images_snapshot(snapshot_id)
+        if snap is None:
+            abort(404)
+        paths = snap["file_paths"]
+        folder_paths = sorted({os.path.dirname(p) for p in paths})
+        files_sample = paths[:5]
+        return jsonify({
+            "file_count": snap["file_count"],
+            "folder_paths": folder_paths,
+            "files_sample": files_sample,
+        })
+
     # -- Prediction API routes --
 
     @app.route("/api/predictions")
@@ -2347,6 +2557,81 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         dets = db.get_detections(photo_id)
         return jsonify([dict(d) for d in dets])
+
+    @app.route("/api/misses")
+    def api_misses():
+        """Return photos flagged as misses.
+
+        With no query string, returns a dict with all three categories.
+        With ``?category=X``, returns {"photos": [...], "category": X}.
+        ``?since=<iso-ts>`` restricts results to photos whose
+        miss_computed_at >= since (used by the pipeline-review step).
+        """
+        db = _get_db()
+        category = request.args.get("category")
+        since = request.args.get("since") or None
+        if category is not None:
+            if category not in ("no_subject", "clipped", "oof"):
+                return jsonify({"error": "invalid category"}), 400
+            photos = db.list_misses(category=category, since=since)
+            return jsonify({"photos": photos, "category": category})
+        return jsonify({
+            "no_subject": db.list_misses(category="no_subject", since=since),
+            "clipped":    db.list_misses(category="clipped", since=since),
+            "oof":        db.list_misses(category="oof", since=since),
+        })
+
+    @app.route("/api/misses/reject", methods=["POST"])
+    def api_misses_reject():
+        """Set flag='rejected' on every photo currently flagged with the given
+        miss category.
+
+        Accepts an optional ``since`` ISO timestamp that mirrors the
+        ``/misses?since=...`` review-window scope; when present, only
+        photos whose miss_computed_at >= since are rejected, so the bulk
+        action matches what the user sees on screen. Returns
+        {"rejected": n, "category": ...}.
+
+        Records a batch ``flag`` entry in ``edit_history`` so the bulk
+        change is undoable and shows up in the audit log, matching the
+        behavior of ``/api/batch/flag``.
+        """
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        since = body.get("since") or None
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        affected = db.bulk_reject_miss_category(category, since=since)
+        if affected:
+            items = [
+                {"photo_id": a["photo_id"],
+                 "old_value": a["old_value"],
+                 "new_value": "rejected"}
+                for a in affected
+            ]
+            db.record_edit(
+                "flag",
+                f"Rejected {len(items)} miss photos (category={category})",
+                "rejected",
+                items,
+                is_batch=True,
+            )
+        return jsonify({"rejected": len(affected), "category": category})
+
+    @app.route("/api/misses/<int:photo_id>/unflag", methods=["POST"])
+    def api_misses_unflag(photo_id):
+        """Clear the given miss-category boolean on a single photo."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        category = body.get("category")
+        if category not in ("no_subject", "clipped", "oof"):
+            return jsonify({"error": "invalid category"}), 400
+        try:
+            db.clear_miss_flag(photo_id, category)
+        except ValueError:
+            return jsonify({"error": "photo not in active workspace"}), 404
+        return jsonify({"ok": True})
 
     @app.route("/api/classify/readiness")
     def api_classify_readiness():
@@ -4705,32 +4990,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    @app.route("/api/jobs/scan", methods=["POST"])
-    def api_job_scan():
-        body = request.get_json(silent=True) or {}
-        root = body.get("root", "")
-        incremental = body.get("incremental", False)
-        if not root:
-            return json_error("root path required")
-        if not os.path.isdir(root):
-            return json_error(f"directory not found: {root}")
+    def _build_scan_work(root, incremental, active_ws):
+        """Build the background work function for a scan job.
 
-        # Remember this scan root (skip temp directories from tests)
-        import tempfile
-
+        Shared by ``POST /api/jobs/scan`` and
+        ``POST /api/folders/<id>/rescan`` so per-folder rescans reuse the
+        same scan + thumbnail pipeline as a full scan.
+        """
         import config as cfg
 
-        tmp_prefix = os.path.realpath(tempfile.gettempdir())
-        if not os.path.realpath(root).startswith(tmp_prefix):
-            user_cfg = cfg.load()
-            roots = user_cfg.get("scan_roots", [])
-            if root not in roots:
-                roots.insert(0, root)
-                user_cfg["scan_roots"] = roots
-                cfg.save(user_cfg)
-
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
 
         def work(job):
             from scanner import scan as do_scan
@@ -4838,8 +5107,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 
+        return work
+
+    @app.route("/api/jobs/scan", methods=["POST"])
+    def api_job_scan():
+        body = request.get_json(silent=True) or {}
+        root = body.get("root", "")
+        incremental = body.get("incremental", False)
+        if not root:
+            return json_error("root path required")
+        if not os.path.isdir(root):
+            return json_error(f"directory not found: {root}")
+
+        # Remember this scan root (skip temp directories from tests)
+        import tempfile
+
+        import config as cfg
+
+        tmp_prefix = os.path.realpath(tempfile.gettempdir())
+        if not os.path.realpath(root).startswith(tmp_prefix):
+            user_cfg = cfg.load()
+            roots = user_cfg.get("scan_roots", [])
+            if root not in roots:
+                roots.insert(0, root)
+                user_cfg["scan_roots"] = roots
+                cfg.save(user_cfg)
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        work = _build_scan_work(root, incremental, active_ws)
+
         job_id = runner.start(
             "scan", work, config={"root": root, "incremental": incremental},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/folders/<int:folder_id>/rescan", methods=["POST"])
+    def api_folder_rescan(folder_id):
+        """Queue a scan job scoped to the given folder's path.
+
+        Body (optional): {"incremental": bool}
+        Returns: {"job_id": "scan-..."} on success; 404 if the folder id
+        is unknown or not linked to the active workspace.
+        """
+        body = request.get_json(silent=True) or {}
+        incremental = bool(body.get("incremental", False))
+        db = _get_db()
+        folder = db.get_folder(folder_id)
+        if not folder:
+            return json_error("folder not found", 404)
+        # Folders are global but scans emit workspace-scoped data (predictions,
+        # pending_changes). Reject rescans of folders the active workspace has
+        # no claim on — otherwise a stale UI or crafted request could pollute
+        # this workspace with scan output from an unrelated folder, and
+        # add_folder's auto-link would silently attach it.
+        active_ws = db._active_workspace_id
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (active_ws, folder_id),
+        ).fetchone()
+        if not linked:
+            return json_error("folder not found", 404)
+        root = folder["path"]
+        if not os.path.isdir(root):
+            return json_error(f"folder path no longer exists: {root}")
+        runner = app._job_runner
+
+        work = _build_scan_work(root, incremental, active_ws)
+
+        job_id = runner.start(
+            "scan", work,
+            config={
+                "root": root,
+                "incremental": incremental,
+                "folder_id": folder_id,
+            },
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
@@ -6691,19 +7035,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
+        source_snapshot_id = body.get("source_snapshot_id")
 
-        if not source and not sources and not collection_id:
-            return json_error("source, sources, or collection_id required")
+        if not source and not sources and not collection_id and not source_snapshot_id:
+            return json_error("source, sources, collection_id, or source_snapshot_id required")
 
-        # Validate all source directories exist
-        if sources:
-            for s in sources:
-                if not os.path.isdir(s):
-                    return json_error(f"source directory not found: {s}")
-        elif source and not os.path.isdir(source):
-            return json_error(f"source directory not found: {source}")
+        # Validate type before touching SQLite. Non-integer bodies (objects,
+        # arrays, non-numeric strings, floats, bools) would otherwise reach
+        # sqlite3 parameter binding and raise ProgrammingError, surfacing as
+        # an opaque 500 instead of a clean 4xx.
+        if source_snapshot_id is not None and (
+            isinstance(source_snapshot_id, bool)
+            or not isinstance(source_snapshot_id, int)
+        ):
+            return json_error("source_snapshot_id must be an integer")
+
+        # Resolve the snapshot synchronously so clients get 404 at request
+        # time instead of a 200 followed by an asynchronous job failure.
+        if (
+            source_snapshot_id is not None
+            and _get_db().get_new_images_snapshot(source_snapshot_id) is None
+        ):
+            return json_error(
+                f"source_snapshot_id {source_snapshot_id} not found",
+                status=404,
+            )
+
+        # Validate source directories — skipped when a snapshot is present,
+        # since run_pipeline_job overrides source/sources with the snapshot's
+        # folders. Rejecting on stale placeholder paths would falsely 400 an
+        # otherwise-valid snapshot-backed run.
+        if source_snapshot_id is None:
+            if sources:
+                for s in sources:
+                    if not os.path.isdir(s):
+                        return json_error(f"source directory not found: {s}")
+            elif source and not os.path.isdir(source):
+                return json_error(f"source directory not found: {source}")
 
         destination = body.get("destination")
+        # Copy-ingest ("destination") is incompatible with snapshot runs:
+        # ingest would copy entire source folders, then snapshot filtering
+        # would drop the destination-scanned photo ids, producing empty
+        # downstream stages after an expensive copy. Fail fast.
+        if destination and source_snapshot_id is not None:
+            return json_error(
+                "destination is not allowed when source_snapshot_id is set"
+            )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
@@ -6717,6 +7095,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             collection_id=collection_id,
             source=source,
             sources=sources,
+            source_snapshot_id=source_snapshot_id,
             destination=destination,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
@@ -7118,6 +7497,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             reflow,
             run_grouping,
             save_results,
@@ -7143,8 +7523,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         encounters = run_grouping(photos, config=pipeline_cfg)
         results = reflow(encounters, config=pipeline_cfg)
 
-        # Save updated results
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. reflow/regroup-live do not recompute misses themselves.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
+        # Save updated results
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))
@@ -7158,6 +7545,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         from pipeline import (
             load_photo_features,
+            load_results_raw,
             run_full_pipeline,
             save_results,
             serialize_results,
@@ -7178,7 +7566,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         results = run_full_pipeline(photos, config=pipeline_cfg)
 
+        # Carry the miss-recomputation marker through so the review UI's
+        # "Review misses" shortcut stays visible after a threshold
+        # tweak. regroup-live does not rerun the miss stage itself.
         cache_dir = os.path.dirname(db_path)
+        existing = load_results_raw(cache_dir, db._active_workspace_id)
+        if existing and existing.get("miss_computed_at"):
+            results["miss_computed_at"] = existing["miss_computed_at"]
+
         save_results(results, cache_dir, db._active_workspace_id)
 
         return jsonify(serialize_results(results))

@@ -163,6 +163,33 @@ def test_api_photo_detail(app_and_db):
     assert 'keywords' in data
 
 
+def test_api_photo_detail_includes_on_disk_path(app_and_db):
+    """GET /api/photos/<id> returns a `path` field equal to folder_path + '/' + filename.
+
+    The browse-grid right-click "Copy Path" action depends on this field being
+    present in the photo detail response. PHOTO_DETAIL_COLS intentionally does
+    not store the full on-disk path in the photos table, so the route handler
+    must compute it by joining the owning folder's path with the photo's
+    filename (same idiom as /api/files/reveal).
+    """
+    import os as _os
+
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
+    folder_row = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (target['folder_id'],)
+    ).fetchone()
+    expected_path = _os.path.join(folder_row['path'], target['filename'])
+
+    resp = client.get(f"/api/photos/{target['id']}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert 'path' in data, "photo detail should expose full on-disk path"
+    assert data['path'] == expected_path
+
+
 def test_api_photos_calendar(app_and_db):
     """GET /api/photos/calendar returns daily photo counts for a year."""
     app, _ = app_and_db
