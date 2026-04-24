@@ -1915,6 +1915,55 @@ def test_preview_sweep_chunks_large_photo_id_sets(tmp_path):
     )
 
 
+def test_invalidation_honors_custom_thumb_cache_dir(tmp_path):
+    """``--thumb-dir`` can point to any directory — not necessarily a
+    ``thumbnails/`` subdirectory of the vireo data dir. Invalidation
+    must target the caller-supplied thumb cache dir directly, not
+    assume a ``vireo_dir/thumbnails/`` layout. Otherwise stale
+    thumbnails survive and an unrelated sibling ``thumbnails/`` can
+    have files removed.
+    """
+    from db import Database
+    from scanner import scan
+    from thumbnails import generate_thumbnail
+
+    # Custom layout: thumb dir has a non-default basename, not adjacent
+    # to a "thumbnails" subdir of vireo_dir.
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    thumb_dir = tmp_path / "custom-thumbs"
+    thumb_dir.mkdir()
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    img = root / "p.jpg"
+    Image.new("RGB", (400, 300), color=(255, 0, 0)).save(str(img), "JPEG")
+
+    db = Database(str(vireo_dir / "test.db"))
+    scan(str(root), db,
+         vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(thumb_dir))
+    photo_id = db.get_photos(per_page=100)[0]["id"]
+
+    thumb = thumb_dir / f"{photo_id}.jpg"
+    generate_thumbnail(photo_id, str(img), str(thumb_dir))
+    assert thumb.exists()
+
+    time.sleep(0.05)
+    Image.new("RGB", (400, 300), color=(0, 0, 255)).save(str(img), "JPEG")
+
+    scan(str(root), db, incremental=True,
+         vireo_dir=str(vireo_dir),
+         thumb_cache_dir=str(thumb_dir))
+
+    assert not thumb.exists(), (
+        "Invalidation must target the configured thumb_cache_dir, not "
+        "the vireo_dir/thumbnails convention."
+    )
+    # Sanity: no accidental 'thumbnails/' directory got created either.
+    assert not (vireo_dir / "thumbnails").exists()
+
+
 def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
     """When a large JPEG's content changes, re-scan must invalidate the stale
     working copy so the subsequent extraction reflects current pixels."""

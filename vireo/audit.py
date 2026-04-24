@@ -185,19 +185,21 @@ def remove_orphans(db, photo_ids):
     log.info("Removed %d orphan entries", len(photo_ids))
 
 
-def import_untracked(db, paths, vireo_dir=None):
+def import_untracked(db, paths, vireo_dir=None, thumb_cache_dir=None):
     """Import untracked files into the database by scanning them.
 
     Args:
         db: Database instance
         paths: list of file paths to import
         vireo_dir: path to the vireo data directory (parent of
-            ``thumbnails/``, ``working/``, ``previews/``). Required for
-            derived-cache invalidation and working-copy extraction to
-            fire — scanner can't guess it because ``--db`` and
-            ``--thumb-dir`` are independently configurable. When
-            omitted, a rescan that detects a content change will leave
-            stale caches in place.
+            ``working/`` and ``previews/``). Required for derived-cache
+            invalidation and working-copy extraction to fire — scanner
+            can't guess it because ``--db`` and ``--thumb-dir`` are
+            independently configurable. When omitted, a rescan that
+            detects a content change will leave stale caches in place.
+        thumb_cache_dir: configured thumbnail cache directory. Forwarded
+            to the scanner so invalidation targets the real cache even
+            when ``--thumb-dir`` points outside ``vireo_dir/thumbnails``.
     """
     from new_images import invalidate_new_images_after_scan
     from scanner import scan
@@ -206,7 +208,9 @@ def import_untracked(db, paths, vireo_dir=None):
     dirs = set(os.path.dirname(p) for p in paths)
     for d in dirs:
         try:
-            scan(d, db, incremental=True, vireo_dir=vireo_dir)
+            scan(d, db, incremental=True,
+                 vireo_dir=vireo_dir,
+                 thumb_cache_dir=thumb_cache_dir)
         finally:
             # scanner.scan commits photo rows incrementally, so even a
             # mid-scan failure can leave DB state that invalidates cached

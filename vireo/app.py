@@ -3976,7 +3976,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        import_untracked(db, paths, vireo_dir=vireo_dir)
+        import_untracked(
+            db, paths,
+            vireo_dir=vireo_dir,
+            thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+        )
         return jsonify({"ok": True, "imported": len(paths)})
 
     # -- Scan status (kept, non-job) --
@@ -5028,6 +5032,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     extract_full_metadata=pipeline_cfg.get("extract_full_metadata", True),
                     status_callback=status_cb,
                     vireo_dir=vireo_dir,
+                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                 )
             finally:
                 # scanner.scan commits photo rows incrementally, so even a mid-scan
@@ -5785,6 +5790,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     progress_callback=scan_cb,
                     skip_paths=exclude_paths or None,
                     vireo_dir=vireo_dir,
+                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                     restrict_dirs=restrict_dirs,
                 )
             finally:

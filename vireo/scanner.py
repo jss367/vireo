@@ -311,7 +311,7 @@ def _pair_raw_jpeg_companions(db):
     commit_with_retry(db.conn)
 
 
-def _invalidate_derived_caches(db, vireo_dir, photo_id):
+def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     """Delete cached thumbnail / working copy / tracked preview for a photo.
 
     Called when the scanner detects that an existing photo's source content
@@ -332,11 +332,19 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id):
     Requires an explicit ``vireo_dir``: DB path and cache root are
     independently configurable (--db vs --thumb-dir), so we can't guess
     the cache location from the DB. No-op when the caller omits it.
+
+    ``thumb_cache_dir`` overrides the thumbnail location. ``--thumb-dir``
+    may point to any directory name — it is not constrained to
+    ``vireo_dir/thumbnails``. Callers that have the configured value
+    (Flask routes, audit entry points) should pass it here or stale
+    thumbs survive; ``previews/`` and ``working/`` are always siblings
+    of ``vireo_dir`` by convention and need no override.
     """
     if not vireo_dir:
         return
 
-    thumb_path = os.path.join(vireo_dir, "thumbnails", f"{photo_id}.jpg")
+    thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
+    thumb_path = os.path.join(thumb_dir, f"{photo_id}.jpg")
     if os.path.exists(thumb_path):
         try:
             os.remove(thumb_path)
@@ -585,7 +593,7 @@ def _extract_working_copies(db, vireo_dir, progress_callback=None, status_callba
     commit_with_retry(db.conn)
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -609,7 +617,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             touch only photos already in the DB.
         vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
             When provided, working copies are extracted for RAW photos after
-            companion pairing.
+            companion pairing, and derived-cache invalidation fires on
+            content-changed photos.
+        thumb_cache_dir: optional override for the thumbnail cache
+            directory. ``--thumb-dir`` is independently configurable and
+            can point anywhere — defaulting to ``vireo_dir/thumbnails``
+            silently misses the real cache when those diverge. Callers
+            with the configured value (Flask routes, audit entry points)
+            should pass it. When omitted, falls back to
+            ``vireo_dir/thumbnails``.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -994,7 +1010,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     and file_hash is not None
                     and prev_file_hash != file_hash
                     and vireo_dir):
-                _invalidate_derived_caches(db, vireo_dir, photo_id)
+                _invalidate_derived_caches(
+                    db, vireo_dir, photo_id, thumb_cache_dir=thumb_cache_dir,
+                )
                 invalidated_photo_ids.add(photo_id)
                 commit_with_retry(db.conn)
 
