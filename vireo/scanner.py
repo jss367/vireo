@@ -844,20 +844,37 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             log.exception("Failed to flag folders partial after scan failure")
         raise
     else:
-        # Per-file loop completed cleanly. Clear any stale 'partial' flag from
-        # a prior failed scan on the same folders so a successful rescan
-        # restores full visibility.
-        if touched_folder_ids:
-            try:
+        # Per-file loop completed cleanly. Clear any stale 'partial' flag
+        # from a prior failed scan on the folders this scan covered, so a
+        # successful rescan restores full visibility. Scope mirrors the
+        # exception path above: the explicit roots (``root`` and any
+        # ``restrict_dirs``) plus every folder the loop actually touched.
+        # Including the roots catches folders that were flagged 'partial'
+        # by a previous failure inside ``_ensure_folder``, before the new
+        # folder_id reached ``touched_folder_ids``.
+        cleared_paths = {str(root_path)}
+        if restrict_dirs is not None:
+            cleared_paths.update(str(d) for d in restrict_dirs)
+        try:
+            if cleared_paths:
+                path_placeholders = ",".join("?" * len(cleared_paths))
+                db.conn.execute(
+                    f"UPDATE folders SET status = 'ok' "
+                    f"WHERE status = 'partial' "
+                    f"AND path IN ({path_placeholders})",
+                    tuple(cleared_paths),
+                )
+            if touched_folder_ids:
                 id_placeholders = ",".join("?" * len(touched_folder_ids))
                 db.conn.execute(
                     f"UPDATE folders SET status = 'ok' "
-                    f"WHERE id IN ({id_placeholders}) AND status = 'partial'",
+                    f"WHERE status = 'partial' "
+                    f"AND id IN ({id_placeholders})",
                     tuple(touched_folder_ids),
                 )
-                commit_with_retry(db.conn)
-            except Exception:
-                log.exception("Failed to clear partial flag after scan success")
+            commit_with_retry(db.conn)
+        except Exception:
+            log.exception("Failed to clear partial flag after scan success")
 
     # Pair raw+JPEG companions: raw is primary, JPEG becomes companion_path.
     # Wrap post-processing so folder counts are always updated, even on failure.

@@ -1409,3 +1409,76 @@ def test_successful_scan_clears_partial_flag(tmp_path):
     assert row["status"] == "ok", (
         f"successful rescan should flip partial → ok, got {row['status']!r}"
     )
+
+
+def test_successful_scan_clears_partial_on_touched_subfolders(tmp_path):
+    """Recursive scan clears 'partial' on subfolders the scan actually touched.
+
+    The exception path flags every touched subfolder as partial; the success
+    path must reset those same subfolders so a user who rescans after a
+    failure sees a clean tree.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {
+        '': ['root.jpg'],
+        'sub': ['nested.jpg'],
+    })
+    db = Database(str(tmp_path / "test.db"))
+
+    scanner_mod.scan(root, db)
+    # Mark both folders partial to simulate a prior mid-scan abort.
+    db.conn.execute("UPDATE folders SET status = 'partial'")
+    db.conn.commit()
+
+    scanner_mod.scan(root, db)
+
+    rows = db.conn.execute(
+        "SELECT path, status FROM folders ORDER BY path"
+    ).fetchall()
+    statuses = {r["path"]: r["status"] for r in rows}
+    assert statuses[root] == "ok", (
+        f"root should be cleared back to ok, got {statuses[root]!r}"
+    )
+    sub_path = os.path.join(root, "sub")
+    assert statuses[sub_path] == "ok", (
+        f"touched subfolder should be cleared back to ok, "
+        f"got {statuses[sub_path]!r}"
+    )
+
+
+def test_partial_folder_photos_remain_visible_in_queries(tmp_path):
+    """Photos in 'partial' folders must stay queryable through read paths.
+
+    Before this fix, `f.status = 'ok'` joins across `db.py` excluded photos
+    from partial folders, so an interrupted scan could make already-imported
+    photos disappear from the UI.
+    """
+    import scanner as scanner_mod
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['seen.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+
+    scanner_mod.scan(root, db)
+    db.conn.execute(
+        "UPDATE folders SET status = 'partial' WHERE path = ?", (root,)
+    )
+    db.conn.commit()
+
+    # Photo queries should still return the photo.
+    photos = db.get_photos(per_page=100)
+    filenames = {p["filename"] for p in photos}
+    assert "seen.jpg" in filenames, (
+        f"photo in partial folder should remain visible, got {filenames}"
+    )
+
+    # And coverage stats should still count it.
+    stats = db.get_coverage_stats()
+    assert stats["total"] >= 1, (
+        f"coverage should count photos in partial folders, "
+        f"got total={stats['total']!r}"
+    )

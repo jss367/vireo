@@ -209,8 +209,11 @@ def ingest(
         # the user copied the same photo into multiple date folders), and
         # every matching folder needs to be walked so all of them get
         # linked to the active workspace. Four guards, layered:
-        #   1. SQL ``f.status = 'ok'`` — exclude folders the DB already
-        #      knows are missing (cheap and visible to static analysis).
+        #   1. SQL ``f.status IN ('ok', 'partial')`` — exclude folders the DB
+        #      already knows are missing (cheap and visible to static
+        #      analysis). Partially-scanned folders still contain valid
+        #      indexed hashes, so we must consult them here to avoid
+        #      re-importing bytes we already know about.
         #   2. SQL prefix match on ``f.path`` with an explicit ``ESCAPE``
         #      clause — rough subtree cut so we don't haul the whole
         #      library into memory on large DBs. Escaping is required
@@ -223,9 +226,9 @@ def ingest(
         #      stored folder path can't lexically appear to be under
         #      the destination while actually resolving outside it.
         #   4. Python ``Path.is_dir`` on the raw stored path — catches
-        #      stale ``status='ok'`` rows when the folder was deleted
-        #      since the last scan and the caller didn't refresh folder
-        #      health first.
+        #      stale ``status IN ('ok', 'partial')`` rows when the folder
+        #      was deleted since the last scan and the caller didn't
+        #      refresh folder health first.
         # A folder passes only if all four guards agree.
         #
         # The SQL prefilter compares against ``dest_path_str`` (derived
@@ -255,7 +258,7 @@ def ingest(
                FROM photos p
                JOIN folders f ON p.folder_id = f.id
                WHERE p.file_hash IS NOT NULL
-                 AND f.status = 'ok'
+                 AND f.status IN ('ok', 'partial')
                  AND (f.path = ? OR f.path LIKE ? ESCAPE '\\')""",
             (dest_path_str, dest_like_prefix),
         ).fetchall()
