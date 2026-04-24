@@ -5000,9 +5000,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # root boundary. scanner.scan() reports (current, total) local
             # to its invocation; we fold those into cumulative counters
             # that the SSE/status stream reads.
-            scan_acc = {"prior": 0, "last_total": 0}
+            # Track both the last reported *processed* count and the
+            # last reported *total* for the current root. On root
+            # boundary we advance the cumulative baseline by the
+            # processed count (not the planned total) so a root that
+            # fails mid-scan doesn't inflate the baseline with phantom
+            # files the next root would start above.
+            scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
 
             def progress_cb(current, total):
+                scan_acc["last_current"] = current
                 scan_acc["last_total"] = total
                 cum_current = scan_acc["prior"] + current
                 cum_total = scan_acc["prior"] + total
@@ -5027,7 +5034,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
 
             def advance_scan_acc():
-                scan_acc["prior"] += scan_acc["last_total"]
+                # Use processed count, not planned total — a root that
+                # raised mid-scan will have last_current < last_total,
+                # and starting the next root above the actual processed
+                # count would overreport photos indexed.
+                scan_acc["prior"] += scan_acc["last_current"]
+                scan_acc["last_current"] = 0
                 scan_acc["last_total"] = 0
 
             job["_start_time"] = time.time()
@@ -5096,7 +5108,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     advance_scan_acc()
 
-            photo_count = job["progress"].get("total", 0)
+            # Use cumulative processed count, not planned total — on a
+            # clean run they're equal; on mixed-outcome runs "current"
+            # reflects the actual photos indexed while "total" includes
+            # planned-but-unprocessed files from the failed root(s).
+            photo_count = job["progress"].get("current", 0)
             if root_errors:
                 scan_summary = (
                     f"{photo_count} photos ({len(root_errors)} of "

@@ -238,3 +238,61 @@ def test_mixed_outcome_does_not_inflate_error_count(app_and_db, tmp_path, monkey
     # Both per-root messages preserved.
     joined = " | ".join(data["errors"])
     assert "boom A" in joined and "boom B" in joined, data["errors"]
+
+
+def test_failed_root_does_not_inflate_cumulative_progress(app_and_db, tmp_path, monkeypatch):
+    """Root A fails after partial progress; root B's cumulative counters
+    must start from root A's processed count, not its planned total.
+
+    Regression: advance_scan_acc() previously added last_total (planned
+    ceiling) to the accumulator. If root A had 10 files planned and
+    failed after processing 3, root B started from a baseline of 10,
+    inflating both cumulative progress and the final "photos indexed"
+    summary with 7 phantom files.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    root_bad = str(tmp_path / "bad")
+    root_good = str(tmp_path / "good")
+    # 10 files in the bad root, one processes then scan raises.
+    for i in range(10):
+        _make_photo(root_bad, f"bad_{i}.jpg")
+    for i in range(2):
+        _make_photo(root_good, f"good_{i}.jpg")
+
+    import scanner as real_scanner
+    real_scan = real_scanner.scan
+
+    def flaky_scan(root, db, *args, progress_callback=None, **kwargs):
+        if root == root_bad:
+            # Report partial progress (3 of 10) then fail, simulating
+            # a mid-scan error after some photos were processed.
+            if progress_callback is not None:
+                progress_callback(3, 10)
+            raise RuntimeError("simulated failure after partial progress")
+        return real_scan(root, db, *args, progress_callback=progress_callback, **kwargs)
+
+    monkeypatch.setattr("scanner.scan", flaky_scan)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [root_bad, root_good]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"
+    # The scan summary should reflect photos ACTUALLY indexed, not the
+    # inflated planned total. Good root contributes 2, bad root
+    # contributes its processed count (3), so the summary should cite
+    # a number consistent with that — and critically, must NOT include
+    # the 7 phantom planned-but-unprocessed files from the bad root.
+    scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+    summary = scan_step.get("summary", "")
+    # Extract the leading "<N> photos" number.
+    leading_n = int(summary.split()[0])
+    # Planned total across both roots was 10 + 2 = 12. With the bug,
+    # photo_count would be 12 (inflated). With the fix it's <= 5 (3
+    # processed from bad + 2 from good).
+    assert leading_n < 12, (
+        f"photo_count inflated by phantom planned-but-unprocessed files: "
+        f"summary={summary!r}"
+    )
