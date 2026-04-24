@@ -5156,15 +5156,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                summary=thumb_summary(thumb_result))
 
             # Mixed-outcome rollup: any failed root => job is "failed".
-            # JobRunner._run_job reads the raise to flip status; the
-            # error was already appended above so it won't be double-
-            # counted.
+            # JobRunner._run_job dedupes job["errors"] by exact string
+            # match. Raise the first per-root message (already recorded
+            # above) so no extra aggregate entry is appended — that
+            # would inflate error_count in job/history output. The
+            # "N of M roots failed" context is already visible via the
+            # scan step's summary and error_count set above.
             if root_errors:
-                raise RuntimeError(
-                    f"{len(root_errors)} of {len(roots_list)} scan root"
-                    f"{'s' if len(roots_list) != 1 else ''} failed: "
-                    + "; ".join(root_errors)
-                )
+                raise RuntimeError(root_errors[0])
 
             return {"photos_indexed": photo_count, "thumbnails": thumb_result}
 

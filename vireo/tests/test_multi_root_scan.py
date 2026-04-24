@@ -194,3 +194,47 @@ def test_scan_roots_invalid_path_returns_error(app_and_db, tmp_path):
         json={"roots": [good, "/definitely/not/a/real/path"]},
     )
     assert resp.status_code == 400
+
+
+def test_mixed_outcome_does_not_inflate_error_count(app_and_db, tmp_path, monkeypatch):
+    """Two failing roots + one good root => error_count is 2, not 3.
+
+    Regression: when the scan loop pre-appends each per-root error to
+    job["errors"] and then raises an aggregated RuntimeError, JobRunner's
+    dedup (exact string match) treats the aggregate as a new distinct
+    entry, inflating error_count by 1 for every mixed-outcome run.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+
+    bad_a = str(tmp_path / "bad_a")
+    bad_b = str(tmp_path / "bad_b")
+    good = str(tmp_path / "good")
+    _make_photo(bad_a, "a.jpg")
+    _make_photo(bad_b, "b.jpg")
+    _make_photo(good, "c.jpg")
+
+    import scanner as real_scanner
+    real_scan = real_scanner.scan
+
+    def flaky_scan(root, db, *args, **kwargs):
+        if root == bad_a:
+            raise RuntimeError("boom A")
+        if root == bad_b:
+            raise RuntimeError("boom B")
+        return real_scan(root, db, *args, **kwargs)
+
+    monkeypatch.setattr("scanner.scan", flaky_scan)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [bad_a, bad_b, good]})
+    job_id = resp.get_json()["job_id"]
+    data = _wait_for_terminal(client, job_id)
+
+    assert data["status"] == "failed"
+    assert len(data["errors"]) == 2, (
+        f"expected exactly 2 error entries (one per failed root), "
+        f"got {len(data['errors'])}: {data['errors']}"
+    )
+    # Both per-root messages preserved.
+    joined = " | ".join(data["errors"])
+    assert "boom A" in joined and "boom B" in joined, data["errors"]
