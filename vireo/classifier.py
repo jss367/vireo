@@ -215,27 +215,48 @@ def _normalize(vec):
     return vec / norm
 
 
+def _looks_like_stale_batched_export(err):
+    """Heuristic: does this exception match the BioCLIP stale-export
+    Reshape failure?
+
+    Old BioCLIP ONNX exports baked batch=1 into a Reshape node named
+    ``gemm_input_reshape``. ONNXRuntime surfaces the failure as
+    ``Reshape node Name:'gemm_input_reshape' ... input_shape_size == size
+    was false`` whenever batch>1. The node name is the discriminator:
+    matching only on "Reshape" would also flag unrelated reshape failures
+    in healthy installs and write a sentinel that locks them out of
+    inference until a forced re-download.
+    """
+    msg = str(err)
+    return "gemm_input_reshape" in msg
+
+
 def _run_text_batched(text_session, text_input_name, tokens, model_dir=None):
     """Run the text encoder on a (N, seq_len) token batch.
 
     Vireo's text encoder ONNX exports are batch-agnostic (see
     ``scripts/export_onnx.py:_TextEncoderWrapper``). If a session rejects a
-    batched input, the model file is from an older export with a hardcoded
-    batch dimension. We write the standard ``.verify_failed`` sentinel into
-    ``model_dir`` so Settings → Models flips the install to "incomplete"
-    and surfaces the existing Repair button — the same self-heal flow used
-    for hash-mismatch corruption — and raise the same incomplete-model
-    error the pipeline uses elsewhere.
+    batched input with the stale-export Reshape signature, write the
+    standard ``.verify_failed`` sentinel into ``model_dir`` so Settings →
+    Models flips the install to "incomplete" and surfaces the existing
+    Repair button — the same self-heal flow used for hash-mismatch
+    corruption.
 
     The pinned-revision verifier can't catch this on its own: the user's
     on-disk bytes legitimately match the upstream commit they were
     downloaded from, so SHA256 verification passes even though the export
     is broken. Detection has to happen at inference, repair has to happen
     through Settings.
+
+    Other inference failures (memory pressure, provider glitches, mmap
+    races) are passed through unchanged so a transient runtime error
+    can't permanently flag a healthy install for Repair.
     """
     try:
         return text_session.run(None, {text_input_name: tokens})[0]
     except Exception as e:
+        if not _looks_like_stale_batched_export(e):
+            raise
         if model_dir:
             import model_verify
             sentinel = os.path.join(

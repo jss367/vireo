@@ -541,6 +541,63 @@ class TestTextEncoderBatchRejection:
             f"sentinel reason should identify stale-export, got: {reason!r}"
         )
 
+    def test_transient_text_session_error_does_not_write_sentinel(
+        self, tmp_path
+    ):
+        """A transient ONNX runtime failure (memory pressure, provider
+        glitch, mmap race) must NOT mark the install as needing Repair.
+
+        Only the specific stale-export signature (the ``gemm_input_reshape``
+        node from old BioCLIP exports) flips the install to incomplete.
+        Other inference errors propagate without mutating model state, so
+        a healthy install isn't permanently flagged for Repair after a
+        one-off runtime hiccup.
+        """
+        import model_verify
+        from classifier import Classifier
+
+        session = MagicMock()
+        mock_input = MagicMock()
+        mock_input.name = "input_ids"
+        session.get_inputs.return_value = [mock_input]
+
+        # A generic ORT runtime error that doesn't match the stale-export
+        # signature — e.g. an out-of-memory failure during inference.
+        def fake_run(output_names, input_dict):
+            raise RuntimeError(
+                "Failed to allocate memory for inference; "
+                "system under memory pressure."
+            )
+
+        session.run = fake_run
+
+        model_dir = _make_model_dir(tmp_path)
+        fake_image_session = _make_fake_image_session()
+        fake_tokenizer = _make_fake_tokenizer()
+
+        with (
+            patch("classifier._MODELS_ROOT", str(tmp_path)),
+            patch("classifier.CACHE_DIR", str(tmp_path / "cache")),
+            patch(
+                "classifier._MANIFEST_PATH",
+                str(tmp_path / "cache" / "manifest.json"),
+            ),
+            patch(
+                "classifier.onnx_runtime.create_session",
+                side_effect=[fake_image_session, session],
+            ),
+            patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+            pytest.raises(RuntimeError, match="memory"),
+        ):
+            Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
+
+        # The sentinel must NOT have been written: no Repair badge for
+        # transient errors.
+        sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+        assert not sentinel.is_file(), (
+            f"transient error must not write sentinel; found at {sentinel}"
+        )
+
 
 class TestEmbeddingCache:
     """Tests for the embedding cache path utility."""
