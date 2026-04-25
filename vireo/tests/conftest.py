@@ -20,9 +20,20 @@ def app_and_db(tmp_path, monkeypatch):
     from db import Database
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
+    import models
     from app import create_app
 
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    # `models.DEFAULT_MODELS_DIR` and `models.CONFIG_PATH` are resolved
+    # at import time from the real `~`. Redirect them so tests don't see
+    # the developer's locally-downloaded weights and don't write to the
+    # real `~/.vireo/models.json`.
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
 
     db_path = str(tmp_path / "test.db")
     thumb_dir = str(tmp_path / "thumbs")
@@ -65,10 +76,17 @@ def client_with_photo(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
+    import models
     from app import create_app
     from db import Database
 
-    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(
+        models, "CONFIG_PATH", str(tmp_path / "models.json"),
+    )
 
     photos_dir = tmp_path / "photos"
     photos_dir.mkdir()

@@ -23,6 +23,32 @@ def _make_thumb(thumb_dir, photo_id):
         Image.new("RGB", (100, 100), color=(80, 120, 80)).save(path)
 
 
+def _make_source_jpeg(folder_path, filename, photo_id):
+    """Write a small placeholder JPEG at folder_path/filename so that
+    /photos/<id>/full and /photos/<id>/original can serve it instead
+    of returning 500 on cache miss.
+
+    Skips when folder_path is the synthetic /test/photos fallback used
+    in headless CI, where the directory isn't writable.
+    """
+    from PIL import Image
+
+    if not folder_path or folder_path.startswith("/test/"):
+        return
+    if not filename.lower().endswith((".jpg", ".jpeg")):
+        # RAW formats (.nef etc.) — load_image needs a different
+        # decoder, so leave them missing rather than write a fake .nef.
+        return
+    os.makedirs(folder_path, exist_ok=True)
+    path = os.path.join(folder_path, filename)
+    if os.path.exists(path):
+        return
+    # A unique-ish color per photo so the lightbox Next/Prev visibly
+    # advances even though pixels aren't meaningful.
+    color = ((photo_id * 37) % 255, (photo_id * 53) % 255, (photo_id * 89) % 255)
+    Image.new("RGB", (640, 480), color=color).save(path, "JPEG", quality=70)
+
+
 def browse_seed(db_path, thumb_dir, photos_root):
     """Minimal seed: workspace, 3 folders, ~10 photos with keywords and ratings.
 
@@ -43,6 +69,12 @@ def browse_seed(db_path, thumb_dir, photos_root):
     f3 = db.add_folder(
         os.path.join(base, "wildlife", "birds"), name="birds", parent_id=f1
     )
+
+    folder_paths = {
+        f1: os.path.join(base, "wildlife"),
+        f2: os.path.join(base, "landscapes"),
+        f3: os.path.join(base, "wildlife", "birds"),
+    }
 
     photos = []
     specs = [
@@ -69,6 +101,7 @@ def browse_seed(db_path, thumb_dir, photos_root):
             timestamp=ts,
         )
         photos.append(pid)
+        _make_source_jpeg(folder_paths[folder_id], fname, pid)
         if rating:
             db.update_photo_rating(pid, rating)
         if flag:
