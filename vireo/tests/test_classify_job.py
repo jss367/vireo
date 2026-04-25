@@ -191,7 +191,7 @@ def test_detect_subjects_returns_detection_map(tmp_path):
 
     mock_db = MagicMock()
     mock_db.get_existing_detection_photo_ids.return_value = set()
-    mock_db.save_detections.return_value = [101]
+    mock_db.write_detection_batch.return_value = [101]
 
     with patch("classify_job.detect_animals", return_value=[fake_detection]), \
          patch("classify_job.get_primary_detection", return_value=fake_detection), \
@@ -339,7 +339,7 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     """_detect_batch must add photo_id to processed_ids as soon as detection
     rows are committed to the DB, before quality-scoring calls.
 
-    If compute_sharpness or update_photo_quality raises after save_detections,
+    If compute_sharpness or update_photo_quality raises after write_detection_batch,
     the outer except catches the exception and processed_ids.add at the end of
     the per-photo loop body is never reached.  The photo would be missing from
     processed_ids, causing the reclassify purge in pipeline_job to skip
@@ -367,7 +367,7 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.save_detections.return_value = [42]
+    mock_db.write_detection_batch.return_value = [42]
 
     # quality scoring raises — simulates compute_sharpness or
     # update_photo_quality failing after the detection row is already saved.
@@ -388,11 +388,11 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
         )
 
     # The detection was saved to the DB before quality scoring raised.
-    mock_db.save_detections.assert_called_once()
+    mock_db.write_detection_batch.assert_called_once()
     # photo 7 must be in processed_ids even though quality scoring raised, so
     # the reclassify purge correctly removes its stale pre-run detection rows.
     assert 7 in processed_ids, (
-        "photo_id must be in processed_ids after save_detections even when "
+        "photo_id must be in processed_ids after write_detection_batch even when "
         "quality-scoring raises — regression for Codex P2 on #513 line 315"
     )
     # detection_map should still contain the result from this run
@@ -508,7 +508,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     ]
 
     mock_db = MagicMock()
-    mock_db.save_detections.return_value = [101, 102]
+    mock_db.write_detection_batch.return_value = [101, 102]
 
     with patch("classify_job.detect_animals", return_value=fake_detections), \
          patch("classify_job.get_primary_detection", return_value=fake_detections[0]), \
@@ -531,7 +531,7 @@ def test_detect_batch_returns_all_detections(tmp_path):
     assert detection_map[1][0]["box_x"] == 0.1
     assert detection_map[1][1]["id"] == 102
     assert detection_map[1][1]["box_x"] == 0.5
-    mock_db.save_detections.assert_called_once()
+    mock_db.write_detection_batch.assert_called_once()
 
 
 def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):

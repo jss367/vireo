@@ -394,13 +394,18 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # treats it as "will be retried next pass".
                 continue
 
+            # Persist detection rows and record the detector run atomically —
+            # `write_detection_batch` wraps both writes in one transaction so a
+            # crash between them can't leave a torn state (detections without a
+            # matching detector_runs row, or the reverse for empty scenes).
+            # Failures from `detect_animals` were handled by the ``is None``
+            # early-continue above and must not poison the skip set.
+            det_ids = db.write_detection_batch(
+                photo["id"], "megadetector-v6", detections,
+            )
+
             if detections:
                 detected += 1
-
-                # Store ALL detections in the database
-                det_ids = db.save_detections(
-                    photo["id"], detections, detector_model="megadetector-v6"
-                )
 
                 # Build detection list with database IDs
                 det_list = []
@@ -422,21 +427,6 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # pre-run detection rows for this photo rather than leaving them in
                 # place and allowing future non-reclassify runs to reuse them.
                 processed_ids.add(photo["id"])
-            else:
-                # Genuine empty scene (detector ran, produced zero boxes).
-                # Clear any stale rows for this (photo, model) and record
-                # the run below so reruns skip.
-                db.save_detections(
-                    photo["id"], [], detector_model="megadetector-v6"
-                )
-
-            # Record the detector run ONLY for successful outcomes —
-            # boxes-found and real-empty-scene. Failures were handled by
-            # the ``is None`` early-continue above and must not poison
-            # the skip set.
-            db.record_detector_run(
-                photo["id"], "megadetector-v6", box_count=len(detections)
-            )
 
             if detections:
                 # Use highest-confidence detection as primary for quality scoring

@@ -3801,6 +3801,147 @@ def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
     assert ok in result, "consistent cached runs must stay cached"
 
 
+def test_write_detection_batch_is_atomic_under_commit_failure(tmp_path):
+    """If commit raises during write_detection_batch, neither detections nor
+    detector_runs may hold partial state. Both inserts must commit together
+    or not at all — the contract that prevents the torn writes described in
+    issue #654 (detections without a matching detector_runs row, or vice
+    versa for empty scenes).
+    """
+    import pytest
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+    ]
+
+    # sqlite3.Connection.commit is read-only at the C level, so we wrap the
+    # connection with a thin proxy whose commit() raises. Everything else
+    # delegates to the real connection so the helper's INSERTs still hit
+    # the underlying DB.
+    real_conn = db.conn
+
+    class FailingCommitConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def commit(self):
+            raise RuntimeError("simulated commit failure")
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    db.conn = FailingCommitConn(real_conn)
+    try:
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            db.write_detection_batch(
+                photo_id, "megadetector-v6", detections,
+            )
+    finally:
+        db.conn = real_conn
+
+    # If the helper did not roll back, an in-progress transaction is still
+    # holding the half-written state. Attempting a commit here would expose
+    # any leaked rows below.
+    import contextlib
+    with contextlib.suppress(Exception):
+        db.conn.commit()
+
+    det_count = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detections WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchone()["c"]
+    run_count = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM detector_runs WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchone()["c"]
+
+    assert det_count == 0, (
+        f"detections must roll back when commit fails; got {det_count} rows"
+    )
+    assert run_count == 0, (
+        f"detector_runs must roll back when commit fails; got {run_count} rows"
+    )
+
+
+def test_write_detection_batch_writes_both_tables_atomically(tmp_path):
+    """Successful write_detection_batch persists detection rows + the matching
+    detector_runs row, returns the new detection IDs, and box_count reflects
+    the number of detections written.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    detections = [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},
+         "confidence": 0.7, "category": "animal"},
+    ]
+    ids = db.write_detection_batch(photo_id, "megadetector-v6", detections)
+    assert len(ids) == 2
+
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchall()
+    assert {r["id"] for r in rows} == set(ids)
+
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert run is not None, "detector_runs row must exist after batch write"
+    assert run["box_count"] == 2
+
+
+def test_write_detection_batch_records_empty_scene(tmp_path):
+    """Empty detections must still write a detector_runs row with box_count=0
+    so future passes skip the photo as a known empty scene.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    ids = db.write_detection_batch(photo_id, "megadetector-v6", [])
+    assert ids == []
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert run is not None
+    assert run["box_count"] == 0
+    assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+
+
 def test_multiple_predictions_per_detection(tmp_path):
     """Multiple species predictions can be stored for the same detection."""
     from db import Database
