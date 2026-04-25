@@ -27,15 +27,19 @@ def run(session):
     if len(ids) < 3:
         return
 
-    # Normal-click the first card, Ctrl-click the next two. On the first
-    # Ctrl-click the handler folds the focused photo into selectedPhotos, so
+    # Normal-click the first card, Cmd-click the next two. On the first
+    # Cmd-click the handler folds the focused photo into selectedPhotos, so
     # the Set ends up containing all three ids.
+    # Use Meta (Cmd) rather than Control: on macOS Ctrl+click is intercepted
+    # by the OS as a right-click and opens the context menu instead of
+    # dispatching a multi-select click. The JS handler accepts metaKey OR
+    # ctrlKey, so Meta works on all platforms.
     session.page.click(f'.grid-card[data-id="{ids[0]}"]')
     session.page.click(
-        f'.grid-card[data-id="{ids[1]}"]', modifiers=["Control"]
+        f'.grid-card[data-id="{ids[1]}"]', modifiers=["Meta"]
     )
     session.page.click(
-        f'.grid-card[data-id="{ids[2]}"]', modifiers=["Control"]
+        f'.grid-card[data-id="{ids[2]}"]', modifiers=["Meta"]
     )
     session.screenshot("after-multiselect")
 

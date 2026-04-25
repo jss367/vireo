@@ -106,13 +106,10 @@ def test_get_models_no_downloads(tmp_path, monkeypatch):
     import models
 
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
-    # Stub os.path.exists within models so the legacy /tmp path check
-    # doesn't leak host filesystem state into the test.
-    _real_exists = os.path.exists
-    monkeypatch.setattr(
-        os.path, "exists",
-        lambda p: _real_exists(p) if p.startswith(str(tmp_path)) else False,
-    )
+    # Redirect DEFAULT_MODELS_DIR to an empty tmp dir so a developer's
+    # locally-downloaded weights in ~/.vireo/models don't make this test
+    # report models as already-downloaded.
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     result = models.get_models()
     assert len(result) >= len(models.KNOWN_MODELS)
     for m in result:
@@ -181,6 +178,7 @@ def test_get_active_model_none(tmp_path, monkeypatch):
     import models
 
     monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "models"))
     assert models.get_active_model() is None
 
 

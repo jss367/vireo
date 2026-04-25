@@ -37,6 +37,23 @@ def _wait_for_runtime(runtime_path: Path, timeout: float = 20.0) -> dict:
     raise TimeoutError(f"{runtime_path} never appeared")
 
 
+def _wait_for_port(port: int, timeout: float = 20.0) -> None:
+    """Poll until 127.0.0.1:port accepts TCP connections.
+
+    runtime.json is written before Flask binds to the port, so callers
+    that immediately POST after _wait_for_runtime can race the bind and
+    get ECONNREFUSED. This guards against that race.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError(f"127.0.0.1:{port} never accepted connections")
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -76,6 +93,7 @@ def test_headless_spawn_writes_runtime_and_serves_health(headless_home, tmp_path
     try:
         runtime = headless_home / ".vireo" / "runtime.json"
         data = _wait_for_runtime(runtime)
+        _wait_for_port(port)
         assert data["port"] == port
         assert data["mode"] == "headless"
         assert data["pid"] == proc.pid
@@ -102,6 +120,7 @@ def test_second_spawn_refuses_with_already_running(headless_home, tmp_path):
     try:
         runtime = headless_home / ".vireo" / "runtime.json"
         _wait_for_runtime(runtime)
+        _wait_for_port(first_port)
 
         second_port = _free_port()
         second = _spawn(headless_home, db, second_port)
@@ -181,6 +200,7 @@ def test_shutdown_endpoint_removes_runtime_json(headless_home, tmp_path):
     try:
         runtime = headless_home / ".vireo" / "runtime.json"
         data = _wait_for_runtime(runtime)
+        _wait_for_port(port)
 
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/v1/shutdown",
