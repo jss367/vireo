@@ -623,6 +623,79 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     assert call_count["n"] == 2, "failed photos must be retried on next pass"
 
 
+def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch):
+    """If the classifier fails to load, a reclassify must NOT have already
+    purged cached predictions/detections — otherwise weight-corruption
+    wipes shared-folder workspaces and there is no replacement.
+    """
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    # Seed a collection the classify path can consume.
+    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+
+    # Force the classifier constructor to raise — simulates
+    # weight-corruption or missing-weights at load time.
+    import classifier as classifier_mod
+    class BoomClassifier:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("simulated weights corruption")
+    monkeypatch.setattr(classifier_mod, "Classifier", BoomClassifier)
+
+    runner = FakeRunner()
+    job = _make_job()
+    params = ClassifyParams(
+        collection_id=coll_id,
+        labels_files=None,
+        labels_file=None,
+        model_id="BioCLIP",
+        model_name="BioCLIP",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        reclassify=True,
+    )
+
+    # Run should fail (classifier init crashes) but MUST NOT destroy the
+    # cached prediction or detection.
+    import contextlib
+    with contextlib.suppress(Exception):
+        run_classify_job(job, runner, db_path, ws, params)
+
+    # Re-open the DB to read post-job state
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    preds_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    dets_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM detections WHERE id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    assert preds_after == 1, (
+        "Reclassify purge happened before model load failed — cached "
+        "predictions were destroyed without replacement."
+    )
+    assert dets_after == 1, (
+        "Detections purged before model load failure — cache lost."
+    )
+
+
 def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
     """When a photo has no real detections and the full-image synthetic
     detection is gated by classifier_runs, the cached top prediction

@@ -1368,19 +1368,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
         )
 
-        if params.reclassify:
-            photo_ids = [p["id"] for p in photos]
-            thread_db.clear_predictions(model=effective_name, collection_photo_ids=photo_ids)
-            # Also clear existing detections so they get re-detected
-            for pid in photo_ids:
-                thread_db.clear_detections(pid)
-            log.info(
-                "Cleared existing predictions and detections for %d photos, model=%s (re-classify)",
-                len(photo_ids),
-                effective_name,
-            )
-
         # Phase 4: Initialize classifier
+        # The reclassify purge (destructive clears of detections + predictions +
+        # cascaded review state) is deferred until AFTER the classifier
+        # initializes. Running it before model load means any weight-load
+        # failure leaves affected photos with no predictions AND no
+        # detections AND no replacement results — shared-folder workspaces
+        # lose their cached state too. Deferring preserves the cache on
+        # setup failure; users see a clean error and their workspace is
+        # unchanged.
         runner.update_step(job["id"], "load_model", status="running")
         if model_type == "timm":
             phase_msg = f"Loading {effective_name} timm model..."
@@ -1431,6 +1427,23 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             job["id"], "load_model", status="completed",
             summary=effective_name,
         )
+
+        # Classifier init succeeded — now it's safe to purge existing
+        # cache for reclassify. Any failure before this point leaves the
+        # cache intact (see comment at the top of this function).
+        if params.reclassify:
+            photo_ids = [p["id"] for p in photos]
+            thread_db.clear_predictions(
+                model=effective_name, collection_photo_ids=photo_ids,
+            )
+            # Also clear existing detections so they get re-detected.
+            for pid in photo_ids:
+                thread_db.clear_detections(pid)
+            log.info(
+                "Cleared existing predictions and detections for %d photos, "
+                "model=%s (re-classify, post-model-load)",
+                len(photo_ids), effective_name,
+            )
 
         # Phase 5: Detect subjects
         runner.update_step(job["id"], "detect", status="running")
