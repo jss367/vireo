@@ -171,6 +171,59 @@ def test_kickoff_compute_clears_prior_error_on_success():
     assert cache.get_recent_error(DB, 1) is None
 
 
+def test_invalidate_workspaces_clears_recent_error():
+    """A recorded failure must not survive an invalidation: when a scan or
+    workspace/folder change advances the generation, the old error reflects
+    state that no longer applies and would otherwise force the next request
+    into the 30s backoff window even though the key has moved on. The next
+    ``kickoff_compute`` after invalidation should run fresh, not be gated."""
+    cache = NewImagesCache(ttl_seconds=60)
+
+    # Record a failure the normal way (via kickoff) so the backoff entry
+    # exists and ``get_recent_error`` would surface it.
+    def boom():
+        raise RuntimeError("disk unreachable")
+
+    event = cache.kickoff_compute(DB, 1, boom)
+    assert event.wait(timeout=2.0)
+    assert cache.get_recent_error(DB, 1) is not None
+
+    # Invalidation simulates a finished scan or workspace folder change.
+    cache.invalidate_workspaces(DB, [1])
+    assert cache.get_recent_error(DB, 1) is None, (
+        "invalidate_workspaces must drop stale failures so a fresh recompute "
+        "isn't suppressed by the prior error's 30s backoff"
+    )
+
+    # And the next kickoff actually runs (not short-circuited by the error
+    # gate), letting a successful compute repopulate the cache.
+    def ok():
+        return {"new_count": 4}
+
+    event = cache.kickoff_compute(DB, 1, ok)
+    assert event.wait(timeout=2.0)
+    assert cache.get(DB, 1) == {"new_count": 4}
+
+
+def test_invalidate_workspaces_clears_error_only_for_targeted_keys():
+    """Invalidation is scoped: a failure on workspace 2 must survive when
+    workspace 1's cache is invalidated."""
+    cache = NewImagesCache(ttl_seconds=60)
+
+    def boom():
+        raise RuntimeError("disk unreachable")
+
+    cache.kickoff_compute(DB, 1, boom).wait(timeout=2.0)
+    cache.kickoff_compute(DB, 2, boom).wait(timeout=2.0)
+    assert cache.get_recent_error(DB, 1) is not None
+    assert cache.get_recent_error(DB, 2) is not None
+
+    cache.invalidate_workspaces(DB, [1])
+
+    assert cache.get_recent_error(DB, 1) is None
+    assert cache.get_recent_error(DB, 2) is not None
+
+
 def test_cache_generation_is_scoped_by_db_path():
     """A bump to one db's generation must not race-drop a concurrent write for
     a different db with the same workspace_id."""

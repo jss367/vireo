@@ -190,6 +190,12 @@ class NewImagesCache:
             for wid in workspace_ids:
                 key = (db_path, wid)
                 self._entries.pop(key, None)
+                # Drop any recorded failure too: the cache key has moved on
+                # (folder/workspace change, completed scan), so the old error
+                # no longer reflects the current state and must not gate a
+                # fresh recompute via the 30s backoff window in
+                # ``kickoff_compute``.
+                self._errors.pop(key, None)
                 self._generations[key] = self._generations.get(key, 0) + 1
 
     def get_recent_error(self, db_path, workspace_id):
