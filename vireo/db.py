@@ -2516,6 +2516,13 @@ class Database:
     def get_dashboard_stats(self):
         """Return aggregate statistics for the dashboard."""
         ws = self._ws_id()
+        # Hoisted: multiple queries below need the workspace-effective
+        # detector_confidence to keep classified_count / prediction_status /
+        # detected_count in sync as the threshold moves.
+        import config as cfg
+        min_conf = self.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
 
         top_keywords = self.conn.execute(
             """SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
@@ -2566,6 +2573,12 @@ class Database:
         # Review status lives in prediction_review (workspace-scoped).
         # Left-joining lets us count pending rows (those without a review row)
         # and bucket them into the pending column via COALESCE.
+        #
+        # Filter by detector_confidence so dashboard status counts stay in
+        # sync with what the UI threshold actually shows, and scope to the
+        # most recent labels_fingerprint per (detection, classifier_model)
+        # so stale-label predictions from a prior label set don't drift the
+        # totals away from the active labeling context.
         prediction_status = self.conn.execute(
             """SELECT COALESCE(pr_rev.status, 'pending') AS status,
                       COUNT(*) AS count
@@ -2576,18 +2589,37 @@ class Database:
                  ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
                LEFT JOIN prediction_review pr_rev
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                GROUP BY COALESCE(pr_rev.status, 'pending')""",
-            (ws, ws),
+            (ws, ws, min_conf),
         ).fetchall()
 
+        # Same threshold + fingerprint rules as prediction_status above, so
+        # classified_count can't drift above detected_count as the threshold
+        # moves.
         classified_count = self.conn.execute(
             """SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos ph ON ph.id = d.photo_id
                JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?""",
-            (ws,),
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               WHERE d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
+            (ws, min_conf),
         ).fetchone()[0]
 
         photos_by_hour = self.conn.execute(
@@ -2617,10 +2649,7 @@ class Database:
             (ws,),
         ).fetchall()
 
-        import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        # min_conf already hoisted at top of get_dashboard_stats.
         detected_count = self.conn.execute(
             """SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d

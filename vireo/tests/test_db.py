@@ -1224,6 +1224,66 @@ def test_query_move_rule_matches_has_predictions(tmp_path):
     assert misses == [pids[1]]
 
 
+def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_path):
+    """get_dashboard_stats' classified_count and prediction_status must
+    apply the same detector_confidence floor as detected_count (otherwise
+    the dashboard shows "3 detected, 7 classified" after raising the
+    threshold), and must scope to the most recent labels_fingerprint per
+    (detection, classifier_model) so stale-label predictions don't drift
+    the dashboard away from the active labeling context.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo A: high-confidence detection + current-fingerprint prediction.
+    det_a = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.9, '2026-04-24')",
+        (det_a,),
+    )
+    # Stale-fingerprint prediction on the SAME detection — must not
+    # inflate classified_count or prediction_status beyond the one photo.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_a,),
+    )
+
+    # Photo B: LOW-confidence detection (below default 0.2 threshold) with
+    # its own current-fingerprint prediction — must be excluded by the
+    # threshold filter.
+    det_b = db.save_detections(pids[1], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Sparrow', 0.9, '2026-04-24')",
+        (det_b,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats()
+    # detected_count applies threshold → only photo A qualifies.
+    assert stats["detected_count"] == 1
+    # classified_count must match — NOT 2 (ignored threshold) and NOT 3
+    # (also mixed fingerprints on photo A).
+    assert stats["classified_count"] == 1, (
+        f"classified_count ({stats['classified_count']}) must honor "
+        f"detector_confidence + fingerprint; expected 1 like detected_count"
+    )
+    # prediction_status: one pending row for photo A's current-fingerprint
+    # prediction. Stale-fingerprint row and below-threshold row excluded.
+    status_counts = {r["status"]: r["count"] for r in stats["prediction_status"]}
+    assert status_counts.get("pending", 0) == 1, (
+        f"prediction_status must exclude stale fingerprint and below-threshold "
+        f"rows; got {status_counts}"
+    )
+
+
 def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monkeypatch):
     """/api/species/<name>/clusters must not mix stale and current-label
     rows when a detection has been classified under multiple fingerprints.
