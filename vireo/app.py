@@ -38,21 +38,30 @@ from preview_cache import evict_if_over_quota as evict_preview_cache_if_over_quo
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-# File logging with rotation — persists across restarts
-_log_dir = os.path.expanduser("~/.vireo")
-os.makedirs(_log_dir, exist_ok=True)
-_file_handler = logging.handlers.RotatingFileHandler(
-    os.path.join(_log_dir, "vireo.log"),
-    maxBytes=5 * 1024 * 1024,  # 5 MB
-    backupCount=3,
-)
-_file_handler.setFormatter(
-    logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+# File logging is attached only when the server actually starts (see
+# main() / _setup_file_logging). Importing this module — e.g. from pytest
+# fixtures — must NOT touch ~/.vireo/vireo.log, or test tracebacks end up
+# in the user's real log file.
+def _setup_file_logging(log_dir=None):
+    root = logging.getLogger()
+    if any(getattr(h, "_vireo_file_handler", False) for h in root.handlers):
+        return
+    if log_dir is None:
+        log_dir = os.path.expanduser("~/.vireo")
+    os.makedirs(log_dir, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "vireo.log"),
+        maxBytes=5 * 1024 * 1024,  # 5 MB
+        backupCount=3,
     )
-)
-logging.getLogger().addHandler(_file_handler)
+    handler._vireo_file_handler = True
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root.addHandler(handler)
 
 
 # Suppress noisy werkzeug request logs for polling endpoints
@@ -8854,6 +8863,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
 
 def main():
+    _setup_file_logging()
+
     parser = argparse.ArgumentParser(description="Vireo Photo Browser")
     parser.add_argument(
         "--db",
