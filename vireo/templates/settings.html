@@ -1016,6 +1016,7 @@ function toggleSection(header) {
 }
 
 /* ---------- Workspace Config Overrides ---------- */
+var _wsOverridesLoaded = false;
 async function loadWsOverrides() {
   try {
     var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
@@ -1039,6 +1040,7 @@ async function loadWsOverrides() {
         updateWsLabel(key);
       }
     });
+    _wsOverridesLoaded = true;
   } catch(e) {}
 }
 
@@ -1072,6 +1074,10 @@ function toggleWsOverride(key) {
 
 var _wsSaveTimer = null;
 function saveWsConfig() {
+  // If the initial load failed, every checkbox shows unchecked even though the
+  // server may have overrides. Saving now would send null for every key and
+  // wipe persisted state we never displayed. Bail out instead.
+  if (!_wsOverridesLoaded) return;
   clearTimeout(_wsSaveTimer);
   _wsSaveTimer = setTimeout(async function() {
     var overrides = {};
