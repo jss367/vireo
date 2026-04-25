@@ -6,11 +6,13 @@ def _seed_burst_group(db, group_id="grp-test-1", model="test-classifier"):
     """Promote the fixture's three hawk predictions into a single burst group.
 
     ``seed_e2e_data`` in conftest.py creates three hawk photos with one
-    prediction each (species=Red-tailed Hawk, model=test-classifier). By
-    setting a shared ``group_id`` on those prediction rows and giving each
-    photo a non-null ``quality_score``, the /review page renders a single
-    group card whose button (``button[data-group-id]``) opens the burst
-    modal via ``openGroupReview``.
+    prediction each (species=Red-tailed Hawk, classifier_model=test-classifier).
+    Group state (``group_id``, ``vote_count``, ``total_votes``) lives in the
+    workspace-scoped ``prediction_review`` table, so we upsert one row per
+    prediction in the active workspace. Setting a non-null ``quality_score``
+    on each photo is what makes the /review page render a group card whose
+    button (``button[data-group-id]``) opens the burst modal via
+    ``openGroupReview``.
 
     Returns the number of predictions that joined the group (usually 3).
     """
@@ -19,19 +21,24 @@ def _seed_burst_group(db, group_id="grp-test-1", model="test-classifier"):
              FROM predictions pr
              JOIN detections d ON d.id = pr.detection_id
             WHERE pr.species = 'Red-tailed Hawk'
-              AND pr.model = ?
-              AND pr.status != 'alternative'""",
+              AND pr.classifier_model = ?""",
         (model,),
     ).fetchall()
     if not rows:
         return 0
     total = len(rows)
+    ws_id = db._active_workspace_id
     for i, row in enumerate(rows):
         db.conn.execute(
-            """UPDATE predictions
-                  SET group_id = ?, vote_count = ?, total_votes = ?
-                WHERE id = ?""",
-            (group_id, total, total, row["id"]),
+            """INSERT INTO prediction_review
+                 (prediction_id, workspace_id, status,
+                  group_id, vote_count, total_votes)
+               VALUES (?, ?, 'pending', ?, ?, ?)
+               ON CONFLICT(prediction_id, workspace_id)
+               DO UPDATE SET group_id    = excluded.group_id,
+                             vote_count  = excluded.vote_count,
+                             total_votes = excluded.total_votes""",
+            (row["id"], ws_id, group_id, total, total),
         )
         # Give each photo a different quality score so the modal has a
         # deterministic AI-best pick.
