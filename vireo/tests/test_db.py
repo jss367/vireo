@@ -1544,6 +1544,12 @@ def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monke
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "bioclip-2",
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "model_type": "bioclip", "downloaded": True,
+    })
     from app import create_app
 
     db_path = str(tmp_path / "test.db")
@@ -1589,6 +1595,78 @@ def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monke
     # not twice (one per fingerprint row).
     assert data["total_photos"] == 1, (
         f"Expected one photo (deduped to current fingerprint), got "
+        f"{data['total_photos']}"
+    )
+
+
+def test_species_clusters_endpoint_filters_to_active_classifier_model(
+    tmp_path, monkeypatch,
+):
+    """/api/species/<name>/clusters must constrain predictions to a single
+    classifier model — otherwise a workspace whose detection has predictions
+    from two models (e.g. BioCLIP-2 and BioCLIP-3) clusters vectors from
+    two different model spaces and shows the same photo twice (one prediction
+    row per model).
+    """
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-3", "name": "bioclip-3",
+        "model_str": "hf-hub:imageomics/bioclip-3",
+        "model_type": "bioclip", "downloaded": True,
+    })
+    from app import create_app
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    from db import Database
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/p", name="p")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    import numpy as np
+    emb_old = np.zeros(512, dtype=np.float32).tobytes()
+    emb_new = np.ones(512, dtype=np.float32).tobytes()
+    # Same photo has embeddings under both models — exactly the state Phase 1
+    # is meant to support — but /clusters must pick one.
+    db.upsert_photo_embedding(pid, "bioclip-2", emb_old)
+    db.upsert_photo_embedding(pid, "bioclip-3", emb_new)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # One prediction row per model on the same detection + species.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-3', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir,
+                     api_token="t")
+    client = app.test_client()
+    resp = client.get("/api/species/Robin/clusters")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # The photo must appear exactly once (filtered to the active classifier
+    # model), not twice (one per classifier model row).
+    assert data["total_photos"] == 1, (
+        f"Expected one photo (filtered to active classifier model), got "
         f"{data['total_photos']}"
     )
 

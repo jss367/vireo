@@ -6788,21 +6788,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         distance_threshold = request.args.get("threshold", 0.4, type=float)
 
+        # Cluster within a single classifier model. A workspace whose
+        # detections were classified under both BioCLIP-2 and BioCLIP-3
+        # would otherwise emit one prediction row per model, double-count
+        # the photo, and cluster vectors from incompatible model spaces.
+        from models import get_active_model
+        active_model = get_active_model()
+        if not active_model or active_model.get("model_type", "bioclip") == "timm":
+            return jsonify({
+                "species": species_name,
+                "clusters": [],
+                "total_photos": 0,
+            })
+        classifier_model = active_model["name"]
+
         # Find all photos with this species prediction in the active
         # workspace. Predictions are global but membership in the
         # workspace is expressed through workspace_folders.
         #
-        # Fingerprint filter: for each (detection, classifier_model) only
-        # surface rows from the most recent labels_fingerprint. Without
-        # this, a workspace that rotated label sets would cluster stale
-        # species rows alongside current ones, distorting cluster
-        # membership / counts / variant labels and duplicating the same
-        # photo embedding.
-        # The embedding used for clustering must come from the same model
-        # that produced the species prediction — otherwise we'd cluster
-        # vectors from different model spaces against each other. The JOIN
-        # against photo_embeddings on (photo_id, model) enforces that and
-        # implicitly drops rows whose model has no cached embedding.
+        # Fingerprint filter: for the chosen classifier_model surface only
+        # rows from the most recent labels_fingerprint. Without this, a
+        # workspace that rotated label sets would cluster stale species
+        # rows alongside current ones, distorting cluster membership /
+        # counts / variant labels and duplicating the same photo embedding.
         rows = db.conn.execute(
             """SELECT d.photo_id, pe.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
@@ -6816,6 +6824,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 AND pe.model = pr.classifier_model
                 AND pe.variant = ''
                WHERE pr.species = ?
+                 AND pr.classifier_model = ?
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -6824,7 +6833,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
                  )""",
-            (ws, species_name, min_conf),
+            (ws, species_name, classifier_model, min_conf),
         ).fetchall()
 
         if len(rows) < 2:
