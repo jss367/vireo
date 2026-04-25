@@ -338,6 +338,18 @@
           <span style="font-size:13px;color:var(--text-primary);min-width:36px;" id="cfgDetectorConfVal">0.20</span>
         </div>
       </div>
+      <div class="setting-row" style="padding:0 0 8px 16px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text-dim);">
+          <input type="checkbox" id="wsOverride_detector_confidence" onchange="toggleWsOverride('detector_confidence')" style="accent-color:var(--accent);">
+          Override for "<span class="ws-override-name">…</span>"
+        </label>
+        <div id="wsOverrideCtrl_detector_confidence" style="display:none;align-items:center;gap:8px;margin-left:24px;margin-top:4px;">
+          <input type="range" id="wsVal_detector_confidence" min="5" max="50" step="1"
+                 style="width:120px;accent-color:var(--accent);"
+                 oninput="document.getElementById('wsDetectorConfVal').textContent=(this.value/100).toFixed(2); saveWsConfig()">
+          <span id="wsDetectorConfVal" style="font-size:12px;color:var(--text-dim);min-width:36px;">-</span>
+        </div>
+      </div>
       <div class="setting-row">
         <div class="setting-label">
           Detection box padding
@@ -1011,7 +1023,7 @@ async function loadWsOverrides() {
       document.querySelectorAll('.ws-override-name').forEach(function(el) { el.textContent = ws.name; });
     }
     var overrides = await safeFetch('/api/workspaces/active/config', {}, { toast: false });
-    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
       var input = document.getElementById('wsVal_' + key);
       var ctrl = document.getElementById('wsOverrideCtrl_' + key);
@@ -1019,7 +1031,7 @@ async function loadWsOverrides() {
       if (overrides[key] !== undefined) {
         checkbox.checked = true;
         ctrl.style.display = 'flex';
-        if (key === 'classification_threshold' || key === 'similarity_threshold') {
+        if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
           input.value = Math.round(overrides[key] * 100);
         } else {
           input.value = overrides[key];
@@ -1037,6 +1049,8 @@ function updateWsLabel(key) {
     document.getElementById('wsThresholdVal').textContent = input.value + '%';
   } else if (key === 'similarity_threshold') {
     document.getElementById('wsSimilarityVal').textContent = input.value + '%';
+  } else if (key === 'detector_confidence') {
+    document.getElementById('wsDetectorConfVal').textContent = (parseInt(input.value) / 100).toFixed(2);
   }
 }
 
@@ -1050,6 +1064,7 @@ function toggleWsOverride(key) {
     if (key === 'classification_threshold') input.value = 40;
     else if (key === 'grouping_window_seconds') input.value = 10;
     else if (key === 'similarity_threshold') input.value = 85;
+    else if (key === 'detector_confidence') input.value = 20;
     updateWsLabel(key);
   }
   saveWsConfig();
@@ -1060,11 +1075,11 @@ function saveWsConfig() {
   clearTimeout(_wsSaveTimer);
   _wsSaveTimer = setTimeout(async function() {
     var overrides = {};
-    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold'].forEach(function(key) {
+    ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
       var input = document.getElementById('wsVal_' + key);
       if (checkbox && checkbox.checked && input) {
-        if (key === 'classification_threshold' || key === 'similarity_threshold') {
+        if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
           overrides[key] = parseInt(input.value) / 100;
         } else {
           overrides[key] = parseInt(input.value);

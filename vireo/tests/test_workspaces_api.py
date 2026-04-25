@@ -282,6 +282,33 @@ def test_workspace_config_get_and_set(app_and_db):
     assert config["grouping_window_seconds"] == 120
 
 
+def test_workspace_config_detector_confidence_override(app_and_db):
+    """POST detector_confidence override is accepted by the API and reaches get_effective_config.
+
+    Regression for #648: the API whitelist used to silently drop detector_confidence,
+    so the read-time threshold filter promised in the #636 CHANGELOG was unreachable
+    via the public API.
+    """
+    import config as cfg
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/workspaces/active/config", json={"detector_confidence": 0.05})
+    assert resp.status_code == 200
+    stored = resp.get_json()["overrides"]
+    assert stored["detector_confidence"] == 0.05
+
+    effective = db.get_effective_config(cfg.load())
+    assert effective["detector_confidence"] == 0.05
+
+    # Clearing via null removes the override and reverts to the global default
+    clear_resp = client.post("/api/workspaces/active/config", json={"detector_confidence": None})
+    assert clear_resp.status_code == 200
+    assert "detector_confidence" not in clear_resp.get_json()["overrides"]
+    assert db.get_effective_config(cfg.load())["detector_confidence"] == cfg.DEFAULTS["detector_confidence"]
+
+
 def test_workspace_config_ignores_unknown_keys(app_and_db):
     """Only allowed keys are stored; unknown keys are silently ignored."""
     app, _db = app_and_db
