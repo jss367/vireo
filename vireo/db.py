@@ -2024,18 +2024,31 @@ class Database:
             # a global detection, which references the photo. Workspace scoping
             # is already enforced by the outer workspace_folders JOIN, so the
             # EXISTS only needs to link prediction → detection → this photo.
+            #
+            # Apply the workspace-effective detector_confidence floor so the
+            # rule matches what the UI actually shows: a photo whose only
+            # predictions sit on below-threshold detections must NOT count
+            # as "has predictions".
+            import config as cfg
+            move_min_conf = self.get_effective_config(cfg.load()).get(
+                "detector_confidence", 0.2
+            )
             if criteria["has_predictions"]:
                 conditions.append(
                     "EXISTS (SELECT 1 FROM predictions pr "
                     "JOIN detections d ON d.id = pr.detection_id "
-                    "WHERE d.photo_id = p.id)"
+                    "WHERE d.photo_id = p.id "
+                    "  AND d.detector_confidence >= ?)"
                 )
+                params.append(move_min_conf)
             else:
                 conditions.append(
                     "NOT EXISTS (SELECT 1 FROM predictions pr "
                     "JOIN detections d ON d.id = pr.detection_id "
-                    "WHERE d.photo_id = p.id)"
+                    "WHERE d.photo_id = p.id "
+                    "  AND d.detector_confidence >= ?)"
                 )
+                params.append(move_min_conf)
         if "imported_before" in criteria:
             conditions.append("p.timestamp < ?")
             params.append(criteria["imported_before"])

@@ -1767,18 +1767,25 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                     model_type = bundle["model_type"]
                     model_name = bundle["model_name"]
 
-                if params.reclassify:
-                    photo_ids = [p["id"] for p in photos]
-                    thread_db.clear_predictions(
-                        model=model_name, collection_photo_ids=photo_ids
-                    )
-
                 # The fingerprint for THIS model's label set — pinned by
                 # model_loader_stage for the first model and by _load_model_bundle
                 # for subsequent ones. Used to key the classifier_runs gate so
                 # a repeat pass over the same (detection, model, fingerprint)
-                # skips work instead of re-running inference.
+                # skips work instead of re-running inference. Hoisted above
+                # the reclassify clear so the clear can scope by fingerprint.
                 spec_fp = loaded_models.get("labels_fingerprint", "legacy")
+
+                if params.reclassify:
+                    photo_ids = [p["id"] for p in photos]
+                    # Scope by labels_fingerprint so reclassifying one
+                    # workspace's label set doesn't wipe another
+                    # workspace's cached predictions on the same photos
+                    # under its own fingerprint (shared-folder setups).
+                    thread_db.clear_predictions(
+                        model=model_name,
+                        collection_photo_ids=photo_ids,
+                        labels_fingerprint=spec_fp,
+                    )
 
                 # No photo-level short-circuit: it would hide detections
                 # that newly cross the workspace's detector_confidence

@@ -1203,6 +1203,37 @@ def test_get_prediction_for_photo_keyed_by_fingerprint(tmp_path):
     ) is None
 
 
+def test_query_move_rule_matches_has_predictions_honors_threshold(tmp_path):
+    """has_predictions must match the UI's read-time threshold view: a
+    photo whose only prediction sits on a below-threshold detection
+    should NOT count as having predictions.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo 0: above-threshold detection + prediction → "has predictions" = True
+    det_a = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_a, species='Robin', confidence=0.9, model='bioclip')
+
+    # Photo 1: ONLY a below-threshold detection (default 0.2) with a
+    # prediction. Must NOT count as "has predictions".
+    det_b = db.save_detections(pids[1], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_b, species='Sparrow', confidence=0.9, model='bioclip')
+
+    has = db.query_move_rule_matches({"has_predictions": True})
+    assert has == [pids[0]], (
+        f"has_predictions=True must apply detector_confidence floor; "
+        f"expected only photo 0, got {has}"
+    )
+    none = db.query_move_rule_matches({"has_predictions": False})
+    assert pids[1] in none, (
+        f"Photo with only below-threshold predictions must match "
+        f"has_predictions=False; got {none}"
+    )
+
+
 def test_query_move_rule_matches_has_predictions(tmp_path):
     """The has_predictions move-rule criterion must work post-refactor.
 
