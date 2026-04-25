@@ -480,13 +480,23 @@ class TestTextEncoderBatchRejection:
         session.run = fake_run
         return session
 
-    def test_raises_clear_error_when_batch_rejected(self, tmp_path):
-        """A stale text encoder ONNX must surface a re-download instruction
-        rather than silently falling back to slow per-row inference."""
+    def test_batch_rejection_writes_verify_failed_sentinel(self, tmp_path):
+        """A stale text encoder ONNX must self-heal via the existing Repair
+        flow: write `.verify_failed` into the model dir so Settings → Models
+        flips the install to 'incomplete' and surfaces the Repair button.
+
+        Without the sentinel, the install keeps passing pinned-revision
+        verification (because the user's bytes still match the old upstream
+        commit they were downloaded from), so Settings shows the model as
+        healthy while every pipeline run blows up at inference. The sentinel
+        bridges that gap: detection happens at runtime, repair happens via
+        the same Settings flow used for any other corruption case.
+        """
+        import model_verify
         import pytest
         from classifier import Classifier
 
-        _make_model_dir(tmp_path)
+        model_dir = _make_model_dir(tmp_path)
         fake_image_session = _make_fake_image_session()
         fake_text_session = self._make_batch1_only_text_session()
         fake_tokenizer = _make_fake_tokenizer()
@@ -503,9 +513,90 @@ class TestTextEncoderBatchRejection:
                 side_effect=[fake_image_session, fake_text_session],
             ),
             patch("classifier._load_tokenizer", return_value=fake_tokenizer),
-            pytest.raises(RuntimeError, match="Re-download"),
+            pytest.raises(RuntimeError) as excinfo,
         ):
             Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
+
+        # The error message must point users at the existing Repair flow,
+        # not tell them to manually re-download.
+        msg = str(excinfo.value)
+        assert "Settings" in msg and "Models" in msg, (
+            f"error should direct user to Settings → Models, got: {msg!r}"
+        )
+        assert "Repair" in msg, (
+            f"error should mention Repair button, got: {msg!r}"
+        )
+
+        # The sentinel must have been written so models._classify_model_state
+        # flips this install to 'incomplete'.
+        sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+        assert sentinel.is_file(), (
+            f".verify_failed sentinel must be written to {sentinel}"
+        )
+        # The sentinel reason should identify the specific failure mode so
+        # future debugging from .vireo logs / support output can distinguish
+        # this from hash-mismatch corruption.
+        reason = sentinel.read_text()
+        assert "stale-export" in reason or "batched" in reason.lower(), (
+            f"sentinel reason should identify stale-export, got: {reason!r}"
+        )
+
+    def test_transient_text_session_error_does_not_write_sentinel(
+        self, tmp_path
+    ):
+        """A transient ONNX runtime failure (memory pressure, provider
+        glitch, mmap race) must NOT mark the install as needing Repair.
+
+        Only the specific stale-export signature (the ``gemm_input_reshape``
+        node from old BioCLIP exports) flips the install to incomplete.
+        Other inference errors propagate without mutating model state, so
+        a healthy install isn't permanently flagged for Repair after a
+        one-off runtime hiccup.
+        """
+        import model_verify
+        from classifier import Classifier
+
+        session = MagicMock()
+        mock_input = MagicMock()
+        mock_input.name = "input_ids"
+        session.get_inputs.return_value = [mock_input]
+
+        # A generic ORT runtime error that doesn't match the stale-export
+        # signature — e.g. an out-of-memory failure during inference.
+        def fake_run(output_names, input_dict):
+            raise RuntimeError(
+                "Failed to allocate memory for inference; "
+                "system under memory pressure."
+            )
+
+        session.run = fake_run
+
+        model_dir = _make_model_dir(tmp_path)
+        fake_image_session = _make_fake_image_session()
+        fake_tokenizer = _make_fake_tokenizer()
+
+        with (
+            patch("classifier._MODELS_ROOT", str(tmp_path)),
+            patch("classifier.CACHE_DIR", str(tmp_path / "cache")),
+            patch(
+                "classifier._MANIFEST_PATH",
+                str(tmp_path / "cache" / "manifest.json"),
+            ),
+            patch(
+                "classifier.onnx_runtime.create_session",
+                side_effect=[fake_image_session, session],
+            ),
+            patch("classifier._load_tokenizer", return_value=fake_tokenizer),
+            pytest.raises(RuntimeError, match="memory"),
+        ):
+            Classifier(labels=["bird", "cat"], model_str="ViT-B-16")
+
+        # The sentinel must NOT have been written: no Repair badge for
+        # transient errors.
+        sentinel = model_dir / model_verify.VERIFY_FAILED_SENTINEL
+        assert not sentinel.is_file(), (
+            f"transient error must not write sentinel; found at {sentinel}"
+        )
 
 
 class TestEmbeddingCache:
