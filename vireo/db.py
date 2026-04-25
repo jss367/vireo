@@ -4398,27 +4398,27 @@ class Database:
             run_conds.append(f"d.photo_id IN ({placeholders})")
             run_params.extend(collection_photo_ids)
         run_where = (" WHERE " + " AND ".join(run_conds)) if run_conds else ""
-        # Match by (detection_id, classifier_model, labels_fingerprint)
-        # — delete composite key tuples via rowid equivalents.
-        rows = self.conn.execute(
-            f"""SELECT cr.detection_id, cr.classifier_model,
-                       cr.labels_fingerprint
-                FROM classifier_runs cr
-                JOIN detections d ON d.id = cr.detection_id
-                JOIN photos ph ON ph.id = d.photo_id
-                JOIN workspace_folders wf
-                  ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?{run_where}""",
+        # Single set-based DELETE via a rowid subquery — the previous
+        # SELECT + per-row DELETE loop issued one statement per matching
+        # run, which on a reclassify of a multi-thousand-detection
+        # workspace dominates wall time on the startup-blocking thread.
+        # Match semantics are identical: the subquery shape is the same
+        # (JOIN through detections/photos/workspace_folders, same
+        # optional filters), and rowid uniquely identifies each
+        # classifier_runs row under the implicit-rowid default.
+        self.conn.execute(
+            f"""DELETE FROM classifier_runs
+                WHERE rowid IN (
+                    SELECT cr.rowid
+                    FROM classifier_runs cr
+                    JOIN detections d ON d.id = cr.detection_id
+                    JOIN photos ph ON ph.id = d.photo_id
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                    {run_where}
+                )""",
             [ws, *run_params],
-        ).fetchall()
-        for r in rows:
-            self.conn.execute(
-                """DELETE FROM classifier_runs
-                   WHERE detection_id = ?
-                     AND classifier_model = ?
-                     AND labels_fingerprint = ?""",
-                (r["detection_id"], r["classifier_model"],
-                 r["labels_fingerprint"]),
-            )
+        )
         self.conn.commit()
 
     def get_predictions(self, photo_ids=None, model=None, status=None):

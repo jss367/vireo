@@ -184,9 +184,11 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
     Returns the list of prediction dicts that were stored (may be empty).
     """
     if classify_fn is None:
-        # No classifier plugged in — record a zero-result run so the gate's
-        # next call notices a prior attempt.  Used in tests that just exercise
-        # the gating logic without actually running a model.
+        # No classifier plugged in — return [] without side effects. The
+        # gate wrapper treats a zero-prediction return as a failed attempt
+        # and does NOT record a classifier_run row, so the next call will
+        # retry. Used in tests that just exercise the gating logic without
+        # actually running a model.
         return []
 
     predictions = classify_fn() or []
@@ -234,8 +236,14 @@ def _classify_detection_gated(db, detection_id, classifier_model,
 
     The gate is keyed on (detection_id, classifier_model, labels_fingerprint):
     if a row exists in classifier_runs and reclassify is False, the classifier
-    is not invoked. After a successful invocation the classifier_runs row is
-    written (or refreshed) so subsequent passes skip.
+    is not invoked. After a successful invocation that produced at least one
+    prediction, the classifier_runs row is written (or refreshed) so
+    subsequent passes skip.
+
+    Mirrors ``_record_batch_classifier_runs`` and the inline pipeline_job
+    guard: a zero-count run is treated as a failed attempt, not a completed
+    one. Recording it would permanently strand the detection on the next
+    non-reclassify pass — the cache would claim "done" with no rows to show.
     """
     if not reclassify:
         existing = db.get_classifier_run_keys(detection_id)
@@ -246,10 +254,11 @@ def _classify_detection_gated(db, detection_id, classifier_model,
         labels_fingerprint=labels_fingerprint,
         classify_fn=classify_fn,
     )
-    db.record_classifier_run(
-        detection_id, classifier_model, labels_fingerprint,
-        prediction_count=len(predictions),
-    )
+    if predictions:
+        db.record_classifier_run(
+            detection_id, classifier_model, labels_fingerprint,
+            prediction_count=len(predictions),
+        )
     return predictions
 
 

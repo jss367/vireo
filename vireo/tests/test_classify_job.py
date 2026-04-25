@@ -970,6 +970,46 @@ def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
     assert calls["n"] == 0, "classifier should be skipped when run key exists"
 
 
+def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatch):
+    """A classify_fn returning [] (transient failure or no-op test stub) must
+    NOT be recorded as a completed classifier_run — otherwise the next
+    non-reclassify pass short-circuits on the gate and the detection is
+    permanently stranded without predictions.
+
+    Mirrors the guard already in _record_batch_classifier_runs and the
+    inline pipeline_job branch.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+          "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    import classify_job
+    # classify_fn=None returns [] with no side effects (see
+    # _run_classifier_on_detection). The gate must NOT write a run row.
+    classify_job._classify_detection_gated(
+        db=db, detection_id=det_id,
+        classifier_model="bioclip-2",
+        labels_fingerprint="abc123",
+        labels=["Robin"], reclassify=False,
+    )
+    assert db.get_classifier_run_keys(det_id) == set(), (
+        "zero-prediction classify_fn must not record a run key"
+    )
+
+
 def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
     """A failed classifier batch (no prediction for a detection) must not be
     cached as a completed run — otherwise the detection is permanently
