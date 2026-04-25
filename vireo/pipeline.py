@@ -76,7 +76,8 @@ def _resolve_collection_photo_ids(db, collection_id):
     return {r["id"] for r in rows} if rows else set()
 
 
-def load_photo_features(db, collection_id=None, config=None):
+def load_photo_features(db, collection_id=None, config=None,
+                        labels_fingerprint=None):
     """Load all pipeline-relevant features for workspace photos from the database.
 
     Returns a list of photo dicts ready for the pipeline stages, with:
@@ -88,6 +89,12 @@ def load_photo_features(db, collection_id=None, config=None):
         db: Database instance with active workspace
         collection_id: optional collection ID to scope results
         config: optional dict with settings (e.g. top_k_predictions)
+        labels_fingerprint: optional — when set, only predictions produced
+            under this label set are considered. When ``None`` (default),
+            each (detection, classifier_model) surfaces rows from its most
+            recent fingerprint only — otherwise a photo with cached
+            predictions from multiple label sets would leak stale species
+            into the top-k.
 
     Returns:
         list of photo dicts
@@ -121,19 +128,62 @@ def load_photo_features(db, collection_id=None, config=None):
             (ws_id,),
         ).fetchall()
 
+    # Resolve the workspace-effective detector_confidence threshold once.
+    # The detections table is global (no workspace_id); threshold filtering
+    # happens at read time against the active workspace's effective config.
+    import config as cfg
+    effective_cfg = db.get_effective_config(cfg.load())
+    min_conf = effective_cfg.get("detector_confidence", 0.2)
+
     # Load species predictions (top-5 per photo, ordered by confidence).
     # Predictions reference detections (not photos directly), so JOIN through
-    # the detections table to get photo_id.
-    pred_rows = db.conn.execute(
-        """SELECT d.photo_id, pr.species, pr.confidence, pr.model
-           FROM predictions pr
-           JOIN detections d ON d.id = pr.detection_id
-           JOIN photos p ON p.id = d.photo_id
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-           WHERE d.workspace_id = ? AND wf.workspace_id = ?
-           ORDER BY d.photo_id, pr.confidence DESC""",
-        (ws_id, ws_id),
-    ).fetchall()
+    # the detections table to get photo_id. Only surface predictions whose
+    # backing detection passes the workspace threshold — lowering the
+    # threshold in workspace config should surface more predictions without
+    # rewriting any rows.
+    # NOTE: pr.classifier_model aliased to "model" for back-compat with
+    # species_top5 tuple shape consumed downstream. Prediction review
+    # fields (status/group_id/individual) are Task 25 scope.
+    #
+    # Fingerprint filter: a detection + classifier_model can have predictions
+    # from multiple label sets (fingerprints) when the user rotates labels.
+    # If the caller pinned a specific fingerprint, use it; otherwise pick
+    # the most recent one per (detection, model) so stale species from an
+    # old label set don't leak into the top-k.
+    if labels_fingerprint is not None:
+        pred_rows = db.conn.execute(
+            """SELECT d.photo_id, pr.species, pr.confidence,
+                      pr.classifier_model AS model
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ?
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = ?
+               ORDER BY d.photo_id, pr.confidence DESC""",
+            (ws_id, min_conf, labels_fingerprint),
+        ).fetchall()
+    else:
+        pred_rows = db.conn.execute(
+            """SELECT d.photo_id, pr.species, pr.confidence,
+                      pr.classifier_model AS model
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ?
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                 )
+               ORDER BY d.photo_id, pr.confidence DESC""",
+            (ws_id, min_conf),
+        ).fetchall()
 
     # Group predictions by photo_id, keep top K
     top_k = (config or {}).get("top_k_predictions", 5)
@@ -143,29 +193,26 @@ def load_photo_features(db, collection_id=None, config=None):
         if len(species_by_photo[pid]) < top_k:
             species_by_photo[pid].append((pr["species"], pr["confidence"], pr["model"]))
 
-    # Load primary detection per photo (highest confidence) from detections table.
-    # This replaces the old photos.detection_box / photos.detection_conf columns.
-    det_rows = db.conn.execute(
-        """SELECT d.photo_id, d.box_x, d.box_y, d.box_w, d.box_h,
-                  d.detector_confidence
-           FROM detections d
-           JOIN photos p ON p.id = d.photo_id
-           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-           WHERE d.workspace_id = ? AND wf.workspace_id = ?
-           ORDER BY d.photo_id, d.detector_confidence DESC""",
-        (ws_id, ws_id),
-    ).fetchall()
+    # Load primary detection per photo (highest confidence) via the global
+    # read-time helper. This replaces the old photos.detection_box /
+    # photos.detection_conf columns; the helper applies the same threshold
+    # resolved above.
+    photo_ids_for_dets = [row["id"] for row in rows]
+    dets_by_photo = db.get_detections_for_photos(
+        photo_ids_for_dets, min_conf=min_conf,
+    )
     primary_det_by_photo = {}
-    for dr in det_rows:
-        pid = dr["photo_id"]
-        if pid not in primary_det_by_photo:
-            primary_det_by_photo[pid] = {
-                "x": dr["box_x"],
-                "y": dr["box_y"],
-                "w": dr["box_w"],
-                "h": dr["box_h"],
-                "detection_conf": dr["detector_confidence"],
-            }
+    for pid, dets in dets_by_photo.items():
+        if not dets:
+            continue
+        top = dets[0]  # helper returns each list ordered by confidence DESC
+        primary_det_by_photo[pid] = {
+            "x": top["x"],
+            "y": top["y"],
+            "w": top["w"],
+            "h": top["h"],
+            "detection_conf": top["confidence"],
+        }
 
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)

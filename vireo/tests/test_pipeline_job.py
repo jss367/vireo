@@ -2213,6 +2213,20 @@ def test_pipeline_reclassify_multimodel_ignores_stale_detection_ids(
             import numpy as np
             return np.zeros(512, dtype=np.float32)
 
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
     params = PipelineParams(
@@ -2372,6 +2386,20 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
             import numpy as np
             return np.zeros(512, dtype=np.float32)
 
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
     params = PipelineParams(
@@ -2480,6 +2508,20 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
 
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
     params = PipelineParams(
@@ -2507,6 +2549,134 @@ def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
         "stale boxes via get_existing_detection_photo_ids + get_detections, "
         "causing false-positive detections to persist indefinitely. "
         "Regression for Codex P1 review on #511 line 848."
+    )
+
+
+def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
+    """A photo with no animals, recorded in detector_runs, must not be
+    re-detected on a subsequent non-reclassify pipeline run.
+
+    Mirrors test_classify_job.test_detect_batch_skips_empty_photo_on_rerun
+    but drives through run_pipeline_job's detect_stage so we exercise the
+    pipeline's own already_detected seeding (which must use
+    get_detector_run_photo_ids, not the legacy get_existing_detection_photo_ids
+    shim that misses empty-scene photos).
+    """
+    import json
+
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    photo_id = db.add_photo(folder_id, "empty.jpg", ".jpg", 12345, 1_000_000.0)
+    _drop_jpeg(folder_path, "empty.jpg")
+
+    # Simulate a prior run where MegaDetector scanned the photo and found
+    # NOTHING — there are no detection rows, but detector_runs records the
+    # scan so the next pipeline pass can skip re-invoking the detector.
+    db.save_detections(photo_id, [], detector_model="megadetector-v6")
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+
+    col_id = db.add_collection(
+        "Test",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    # Remove the legacy shim so the pipeline must call
+    # get_detector_run_photo_ids directly. If pipeline still uses the
+    # legacy name (via getattr) it will fall through to the default
+    # `lambda: set()` and miss our empty-scene photo.
+    monkeypatch.delattr(Database, "get_existing_detection_photo_ids")
+
+    # Capture what already_detected_ids the pipeline passes to _detect_batch.
+    # If the pipeline seeds correctly from get_detector_run_photo_ids, our
+    # empty-scene photo will appear in already_detected_ids — meaning the
+    # real _detect_batch would skip re-invoking MegaDetector for it.
+    detect_calls = []
+
+    def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
+                          det_conf_threshold=None, already_detected_ids=None,
+                          cached_detections=None):
+        detect_calls.append({
+            "already_detected_ids": frozenset(already_detected_ids or set()),
+            "batch_ids": [p["id"] for p in batch],
+        })
+        # Simulate the real _detect_batch's skip behaviour: if the photo
+        # is already in already_detected_ids, don't re-"detect" it.
+        processed = {p["id"] for p in batch}
+        return {}, 0, processed
+
+    monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
+
+    # Patch classify_stage's prediction-photo lookup so classify_stage
+    # doesn't trip on pre-existing schema issues in other migrations.
+    # (This test focuses narrowly on detect_stage's already_detected seed.)
+    monkeypatch.setattr(
+        Database, "get_existing_prediction_photo_ids",
+        lambda self, model_name: set(),
+    )
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def encode_image(self, *args, **kwargs):
+            import numpy as np
+            return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=col_id,
+        model_ids=[model_id],
+        reclassify=False,  # non-reclassify: must honour detector_runs skip
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+    # classify_stage may still fail against pre-migration schema bits that
+    # this task doesn't own. We only need detect_stage to have run.
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert detect_calls, "expected detect_stage to call _detect_batch"
+    first_call = detect_calls[0]
+    assert photo_id in first_call["already_detected_ids"], (
+        f"Empty-scene photo {photo_id} was recorded in detector_runs but "
+        f"pipeline did not seed it into already_detected_ids "
+        f"(got {set(first_call['already_detected_ids'])!r}). "
+        f"detect_stage must seed from get_detector_run_photo_ids "
+        f"('megadetector-v6'), not the legacy "
+        f"get_existing_detection_photo_ids shim which misses empty-scene photos."
     )
 
 
@@ -2602,6 +2772,20 @@ def test_pipeline_reclassify_partial_abort_preserves_unprocessed_detections(
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
@@ -2726,6 +2910,20 @@ def test_pipeline_reclassify_partial_batch_exception_preserves_detections(
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
@@ -3256,7 +3454,7 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
 
     # At least one prediction should have been stored.
     preds = db.conn.execute(
-        "SELECT id, detection_id, species, model FROM predictions"
+        "SELECT id, detection_id, species, classifier_model AS model FROM predictions"
     ).fetchall()
     assert preds, (
         "Pipeline classify stage produced no predictions — test setup did "
@@ -3271,20 +3469,24 @@ def test_pipeline_classify_stores_predictions_with_detection_id(
         "logic never matches and every pipeline run re-classifies everything."
     )
 
-    # Every prediction's detection_id must resolve to a real detection row in
-    # the active workspace (so the workspace-scoped skip query picks it up).
+    # Every prediction's detection_id must resolve to a real detection row.
+    # Detections are global post-refactor — workspace scoping is through
+    # workspace_folders, so we verify that join resolves instead of reading
+    # the dropped workspace_id column on detections.
     for p in preds:
         det = db.conn.execute(
-            "SELECT photo_id, workspace_id FROM detections WHERE id = ?",
-            (p["detection_id"],),
+            """SELECT d.id, d.photo_id, wf.workspace_id
+               FROM detections d
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id
+               WHERE d.id = ? AND wf.workspace_id = ?""",
+            (p["detection_id"], ws_id),
         ).fetchone()
         assert det is not None, (
             f"Prediction {dict(p)} references detection_id "
-            f"{p['detection_id']} which does not exist in detections table."
-        )
-        assert det["workspace_id"] == ws_id, (
-            f"Prediction bound to detection in workspace {det['workspace_id']}, "
-            f"expected {ws_id}."
+            f"{p['detection_id']} which doesn't resolve to a detection in "
+            f"workspace {ws_id} via workspace_folders."
         )
 
     # photo_with_det must be in the skip set so the second run reuses its
@@ -3593,6 +3795,20 @@ def test_pipeline_step_defs_include_detect_and_per_model_classify(
             import numpy as np
             return np.zeros(512, dtype=np.float32)
 
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
     params = PipelineParams(
@@ -3714,6 +3930,20 @@ def test_pipeline_single_model_gets_per_model_classify_row(tmp_path, monkeypatch
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
@@ -3881,6 +4111,20 @@ def test_pipeline_one_model_fails_to_load_other_model_still_runs(
             import numpy as np
             return np.zeros(512, dtype=np.float32)
 
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
+
     monkeypatch.setattr(classifier_mod, "Classifier", SelectiveClassifier)
 
     params = PipelineParams(
@@ -3954,6 +4198,20 @@ def test_pipeline_per_model_step_summary_includes_prediction_count(
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 
@@ -4119,6 +4377,20 @@ def test_pipeline_fatal_error_does_not_overwrite_completed_model_rows(
         def encode_image(self, *args, **kwargs):
             import numpy as np
             return np.zeros(512, dtype=np.float32)
+
+        def classify_with_embedding(self, img, threshold=0):
+            import numpy as np
+            return [{"species": "Robin", "score": 0.9}], np.zeros(
+                512, dtype=np.float32,
+            )
+
+        def classify_batch_with_embedding(self, images, threshold=0):
+            import numpy as np
+            zero = np.zeros(512, dtype=np.float32)
+            return [(
+                [{"species": "Robin", "score": 0.9}],
+                zero,
+            ) for _ in images]
 
     monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
 

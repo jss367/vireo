@@ -148,21 +148,27 @@ def compute_misses_for_workspace(
     excluded = set(exclude_photo_ids) if exclude_photo_ids else set()
 
     ws_id = db._ws_id()
-    # Detector confidence is written to the `detections` table by the
-    # classify stage, not to `photos.detection_conf` (legacy column). Read
-    # the highest-confidence detection per photo, workspace-scoped, so
-    # photos with real detections aren't misread as no_subject.
+    # Detections are global now; scope *photos* to the workspace via
+    # workspace_folders and filter detections at read time by the
+    # workspace-effective detector_confidence threshold. Photos whose
+    # highest-confidence box is below threshold are legitimate no_subject
+    # candidates.
+    import config as cfg
+    min_conf = db.get_effective_config(cfg.load()).get(
+        "detector_confidence", 0.2
+    )
     rows = db.conn.execute(
         "SELECT p.id, p.burst_id, "
         "       (SELECT MAX(d.detector_confidence) FROM detections d "
-        "        WHERE d.photo_id = p.id AND d.workspace_id = ?) "
+        "        WHERE d.photo_id = p.id "
+        "          AND d.detector_confidence >= ?) "
         "         AS detection_conf, "
         "       p.subject_size, p.crop_complete, "
         "       p.subject_tenengrad, p.bg_tenengrad "
         "FROM photos p "
         "JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
         "WHERE wf.workspace_id = ?",
-        (ws_id, ws_id),
+        (min_conf, ws_id),
     ).fetchall()
 
     target_ids = None

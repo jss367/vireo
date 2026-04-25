@@ -1206,7 +1206,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         the first model) and the classify stage (for each subsequent model in
         a multi-model run).
         """
-        from classify_job import _load_labels
+        from classify_job import (
+            _load_labels,
+            _record_labels_fingerprint,
+            _resolve_label_sources,
+        )
+        from labels_fingerprint import compute_fingerprint
         from models import _classify_model_state
 
         model_str = active_model["model_str"]
@@ -1222,6 +1227,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             labels_files=params.labels_files,
             db=thread_db,
         )
+        # Compute a content-addressable fingerprint for the active label set
+        # and record it in the labels_fingerprints sidecar. Kept on the bundle
+        # so classify_stage can pass it to record_classifier_run for each
+        # (detection, model, fingerprint) triple.
+        fp = compute_fingerprint(labels)
+        label_sources = _resolve_label_sources(params, thread_db)
+        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
 
         # Preflight: validate the on-disk model before handing it to
         # ONNXRuntime. A stale _check_onnx_downloaded result (e.g. after
@@ -1350,6 +1362,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             "model_name": model_name,
             "model_str": model_str,
             "labels": labels,
+            "labels_fingerprint": fp,
             "use_tol": use_tol,
             "active_model": active_model,
         }
@@ -1519,8 +1532,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # history): start with an empty already_detected so EVERY photo
             # is re-detected; snapshot pre-run detection IDs so we can purge
             # them after this detect pass completes. On a non-reclassify run,
-            # pre-seed already_detected from the DB so _detect_batch reuses
-            # rows instead of re-invoking MegaDetector.
+            # pre-seed already_detected from detector_runs so _detect_batch
+            # reuses rows instead of re-invoking MegaDetector — including
+            # empty-scene photos (box_count=0) which would otherwise be
+            # re-detected forever by a legacy detections-only seed.
             if params.reclassify:
                 already_detected: set = set()
                 photo_ids_list = [p["id"] for p in photos]
@@ -1529,9 +1544,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 )(photo_ids_list)
             else:
                 already_detected = set(
-                    getattr(
-                        thread_db, "get_existing_detection_photo_ids", lambda: set()
-                    )()
+                    thread_db.get_detector_run_photo_ids("megadetector-v6")
                 )
                 pre_run_det_ids = {}
             detect_state["pre_run_det_ids"] = pre_run_det_ids
@@ -1707,6 +1720,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
 
             tax = loaded_models["tax"]
+            # Fingerprint for the FIRST model is preloaded by model_loader_stage.
+            # Each subsequent iteration reloads its own bundle (with its own fp)
+            # inside the loop, so we read loaded_models["labels_fingerprint"]
+            # per-spec below rather than capturing a single value here.
             resolved_specs_local = loaded_models.get("resolved_specs") or [
                 loaded_models["active_model"]
             ]
@@ -1790,18 +1807,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     model_type = bundle["model_type"]
                     model_name = bundle["model_name"]
 
+                # The fingerprint for THIS model's label set — pinned by
+                # model_loader_stage for the first model and by _load_model_bundle
+                # for subsequent ones. Used to key the classifier_runs gate so
+                # a repeat pass over the same (detection, model, fingerprint)
+                # skips work instead of re-running inference. Hoisted above
+                # the reclassify clear so the clear can scope by fingerprint.
+                spec_fp = loaded_models.get("labels_fingerprint", "legacy")
+
                 if params.reclassify:
                     photo_ids = [p["id"] for p in photos]
+                    # Scope by labels_fingerprint so reclassifying one
+                    # workspace's label set doesn't wipe another
+                    # workspace's cached predictions on the same photos
+                    # under its own fingerprint (shared-folder setups).
                     thread_db.clear_predictions(
-                        model=model_name, collection_photo_ids=photo_ids
+                        model=model_name,
+                        collection_photo_ids=photo_ids,
+                        labels_fingerprint=spec_fp,
                     )
 
-                existing_preds = set()
-                if not params.reclassify:
-                    existing_preds = thread_db.get_existing_prediction_photo_ids(
-                        model_name
-                    )
-
+                # No photo-level short-circuit: it would hide detections
+                # that newly cross the workspace's detector_confidence
+                # threshold on photos that already had a cached prediction
+                # for some other detection. The per-detection
+                # classifier_runs gate below handles skipping correctly
+                # and still surfaces cached results into raw_results so
+                # grouping sees them.
                 raw_results: list = []
                 failed = 0
                 skipped_existing = 0
@@ -1845,46 +1877,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # restrict deletions to photos actually reclassified.
                         if models_succeeded == 0:
                             first_model_photo_ids.add(photo["id"])
-                        if photo["id"] in existing_preds:
-                            skipped_existing += 1
-                            pred_row = thread_db.get_prediction_for_photo(
-                                photo["id"], model_name,
-                            )
-                            if pred_row:
-                                folder_path = folders.get(photo["folder_id"], "")
-                                image_path = os.path.join(
-                                    folder_path, photo["filename"],
-                                )
-                                timestamp = None
-                                if photo["timestamp"]:
-                                    with contextlib.suppress(ValueError, TypeError):
-                                        timestamp = dt.fromisoformat(
-                                            photo["timestamp"]
-                                        )
-                                embedding = None
-                                if model_type != "timm":
-                                    emb_blob = thread_db.get_photo_embedding(
-                                        photo["id"]
-                                    )
-                                    if emb_blob:
-                                        import numpy as np
-                                        embedding = np.frombuffer(
-                                            emb_blob, dtype=np.float32,
-                                        )
-                                raw_results.append({
-                                    "photo": photo,
-                                    "detection_id": pred_row["detection_id"],
-                                    "folder_path": folder_path,
-                                    "image_path": image_path,
-                                    "prediction": pred_row["species"],
-                                    "confidence": pred_row["confidence"],
-                                    "timestamp": timestamp,
-                                    "filename": photo["filename"],
-                                    "embedding": embedding,
-                                    "taxonomy": None,
-                                    "_existing": True,
-                                })
-                            continue
 
                         # Pull the primary detection for this photo from the
                         # detect-stage cache. Fall back to db.get_detections()
@@ -1915,6 +1907,68 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         if primary_det is None:
                             continue
 
+                        # Classifier-run gate: skip work when this exact
+                        # (detection, classifier_model, labels_fingerprint)
+                        # triple was already classified. Reclassify bypasses
+                        # the gate so users can force a fresh pass. When
+                        # gated, surface the cached top-1 prediction into
+                        # raw_results so downstream grouping/storage sees
+                        # it — otherwise the cached detection would silently
+                        # drop out of the grouping pipeline.
+                        if not params.reclassify:
+                            run_keys = thread_db.get_classifier_run_keys(
+                                primary_det["id"]
+                            )
+                            if (model_name, spec_fp) in run_keys:
+                                cached = thread_db.get_predictions_for_detection(
+                                    primary_det["id"],
+                                    classifier_model=model_name,
+                                    labels_fingerprint=spec_fp,
+                                    min_classifier_conf=0,
+                                )
+                                if cached:
+                                    skipped_existing += 1
+                                    top = cached[0]
+                                    folder_path = folders.get(photo["folder_id"], "")
+                                    image_path = os.path.join(
+                                        folder_path, photo["filename"],
+                                    )
+                                    timestamp = None
+                                    if photo["timestamp"]:
+                                        with contextlib.suppress(ValueError, TypeError):
+                                            timestamp = dt.fromisoformat(
+                                                photo["timestamp"]
+                                            )
+                                    embedding = None
+                                    if model_type != "timm":
+                                        emb_blob = thread_db.get_photo_embedding(
+                                            photo["id"]
+                                        )
+                                        if emb_blob:
+                                            import numpy as np
+                                            embedding = np.frombuffer(
+                                                emb_blob, dtype=np.float32,
+                                            )
+                                    raw_results.append({
+                                        "photo": photo,
+                                        "detection_id": primary_det["id"],
+                                        "folder_path": folder_path,
+                                        "image_path": image_path,
+                                        "prediction": top["species"],
+                                        "confidence": top["confidence"],
+                                        "timestamp": timestamp,
+                                        "filename": photo["filename"],
+                                        "embedding": embedding,
+                                        "taxonomy": None,
+                                        "_existing": True,
+                                    })
+                                    continue
+                                # Run key with no cached rows (e.g.
+                                # prior pass stored `category == 'match'`
+                                # so the prediction was intentionally not
+                                # written). Fall through to re-classify
+                                # instead of stranding the detection.
+
                         img, folder_path, image_path = _prepare_image(
                             photo, folders, primary_det,
                         )
@@ -1929,6 +1983,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             "image_path": image_path,
                             "img": img,
                         }]
+                        pre_len = len(raw_results)
                         n_batch_failed = _flush_batch(
                             img_batch, clf, model_type, model_name,
                             thread_db, raw_results,
@@ -1937,9 +1992,27 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             failed_photo_ids.add(photo["id"])
                         failed += n_batch_failed
 
+                        # Record the classifier_runs row so the next pass over
+                        # the same (detection, model, fingerprint) short-
+                        # circuits. prediction_count reflects how many rows
+                        # _flush_batch added to raw_results for this detection.
+                        #
+                        # Only persist when the batch produced at least one
+                        # prediction. A count of 0 means the classifier
+                        # failed (transient load error, decode error, etc.);
+                        # caching that would strand the detection without
+                        # predictions until the user forces --reclassify.
+                        new_count = len(raw_results) - pre_len
+                        if new_count > 0:
+                            thread_db.record_classifier_run(
+                                primary_det["id"], model_name, spec_fp,
+                                prediction_count=new_count,
+                            )
+
                 group_result = _store_grouped_predictions(
                     raw_results, job["id"], model_name,
                     grouping_window, similarity_threshold, tax, thread_db,
+                    labels_fingerprint=spec_fp,
                 )
                 preds = group_result["predictions_stored"]
                 total_predictions_stored += preds

@@ -20,11 +20,6 @@ def test_workspace_tables_exist(db):
     assert "workspace_folders" in tables
 
 
-def test_detections_has_workspace_id(db):
-    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()]
-    assert "workspace_id" in cols
-
-
 def test_collections_has_workspace_id(db):
     cols = [r[1] for r in db.conn.execute("PRAGMA table_info(collections)").fetchall()]
     assert "workspace_id" in cols
@@ -118,33 +113,28 @@ def db_with_workspace(db):
     return db, ws_id, folder_id, photo_id
 
 
-def test_add_prediction_uses_workspace(db_with_workspace):
-    db, ws_id, _, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
-    row = db.conn.execute(
-        "SELECT workspace_id FROM detections WHERE id = ?", (det_ids[0],)
-    ).fetchone()
-    assert row["workspace_id"] == ws_id
-
-
 def test_get_predictions_scoped_to_workspace(db_with_workspace):
+    """Predictions are global, but get_predictions() scopes visibility through
+    workspace_folders. A prediction on a photo whose folder is linked only to
+    ws1 is invisible to ws2."""
     db, ws_id, folder_id, photo_id = db_with_workspace
     det_ids1 = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")
     db.add_prediction(det_ids1[0], "Robin", 0.95, "bioclip")
-    # Create second workspace with same photo, different prediction
+
+    # Second workspace with a different folder + photo.
     ws2 = db.create_workspace("Other")
-    db.add_workspace_folder(ws2, folder_id)
     db.set_active_workspace(ws2)
-    det_ids2 = db.save_detections(photo_id, [
+    folder2 = db.add_folder("/photos2", name="photos2")
+    db.add_workspace_folder(ws2, folder2)
+    photo2 = db.add_photo(folder2, "bird2.jpg", ".jpg", 1000, 1.0)
+    det_ids2 = db.save_detections(photo2, [
         {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
     ], detector_model="MDV6")
     db.add_prediction(det_ids2[0], "Sparrow", 0.8, "bioclip")
-    # Each workspace sees only its own predictions
+
+    # Each workspace sees only predictions on its own folders' photos.
     preds_ws2 = db.get_predictions()
     assert len(preds_ws2) == 1
     assert preds_ws2[0]["species"] == "Sparrow"
@@ -152,51 +142,6 @@ def test_get_predictions_scoped_to_workspace(db_with_workspace):
     preds_ws1 = db.get_predictions()
     assert len(preds_ws1) == 1
     assert preds_ws1[0]["species"] == "Robin"
-
-
-def test_clear_predictions_scoped_to_workspace(db_with_workspace):
-    db, ws_id, folder_id, photo_id = db_with_workspace
-    det_ids1 = db.save_detections(photo_id, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids1[0], "Robin", 0.95, "bioclip")
-    ws2 = db.create_workspace("Other")
-    db.add_workspace_folder(ws2, folder_id)
-    db.set_active_workspace(ws2)
-    det_ids2 = db.save_detections(photo_id, [
-        {"box": {"x": 0.2, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.8, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids2[0], "Sparrow", 0.8, "bioclip")
-    # Clear ws2 predictions only
-    db.clear_predictions()
-    assert len(db.get_predictions()) == 0
-    # ws1 predictions untouched
-    db.set_active_workspace(ws_id)
-    assert len(db.get_predictions()) == 1
-
-
-def test_cascade_delete_removes_predictions(db_with_workspace):
-    db, ws_id, _, photo_id = db_with_workspace
-    det_ids = db.save_detections(photo_id, [
-        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], "Robin", 0.95, "bioclip")
-    db.delete_workspace(ws_id)
-    # Cascade: workspace -> detections -> predictions
-    count = db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
-    assert count == 0
-    det_count = db.conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0]
-    assert det_count == 0
-
-
-def test_save_detections_without_active_workspace_raises(db):
-    folder_id = db.add_folder("/photos", name="photos")
-    photo_id = db.add_photo(folder_id, "bird.jpg", ".jpg", 1000, 1.0)
-    db._active_workspace_id = None  # Clear auto-set workspace
-    with pytest.raises(RuntimeError):
-        db.save_detections(photo_id, [
-            {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
-        ], detector_model="MDV6")
 
 
 # -- Task 5: Workspace-scoped collections --
@@ -472,10 +417,10 @@ def test_migration_from_legacy_db(tmp_path):
     pred_count = db.conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
     assert pred_count == 0
 
-    # Detections table exists with workspace_id
+    # Detections table is global now: has photo_id, no workspace_id
     det_cols = [r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()]
-    assert "workspace_id" in det_cols
     assert "photo_id" in det_cols
+    assert "workspace_id" not in det_cols
 
     # predictions table now uses detection_id
     pred_cols = [r[1] for r in db.conn.execute("PRAGMA table_info(predictions)").fetchall()]
@@ -861,8 +806,12 @@ def test_keyword_tree_includes_ancestors(db):
 # -- Move folders between workspaces --
 
 
-def test_move_folders_moves_detections_and_pending_changes(db_with_workspace):
-    """move_folders_to_workspace moves folders, detections, and pending_changes."""
+def test_move_folders_moves_pending_changes(db_with_workspace):
+    """move_folders_to_workspace moves folders and pending_changes.
+
+    Detections are now global (no workspace_id), so predictions follow the
+    folder via workspace_folders membership rather than being reassigned.
+    """
     db, ws1, folder_id, photo_id = db_with_workspace
     det_ids = db.save_detections(photo_id, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
@@ -874,14 +823,13 @@ def test_move_folders_moves_detections_and_pending_changes(db_with_workspace):
 
     result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
     assert result["folders_moved"] == 1
-    assert result["detections_moved"] == 1
     assert result["pending_changes_moved"] == 1
 
     # Folder moved: ws2 has it, ws1 does not
     assert len(db.get_workspace_folders(ws2)) == 1
     assert len(db.get_workspace_folders(ws1)) == 0
 
-    # Detections/predictions moved to ws2
+    # Predictions follow the folder's workspace membership (detections are global).
     db.set_active_workspace(ws2)
     preds = db.get_predictions()
     assert len(preds) == 1

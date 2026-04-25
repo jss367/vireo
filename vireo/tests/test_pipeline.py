@@ -466,6 +466,55 @@ def test_load_photo_features_includes_model_in_species(tmp_path):
             assert isinstance(entry[2], str), f"Model should be a string, got {type(entry[2])}"
 
 
+def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
+    """With multiple fingerprints cached for a (detection, model), only the
+    latest one surfaces — otherwise stale species from an old label set
+    would leak into the pipeline top-k.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p")
+    db.add_workspace_folder(ws, folder_id)
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        pid,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    # Older fingerprint row (stale label set) — Robin.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.9, '2026-01-01T00:00:00')",
+        (det_ids[0],),
+    )
+    # Newer fingerprint row (current label set) — Blue Jay.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Blue Jay', 0.85, '2026-04-24T00:00:00')",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    # Default behavior: most recent fingerprint only.
+    photos = load_photo_features(db)
+    species = [e[0] for e in photos[0]["species_top5"]]
+    assert species == ["Blue Jay"], "should surface only the latest fingerprint's species"
+
+    # Explicit override: pin to the stale fingerprint.
+    photos = load_photo_features(db, labels_fingerprint="fp-old")
+    species = [e[0] for e in photos[0]["species_top5"]]
+    assert species == ["Robin"]
+
+
 def test_load_photo_features_collection_scoped(tmp_path):
     """load_photo_features with collection_id returns only collection photos."""
     from db import Database
@@ -1146,3 +1195,88 @@ def test_eye_stage_picks_eye_with_higher_tenengrad(tmp_path, monkeypatch):
     assert abs(eye_y - 300.0 / 600.0) < 1.0 / 600.0
     assert eye_conf == 0.80
     assert eye_teng > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Read-time detection threshold filtering (Task 24)
+# ---------------------------------------------------------------------------
+
+
+def test_load_photo_features_honors_workspace_detector_threshold(tmp_path):
+    """Lowering workspace `detector_confidence` surfaces more cached boxes at
+    read time, without rewriting detection rows.
+
+    Exercises the global-detections design: boxes are stored once globally;
+    each workspace's view of subject crops / primary detections is filtered
+    by its effective `detector_confidence` override at read time.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+
+    pid = db.add_photo(
+        fid, "bird.jpg", ".jpg", 1000, 1.0,
+        timestamp="2026-04-23T10:00:00",
+        width=4000, height=3000,
+    )
+
+    # Save two boxes globally: one high-conf (surfaces at default threshold),
+    # one low-conf (only surfaces when the workspace lowers its threshold).
+    db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.3, "h": 0.3},
+         "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    # At the default workspace threshold (0.2), only the high-conf box wins
+    # as primary detection.
+    photos = load_photo_features(db)
+    assert len(photos) == 1
+    primary = photos[0]["detection_box"]
+    assert primary is not None
+    assert primary["x"] == 0.5
+    assert photos[0]["detection_conf"] == 0.95
+
+    # Lower the workspace threshold via per-workspace config override so the
+    # low-conf box becomes visible. Primary is still the high-conf one
+    # (helper sorts by confidence DESC), but if we drop the high-conf box
+    # the low-conf one now surfaces — proving the read-time filter actually
+    # changed behavior without any detection-row writes.
+    db.update_workspace(ws_id,
+                        config_overrides={"detector_confidence": 0.01})
+
+    # Delete just the high-conf detection to confirm the low-conf one now
+    # becomes primary under the lowered threshold.
+    db.conn.execute(
+        "DELETE FROM detections WHERE photo_id = ? AND detector_confidence = ?",
+        (pid, 0.95),
+    )
+    db.conn.commit()
+
+    photos = load_photo_features(db)
+    assert len(photos) == 1
+    primary = photos[0]["detection_box"]
+    assert primary is not None, (
+        "lowering detector_confidence should surface the cached low-conf box"
+    )
+    assert primary["x"] == 0.1
+    assert photos[0]["detection_conf"] == 0.05
+
+    # Raise the threshold back above 0.05 — the low-conf box disappears
+    # again, purely through read-time filtering.
+    db.update_workspace(ws_id,
+                        config_overrides={"detector_confidence": 0.5})
+    photos = load_photo_features(db)
+    assert photos[0]["detection_box"] is None
+    assert photos[0]["detection_conf"] is None
+
+    # And the raw row count never changed (no rewrites).
+    raw = db.conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (pid,),
+    ).fetchone()[0]
+    assert raw == 1

@@ -230,7 +230,7 @@ def test_detect_subjects_skips_existing_detections(tmp_path):
 
     mock_db = MagicMock()
     # Photo 1 already has detections in the database
-    mock_db.get_existing_detection_photo_ids.return_value = {1}
+    mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -269,7 +269,7 @@ def test_detect_subjects_skips_weight_download_when_all_cached(tmp_path):
     folders = {10: str(tmp_path)}
 
     mock_db = MagicMock()
-    mock_db.get_existing_detection_photo_ids.return_value = {1}
+    mock_db.get_detector_run_photo_ids.return_value = {1}
     mock_db.get_detections.return_value = [
         {"id": 101, "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
          "detector_confidence": 0.9, "category": "animal"},
@@ -299,7 +299,7 @@ def test_detect_subjects_skips_weight_download_for_empty_reclassify(tmp_path):
     job = _make_job()
 
     mock_db = MagicMock()
-    mock_db.get_existing_detection_photo_ids.return_value = set()
+    mock_db.get_detector_run_photo_ids.return_value = set()
 
     with patch("detector.ensure_megadetector_weights") as mock_ensure:
         _detect_subjects(
@@ -399,15 +399,14 @@ def test_detect_batch_marks_processed_before_quality_scoring(tmp_path):
     assert 7 in detection_map
 
 
-def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
-    """When det_conf_threshold is unset, _detect_batch must read the
-    workspace-effective config (so per-workspace overrides apply), not
-    the bare global config.
+def test_detect_batch_does_not_pass_threshold_to_detector(tmp_path, monkeypatch):
+    """detect_animals is called with just the image path — the workspace
+    threshold is NOT applied at write time.
 
-    Regression: the old code called cfg.load() directly, which dropped
-    workspace overrides on the floor. A bird-photography workspace
-    setting detector_confidence=0.05 was silently ignored — every call
-    used the 0.2 global default.
+    Regression for the detection-storage redesign: the detector writes
+    everything above RAW_CONF_FLOOR so results can be globally cached
+    across workspaces. Any per-workspace threshold is applied as a
+    read-time filter (get_detections / stats queries), not here.
     """
     from unittest.mock import patch
 
@@ -434,8 +433,9 @@ def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_detect(image_path, confidence_threshold):
-        captured["threshold"] = confidence_threshold
+    def fake_detect(image_path, *args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
         return []
 
     runner = FakeRunner()
@@ -454,9 +454,13 @@ def test_detect_batch_uses_workspace_effective_threshold(tmp_path, monkeypatch):
             already_detected_ids=set(),
         )
 
-    assert captured["threshold"] == 0.05, (
-        "workspace override detector_confidence=0.05 was dropped; "
-        f"detect_animals was called with {captured.get('threshold')!r}"
+    assert "confidence_threshold" not in captured["kwargs"], (
+        "detect_animals must not receive confidence_threshold; "
+        f"got kwargs={captured['kwargs']!r}"
+    )
+    assert captured["args"] == (), (
+        "detect_animals must only be called with the image path; "
+        f"got extra positional args={captured['args']!r}"
     )
 
 
@@ -528,6 +532,556 @@ def test_detect_batch_returns_all_detections(tmp_path):
     assert detection_map[1][1]["id"] == 102
     assert detection_map[1][1]["box_x"] == 0.5
     mock_db.save_detections.assert_called_once()
+
+
+def test_detect_batch_skips_empty_photo_on_rerun(tmp_path, monkeypatch):
+    """A photo with no animals is recorded in detector_runs; rerun skips detection."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "empty.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+
+    call_count = {"n": 0}
+    def fake_detect(image_path):
+        call_count["n"] += 1
+        return []  # no animals
+
+    monkeypatch.setattr("classify_job.detect_animals", fake_detect)
+    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+
+    import classify_job
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "empty.jpg"}]
+    folders = {folder_id: "/tmp/p"}
+
+    # First call: runs detection
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1
+
+    # Second call: should skip because detector_runs has the row
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1, "detect_animals should not be re-called for empty photos"
+
+
+def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch):
+    """When detect_animals returns None (image decode error, ONNX crash,
+    etc.), _detect_batch must NOT write a detector_runs row — otherwise
+    future non-reclassify passes would skip the photo permanently,
+    leaving it without detections unless the user forces --reclassify.
+    A legitimate empty scene still gets cached (separate test).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "broken.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    call_count = {"n": 0}
+    def failing_detect(image_path):
+        call_count["n"] += 1
+        return None  # simulate detector failure
+
+    monkeypatch.setattr("classify_job.detect_animals", failing_detect)
+    monkeypatch.setattr("classify_job.get_primary_detection", lambda dets: None)
+
+    import classify_job
+    photos = [{"id": photo_id, "folder_id": folder_id, "filename": "broken.jpg"}]
+    folders = {folder_id: "/tmp/p"}
+
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 1, "detector was called"
+    # No detector_run row should have been written for the failed run
+    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+
+    # A second pass must call the detector again (no cached "already done")
+    classify_job._detect_batch(
+        photos, folders, runner=None, job={"id": 0}, reclassify=False, db=db,
+        det_conf_threshold=0.2,
+        already_detected_ids=db.get_detector_run_photo_ids("megadetector-v6"),
+    )
+    assert call_count["n"] == 2, "failed photos must be retried on next pass"
+
+
+def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
+    """If classifier_runs has a (model, fp) key but get_predictions_for_detection
+    returns nothing (e.g. a prior pass stored `category == 'match'` which
+    is intentionally not written, or transient ordering between the run
+    record and _store_grouped_predictions), the detection must fall
+    through to classification — not short-circuit forever.
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Robin", "score": 0.9}], None),
+    ]
+    mock_db = MagicMock()
+    # Gate fires (run key present) but no cached prediction rows.
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.get_photo_embedding.return_value = None
+
+    # Need a real image on disk so _prepare_image succeeds.
+    import os
+    img_path = os.path.join(str(tmp_path), "bird.jpg")
+    Image.new("RGB", (400, 400), color="green").save(img_path)
+
+    detection_map = {
+        1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
+             "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+             "category": "animal"}],
+    }
+
+    _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map=detection_map,
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    # The classifier must have actually been invoked — if the gate
+    # short-circuited on the empty cached result, this assertion fails.
+    assert (
+        mock_clf.classify_batch_with_embedding.called
+        or mock_clf.classify_with_embedding.called
+    ), (
+        "Gate fired with no cached rows and short-circuited classification; "
+        "the detection is stranded until --reclassify."
+    )
+
+
+def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch):
+    """If the classifier fails to load, a reclassify must NOT have already
+    purged cached predictions/detections — otherwise weight-corruption
+    wipes shared-folder workspaces and there is no replacement.
+    """
+    from classify_job import ClassifyParams, run_classify_job
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    folder_id = db.add_folder("/tmp/p", name="p")
+    pid = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="megadetector-v6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="BioCLIP", labels_fingerprint="legacy")
+
+    # Seed a collection the classify path can consume.
+    coll_id = db.add_collection("c", '[{"field":"photo_ids","value":[' + str(pid) + ']}]')
+
+    # Force the classifier constructor to raise — simulates
+    # weight-corruption or missing-weights at load time.
+    import classifier as classifier_mod
+    class BoomClassifier:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("simulated weights corruption")
+    monkeypatch.setattr(classifier_mod, "Classifier", BoomClassifier)
+
+    runner = FakeRunner()
+    job = _make_job()
+    params = ClassifyParams(
+        collection_id=coll_id,
+        labels_files=None,
+        labels_file=None,
+        model_id="BioCLIP",
+        model_name="BioCLIP",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        reclassify=True,
+    )
+
+    # Run should fail (classifier init crashes) but MUST NOT destroy the
+    # cached prediction or detection.
+    import contextlib
+    with contextlib.suppress(Exception):
+        run_classify_job(job, runner, db_path, ws, params)
+
+    # Re-open the DB to read post-job state
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    preds_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    dets_after = db2.conn.execute(
+        "SELECT COUNT(*) AS n FROM detections WHERE id=?",
+        (det_id,),
+    ).fetchone()["n"]
+    assert preds_after == 1, (
+        "Reclassify purge happened before model load failed — cached "
+        "predictions were destroyed without replacement."
+    )
+    assert dets_after == 1, (
+        "Detections purged before model load failure — cache lost."
+    )
+
+
+def test_classify_photos_surfaces_cached_full_image_predictions(tmp_path):
+    """When a photo has no real detections and the full-image synthetic
+    detection is gated by classifier_runs, the cached top prediction
+    must still be surfaced into raw_results as `_existing: True` —
+    otherwise non-reclassify reruns silently drop those photos from
+    downstream grouping.
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_db = MagicMock()
+    # No real detections → full-image path. Existing full-image
+    # detection is cached.
+    mock_db.get_detections.return_value = [{"id": 999}]
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = [
+        {"species": "Robin", "confidence": 0.9, "detection_id": 999},
+    ]
+    mock_db.get_photo_embedding.return_value = None
+
+    raw_results, failed, skipped = _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map={},  # no real detections → full-image branch
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    assert skipped == 1, "cached full-image detection should count as skipped"
+    assert len(raw_results) == 1, "cached full-image prediction must surface"
+    assert raw_results[0]["_existing"] is True
+    assert raw_results[0]["prediction"] == "Robin"
+    assert raw_results[0]["detection_id"] == 999
+    mock_clf.classify_with_embedding.assert_not_called()
+    mock_clf.classify_batch_with_embedding.assert_not_called()
+
+
+def test_classify_photos_reuses_full_image_detection_on_rerun(tmp_path, monkeypatch):
+    """When a photo has no real detections, classify_photos falls back to a
+    synthetic ('full-image') detection. Because save_detections is
+    clear-and-reinsert per (photo, detector_model), calling it on every
+    pass would generate a new id each time and cascade-delete prior
+    predictions/classifier_runs tied to the old id. The non-reclassify
+    path must reuse the existing full-image detection instead.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    # Pre-seed a full-image detection that a prior classify pass would have
+    # left behind.
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )
+    original_det_id = det_ids[0]
+
+    # Sanity check the helper used by the reuse path — must use min_conf=0
+    # because the synthetic full-image detection has confidence=0.
+    existing = db.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert len(existing) == 1
+    assert existing[0]["id"] == original_det_id
+
+    # Simulate what classify_photos does on a subsequent pass: the reuse
+    # branch must NOT call save_detections again, or it would cascade-delete
+    # any cached predictions attached to the original detection.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'bioclip', 'fp1', 'Robin', 0.8)",
+        (original_det_id,),
+    )
+    db.conn.commit()
+
+    # Reuse path via the helper
+    reused = db.get_detections(
+        photo_id, detector_model="full-image", min_conf=0,
+    )
+    assert reused[0]["id"] == original_det_id
+    # Prediction still there
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id = ?",
+        (original_det_id,),
+    ).fetchone()["n"]
+    assert n == 1
+
+
+def test_store_grouped_predictions_writes_active_fingerprint(tmp_path):
+    """Predictions produced under a given label set must be written with
+    that set's fingerprint, not the default 'legacy'. Otherwise the
+    fingerprint-aware skip gate (get_existing_prediction_photo_ids with
+    labels_fingerprint=...) would miss them and force reclassification
+    on every pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+
+    import classify_job
+    raw_results = [{
+        "photo": {
+            "id": photo_id, "filename": "a.jpg",
+            "folder_id": folder_id, "timestamp": None, "burst_id": None,
+        },
+        "folder_path": "/tmp/p",
+        "detection_id": det_ids[0],
+        "prediction": "Robin",
+        "confidence": 0.88,
+        "alternatives": [],
+        "taxonomy": {},
+        "timestamp": None,
+    }]
+    classify_job._store_grouped_predictions(
+        raw_results, job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=None,
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    row = db.conn.execute(
+        "SELECT labels_fingerprint FROM predictions WHERE species=?", ("Robin",)
+    ).fetchone()
+    assert row is not None, "prediction was not stored"
+    assert row["labels_fingerprint"] == "fp-active"
+
+    # And the fingerprint-aware cache lookup must now find it.
+    hits = db.get_existing_prediction_photo_ids(
+        "bioclip-2", labels_fingerprint="fp-active",
+    )
+    assert hits == {photo_id}
+
+
+def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):
+    """If (detection, classifier_model, fingerprint) already ran, don't invoke again."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    # Pre-seed a classifier run — any subsequent invocation should bail
+    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=0)
+
+    calls = {"n": 0}
+    def fake_classify(*a, **kw):
+        calls["n"] += 1
+        return []
+    monkeypatch.setattr("classify_job._run_classifier_on_detection", fake_classify)
+
+    import classify_job
+    classify_job._classify_detection_gated(
+        db=db, detection_id=det_id,
+        classifier_model="bioclip-2",
+        labels_fingerprint="abc123",
+        labels=["Robin"], reclassify=False,
+    )
+    assert calls["n"] == 0, "classifier should be skipped when run key exists"
+
+
+def test_classify_detection_gated_does_not_cache_zero_count(tmp_path, monkeypatch):
+    """A classify_fn returning [] (transient failure or no-op test stub) must
+    NOT be recorded as a completed classifier_run — otherwise the next
+    non-reclassify pass short-circuits on the gate and the detection is
+    permanently stranded without predictions.
+
+    Mirrors the guard already in _record_batch_classifier_runs and the
+    inline pipeline_job branch.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+          "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    import classify_job
+    # classify_fn=None returns [] with no side effects (see
+    # _run_classifier_on_detection). The gate must NOT write a run row.
+    classify_job._classify_detection_gated(
+        db=db, detection_id=det_id,
+        classifier_model="bioclip-2",
+        labels_fingerprint="abc123",
+        labels=["Robin"], reclassify=False,
+    )
+    assert db.get_classifier_run_keys(det_id) == set(), (
+        "zero-prediction classify_fn must not record a run key"
+    )
+
+
+def test_record_batch_classifier_runs_skips_zero_count(tmp_path):
+    """A failed classifier batch (no prediction for a detection) must not be
+    cached as a completed run — otherwise the detection is permanently
+    stranded on the next non-reclassify pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ok, det_failed = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9},
+            {"box": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5}, "confidence": 0.8},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    batch = [
+        {"detection_id": det_ok, "img": object()},
+        {"detection_id": det_failed, "img": object()},
+    ]
+    # Only the first detection made it into raw_results (second one failed)
+    raw_results = [{"detection_id": det_ok, "species": "Robin", "confidence": 0.9}]
+
+    import classify_job
+    classify_job._record_batch_classifier_runs(
+        db, batch, "bioclip-2", "abc123", raw_results
+    )
+
+    keys_ok = db.get_classifier_run_keys(det_ok)
+    keys_failed = db.get_classifier_run_keys(det_failed)
+    assert keys_ok == {("bioclip-2", "abc123")}, "successful detection should be cached"
+    assert keys_failed == set(), "failed detection must NOT be cached"
+
+
+def test_classifier_fingerprint_upserted(tmp_path, monkeypatch):
+    """When a classifier runs, the labels fingerprint is upserted."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+
+    from labels_fingerprint import compute_fingerprint
+    labels = ["Robin", "Sparrow"]
+    expected_fp = compute_fingerprint(labels)
+
+    import classify_job
+    classify_job._record_labels_fingerprint(
+        db, fingerprint=expected_fp, labels=labels,
+        sources=["/tmp/active.txt"],
+    )
+    row = db.conn.execute(
+        "SELECT display_name, label_count FROM labels_fingerprints WHERE fingerprint=?",
+        (expected_fp,),
+    ).fetchone()
+    assert row["label_count"] == 2
 
 
 def test_classify_photos_iterates_over_detections(tmp_path):
@@ -660,7 +1214,12 @@ def test_classify_photos_new_photo(tmp_path):
 
 
 def test_classify_photos_skips_existing(tmp_path):
-    """Phase 6: skips photos with existing predictions."""
+    """Skipping is now per-detection via classifier_runs, not per-photo.
+
+    When a detection's (model, fingerprint) has a cached classifier run,
+    the classifier is not re-invoked, but the cached top-1 prediction is
+    surfaced into raw_results so downstream grouping still sees it.
+    """
     from unittest.mock import MagicMock
 
     from classify_job import _classify_photos
@@ -673,22 +1232,28 @@ def test_classify_photos_skips_existing(tmp_path):
          "timestamp": "2024-01-15T10:00:00"},
     ]
     folders = {10: str(tmp_path)}
-    existing_preds = {1}  # photo 1 already classified
 
     mock_clf = MagicMock()
     mock_db = MagicMock()
-    mock_db.get_prediction_for_photo.return_value = {
-        "species": "Northern Cardinal",
-        "confidence": 0.95,
-        "detection_id": 101,
-    }
+    # Detection 101 has a cached classifier_run for (BioCLIP, legacy).
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "legacy")}
+    mock_db.get_predictions_for_detection.return_value = [
+        {"species": "Northern Cardinal", "confidence": 0.95,
+         "detection_id": 101},
+    ]
     mock_db.get_photo_embedding.return_value = None
+
+    detection_map = {
+        1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
+             "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+             "category": "animal"}],
+    }
 
     raw_results, failed, skipped = _classify_photos(
         photos=photos,
         folders=folders,
-        detection_map={},
-        existing_preds=existing_preds,
+        detection_map=detection_map,
+        existing_preds=set(),  # dead parameter post-refactor
         clf=mock_clf,
         model_type="bioclip",
         model_name="BioCLIP",
@@ -697,9 +1262,10 @@ def test_classify_photos_skips_existing(tmp_path):
         db=mock_db,
     )
 
-    assert skipped == 1
-    assert len(raw_results) == 1
+    assert skipped == 1, "cached detection should count as skipped"
+    assert len(raw_results) == 1, "cached prediction must be surfaced"
     assert raw_results[0]["_existing"] is True
+    assert raw_results[0]["prediction"] == "Northern Cardinal"
     mock_clf.classify_with_embedding.assert_not_called()
 
 
@@ -827,7 +1393,7 @@ def test_store_grouped_predictions_saves_alternatives(tmp_path):
                        file_size=1000, file_mtime=1.0, timestamp="2024-01-15T10:00:00")
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
 
     raw_results = [{
         "photo": {"id": pid, "filename": "bird.jpg", "timestamp": "2024-01-15T10:00:00"},

@@ -2430,26 +2430,52 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
     def api_reject_prediction(pred_id):
         db = _get_db()
+        # Review state lives in prediction_review now; predictions.model is
+        # renamed to classifier_model.  Sibling-alternative rejection goes
+        # through the workspace-scoped review table.
+        ws = db._ws_id()
         pred = db.conn.execute(
-            """SELECT pr.id, pr.species, pr.detection_id, pr.model, d.photo_id
+            """SELECT pr.id, pr.species, pr.detection_id,
+                      pr.classifier_model AS model,
+                      pr.labels_fingerprint, d.photo_id
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE pr.id = ?""",
             (pred_id,),
         ).fetchone()
-        db.update_prediction_status(pred_id, "rejected")
-        if pred:
-            # Also reject sibling alternative predictions
-            db.conn.execute(
-                """UPDATE predictions SET status = 'rejected'
-                   WHERE detection_id = ? AND model = ? AND id != ? AND status = 'alternative'""",
-                (pred["detection_id"], pred["model"], pred_id),
-            )
-            db.conn.commit()
-            db.record_edit('prediction_reject',
-                           f'Rejected prediction "{pred["species"]}"',
-                           'rejected',
-                           [{'photo_id': pred['photo_id'], 'old_value': 'pending', 'new_value': 'rejected'}])
+        # prediction_review has an FK on prediction_id; writing review state
+        # for a missing pred would raise an IntegrityError and return 500
+        # where the legacy endpoint returned a harmless no-op. Gate the
+        # write on existence so stale IDs stay a clean 404.
+        if pred is None:
+            return json_error("prediction not found", 404)
+        db.update_prediction_status(pred_id, "rejected", _commit=False)
+        # Also reject sibling alternative predictions for the same
+        # (detection, classifier_model, labels_fingerprint) in this
+        # workspace. Fingerprint scoping matters: without it, rejecting a
+        # prediction from a new label set would rewrite review state for
+        # prior fingerprints' alternatives on the same detection.
+        sibling_ids = [row["id"] for row in db.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id
+                AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND pr.classifier_model = ?
+                 AND pr.labels_fingerprint = ?
+                 AND pr.id != ?
+                 AND pr_rev.status = 'alternative'""",
+            (ws, pred["detection_id"], pred["model"],
+             pred["labels_fingerprint"], pred_id),
+        ).fetchall()]
+        for sid in sibling_ids:
+            db.update_prediction_status(sid, "rejected", _commit=False)
+        db.conn.commit()
+        db.record_edit('prediction_reject',
+                       f'Rejected prediction "{pred["species"]}"',
+                       'rejected',
+                       [{'photo_id': pred['photo_id'], 'old_value': 'pending', 'new_value': 'rejected'}])
         return jsonify({"ok": True})
 
     @app.route("/api/predictions/group/<group_id>")
@@ -3326,6 +3352,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "files_removed": files_removed,
             "failed": len(failed_tracked),
         })
+
+    @app.route("/api/detection-cache/stats")
+    def api_detection_cache_stats():
+        """Return global detector-cache stats for the settings page.
+
+        `detector_runs` is shared across workspaces, so the numbers do
+        not depend on the active workspace.
+        """
+        db = _get_db()
+        return jsonify(db.get_global_detection_stats())
 
     @app.route("/api/embedding-cache")
     def api_embedding_cache():
@@ -4514,14 +4550,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo:
             return json_error("Photo not found", 404)
 
-        pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name, pr.confidence
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
+        # Use the current-fingerprint helper so a photo with cached
+        # predictions from multiple label sets doesn't prefill iNat with
+        # a species from a stale label set. Apply the workspace-effective
+        # detector_confidence floor so we never prefill a taxon from a
+        # detection the UI threshold hides.
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
+        pred = db.get_top_prediction_for_photo(
+            photo_id, min_detector_confidence=min_conf,
+        )
 
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
@@ -4606,15 +4645,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isfile(photo_path):
             return json_error("Photo file not found on disk", 404)
 
-        # Use overrides from request, or fall back to DB data
-        pred = db.conn.execute(
-            """SELECT pr.species, pr.scientific_name
-               FROM predictions pr
-               JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
-               ORDER BY pr.confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
+        # Use overrides from request, or fall back to DB data. The helper
+        # picks the highest-confidence prediction from the CURRENT
+        # fingerprint, scoped to the active workspace, and respecting the
+        # workspace-effective detector_confidence floor — submitting a
+        # stale or below-threshold taxon to iNaturalist is permanent and
+        # not easily reversible.
+        min_conf = db.get_effective_config(user_cfg).get(
+            "detector_confidence", 0.2
+        )
+        pred = db.get_top_prediction_for_photo(
+            photo_id, min_detector_confidence=min_conf,
+        )
 
         taxon = data.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
         observed_on = data.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
@@ -4658,6 +4700,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("submissions array is required")
 
         db = _get_db()
+        # Resolve the workspace-effective detector_confidence floor once for
+        # the whole batch — read-time thresholding means below-threshold
+        # detections should never seed an iNat submission.
+        min_conf = db.get_effective_config(user_cfg).get(
+            "detector_confidence", 0.2
+        )
         results = []
         for sub in submissions:
             photo_id = sub.get("photo_id")
@@ -4675,14 +4723,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 results.append({"photo_id": photo_id, "error": "Photo file not found on disk"})
                 continue
 
-            pred = db.conn.execute(
-                """SELECT pr.species, pr.scientific_name
-                   FROM predictions pr
-                   JOIN detections d ON d.id = pr.detection_id
-                   WHERE d.photo_id = ? AND d.workspace_id = ?
-                   ORDER BY pr.confidence DESC LIMIT 1""",
-                (photo_id, db._active_workspace_id),
-            ).fetchone()
+            # Current-fingerprint + workspace-scoped top prediction,
+            # respecting the active detector_confidence floor — avoids
+            # submitting a stale-label-set or now-hidden taxon to iNaturalist.
+            pred = db.get_top_prediction_for_photo(
+                photo_id, min_detector_confidence=min_conf,
+            )
 
             taxon = sub.get("taxon_name") or (pred["scientific_name"] if pred else None) or (pred["species"] if pred else None)
             observed_on = sub.get("observed_on") or (photo["timestamp"][:10] if photo["timestamp"] else None)
@@ -6592,8 +6638,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ws_name = ws["name"] if ws else "unknown"
             folder_count = db.conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
             photo_count = db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            # Predictions are global now; workspace scoping happens through
+            # the detection -> photo -> workspace_folders join.
             pred_count = db.conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE workspace_id = ?",
+                """SELECT COUNT(*) FROM predictions pr
+                   JOIN detections d ON d.id = pr.detection_id
+                   JOIN photos p ON p.id = d.photo_id
+                   JOIN workspace_folders wf
+                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?""",
                 (db._ws_id(),)
             ).fetchone()[0]
         except Exception:
@@ -6729,17 +6781,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import numpy as np
 
         db = _get_db()
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         distance_threshold = request.args.get("threshold", 0.4, type=float)
 
-        # Find all photos with this species prediction
+        # Find all photos with this species prediction in the active
+        # workspace. Predictions are global but membership in the
+        # workspace is expressed through workspace_folders.
+        #
+        # Fingerprint filter: for each (detection, classifier_model) only
+        # surface rows from the most recent labels_fingerprint. Without
+        # this, a workspace that rotated label sets would cluster stale
+        # species rows alongside current ones, distorting cluster
+        # membership / counts / variant labels and duplicating the same
+        # photo embedding.
         rows = db.conn.execute(
             """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
-               WHERE pr.species = ? AND d.workspace_id = ? AND p.embedding IS NOT NULL""",
-            (species_name, db._active_workspace_id),
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               WHERE pr.species = ?
+                 AND p.embedding IS NOT NULL
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )""",
+            (ws, species_name, min_conf),
         ).fetchall()
 
         if len(rows) < 2:
@@ -6846,18 +6923,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/species/summary")
     def api_species_list():
-        """List all species with prediction counts, for the variant explorer."""
+        """List all species with prediction counts, for the variant explorer.
+
+        Scoped to photos in the active workspace via ``workspace_folders`` and
+        filtered at read time by the workspace-effective
+        ``detector_confidence`` threshold. Review status is sourced from the
+        workspace-scoped ``prediction_review`` table; rejected predictions
+        are excluded. Predictions are filtered to the most recent
+        ``labels_fingerprint`` per ``(detection, classifier_model)`` so that
+        stale species from old label sets do not contaminate counts after
+        re-classification.
+        """
         db = _get_db()
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         rows = db.conn.execute(
             """SELECT pr.species, COUNT(DISTINCT d.photo_id) as photo_count,
                       pr.taxonomy_order, pr.taxonomy_family, pr.taxonomy_genus,
                       pr.scientific_name
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE pr.status != 'rejected' AND d.workspace_id = ?
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE d.detector_confidence >= ?
+                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                GROUP BY pr.species
                ORDER BY photo_count DESC""",
-            (db._active_workspace_id,),
+            (ws, ws, min_conf),
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -7103,20 +7208,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 coll_photos = thread_db.get_collection_photos(
                     collection_id, per_page=999999
                 )
-                # Filter to photos with detections but no masks
-                ws_id = thread_db._active_workspace_id
+                # Filter to photos with detections but no masks. Detection
+                # threshold is resolved at read time from the workspace's
+                # effective config (detections table is global now).
                 photos = []
                 for p in coll_photos:
                     if p["mask_path"]:
                         continue
-                    det = thread_db.conn.execute(
-                        """SELECT box_x, box_y, box_w, box_h, detector_confidence
-                           FROM detections
-                           WHERE photo_id = ? AND workspace_id = ?
-                           ORDER BY detector_confidence DESC LIMIT 1""",
-                        (p["id"], ws_id),
-                    ).fetchone()
-                    if det:
+                    dets = thread_db.get_detections(p["id"])
+                    if dets:
+                        det = dets[0]
                         photos.append({
                             "id": p["id"],
                             "folder_id": p["folder_id"],
@@ -7755,15 +7856,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not row:
             return json_error("Photo not found", 404)
         result = dict(row)
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
+        # Get primary detection from global detections table (threshold
+        # resolved from workspace-effective config inside get_detections).
+        dets = db.get_detections(photo_id)
+        if dets:
+            det = dets[0]
             result["detection_box"] = {
                 "x": det["box_x"], "y": det["box_y"],
                 "w": det["box_w"], "h": det["box_h"],
@@ -8281,35 +8378,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result.pop("detection_box", None)
         result.pop("detection_conf", None)
 
-        # Get primary detection from detections table
-        det = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h, detector_confidence
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
-        if det:
-            result["detection_box"] = {
-                "x": det["box_x"], "y": det["box_y"],
-                "w": det["box_w"], "h": det["box_h"],
-            }
-            result["detection_conf"] = det["detector_confidence"]
-
-        # Get detections for this photo (from detections table)
+        # Get detections for this photo — threshold resolved at read time
+        # from the workspace-effective config.
         dets = db.get_detections(photo_id)
         result["detections"] = [dict(d) for d in dets]
 
-        # Get predictions for this photo (through detections JOIN)
+        # Primary detection = highest-confidence above threshold.
+        if dets:
+            primary = dets[0]
+            result["detection_box"] = {
+                "x": primary["box_x"], "y": primary["box_y"],
+                "w": primary["box_w"], "h": primary["box_h"],
+            }
+            result["detection_conf"] = primary["detector_confidence"]
+
+        # Get predictions for this photo (through detections JOIN).  Per-
+        # workspace review state (status, group_id, individual, vote counts)
+        # is left-joined from prediction_review; absent rows are 'pending'.
+        #
+        # Apply the same workspace-effective detector_confidence floor used
+        # by `db.get_detections` above so result["predictions"] stays in
+        # sync with result["detections"]. Otherwise raising the threshold
+        # leaves stale species rows for detections the UI is meant to hide.
+        # Also pin to the most recent labels_fingerprint per
+        # (detection, classifier_model) so a workspace that rotated label
+        # sets doesn't see a debug payload mixing stale and current labels.
+        import config as cfg
+        ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         preds = db.conn.execute(
-            """SELECT pr.species, pr.confidence, pr.model, pr.category, pr.status,
-                      pr.group_id, pr.vote_count, pr.total_votes, pr.individual,
+            """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
+                      pr.category,
+                      COALESCE(pr_rev.status, 'pending') AS status,
+                      pr_rev.individual AS individual,
+                      pr_rev.group_id AS group_id,
+                      pr_rev.vote_count AS vote_count,
+                      pr_rev.total_votes AS total_votes,
                       d.box_x, d.box_y, d.box_w, d.box_h, d.detector_confidence
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               WHERE d.photo_id = ? AND d.workspace_id = ?
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE d.photo_id = ?
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                ORDER BY pr.confidence DESC""",
-            (photo_id, db._active_workspace_id),
+            (ws, photo_id, min_conf),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
 
@@ -8364,16 +8486,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if img is None:
             return "Could not load image", 500
 
-        # Get primary detection box from detections table
-        det_row = db.conn.execute(
-            """SELECT box_x, box_y, box_w, box_h
-               FROM detections
-               WHERE photo_id = ? AND workspace_id = ?
-               ORDER BY detector_confidence DESC LIMIT 1""",
-            (photo_id, db._active_workspace_id),
-        ).fetchone()
+        # Get primary detection box — global detections table, threshold
+        # resolved from workspace-effective config in get_detections.
+        dets = db.get_detections(photo_id)
         det_box = None
-        if det_row:
+        if dets:
+            det_row = dets[0]
             det_box = {
                 "x": det_row["box_x"], "y": det_row["box_y"],
                 "w": det_row["box_w"], "h": det_row["box_h"],

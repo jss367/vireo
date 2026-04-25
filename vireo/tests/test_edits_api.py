@@ -417,9 +417,9 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     resp = client.post(f'/api/predictions/{pred_id}/accept')
     assert resp.status_code == 200
 
-    # Verify accepted state
-    pred_row = db.conn.execute("SELECT status FROM predictions WHERE id = ?", (pred_id,)).fetchone()
-    assert pred_row['status'] == 'accepted'
+    # Verify accepted state (review status lives in prediction_review per workspace)
+    ws_id = db._active_workspace_id
+    assert db.get_review_status(pred_id, ws_id) == 'accepted'
     kws = {k['name'] for k in db.get_photo_keywords(pid)}
     assert 'Blue Jay' in kws
 
@@ -428,8 +428,7 @@ def test_accept_prediction_undo_restores_status(app_and_db):
     assert resp.status_code == 200
 
     # Prediction status restored to pending
-    pred_row = db.conn.execute("SELECT status FROM predictions WHERE id = ?", (pred_id,)).fetchone()
-    assert pred_row['status'] == 'pending'
+    assert db.get_review_status(pred_id, ws_id) == 'pending'
 
     # Keyword removed
     kws = {k['name'] for k in db.get_photo_keywords(pid)}

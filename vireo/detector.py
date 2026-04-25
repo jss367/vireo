@@ -25,6 +25,13 @@ INPUT_SIZE = 640
 # MegaDetector class mapping (index -> label)
 CLASS_NAMES = {0: "animal", 1: "person", 2: "vehicle"}
 
+# Raw-confidence hard floor. Every detection at or above this value is stored;
+# the user-visible threshold is applied as a read-time filter from the
+# workspace-effective config. Filtering at write time would defeat the global
+# detection cache — two workspaces with different thresholds over the same
+# photo would otherwise need separate detector runs.
+RAW_CONF_FLOOR = 0.01
+
 
 def ensure_megadetector_weights(progress_callback=None):
     """Ensure MegaDetector V6 ONNX weights are present on disk.
@@ -290,19 +297,28 @@ def _postprocess(outputs, preprocess_info, confidence_threshold):
     return detections
 
 
-def detect_animals(image_path, confidence_threshold=0.2):
+def detect_animals(image_path):
     """Detect animals in an image using MegaDetector.
+
+    Returns every detection above ``RAW_CONF_FLOOR``. The user-visible
+    confidence threshold is applied as a read-time filter from the
+    workspace-effective config — don't filter at write time or we can't
+    globally cache detector output across workspaces with different
+    thresholds.
 
     Args:
         image_path: path to the image file
-        confidence_threshold: minimum detection confidence (0-1)
 
     Returns:
         list of detections, each with:
             box: {x, y, w, h} normalized 0-1
             confidence: float 0-1
             category: str ('animal', 'person', 'vehicle')
-        Returns empty list on failure.
+
+        ``[]`` means "ran successfully, no boxes above the raw floor"
+        (a real empty scene). ``None`` means "the run itself failed"
+        (image decode error, ONNX error, etc.) — callers should NOT
+        cache a zero-box result for this case.
     """
     session = _get_session()
 
@@ -314,7 +330,7 @@ def detect_animals(image_path, confidence_threshold=0.2):
         img = load_image(str(image_path), max_size=1280)
         if img is None:
             log.warning("Could not load image for detection: %s", image_path)
-            return []
+            return None
         img_array = np.array(img.convert("RGB"))
 
         input_tensor, preprocess_info = _preprocess(img_array)
@@ -322,10 +338,10 @@ def detect_animals(image_path, confidence_threshold=0.2):
         input_name = session.get_inputs()[0].name
         outputs = session.run(None, {input_name: input_tensor})
 
-        return _postprocess(outputs, preprocess_info, confidence_threshold)
+        return _postprocess(outputs, preprocess_info, RAW_CONF_FLOOR)
     except Exception:
         log.warning("Detection failed for %s", image_path, exc_info=True)
-        return []
+        return None
 
 
 def get_primary_detection(detections):

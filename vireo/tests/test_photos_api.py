@@ -93,6 +93,52 @@ def test_api_photos_includes_all_detections(app_and_db):
     assert bird3['detections'] == []
 
 
+def test_api_photos_detections_honor_workspace_threshold(app_and_db):
+    """Lowering the workspace's `detector_confidence` surfaces more boxes at
+    read time, without rewriting any detection rows.
+
+    Exercises the global-detections design: boxes are cached once, each
+    workspace filters on its own threshold when reading.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    target = [p for p in photos if p['filename'] == 'bird1.jpg'][0]
+
+    # Save two boxes: one above the default 0.2 threshold, one below it.
+    db.save_detections(target['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}, "confidence": 0.95, "category": "animal"},
+    ], detector_model="MDV6")
+
+    client = app.test_client()
+
+    # Default workspace threshold (0.2) hides the low-confidence box.
+    resp = client.get('/api/photos')
+    bird1 = [p for p in resp.get_json()['photos'] if p['filename'] == 'bird1.jpg'][0]
+    assert len(bird1['detections']) == 1
+    assert bird1['detections'][0]['confidence'] == 0.95
+
+    # Lower the workspace threshold via a per-workspace config override —
+    # no detection rows are rewritten, only the read-time filter changes.
+    db.update_workspace(db._active_workspace_id,
+                        config_overrides={"detector_confidence": 0.01})
+
+    resp = client.get('/api/photos')
+    bird1 = [p for p in resp.get_json()['photos'] if p['filename'] == 'bird1.jpg'][0]
+    assert len(bird1['detections']) == 2, (
+        "lowering detector_confidence should surface more cached boxes"
+    )
+    # Still ordered by confidence DESC.
+    assert bird1['detections'][0]['confidence'] == 0.95
+    assert bird1['detections'][1]['confidence'] == 0.05
+
+    # And no new rows were written.
+    raw = db.conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE photo_id = ?", (target['id'],)
+    ).fetchone()[0]
+    assert raw == 2
+
+
 def test_api_photos_filter_keyword(app_and_db):
     """GET /api/photos?keyword= filters by keyword."""
     app, _ = app_and_db
@@ -304,6 +350,43 @@ def test_api_species_empty(app_and_db):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data['species'] == []
+
+
+def test_api_species_summary_filters_to_latest_fingerprint(app_and_db):
+    """GET /api/species/summary must surface only the most recent
+    labels_fingerprint per (detection, classifier_model). Stale species
+    cached under an old label set must NOT contribute to counts —
+    otherwise the variant explorer mixes pre- and post-relabel results.
+    """
+    app, db = app_and_db
+    det_ids = db.save_detections(1, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    # Stale fingerprint: species the user used to track.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.9, '2026-01-01')",
+        (det_ids[0],),
+    )
+    # Current fingerprint: species under the active label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.8, '2026-04-24')",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/species/summary')
+    assert resp.status_code == 200
+    species = [r['species'] for r in resp.get_json()]
+    assert 'Robin' in species
+    assert 'Finch' not in species, (
+        "Species summary leaked a stale-fingerprint species into counts "
+        "— variant explorer would mix pre- and post-relabel results."
+    )
 
 
 def test_photo_detail_includes_metadata(app_and_db):

@@ -234,6 +234,45 @@ def test_browse_summary_folder_includes_descendants(tmp_path):
     assert summary['filtered_total'] == 2
 
 
+def test_browse_summary_top_species_filters_to_latest_fingerprint(tmp_path):
+    """get_browse_summary's top-species ranking must pin to the most
+    recent labels_fingerprint per (detection, classifier_model).
+    Otherwise a stale higher-confidence row from an old label set wins
+    ROW_NUMBER() and `/api/browse/summary` reports the wrong species.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg',
+                       extension='.jpg', file_size=100, file_mtime=1.0)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint — HIGHER confidence + 'Finch'.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.99, '2026-01-01')",
+        (det_id,),
+    )
+    # Current fingerprint — lower confidence + 'Robin'.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.7, '2026-04-25')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    summary = db.get_browse_summary()
+    species_list = [(s["species"], s["count"]) for s in summary["top_species"]]
+    assert species_list == [("Robin", 1)], (
+        f"top_species must be the active-fingerprint Robin (lower "
+        f"confidence) — not stale-fingerprint Finch (higher); "
+        f"got {species_list}"
+    )
+
+
 def test_calendar_data_folder_includes_descendants(tmp_path):
     """get_calendar_data(folder_id=parent) counts descendants."""
     from db import Database
@@ -1345,6 +1384,816 @@ def test_get_existing_prediction_photo_ids(tmp_path):
     assert result == set()
 
 
+def test_get_prediction_for_photo_keyed_by_fingerprint(tmp_path):
+    """When labels_fingerprint is given, it must scope the lookup.
+
+    Cache identity is (detection, model, fingerprint, species), so the
+    single-photo fetch used by the classify-skip path must honor it;
+    otherwise it would return a row from a different label set and
+    propagate incorrect species metadata into downstream grouping.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    # Two predictions on the same detection, same model, different fingerprints.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'aaa', 'Robin', 0.9)",
+        (det_ids[0],),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'bbb', 'Sparrow', 0.85)",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='aaa',
+    )['species'] == 'Robin'
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='bbb',
+    )['species'] == 'Sparrow'
+    # Absent fingerprint → no row
+    assert db.get_prediction_for_photo(
+        pids[0], 'bioclip', labels_fingerprint='ccc',
+    ) is None
+
+
+def test_query_move_rule_matches_has_predictions_honors_threshold(tmp_path):
+    """has_predictions must match the UI's read-time threshold view: a
+    photo whose only prediction sits on a below-threshold detection
+    should NOT count as having predictions.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo 0: above-threshold detection + prediction → "has predictions" = True
+    det_a = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_a, species='Robin', confidence=0.9, model='bioclip')
+
+    # Photo 1: ONLY a below-threshold detection (default 0.2) with a
+    # prediction. Must NOT count as "has predictions".
+    det_b = db.save_detections(pids[1], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_b, species='Sparrow', confidence=0.9, model='bioclip')
+
+    has = db.query_move_rule_matches({"has_predictions": True})
+    assert has == [pids[0]], (
+        f"has_predictions=True must apply detector_confidence floor; "
+        f"expected only photo 0, got {has}"
+    )
+    none = db.query_move_rule_matches({"has_predictions": False})
+    assert pids[1] in none, (
+        f"Photo with only below-threshold predictions must match "
+        f"has_predictions=False; got {none}"
+    )
+
+
+def test_query_move_rule_matches_has_predictions(tmp_path):
+    """The has_predictions move-rule criterion must work post-refactor.
+
+    Predictions no longer carry photo_id/workspace_id; the EXISTS subquery
+    now routes through detections.photo_id instead. Previously this raised
+    `no such column: pr.photo_id` on any preview/apply of a rule using the
+    "Has predictions" criterion.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo 0 has a prediction; photo 1 does not.
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+
+    hits = db.query_move_rule_matches({"has_predictions": True})
+    assert hits == [pids[0]]
+    misses = db.query_move_rule_matches({"has_predictions": False})
+    assert misses == [pids[1]]
+
+
+def test_dashboard_stats_classified_count_honors_threshold_and_fingerprint(tmp_path):
+    """get_dashboard_stats' classified_count and prediction_status must
+    apply the same detector_confidence floor as detected_count (otherwise
+    the dashboard shows "3 detected, 7 classified" after raising the
+    threshold), and must scope to the most recent labels_fingerprint per
+    (detection, classifier_model) so stale-label predictions don't drift
+    the dashboard away from the active labeling context.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Photo A: high-confidence detection + current-fingerprint prediction.
+    det_a = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.9, '2026-04-24')",
+        (det_a,),
+    )
+    # Stale-fingerprint prediction on the SAME detection — must not
+    # inflate classified_count or prediction_status beyond the one photo.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_a,),
+    )
+
+    # Photo B: LOW-confidence detection (below default 0.2 threshold) with
+    # its own current-fingerprint prediction — must be excluded by the
+    # threshold filter.
+    det_b = db.save_detections(pids[1], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Sparrow', 0.9, '2026-04-24')",
+        (det_b,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats()
+    # detected_count applies threshold → only photo A qualifies.
+    assert stats["detected_count"] == 1
+    # classified_count must match — NOT 2 (ignored threshold) and NOT 3
+    # (also mixed fingerprints on photo A).
+    assert stats["classified_count"] == 1, (
+        f"classified_count ({stats['classified_count']}) must honor "
+        f"detector_confidence + fingerprint; expected 1 like detected_count"
+    )
+    # prediction_status: one pending row for photo A's current-fingerprint
+    # prediction. Stale-fingerprint row and below-threshold row excluded.
+    status_counts = {r["status"]: r["count"] for r in stats["prediction_status"]}
+    assert status_counts.get("pending", 0) == 1, (
+        f"prediction_status must exclude stale fingerprint and below-threshold "
+        f"rows; got {status_counts}"
+    )
+
+
+def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monkeypatch):
+    """/api/species/<name>/clusters must not mix stale and current-label
+    rows when a detection has been classified under multiple fingerprints.
+    """
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    from app import create_app
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    from db import Database
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/p", name="p")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    import numpy as np
+    emb = np.zeros(512, dtype=np.float32).tobytes()
+    db.conn.execute(
+        "UPDATE photos SET embedding=?, embedding_model='test' WHERE id=?",
+        (emb, pid),
+    )
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Two fingerprints on the same detection with the same species.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir,
+                     api_token="t")
+    client = app.test_client()
+    resp = client.get("/api/species/Robin/clusters")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Photo must appear exactly once (deduped to the current fingerprint),
+    # not twice (one per fingerprint row).
+    assert data["total_photos"] == 1, (
+        f"Expected one photo (deduped to current fingerprint), got "
+        f"{data['total_photos']}"
+    )
+
+
+def test_clear_detections_also_clears_detector_runs(tmp_path):
+    """clear_detections must wipe the matching detector_runs entry, or a
+    failed reclassify (clear, then model init crash) would leave a stale
+    "done" run key behind and the next non-reclassify pass would skip
+    detection forever, leaving the photo without boxes.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(pids[0], "megadetector-v6", box_count=1)
+    assert pids[0] in db.get_detector_run_photo_ids("megadetector-v6")
+
+    db.clear_detections(pids[0])
+
+    assert pids[0] not in db.get_detector_run_photo_ids("megadetector-v6"), (
+        "clear_detections left a stale run key — _detect_subjects would "
+        "skip this photo on the next non-reclassify pass."
+    )
+
+
+def test_migration_backfills_group_metadata_on_pending_rows(tmp_path):
+    """Legacy burst-grouped predictions stored group_id/vote_count on
+    pending rows. The migration must backfill prediction_review for those
+    too — not just non-pending rows — or the group membership is lost
+    and get_group_predictions can't recover the burst.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            group_id TEXT, individual TEXT, vote_count INTEGER,
+            total_votes INTEGER, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        -- Pending row carrying group metadata from a prior burst pass.
+        INSERT INTO predictions (id, detection_id, species, model, status,
+                                 group_id, vote_count, total_votes)
+            VALUES (1000, 100, 'Robin', 'bioclip-2', 'pending',
+                    'g-2026', 3, 5);
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    rev = db.conn.execute(
+        "SELECT group_id, vote_count, total_votes FROM prediction_review "
+        "WHERE prediction_id = 1000 AND workspace_id = 1"
+    ).fetchone()
+    assert rev is not None, (
+        "Pending prediction with group metadata should have been backfilled "
+        "into prediction_review; migration silently dropped the group."
+    )
+    assert rev["group_id"] == "g-2026"
+    assert rev["vote_count"] == 3
+
+
+def test_clear_predictions_scopes_by_fingerprint(tmp_path):
+    """When a fingerprint is supplied, clear_predictions must delete only
+    that label set's rows and leave predictions under other fingerprints
+    untouched. Also wipes the matching classifier_runs so next pass
+    re-runs inference.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-a")
+    db.add_prediction(det_id, species="Sparrow", confidence=0.85,
+                      model="bioclip-2", labels_fingerprint="fp-b")
+    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.record_classifier_run(det_id, "bioclip-2", "fp-b", prediction_count=1)
+
+    db.clear_predictions(model="bioclip-2", labels_fingerprint="fp-a")
+
+    remaining = {r["species"] for r in db.conn.execute(
+        "SELECT species FROM predictions WHERE detection_id=?", (det_id,)
+    ).fetchall()}
+    assert remaining == {"Sparrow"}, "fp-b row must be untouched"
+
+    run_keys = db.get_classifier_run_keys(det_id)
+    assert ("bioclip-2", "fp-a") not in run_keys, \
+        "fp-a classifier_runs key must be cleared or next pass will skip"
+    assert ("bioclip-2", "fp-b") in run_keys, "fp-b run key must be preserved"
+
+
+def test_clear_predictions_no_model_clears_classifier_runs(tmp_path):
+    """clear_predictions() with no model must also wipe classifier_runs for
+    affected detections. Otherwise the (detection, model, fingerprint) skip
+    gate treats them as already classified and the next non-reclassify pass
+    leaves those photos permanently without predictions.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-a")
+    db.add_prediction(det_id, species="Sparrow", confidence=0.85,
+                      model="other-model", labels_fingerprint="fp-b")
+    db.record_classifier_run(det_id, "bioclip-2", "fp-a", prediction_count=1)
+    db.record_classifier_run(det_id, "other-model", "fp-b", prediction_count=1)
+
+    db.clear_predictions()
+
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE detection_id=?",
+        (det_id,),
+    ).fetchone()[0]
+    assert remaining == 0, "All predictions for the detection must be deleted"
+
+    run_keys = db.get_classifier_run_keys(det_id)
+    assert run_keys == set(), (
+        "All classifier_runs entries for the detection must be cleared so "
+        "the next non-reclassify pass actually re-runs inference"
+    )
+
+
+def test_get_predictions_filters_to_latest_fingerprint(tmp_path):
+    """get_predictions() must return only the most recent fingerprint per
+    (detection, classifier_model). Mixing stale and current fingerprints
+    contaminates /api/predictions and /api/predictions/compare with
+    duplicate/conflicting species after a label-set change.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint with HIGHER confidence than current — confidence-only
+    # ranking would surface it; the latest-fingerprint filter must exclude it.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    rows = db.get_predictions(photo_ids=[pids[0]])
+    species_seen = {r["species"] for r in rows}
+    assert species_seen == {"Robin"}, (
+        "get_predictions returned stale-fingerprint species — would mix "
+        "old and current label sets in /api/predictions."
+    )
+
+
+def test_move_folders_moves_prediction_review(tmp_path):
+    """Moving folders between workspaces must carry prediction_review rows
+    with them — otherwise accepted/rejected/group metadata is silently
+    dropped and the target workspace reads everything as 'pending'.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_src = db.create_workspace("src")
+    ws_tgt = db.create_workspace("tgt")
+    fid = db.add_folder("/p", name="p")
+    db.add_workspace_folder(ws_src, fid)
+
+    db._active_workspace_id = ws_src
+    pid = db.add_photo(fid, "a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-x",
+                      status="accepted", individual="Ruby")
+    pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin'"
+    ).fetchone()["id"]
+    # Sanity: review row exists in source ws.
+    assert db.get_review_status(pred_id, ws_src) == "accepted"
+
+    db.move_folders_to_workspace(ws_src, ws_tgt, [fid])
+
+    # Review row must have followed the folder.
+    assert db.get_review_status(pred_id, ws_tgt) == "accepted"
+    assert db.get_review_status(pred_id, ws_src) == "pending", \
+        "source ws should no longer claim this review row"
+    # Individual carried over.
+    row = db.conn.execute(
+        "SELECT individual FROM prediction_review "
+        "WHERE prediction_id=? AND workspace_id=?",
+        (pred_id, ws_tgt),
+    ).fetchone()
+    assert row["individual"] == "Ruby"
+
+
+def test_migration_preserves_predictions_when_dropping_detections(tmp_path):
+    """Legacy DB with FK ON DELETE CASCADE from predictions→detections:
+    the global-detections rewrite must NOT cascade-delete predictions
+    when it drops the old detections table. Data loss regression.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        -- The REAL legacy schema: FK with ON DELETE CASCADE. Dropping the
+        -- old detections table with FKs enabled would nuke everything here.
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER REFERENCES detections(id) ON DELETE CASCADE,
+            species TEXT, confidence REAL, model TEXT,
+            status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (1000, 100, 'Robin', 'bioclip-2', 'accepted');
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    # Prediction row must still be there after migration.
+    pred_count = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions"
+    ).fetchone()["n"]
+    assert pred_count == 1, (
+        "Migration cascade-deleted predictions when it dropped the old "
+        "detections table — data loss regression."
+    )
+    # And it must still be reachable via the new detection row.
+    row = db.conn.execute(
+        "SELECT p.species FROM predictions p "
+        "JOIN detections d ON d.id = p.detection_id WHERE p.id = 1000"
+    ).fetchone()
+    assert row is not None
+    assert row["species"] == "Robin"
+
+
+def test_get_top_prediction_for_photo_scoped_to_current_fingerprint(tmp_path):
+    """get_top_prediction_for_photo must return the highest-confidence row
+    from the *current* fingerprint only — a stale fingerprint with higher
+    confidence must NOT win. Used by iNat prefill/submit to avoid sending
+    a taxon from an old label set.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint wins by confidence but is from an old label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    pred = db.get_top_prediction_for_photo(pids[0])
+    assert pred is not None
+    assert pred["species"] == "Robin", (
+        "Helper returned stale-fingerprint species despite higher "
+        "confidence — would prefill iNat with the wrong taxon."
+    )
+
+
+def test_get_top_prediction_for_photo_respects_detector_confidence(tmp_path):
+    """get_top_prediction_for_photo must drop predictions whose backing
+    detection is below the supplied detector_confidence floor — otherwise
+    iNat prefill/submit can use species from detections the UI threshold
+    is supposed to hide (e.g. lower threshold to classify, then raise it).
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    # Two detections on the same photo: one above the upcoming threshold
+    # with a LOWER-confidence prediction, one below with a HIGHER-
+    # confidence prediction. Without the floor, the below-threshold
+    # detection's species wins by confidence.
+    det_high_conf, det_low_conf = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 1, "y": 1, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_high_conf, species="Robin", confidence=0.4,
+                      model="bioclip-2", labels_fingerprint="fp")
+    db.add_prediction(det_low_conf, species="Finch", confidence=0.95,
+                      model="bioclip-2", labels_fingerprint="fp")
+
+    # Without a floor: confidence-only ranking returns the (now-hidden)
+    # below-threshold detection's species.
+    pred_unfiltered = db.get_top_prediction_for_photo(pids[0])
+    assert pred_unfiltered is not None
+    assert pred_unfiltered["species"] == "Finch"
+
+    # With the floor matching a typical UI threshold, only the above-
+    # threshold detection is eligible, so we get the visible species.
+    pred = db.get_top_prediction_for_photo(
+        pids[0], min_detector_confidence=0.2,
+    )
+    assert pred is not None
+    assert pred["species"] == "Robin", (
+        "Helper returned a species from a below-threshold detection — "
+        "iNat would submit a taxon from a detection the UI hides."
+    )
+
+    # If the floor excludes every detection, the helper returns None
+    # rather than falling back to a hidden detection.
+    assert db.get_top_prediction_for_photo(
+        pids[0], min_detector_confidence=0.99,
+    ) is None
+
+
+def test_update_prediction_group_info_scoped_to_fingerprint(tmp_path):
+    """Group metadata must land on the primary row for the ACTIVE label
+    fingerprint, not whichever fingerprint happens to have higher
+    confidence on the same detection.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Stale fingerprint has HIGHER confidence than current — so the old
+    # (by-confidence-only) SELECT would pick the wrong one.
+    db.add_prediction(det_id, species="Finch", confidence=0.95,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    pred_old = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-old'"
+    ).fetchone()["id"]
+    db.add_prediction(det_id, species="Robin", confidence=0.80,
+                      model="bioclip-2", labels_fingerprint="fp-new")
+    pred_new = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-new'"
+    ).fetchone()["id"]
+
+    db.update_prediction_group_info(
+        detection_id=det_id, model="bioclip-2",
+        group_id="g1", vote_count=2, total_votes=3, individual=None,
+        labels_fingerprint="fp-new",
+    )
+
+    # Only the fp-new row got the group metadata.
+    new_row = db.conn.execute(
+        "SELECT group_id FROM prediction_review WHERE prediction_id=?",
+        (pred_new,),
+    ).fetchone()
+    old_row = db.conn.execute(
+        "SELECT group_id FROM prediction_review WHERE prediction_id=?",
+        (pred_old,),
+    ).fetchone()
+    assert new_row is not None and new_row["group_id"] == "g1"
+    assert old_row is None, "stale-fingerprint row must not receive group metadata"
+
+
+def test_accept_prediction_sibling_rejection_scoped_to_fingerprint(tmp_path):
+    """Accepting a prediction under one labels_fingerprint must not mark
+    predictions with OTHER fingerprints on the same detection as rejected.
+    Each label set should have independent review state.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    ws = db._active_workspace_id
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Two predictions on the same detection, different fingerprints.
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    pred_old = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-old'"
+    ).fetchone()["id"]
+
+    db.add_prediction(det_id, species="Blue Jay", confidence=0.85,
+                      model="bioclip-2", labels_fingerprint="fp-new")
+    pred_new = db.conn.execute(
+        "SELECT id FROM predictions WHERE labels_fingerprint='fp-new'"
+    ).fetchone()["id"]
+
+    # Accept the fp-new prediction. The fp-old one must remain pending.
+    db.accept_prediction(pred_new)
+
+    assert db.get_review_status(pred_new, ws) == "accepted"
+    assert db.get_review_status(pred_old, ws) == "pending", \
+        "sibling rejection must not cross fingerprints"
+
+
+def test_get_group_predictions_alternatives_scoped_to_fingerprint(tmp_path):
+    """Group alternatives must not mix across fingerprints — a detection
+    classified under two label sets should only show the current set's
+    alternatives in the group-review UI.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    ws = db._active_workspace_id
+    det_id = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # Current fingerprint: primary + alternative.
+    db.add_prediction(det_id, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="fp-new",
+                      group_id="g1")
+    pred_primary = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin'"
+    ).fetchone()["id"]
+    db.add_prediction(det_id, species="Sparrow", confidence=0.3,
+                      model="bioclip-2", labels_fingerprint="fp-new",
+                      status="alternative")
+
+    # Stale fingerprint: primary + alternative on the SAME detection.
+    db.add_prediction(det_id, species="Finch", confidence=0.8,
+                      model="bioclip-2", labels_fingerprint="fp-old")
+    db.add_prediction(det_id, species="Warbler", confidence=0.2,
+                      model="bioclip-2", labels_fingerprint="fp-old",
+                      status="alternative")
+
+    group = db.get_group_predictions("g1")
+    assert len(group) == 1
+    assert group[0]["species"] == "Robin"
+    alt_species = {a["species"] for a in group[0]["alternatives"]}
+    assert alt_species == {"Sparrow"}, \
+        f"expected only current-fingerprint alternative, got {alt_species}"
+
+
+def test_add_prediction_duplicate_does_not_corrupt_review(tmp_path):
+    """When add_prediction is called twice with the same unique key and the
+    second call carries review metadata, the upsert into prediction_review
+    must target the EXISTING prediction_id — not whatever cur.lastrowid
+    happens to hold after the INSERT OR IGNORE is skipped.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    # Two distinct detections so we have two prediction ids to confuse.
+    det1 = db.save_detections(pids[0], [
+        {"box": {"x": 0, "y": 0, "w": 0.5, "h": 0.5}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    det2 = db.save_detections(pids[1], [
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5}, "confidence": 0.85, "category": "animal"}
+    ], detector_model="MDV6")[0]
+
+    # First prediction on det1 — no review state, fingerprint="x".
+    db.add_prediction(det1, species="Robin", confidence=0.9,
+                      model="bioclip-2", labels_fingerprint="x")
+    pred1_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=?", (det1,)
+    ).fetchone()["id"]
+
+    # Unrelated prediction on det2 to move cur.lastrowid forward.
+    db.add_prediction(det2, species="Sparrow", confidence=0.8,
+                      model="bioclip-2", labels_fingerprint="x")
+
+    # Re-add the SAME (det1, model, fp, species) with review metadata.
+    # INSERT OR IGNORE should skip; the upsert must target pred1_id, not
+    # the most-recent-insert id (which would be det2's prediction).
+    db.add_prediction(
+        det1, species="Robin", confidence=0.9,
+        model="bioclip-2", labels_fingerprint="x",
+        status="accepted", individual="Ruby",
+    )
+    rev_rows = db.conn.execute(
+        "SELECT prediction_id, status, individual FROM prediction_review "
+        "WHERE status = 'accepted'"
+    ).fetchall()
+    assert len(rev_rows) == 1
+    assert rev_rows[0]["prediction_id"] == pred1_id
+    assert rev_rows[0]["individual"] == "Ruby"
+
+
+def test_get_photos_missing_masks_folder_ids_scoped_to_workspace(tmp_path):
+    """The folder_ids branch must enforce workspace scoping so stray folder
+    ids from another workspace don't leak photos into the result.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    fa = db.add_folder("/a", name="a")
+    fb = db.add_folder("/b", name="b")
+    db.add_workspace_folder(ws_a, fa)
+    db.add_workspace_folder(ws_b, fb)
+
+    db._active_workspace_id = ws_a
+    pa = db.add_photo(fa, "x.jpg", extension=".jpg",
+                      file_size=100, file_mtime=1.0)
+    db._active_workspace_id = ws_b
+    pb = db.add_photo(fb, "y.jpg", extension=".jpg",
+                      file_size=100, file_mtime=2.0)
+
+    # Both photos have detections.
+    db.save_detections(pa, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    db.save_detections(pb, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+
+    # Active ws = A. Even if caller passes B's folder id by mistake,
+    # results must not include B's photo.
+    db._active_workspace_id = ws_a
+    hits = db.get_photos_missing_masks(folder_ids=[fa, fb])
+    hit_ids = {h["id"] for h in hits}
+    assert pa in hit_ids
+    assert pb not in hit_ids, "workspace B photo must not leak into workspace A"
+
+
+def test_clear_predictions_without_collection_photo_ids(tmp_path):
+    """The no-collection branch must bind every workspace_id placeholder it
+    uses. A bug where the list of bound params had fewer entries than the
+    ?-count in the SQL would raise sqlite3.ProgrammingError.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}])
+    det_ids = db.save_detections(
+        pids[0],
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+
+    # Must not raise. Both with and without the model filter.
+    db.clear_predictions()
+    assert db.get_existing_prediction_photo_ids('bioclip') == set()
+
+    # Restore and try the model branch.
+    db.add_prediction(det_ids[0], species='Robin', confidence=0.9, model='bioclip')
+    db.clear_predictions(model='bioclip')
+    assert db.get_existing_prediction_photo_ids('bioclip') == set()
+
+
+def test_get_existing_prediction_photo_ids_keyed_by_fingerprint(tmp_path):
+    """When a labels_fingerprint is given, the lookup scopes to that fingerprint.
+
+    The cache identity of a prediction is (detection, model, fingerprint,
+    species), so the photo-level short-circuit in classify_job must key on
+    fingerprint too — otherwise changing the workspace's label set would
+    leave stale predictions unprocessed.
+    """
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+    det_ids = db.save_detections(pids[0], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")
+    # Prediction was produced with label set fp="aaa"
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, labels_fingerprint, "
+        "species, confidence) VALUES (?, 'bioclip', 'aaa', 'Robin', 0.9)",
+        (det_ids[0],),
+    )
+    db.conn.commit()
+
+    # Same fingerprint → photo is skipped
+    assert db.get_existing_prediction_photo_ids(
+        'bioclip', labels_fingerprint='aaa',
+    ) == {pids[0]}
+    # Different fingerprint (label set changed) → photo is NOT skipped
+    assert db.get_existing_prediction_photo_ids(
+        'bioclip', labels_fingerprint='bbb',
+    ) == set()
+    # No fingerprint passed → pre-refactor behavior (skip any model match)
+    assert db.get_existing_prediction_photo_ids('bioclip') == {pids[0]}
+
+
 def test_get_prediction_for_photo(tmp_path):
     """Returns species and confidence for a photo's prediction by model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
@@ -1666,8 +2515,9 @@ def test_get_accepted_species_excludes_non_geolocated(tmp_path):
     ], detector_model="MDV6")
     db.add_prediction(det_ids[0], 'Red-tailed Hawk', 0.95, 'bioclip')
     preds = db.get_predictions(photo_ids=[p1])
-    db.conn.execute("UPDATE predictions SET status='accepted' WHERE id=?", (preds[0]['id'],))
-    db.conn.commit()
+    # Review status now lives in the workspace-scoped prediction_review
+    # table; absent rows are 'pending'.
+    db.set_review_status(preds[0]['id'], db._active_workspace_id, 'accepted')
 
     species = db.get_accepted_species()
     assert species == []
@@ -2283,6 +3133,53 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
     assert rows[0]["scientific_name"] == "Turdus migratorius"
 
 
+def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_path):
+    """When a detection has cached predictions from multiple label-set
+    fingerprints, the eye-keypoint candidate query must pick from the
+    most recent one — otherwise a stale high-confidence row can drive
+    `_resolve_keypoint_model` with outdated taxonomy and route the
+    stage to the wrong model.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
+    ], detector_model="MegaDetector")[0]
+    # Stale fingerprint — high confidence + bird taxonomy.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, taxonomy_class, "
+        "scientific_name, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.99, 'Aves', "
+        "'Turdus migratorius', '2026-01-01')",
+        (det_id,),
+    )
+    # Current fingerprint — lower confidence + mammal taxonomy.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, taxonomy_class, "
+        "scientific_name, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Vulpes vulpes', 0.6, 'Mammalia', "
+        "'Vulpes vulpes', '2026-04-25')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    # Must pick the current-fingerprint row, not the stale higher-confidence one.
+    assert rows[0]["taxonomy_class"] == "Mammalia", (
+        f"Stale-fingerprint Robin row drove the eye-keypoint stage; "
+        f"expected current-fingerprint Vulpes; got {rows[0]['taxonomy_class']}"
+    )
+
+
 def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):
     """When ``photo_ids`` is provided, only those photos are returned even
     if other eligible photos exist in the workspace. Empty iterables return
@@ -2394,7 +3291,12 @@ def test_database_supports_in_memory_sqlite():
 
 
 def test_detections_table_exists(tmp_path):
-    """The detections table should exist with expected columns."""
+    """The detections table should exist with expected columns.
+
+    ``workspace_id`` was dropped when detections became global (cached per
+    photo, not per workspace); the per-workspace scoping now happens via
+    ``workspace_folders`` joins at read time.
+    """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     row = db.conn.execute(
@@ -2403,7 +3305,7 @@ def test_detections_table_exists(tmp_path):
     assert row is not None
     schema = row[0].lower()
     assert "photo_id" in schema
-    assert "workspace_id" in schema
+    assert "workspace_id" not in schema
     assert "box_x" in schema
     assert "box_y" in schema
     assert "box_w" in schema
@@ -2439,10 +3341,179 @@ def test_save_detections(tmp_path):
     ]
     ids = db.save_detections(pid, detections, detector_model="MDV6-yolov9-c")
     assert len(ids) == 2
-    rows = db.conn.execute("SELECT * FROM detections WHERE photo_id = ?", (pid,)).fetchall()
+    rows = db.conn.execute(
+        "SELECT * FROM detections WHERE photo_id = ? ORDER BY id",
+        (pid,),
+    ).fetchall()
     assert len(rows) == 2
     assert rows[0]["box_x"] == 0.1
     assert rows[1]["box_x"] == 0.5
+
+
+def test_save_detections_replaces_existing(tmp_path):
+    """Second save for the same (photo, model) wipes prior rows — idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+
+    det_a = {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    det_b = {"box": {"x": 0.2, "y": 0.2, "w": 0.5, "h": 0.5}, "confidence": 0.7, "category": "animal"}
+
+    # First run: two boxes
+    ids_v1 = db.save_detections(photo_id, [det_a, det_b], detector_model="megadetector-v6")
+    assert len(ids_v1) == 2
+
+    # Second run on same (photo, model): one box — the old rows should be gone
+    ids_v2 = db.save_detections(photo_id, [det_a], detector_model="megadetector-v6")
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+        (photo_id, "megadetector-v6"),
+    ).fetchall()
+    assert {r["id"] for r in rows} == set(ids_v2)
+
+
+def test_save_detections_is_global(tmp_path):
+    """Detections written in workspace A are visible when B is active — the table is global."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+
+    db._active_workspace_id = ws_a
+    db.save_detections(photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6")
+
+    db._active_workspace_id = ws_b
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ?", (photo_id,),
+    ).fetchall()
+    # Global cache: workspace B sees the row written from A
+    assert len(rows) == 1
+
+
+def test_get_detections_threshold_filter(tmp_path, monkeypatch):
+    """get_detections filters by min_conf, resolving from workspace-effective config when None."""
+    import config as cfg
+    from db import Database
+
+    # Isolate config from the user's ~/.vireo/config.json so the default
+    # detector_confidence (0.2) is what the test actually resolves.
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.4, "category": "animal"},
+        ],
+        detector_model="megadetector-v6",
+    )
+
+    # min_conf=0: returns everything
+    rows = db.get_detections(photo_id, min_conf=0)
+    assert len(rows) == 2
+
+    # min_conf=0.2: only the 0.4 row
+    rows = db.get_detections(photo_id, min_conf=0.2)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.4
+
+    # min_conf=None pulls from workspace-effective config (default 0.2 → 1 row)
+    rows = db.get_detections(photo_id)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.4
+
+
+def test_get_detections_cross_workspace_read(tmp_path):
+    """Detections written in workspace A are readable from workspace B — table is global."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+
+    db._active_workspace_id = ws_a
+    db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+
+    db._active_workspace_id = ws_b
+    rows = db.get_detections(photo_id, min_conf=0)
+    assert len(rows) == 1
+    assert rows[0]["detector_confidence"] == 0.9
+
+
+def test_get_detections_for_photos_threshold_filter(tmp_path, monkeypatch):
+    """Batch get_detections_for_photos filters by min_conf across photos and reads cross-workspace."""
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, fid)
+    db.add_workspace_folder(ws_b, fid)
+    p1 = db.add_photo(fid, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(fid, "b.jpg", extension=".jpg", file_size=100, file_mtime=2.0)
+
+    db._active_workspace_id = ws_a
+    db.save_detections(p1, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05, "category": "animal"},
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.6, "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.save_detections(p2, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.1, "category": "animal"},
+    ], detector_model="megadetector-v6")
+
+    # min_conf=0: both photos, all three rows
+    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    assert len(result[p1]) == 2
+    assert len(result[p2]) == 1
+
+    # min_conf=0.5: only p1's 0.6 row; p2 has nothing above threshold → omitted
+    result = db.get_detections_for_photos([p1, p2], min_conf=0.5)
+    assert set(result.keys()) == {p1}
+    assert len(result[p1]) == 1
+    assert result[p1][0]["confidence"] == 0.6
+
+    # min_conf=None resolves from workspace-effective config (default 0.2):
+    # p1 keeps the 0.6, p2's 0.1 is filtered out.
+    result = db.get_detections_for_photos([p1, p2])
+    assert set(result.keys()) == {p1}
+    assert len(result[p1]) == 1
+
+    # Cross-workspace: read from B, see A's writes.
+    db._active_workspace_id = ws_b
+    result = db.get_detections_for_photos([p1, p2], min_conf=0)
+    assert len(result[p1]) == 2
+    assert len(result[p2]) == 1
 
 
 def test_get_detections_for_photo(tmp_path):
@@ -2496,8 +3567,8 @@ def test_get_detections_for_photos_empty(tmp_path):
     assert db.get_detections_for_photos([]) == {}
 
 
-def test_get_detections_for_photos_scoped_to_workspace(tmp_path):
-    """get_detections_for_photos must not leak detections from other workspaces."""
+def test_get_detections_for_photos_is_global(tmp_path):
+    """get_detections_for_photos reads detections globally — table is no longer workspace-scoped."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
@@ -2510,8 +3581,46 @@ def test_get_detections_for_photos_scoped_to_workspace(tmp_path):
     other_ws = db.create_workspace("Other")
     db.set_active_workspace(other_ws)
 
-    result = db.get_detections_for_photos([pid])
-    assert result == {}
+    # Global cache: workspace "Other" sees detections written under the default workspace.
+    result = db.get_detections_for_photos([pid], min_conf=0)
+    assert len(result[pid]) == 1
+    assert result[pid][0]["confidence"] == 0.9
+
+
+def test_get_predictions_for_detection_filters(tmp_path):
+    """get_predictions_for_detection filters by min_classifier_conf and labels_fingerprint."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(photo_id, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="megadetector-v6")[0]
+
+    for sp, conf, fp in [("Robin", 0.8, "abc"), ("Sparrow", 0.3, "abc"),
+                          ("Robin", 0.9, "xyz")]:
+        db.conn.execute(
+            """INSERT INTO predictions (detection_id, classifier_model,
+                                         labels_fingerprint, species, confidence)
+               VALUES (?, 'bioclip-2', ?, ?, ?)""",
+            (det_id, fp, sp, conf),
+        )
+    db.conn.commit()
+
+    # All three rows when unfiltered
+    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0)) == 3
+    # Only >= 0.5
+    assert len(db.get_predictions_for_detection(det_id, min_classifier_conf=0.5)) == 2
+    # Filter by fingerprint
+    by_abc = db.get_predictions_for_detection(
+        det_id, labels_fingerprint="abc", min_classifier_conf=0
+    )
+    assert {r["species"] for r in by_abc} == {"Robin", "Sparrow"}
 
 
 def test_clear_detections(tmp_path):
@@ -2523,11 +3632,11 @@ def test_clear_detections(tmp_path):
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
     ], detector_model="MDV6")
-    # Insert prediction via raw SQL since add_prediction is not yet refactored
-    # for the detection-based schema (Task 3)
     db.conn.execute(
-        "INSERT INTO predictions (detection_id, species, confidence, model, status) VALUES (?, ?, ?, ?, ?)",
-        (det_ids[0], "Elk", 0.9, "bioclip", "pending"),
+        """INSERT INTO predictions
+             (detection_id, classifier_model, labels_fingerprint, species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (det_ids[0], "bioclip", "legacy", "Elk", 0.9),
     )
     db.conn.commit()
     db.clear_detections(pid)
@@ -2568,10 +3677,25 @@ def test_init_purges_orphan_predictions(tmp_path):
     from db import Database
     db_path = str(tmp_path / "test.db")
     db = Database(db_path)
-    # Bypass the add_prediction guard to simulate a legacy orphan row.
+    # Simulate a legacy orphan row by dropping the NOT NULL constraint on
+    # detection_id — the current CREATE enforces NOT NULL (that guard was
+    # added after the purge was written), but pre-migration installs still
+    # hold orphans we want the purge to sweep.
+    db.conn.execute("DROP TABLE predictions")
     db.conn.execute(
-        "INSERT INTO predictions (detection_id, species, confidence, model, status) "
-        "VALUES (NULL, 'Elk', 0.9, 'bioclip', 'pending')"
+        """CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY,
+            detection_id INTEGER,
+            classifier_model TEXT,
+            labels_fingerprint TEXT DEFAULT 'legacy',
+            species TEXT,
+            confidence REAL,
+            category TEXT
+        )"""
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, species, confidence, classifier_model) "
+        "VALUES (NULL, 'Elk', 0.9, 'bioclip')"
     )
     db.conn.commit()
     assert db.conn.execute(
@@ -2619,7 +3743,8 @@ def test_accept_prediction_tags_photo(tmp_path):
 
 
 def test_get_existing_detection_photo_ids(tmp_path):
-    """get_existing_detection_photo_ids returns photo IDs that have detections."""
+    """get_existing_detection_photo_ids shim returns photo IDs where the default
+    detector model has run (delegates to get_detector_run_photo_ids)."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos")
@@ -2627,10 +3752,53 @@ def test_get_existing_detection_photo_ids(tmp_path):
     pid2 = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg", file_size=100, file_mtime=1.0)
     db.save_detections(pid1, [
         {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9, "category": "animal"},
-    ], detector_model="MDV6")
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(pid1, "megadetector-v6", box_count=1)
     result = db.get_existing_detection_photo_ids()
     assert pid1 in result
     assert pid2 not in result
+
+
+def test_get_detector_run_photo_ids_excludes_torn_state(tmp_path):
+    """A detector_runs row with box_count>0 but no matching detections is a
+    torn state left behind by a reclassify that cleared detections and then
+    failed before writing new rows. That photo must NOT be treated as cached —
+    otherwise the next non-reclassify run skips detection and the photo is
+    permanently stranded on full-image fallback.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    torn = db.add_photo(folder_id=fid, filename="torn.jpg", extension=".jpg",
+                        file_size=100, file_mtime=1.0)
+    empty = db.add_photo(folder_id=fid, filename="empty.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    ok = db.add_photo(folder_id=fid, filename="ok.jpg", extension=".jpg",
+                      file_size=100, file_mtime=1.0)
+
+    # Torn: run recorded with boxes, but detections cleared (simulates a
+    # reclassify that wiped rows then crashed before re-detecting).
+    db.save_detections(torn, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(torn, "megadetector-v6", box_count=1)
+    db.clear_detections(torn)
+
+    # Legit empty scene: run recorded with box_count=0, no detections.
+    db.record_detector_run(empty, "megadetector-v6", box_count=0)
+
+    # Consistent: run recorded and detection rows present.
+    db.save_detections(ok, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(ok, "megadetector-v6", box_count=1)
+
+    result = db.get_detector_run_photo_ids("megadetector-v6")
+    assert torn not in result, "torn state must be re-detected, not skipped"
+    assert empty in result, "legit empty scenes must stay cached"
+    assert ok in result, "consistent cached runs must stay cached"
 
 
 def test_multiple_predictions_per_detection(tmp_path):
@@ -2640,11 +3808,12 @@ def test_multiple_predictions_per_detection(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
     det_id = det_ids[0]
 
     db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
@@ -2667,11 +3836,12 @@ def test_alternative_predictions_filtered_from_pending(tmp_path):
     ws_id = db.ensure_default_workspace()
     db.set_active_workspace(ws_id)
     fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws_id, fid)
     pid = db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
                        file_size=1000, file_mtime=1.0)
     det_ids = db.save_detections(pid, [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
-    ])
+    ], detector_model="megadetector-v6")
     det_id = det_ids[0]
 
     db.add_prediction(detection_id=det_id, species="Robin", confidence=0.85,
@@ -3505,14 +4675,23 @@ def test_get_highlights_candidates(tmp_path):
             "UPDATE photos SET quality_score = ? WHERE id = ?", (qs, pid)
         )
         if qs is not None and qs >= 0.5:
-            # Add a detection + accepted prediction for photos with decent quality
+            # Add a detection + accepted prediction for photos with decent quality.
+            # Detections are global (no workspace_id); the predictions table
+            # dropped ``model``/``status`` — review state lives in
+            # ``prediction_review``.
             did = db.conn.execute(
-                "INSERT INTO detections (photo_id, workspace_id, detector_confidence) VALUES (?, ?, 0.9)",
-                (pid, db._ws_id()),
+                "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+                (pid,),
+            ).lastrowid
+            pred_id = db.conn.execute(
+                "INSERT INTO predictions (detection_id, classifier_model, species, confidence) "
+                "VALUES (?, 'test', ?, 0.95)",
+                (did, f"Species{i}"),
             ).lastrowid
             db.conn.execute(
-                "INSERT INTO predictions (detection_id, species, confidence, status) VALUES (?, ?, 0.95, 'accepted')",
-                (did, f"Species{i}"),
+                "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+                "VALUES (?, ?, 'accepted')",
+                (pred_id, db._ws_id()),
             )
     db.conn.commit()
 
@@ -4170,6 +5349,558 @@ def test_preview_cache_oldest_first(tmp_path):
     assert [(r["photo_id"], r["size"]) for r in rows] == [(p1, 1920), (p2, 1920)]
 
 
+def test_new_cache_tables_exist(tmp_path):
+    """detector_runs, classifier_runs, labels_fingerprints, prediction_review are created."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    tables = {r['name'] for r in db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    assert 'detector_runs' in tables
+    assert 'classifier_runs' in tables
+    assert 'labels_fingerprints' in tables
+    assert 'prediction_review' in tables
+
+
+def test_record_detector_run_and_lookup(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    db._active_workspace_id = db.create_workspace("WS")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    # Initially: no runs recorded
+    assert db.get_detector_run_photo_ids("megadetector-v6") == set()
+
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=0)
+    assert db.get_detector_run_photo_ids("megadetector-v6") == {photo_id}
+
+    # Re-recording is idempotent / updates box_count
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=3)
+    row = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id=? AND detector_model=?",
+        (photo_id, "megadetector-v6"),
+    ).fetchone()
+    assert row["box_count"] == 3
+
+
+def test_detector_run_is_not_workspace_scoped(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+    db.add_workspace_folder(ws_a, folder_id)
+    db.add_workspace_folder(ws_b, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+
+    db._active_workspace_id = ws_a
+    # Save the matching detection rows alongside the run so the cached-run
+    # state is consistent — get_detector_run_photo_ids excludes torn states
+    # where box_count>0 has no matching detections.
+    db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9,
+         "category": "animal"},
+        {"box": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}, "confidence": 0.8,
+         "category": "animal"},
+    ], detector_model="megadetector-v6")
+    db.record_detector_run(photo_id, "megadetector-v6", box_count=2)
+
+    db._active_workspace_id = ws_b
+    assert photo_id in db.get_detector_run_photo_ids("megadetector-v6")
+
+
+def test_init_normalizes_legacy_detector_model_key(tmp_path):
+    """Legacy rows written with detector_model='MegaDetector' must be
+    renamed to 'megadetector-v6' on init. Without this, the next run
+    would insert a parallel set of detections keyed on the new string
+    instead of clearing-and-reinserting the legacy ones.
+    """
+    from db import Database
+
+    db_path = str(tmp_path / "legacy.db")
+    db = Database(db_path)
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Manually write a legacy-keyed detection and detector_runs row, as if
+    # the DB had been populated by pre-refactor code.
+    db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_model, "
+        "box_x, box_y, box_w, box_h, detector_confidence) "
+        "VALUES (?, 'MegaDetector', 0.1, 0.1, 0.2, 0.2, 0.9)",
+        (photo_id,),
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO detector_runs "
+        "(photo_id, detector_model, box_count) VALUES (?, 'MegaDetector', 1)",
+        (photo_id,),
+    )
+    db.conn.commit()
+    db.conn.close()
+
+    # Re-open: init-time migration should normalize the key.
+    db2 = Database(db_path)
+    det_keys = {r["detector_model"] for r in db2.conn.execute(
+        "SELECT detector_model FROM detections"
+    ).fetchall()}
+    run_keys = {r["detector_model"] for r in db2.conn.execute(
+        "SELECT detector_model FROM detector_runs"
+    ).fetchall()}
+    assert det_keys == {"megadetector-v6"}
+    assert run_keys == {"megadetector-v6"}
+
+
+def test_record_classifier_run_and_lookup(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    db._active_workspace_id = db.create_workspace("WS")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Need a detection row to reference:
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    assert db.get_classifier_run_keys(det_id) == set()
+
+    db.record_classifier_run(det_id, "bioclip-2", "abc123", prediction_count=5)
+    assert db.get_classifier_run_keys(det_id) == {("bioclip-2", "abc123")}
+
+
+def test_upsert_labels_fingerprint(tmp_path):
+    import json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.upsert_labels_fingerprint(
+        fingerprint="abc123",
+        display_name="California birds",
+        sources=["/labels/ca-birds.txt"],
+        label_count=423,
+    )
+    row = db.conn.execute(
+        "SELECT * FROM labels_fingerprints WHERE fingerprint=?", ("abc123",)
+    ).fetchone()
+    assert row["display_name"] == "California birds"
+    assert json.loads(row["sources_json"]) == ["/labels/ca-birds.txt"]
+    assert row["label_count"] == 423
+
+    # Upsert is idempotent
+    db.upsert_labels_fingerprint("abc123", "California birds (v2)",
+                                  ["/labels/ca-birds-v2.txt"], 500)
+    row = db.conn.execute(
+        "SELECT display_name, label_count FROM labels_fingerprints WHERE fingerprint=?",
+        ("abc123",),
+    ).fetchone()
+    assert row["display_name"] == "California birds (v2)"
+    assert row["label_count"] == 500
+
+
+def test_review_status_absence_is_pending(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("WS")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    # Predictions now carry ``classifier_model`` (the old ``model`` was renamed).
+    pred_id = db.conn.execute(
+        """INSERT INTO predictions (detection_id, classifier_model, species, confidence)
+           VALUES (?, 'bioclip-2', 'Robin', 0.8)""",
+        (det_ids[0],),
+    ).lastrowid
+    db.conn.commit()
+
+    # No row in prediction_review yet → pending
+    assert db.get_review_status(pred_id, ws) == "pending"
+
+    db.set_review_status(pred_id, ws, status="approved")
+    assert db.get_review_status(pred_id, ws) == "approved"
+
+    db.set_review_status(pred_id, ws, status="rejected")
+    assert db.get_review_status(pred_id, ws) == "rejected"
+
+
+def test_migration_backfills_detector_runs(tmp_path):
+    """Legacy detections become detector_runs rows on upgrade."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY,
+            photo_id INTEGER,
+            workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL,
+            category TEXT,
+            detector_model TEXT,
+            created_at TEXT
+        );
+        INSERT INTO folders (id, path) VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'Default');
+        INSERT INTO detections (photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (10, 1, 0, 0, 1, 1, 0.5, 'animal', 'megadetector-v6', '2026-01-01T00:00:00');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Open through Database → migrations run
+    from db import Database
+    db = Database(db_path)
+    run = db.conn.execute(
+        "SELECT box_count FROM detector_runs WHERE photo_id=10 AND detector_model='megadetector-v6'"
+    ).fetchone()
+    assert run is not None
+    assert run["box_count"] == 1
+
+
+def test_migration_backfills_prediction_review(tmp_path):
+    """Approved/rejected predictions get prediction_review rows in the right workspace."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT,
+            status TEXT DEFAULT 'pending', reviewed_at TEXT,
+            individual TEXT, group_id TEXT,
+            vote_count INTEGER, total_votes INTEGER,
+            created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1'),
+                   (200, 10, 2, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't2');
+        INSERT INTO predictions (id, detection_id, species, model, status, individual)
+            VALUES (1, 100, 'Robin', 'bioclip-2', 'approved', 'Ruby'),
+                   (2, 200, 'Robin', 'bioclip-2', 'rejected', NULL);
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    rows = db.conn.execute(
+        "SELECT prediction_id, workspace_id, status, individual "
+        "FROM prediction_review ORDER BY workspace_id"
+    ).fetchall()
+    # After Task 9 dedupes detections, both predictions point to the canonical
+    # detection, so we should have two review rows — one per workspace.
+    assert len(rows) == 2
+    ws_statuses = {r["workspace_id"]: (r["status"], r["individual"]) for r in rows}
+    assert ws_statuses[1] == ("approved", "Ruby")
+    assert ws_statuses[2] == ("rejected", None)
+
+
+def test_migration_dedupes_detections_and_repoints_predictions(tmp_path):
+    """Two workspaces with identical detection rows collapse to one; predictions follow."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B');
+        -- Same box, same photo, two workspaces:
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+          VALUES (100, 10, 1, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't1'),
+                 (200, 10, 2, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't2');
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (1000, 100, 'Robin', 'bioclip-2', 'approved'),
+            (2000, 200, 'Robin', 'bioclip-2', 'pending');
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    # Exactly one detection row for (photo=10, model=megadetector-v6)
+    rows = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id=10 AND detector_model='megadetector-v6'"
+    ).fetchall()
+    assert len(rows) == 1
+    canonical_id = rows[0]["id"]
+    # Both predictions now point at the canonical detection id
+    pred_rows = db.conn.execute(
+        "SELECT id, detection_id FROM predictions ORDER BY id"
+    ).fetchall()
+    assert {r["detection_id"] for r in pred_rows} == {canonical_id}
+    # detections table no longer has workspace_id column
+    cols = {r[1] for r in db.conn.execute("PRAGMA table_info(detections)").fetchall()}
+    assert "workspace_id" not in cols
+
+
+def test_migration_handles_loser_vs_loser_collision(tmp_path):
+    """When the canonical detection has NO prediction yet but two
+    *non-canonical* duplicate detections both have the same
+    (model, species), the upcoming remap would collapse both onto the
+    same (canonical_id, model, species) tuple and trip the legacy
+    UNIQUE. The pre-remap dedup must keep one loser as the survivor.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C');
+        -- Three detections on the same box, three workspaces.
+        -- d1 will be the canonical (lowest id). Critically, d1 has NO
+        -- prediction; predictions exist only on d2 and d3.
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+          VALUES (100, 10, 1, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't1'),
+                 (200, 10, 2, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't2'),
+                 (300, 10, 3, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't3');
+        -- Two non-canonical losers, same (model, species), no canonical
+        -- prediction. The naive remap would put both on (100, 'bioclip-2',
+        -- 'Robin') and trip UNIQUE.
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (2000, 200, 'Robin', 'bioclip-2', 'approved'),
+            (3000, 300, 'Robin', 'bioclip-2', 'pending');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Init must not raise IntegrityError.
+    from db import Database
+    db = Database(db_path)
+    rows = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin' "
+        "AND classifier_model='bioclip-2'"
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"Expected exactly one Robin prediction after loser-vs-loser "
+        f"dedup; got {len(rows)}"
+    )
+
+
+def test_migration_handles_prediction_collision_on_repoint(tmp_path):
+    """When two workspaces had the SAME (detection, model, species) prediction
+    on duplicate detection rows (one per workspace), repointing both to the
+    canonical detection_id would otherwise trip the legacy
+    UNIQUE(detection_id, model, species) index. The migration must delete
+    the non-canonical dup first.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        -- Critical: legacy predictions carries the real UNIQUE constraint.
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B');
+        -- Same box, two workspaces, same prediction in both:
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+          VALUES (100, 10, 1, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't1'),
+                 (200, 10, 2, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't2');
+        -- Same (model, species) prediction in both workspaces — would collide on
+        -- repoint to the canonical detection row without pre-deletion.
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (1000, 100, 'Robin', 'bioclip-2', 'approved'),
+            (2000, 200, 'Robin', 'bioclip-2', 'pending');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Init must not raise an IntegrityError.
+    from db import Database
+    db = Database(db_path)
+    # Exactly one surviving prediction for this (detection, model, species).
+    rows = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin' "
+        "AND classifier_model='bioclip-2'"
+    ).fetchall()
+    assert len(rows) == 1, "non-canonical duplicate must have been deleted"
+
+
+def test_predictions_has_labels_fingerprint(tmp_path):
+    """Fresh DB's predictions table includes the labels_fingerprint column."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cols = {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(predictions)"
+    ).fetchall()}
+    assert "labels_fingerprint" in cols
+
+
+def test_migration_sets_labels_fingerprint_legacy(tmp_path):
+    """Legacy predictions rows without labels_fingerprint get 'legacy' on migration."""
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A');
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+            VALUES (100, 10, 1, 0, 0, 1, 1, 0.9, 'animal', 'megadetector-v6', 't1');
+        INSERT INTO predictions (id, detection_id, species, model) VALUES
+            (1, 100, 'Robin', 'bioclip-2');
+    """)
+    conn.commit()
+    conn.close()
+
+    from db import Database
+    db = Database(db_path)
+    row = db.conn.execute(
+        "SELECT labels_fingerprint FROM predictions WHERE id=1"
+    ).fetchone()
+    assert row["labels_fingerprint"] == "legacy"
+
+
+def test_predictions_has_new_unique_and_no_legacy_columns(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cols = {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(predictions)"
+    ).fetchall()}
+    # Legacy review/workspace columns are gone
+    for legacy in ("status", "reviewed_at", "individual", "group_id",
+                   "vote_count", "total_votes", "workspace_id"):
+        assert legacy not in cols, f"legacy column {legacy} still present"
+    # New unique constraint on (detection_id, classifier_model, labels_fingerprint, species)
+    indexes = db.conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='predictions'"
+    ).fetchall()
+    assert any(
+        "labels_fingerprint" in (idx["sql"] or "") and "species" in (idx["sql"] or "")
+        for idx in indexes
+    )
+
+
 def test_miss_columns_present(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
@@ -4407,6 +6138,7 @@ def test_list_misses_joins_primary_detection_from_detections_table(tmp_path):
             {"box": {"x": 0.35, "y": 0.35, "w": 0.2, "h": 0.2},
              "confidence": 0.85, "category": "animal"},
         ],
+        detector_model="megadetector-v6",
     )
 
     misses = db.list_misses(category="clipped")
@@ -4538,6 +6270,7 @@ def test_list_misses_chunks_detection_lookup_over_sqlite_var_limit(tmp_path):
             pid,
             [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
               "confidence": 0.9, "category": "animal"}],
+            detector_model="megadetector-v6",
         )
 
     misses = db.list_misses(category="clipped")

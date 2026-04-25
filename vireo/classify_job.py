@@ -160,6 +160,125 @@ def _load_labels(model_type, model_str, labels_file, labels_files, db=None):
     return labels, use_tol
 
 
+def _record_labels_fingerprint(db, fingerprint, labels, sources):
+    """Populate the labels_fingerprints sidecar. Cosmetic — powers UX lookups."""
+    display = ", ".join(os.path.basename(s) for s in (sources or [])) or None
+    db.upsert_labels_fingerprint(
+        fingerprint=fingerprint,
+        display_name=display,
+        sources=sources,
+        label_count=len(labels or []),
+    )
+
+
+def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
+                                  labels_fingerprint, classify_fn=None):
+    """Run the classifier for a single detection and persist results.
+
+    This is a thin adapter that the gate wrapper calls. ``classify_fn`` is an
+    injection seam for the higher-level classify/pipeline code that already
+    has a loaded model bundle and prepared image — it should return a list of
+    prediction dicts that get stored in the ``predictions`` table for this
+    (detection, classifier_model, labels_fingerprint) triple.
+
+    Returns the list of prediction dicts that were stored (may be empty).
+    """
+    if classify_fn is None:
+        # No classifier plugged in — return [] without side effects. The
+        # gate wrapper treats a zero-prediction return as a failed attempt
+        # and does NOT record a classifier_run row, so the next call will
+        # retry. Used in tests that just exercise the gating logic without
+        # actually running a model.
+        return []
+
+    predictions = classify_fn() or []
+    # Persist predictions with the new (classifier_model, labels_fingerprint)
+    # identity. INSERT OR REPLACE on the UNIQUE
+    # (detection_id, classifier_model, labels_fingerprint, species) so a
+    # re-classify with reclassify=True refreshes the row in place.
+    for pred in predictions:
+        species = pred.get("species")
+        if not species:
+            continue
+        confidence = pred.get("confidence") or pred.get("score")
+        tax = pred.get("taxonomy") or {}
+        db.conn.execute(
+            """INSERT OR REPLACE INTO predictions
+                (detection_id, classifier_model, labels_fingerprint, species,
+                 confidence, category, scientific_name,
+                 taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                 taxonomy_order, taxonomy_family, taxonomy_genus)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                detection_id,
+                classifier_model,
+                labels_fingerprint,
+                species,
+                confidence,
+                pred.get("category", "new"),
+                tax.get("scientific_name"),
+                tax.get("kingdom"),
+                tax.get("phylum"),
+                tax.get("class"),
+                tax.get("order"),
+                tax.get("family"),
+                tax.get("genus"),
+            ),
+        )
+    db.conn.commit()
+    return predictions
+
+
+def _classify_detection_gated(db, detection_id, classifier_model,
+                               labels_fingerprint, labels, reclassify,
+                               classify_fn=None):
+    """Run the classifier only if we haven't already for this triple.
+
+    The gate is keyed on (detection_id, classifier_model, labels_fingerprint):
+    if a row exists in classifier_runs and reclassify is False, the classifier
+    is not invoked. After a successful invocation that produced at least one
+    prediction, the classifier_runs row is written (or refreshed) so
+    subsequent passes skip.
+
+    Mirrors ``_record_batch_classifier_runs`` and the inline pipeline_job
+    guard: a zero-count run is treated as a failed attempt, not a completed
+    one. Recording it would permanently strand the detection on the next
+    non-reclassify pass — the cache would claim "done" with no rows to show.
+    """
+    if not reclassify:
+        existing = db.get_classifier_run_keys(detection_id)
+        if (classifier_model, labels_fingerprint) in existing:
+            return []
+    predictions = _run_classifier_on_detection(
+        db, detection_id, classifier_model, labels,
+        labels_fingerprint=labels_fingerprint,
+        classify_fn=classify_fn,
+    )
+    if predictions:
+        db.record_classifier_run(
+            detection_id, classifier_model, labels_fingerprint,
+            prediction_count=len(predictions),
+        )
+    return predictions
+
+
+def _resolve_label_sources(params, db):
+    """Return list of source file paths used to build the active label set.
+
+    Mirrors the lookup order in _load_labels — but only produces the source
+    paths so the caller can stash them on the labels_fingerprints row.
+    """
+    if params.labels_files and isinstance(params.labels_files, list):
+        return list(params.labels_files)
+    if params.labels_file:
+        return [params.labels_file]
+    ws_labels = db.get_workspace_active_labels() if db else None
+    if ws_labels is not None:
+        return list(ws_labels)
+    active_sets = get_active_labels()
+    return [s.get("labels_file") for s in (active_sets or []) if s.get("labels_file")]
+
+
 def _detect_batch(photos, folders, runner, job, reclassify, db,
                    det_conf_threshold=None, already_detected_ids=None,
                    cached_detections=None):
@@ -206,7 +325,11 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
             folder_path = folders.get(photo["folder_id"], "")
             image_path = os.path.join(folder_path, photo["filename"])
 
-            # Skip if already detected (unless reclassifying)
+            # Skip if already detected (unless reclassifying). After the
+            # detector_runs migration, `already_detected_ids` includes
+            # empty-scene photos (box_count=0) — we must not re-invoke
+            # MegaDetector for them either. Either the detector produced
+            # rows (reuse them) or it ran and found nothing (skip entirely).
             if not reclassify and photo["id"] in already_detected_ids:
                 # Prefer cached detections from an earlier model in this
                 # same pipeline run so that model 2+ is bound to the
@@ -220,7 +343,13 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         detected += 1
                     processed_ids.add(photo["id"])
                     continue
-                existing_dets = db.get_detections(photo["id"])
+                # Pull cached rows if any; an empty result means this photo
+                # was scanned and had no animals, which is still a skip.
+                # (Task 20 will add a min_conf filter to get_detections.)
+                try:
+                    existing_dets = db.get_detections(photo["id"])
+                except Exception:
+                    existing_dets = []
                 if existing_dets:
                     det_list = []
                     for d in existing_dets:
@@ -235,29 +364,42 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                         })
                     detection_map[photo["id"]] = det_list
                     detected += 1
-                    processed_ids.add(photo["id"])
-                    continue
+                processed_ids.add(photo["id"])
+                continue
 
-            # Resolve threshold lazily on first actual detection call so a
-            # batch where every photo hits the cached/already-detected
-            # short-circuit doesn't need a working config/db at all (the
-            # cached-detections short-circuit test relies on this).
+            # Resolve workspace-effective threshold lazily on first actual
+            # detection call so a batch where every photo hits the
+            # cached/already-detected short-circuit doesn't need a working
+            # config/db at all (the cached-detections short-circuit test
+            # relies on this).
+            #
+            # The threshold is NOT passed to detect_animals — detector writes
+            # everything above RAW_CONF_FLOOR so results can be globally
+            # cached. The effective threshold is applied as a read-time
+            # filter by get_detections / stats queries (Tasks 20-22).
             if det_conf_threshold is None:
                 import config as cfg
-                # Use workspace-effective config so per-workspace overrides
-                # (e.g. bird-photography workspaces lowering the threshold)
-                # are honored, not just the bare global default.
                 effective_cfg = db.get_effective_config(cfg.load())
                 det_conf_threshold = effective_cfg.get("detector_confidence", 0.2)
 
-            detections = detect_animals(image_path, confidence_threshold=det_conf_threshold)
+            detections = detect_animals(image_path)
+
+            if detections is None:
+                # Detector run itself failed (image decode error, ONNX
+                # error, etc.). Do NOT clear prior detections and do NOT
+                # record a run — otherwise future non-reclassify passes
+                # would skip the photo permanently, leaving it without
+                # detections unless the user forces --reclassify.
+                # The photo stays out of processed_ids so the caller
+                # treats it as "will be retried next pass".
+                continue
 
             if detections:
                 detected += 1
 
                 # Store ALL detections in the database
                 det_ids = db.save_detections(
-                    photo["id"], detections, detector_model="MegaDetector"
+                    photo["id"], detections, detector_model="megadetector-v6"
                 )
 
                 # Build detection list with database IDs
@@ -280,7 +422,23 @@ def _detect_batch(photos, folders, runner, job, reclassify, db,
                 # pre-run detection rows for this photo rather than leaving them in
                 # place and allowing future non-reclassify runs to reuse them.
                 processed_ids.add(photo["id"])
+            else:
+                # Genuine empty scene (detector ran, produced zero boxes).
+                # Clear any stale rows for this (photo, model) and record
+                # the run below so reruns skip.
+                db.save_detections(
+                    photo["id"], [], detector_model="megadetector-v6"
+                )
 
+            # Record the detector run ONLY for successful outcomes —
+            # boxes-found and real-empty-scene. Failures were handled by
+            # the ``is None`` early-continue above and must not poison
+            # the skip set.
+            db.record_detector_run(
+                photo["id"], "megadetector-v6", box_count=len(detections)
+            )
+
+            if detections:
                 # Use highest-confidence detection as primary for quality scoring
                 primary = get_primary_detection(detections)
                 if primary:
@@ -350,9 +508,10 @@ def _detect_subjects(photos, folders, runner, job, reclassify, db):
     total = len(photos)
 
     # Resolve cached-detection state before running MegaDetector so we can skip
-    # the weight download entirely when every photo already has a detection row.
+    # the weight download entirely when every photo already has a detector_runs
+    # row (including empty-scene rows with box_count=0).
     already_detected_ids = (
-        db.get_existing_detection_photo_ids() if not reclassify else set()
+        db.get_detector_run_photo_ids("megadetector-v6") if not reclassify else set()
     )
 
     if detect_animals is not None and get_primary_detection is not None:
@@ -658,6 +817,7 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
 def _classify_photos(
     photos, folders, detection_map, existing_preds, clf, model_type,
     model_name, runner, job, db, top_k=1, vireo_dir=None,
+    labels_fingerprint=None, reclassify=False,
 ):
     """Classify detections in batches, cropping to each detection's bounding box.
 
@@ -668,9 +828,16 @@ def _classify_photos(
     Images are passed directly to classifiers as PIL objects (no temp file I/O).
     Multiple images are batched into a single forward pass for throughput.
 
+    A per-detection classifier_runs gate keyed on (detection_id, model_name,
+    labels_fingerprint) short-circuits re-work when the same triple already
+    ran. reclassify=True bypasses the gate.
+
     Returns:
         (raw_results, failed_count, skipped_existing_count)
     """
+    # Fall back to the legacy sentinel when the caller didn't compute a
+    # fingerprint — matches the default used by classifier_runs.
+    fp = labels_fingerprint or "legacy"
     from datetime import datetime as dt
 
     if load_image is None:
@@ -706,51 +873,73 @@ def _classify_photos(
         folder_path = folders.get(photo["folder_id"], "")
         image_path = os.path.join(folder_path, photo["filename"])
 
-        if photo["id"] in existing_preds:
-            # Flush pending batch to preserve photo ordering in raw_results
-            if batch:
-                failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
-                batch = []
-            skipped_existing += 1
-            pred_row = db.get_prediction_for_photo(photo["id"], model_name)
-            if pred_row:
-                timestamp = None
-                if photo["timestamp"]:
-                    try:
-                        timestamp = dt.fromisoformat(photo["timestamp"])
-                    except Exception:
-                        pass
-                embedding = None
-                if model_type != "timm":
-                    emb_blob = db.get_photo_embedding(photo["id"])
-                    if emb_blob:
-                        import numpy as np
-
-                        embedding = np.frombuffer(emb_blob, dtype=np.float32)
-                raw_results.append(
-                    {
-                        "photo": photo,
-                        "detection_id": pred_row["detection_id"],
-                        "folder_path": folder_path,
-                        "image_path": image_path,
-                        "prediction": pred_row["species"],
-                        "confidence": pred_row["confidence"],
-                        "timestamp": timestamp,
-                        "filename": photo["filename"],
-                        "embedding": embedding,
-                        "taxonomy": None,
-                        "alternatives": [],
-                        "_existing": True,
-                    }
-                )
-            continue
-
         # Get detections for this photo (list of detection dicts with IDs)
         photo_detections = detection_map.get(photo["id"], [])
 
         if photo_detections:
-            # Classify each detection independently
+            # Classify each detection independently.
+            #
+            # No photo-level short-circuit here: a prior short-circuit that
+            # skipped photos with any cached prediction under (model, fp)
+            # silently dropped newly-surfaced detections after the user
+            # lowered `detector_confidence`, leaving them unclassified
+            # until --reclassify. The per-detection classifier_runs gate
+            # below handles incremental work correctly.
+            timestamp = None
+            if photo["timestamp"]:
+                try:
+                    timestamp = dt.fromisoformat(photo["timestamp"])
+                except Exception:
+                    pass
+
             for detection in photo_detections:
+                # Classifier-run gate: if (detection, model, fingerprint)
+                # has a run key AND has cached prediction rows, surface the
+                # cached top-1 and skip inference. If the run key exists
+                # but no cached rows do (e.g. the prior pass stored
+                # `category == 'match'` which is intentionally not written,
+                # or transient ordering between record_classifier_run and
+                # _store_grouped_predictions), DON'T short-circuit —
+                # otherwise the photo is stranded until the user forces
+                # --reclassify. Fall through to re-classify instead.
+                if not reclassify:
+                    run_keys = db.get_classifier_run_keys(detection["id"])
+                    if (model_name, fp) in run_keys:
+                        cached = db.get_predictions_for_detection(
+                            detection["id"],
+                            classifier_model=model_name,
+                            labels_fingerprint=fp,
+                            min_classifier_conf=0,
+                        )
+                        if cached:
+                            skipped_existing += 1
+                            top = cached[0]  # ordered by confidence DESC
+                            embedding = None
+                            if model_type != "timm":
+                                emb_blob = db.get_photo_embedding(photo["id"])
+                                if emb_blob:
+                                    import numpy as np
+                                    embedding = np.frombuffer(
+                                        emb_blob, dtype=np.float32,
+                                    )
+                            raw_results.append({
+                                "photo": photo,
+                                "detection_id": detection["id"],
+                                "folder_path": folder_path,
+                                "image_path": image_path,
+                                "prediction": top["species"],
+                                "confidence": top["confidence"],
+                                "timestamp": timestamp,
+                                "filename": photo["filename"],
+                                "embedding": embedding,
+                                "taxonomy": None,
+                                "alternatives": [],
+                                "_existing": True,
+                            })
+                            continue
+                        # Run key without cached rows → fall through to
+                        # classify this detection.
+
                 img, det_folder_path, det_image_path = _prepare_image(
                     photo, folders, detection, vireo_dir=vireo_dir
                 )
@@ -768,13 +957,84 @@ def _classify_photos(
 
                 if len(batch) >= _BATCH_SIZE:
                     failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                    _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
                     batch = []
         else:
-            # No detections — create a full-image detection and classify it
-            full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
-                               "confidence": 0, "category": "animal"}]
-            full_det_ids = db.save_detections(photo["id"], full_image_det,
-                                              detector_model="full-image")
+            # No detections — use (or create) a full-image synthetic detection
+            # to carry the classifier output.
+            #
+            # save_detections() does clear-and-reinsert per
+            # (photo_id, detector_model), so calling it on every pass would
+            # generate a new id each time and cascade-delete prior predictions
+            # and classifier_runs tied to the old id. Reuse the existing
+            # full-image detection when one is already cached, and only
+            # create a fresh one if none exists (or if the caller asked for
+            # a reclassify).
+            # min_conf=0 because the synthetic full-image detection is
+            # written with confidence=0 — the default threshold filter would
+            # hide it.
+            existing_full = db.get_detections(
+                photo["id"], detector_model="full-image", min_conf=0,
+            )
+            if existing_full and not reclassify:
+                full_det_id = existing_full[0]["id"]
+            else:
+                full_image_det = [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                                   "confidence": 0, "category": "animal"}]
+                full_det_ids = db.save_detections(
+                    photo["id"], full_image_det,
+                    detector_model="full-image",
+                )
+                full_det_id = full_det_ids[0]
+            # Gate check for the synthetic full-image detection too.
+            # Mirror the regular detection branch: when gated, surface the
+            # cached top-1 prediction into raw_results so downstream
+            # grouping/storage still sees it. Without this, non-reclassify
+            # reruns silently drop cached full-image photos even though
+            # those photos were intentionally kept in the cache.
+            if not reclassify:
+                run_keys = db.get_classifier_run_keys(full_det_id)
+                if (model_name, fp) in run_keys:
+                    cached = db.get_predictions_for_detection(
+                        full_det_id,
+                        classifier_model=model_name,
+                        labels_fingerprint=fp,
+                        min_classifier_conf=0,
+                    )
+                    if cached:
+                        skipped_existing += 1
+                        top = cached[0]
+                        timestamp = None
+                        if photo["timestamp"]:
+                            try:
+                                timestamp = dt.fromisoformat(photo["timestamp"])
+                            except Exception:
+                                pass
+                        embedding = None
+                        if model_type != "timm":
+                            emb_blob = db.get_photo_embedding(photo["id"])
+                            if emb_blob:
+                                import numpy as np
+                                embedding = np.frombuffer(
+                                    emb_blob, dtype=np.float32,
+                                )
+                        raw_results.append({
+                            "photo": photo,
+                            "detection_id": full_det_id,
+                            "folder_path": folder_path,
+                            "image_path": image_path,
+                            "prediction": top["species"],
+                            "confidence": top["confidence"],
+                            "timestamp": timestamp,
+                            "filename": photo["filename"],
+                            "embedding": embedding,
+                            "taxonomy": None,
+                            "alternatives": [],
+                            "_existing": True,
+                        })
+                        continue
+                    # Run key without cached rows → fall through to
+                    # re-classify this full-image detection.
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:
                 failed += 1
@@ -782,7 +1042,7 @@ def _classify_photos(
 
             batch.append({
                 "photo": photo,
-                "detection_id": full_det_ids[0],
+                "detection_id": full_det_id,
                 "folder_path": folder_path,
                 "image_path": image_path,
                 "img": img,
@@ -790,19 +1050,66 @@ def _classify_photos(
 
             if len(batch) >= _BATCH_SIZE:
                 failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+                _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
                 batch = []
 
     # Flush remaining images
     if batch:
         failed += _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=top_k)
+        _record_batch_classifier_runs(db, batch, model_name, fp, raw_results)
 
     return raw_results, failed, skipped_existing
 
 
+def _record_batch_classifier_runs(db, batch, model_name, labels_fingerprint, raw_results):
+    """Record classifier_runs rows for every detection in ``batch``.
+
+    ``batch`` is the list of entries that were just passed to _flush_batch;
+    ``raw_results`` may already contain entries from prior batches, so we scope
+    the prediction_count lookup to entries that reference this batch's
+    detection_ids.  Called after _flush_batch has committed predictions so the
+    run row is only written for detections that actually produced output.
+    """
+    if not batch:
+        return
+    # Tally how many raw_results entries reference each detection_id. Entries
+    # without a detection_id (unusual, but possible on synthesized rows) are
+    # ignored. For a per-detection batch this is typically 0 or 1.
+    counts: dict = {}
+    for r in raw_results:
+        did = r.get("detection_id")
+        if did is not None:
+            counts[did] = counts.get(did, 0) + 1
+    seen: set = set()
+    for entry in batch:
+        did = entry.get("detection_id")
+        if did is None or did in seen:
+            continue
+        seen.add(did)
+        # Only record the run for detections that actually produced a
+        # prediction. A count of 0 means the classifier failed (transient
+        # load error, decode error, etc.) — caching it as "done" would
+        # permanently strand the detection on the next non-reclassify run.
+        n = counts.get(did, 0)
+        if n <= 0:
+            continue
+        db.record_classifier_run(
+            did, model_name, labels_fingerprint,
+            prediction_count=n,
+        )
+
+
 def _store_grouped_predictions(
     raw_results, job_id, model_name, grouping_window, similarity_threshold, tax, db,
+    labels_fingerprint="legacy",
 ):
     """Group results by timestamp/similarity, compute consensus, store to DB.
+
+    ``labels_fingerprint`` is written verbatim onto each prediction row so
+    the fingerprint-aware skip gate (``get_existing_prediction_photo_ids``)
+    actually finds them. Defaulting to ``'legacy'`` would make cache
+    lookups miss and force reclassification on every pass — callers must
+    pass the active fingerprint.
 
     Returns:
         dict with predictions_stored, burst_groups, already_labeled counts.
@@ -852,6 +1159,7 @@ def _store_grouped_predictions(
                 model=model_name,
                 category=category,
                 taxonomy=tax_hierarchy,
+                labels_fingerprint=labels_fingerprint,
             )
             # Store alternative predictions
             for alt in item.get("alternatives", []):
@@ -866,6 +1174,7 @@ def _store_grouped_predictions(
                     category=category,
                     status="alternative",
                     taxonomy=alt_tax,
+                    labels_fingerprint=labels_fingerprint,
                 )
             predictions_stored += 1
         else:
@@ -911,6 +1220,7 @@ def _store_grouped_predictions(
                         vote_count=cons["vote_count"],
                         total_votes=cons["total_votes"],
                         individual=individual_json,
+                        labels_fingerprint=labels_fingerprint,
                     )
                 else:
                     db.add_prediction(
@@ -924,6 +1234,7 @@ def _store_grouped_predictions(
                         total_votes=cons["total_votes"],
                         individual=individual_json,
                         taxonomy=item.get("taxonomy") or cons_hierarchy,
+                        labels_fingerprint=labels_fingerprint,
                     )
                     # Store alternative predictions for this group member
                     for alt in item.get("alternatives", []):
@@ -938,6 +1249,7 @@ def _store_grouped_predictions(
                             category=category,
                             status="alternative",
                             taxonomy=alt_tax,
+                            labels_fingerprint=labels_fingerprint,
                         )
             predictions_stored += len(group)
 
@@ -1032,6 +1344,14 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             labels_files=params.labels_files,
             db=thread_db,
         )
+        # Compute a content-addressable fingerprint for the active label set.
+        # Kept in scope so downstream classifier_runs writes can record the
+        # exact (classifier_model, labels_fingerprint) that produced a result.
+        from labels_fingerprint import compute_fingerprint
+        fp = compute_fingerprint(labels)
+        label_sources = _resolve_label_sources(params, thread_db)
+        _record_labels_fingerprint(thread_db, fp, labels, sources=label_sources)
+
         tax_summary = "Taxonomy loaded" if tax else "No taxonomy"
         labels_summary = f"{len(labels)} labels" if labels else ("Tree of Life" if use_tol else "no labels")
         runner.update_step(
@@ -1065,19 +1385,15 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             "Classifying %d photos with '%s' (%s)", total, effective_name, model_str
         )
 
-        if params.reclassify:
-            photo_ids = [p["id"] for p in photos]
-            thread_db.clear_predictions(model=effective_name, collection_photo_ids=photo_ids)
-            # Also clear existing detections so they get re-detected
-            for pid in photo_ids:
-                thread_db.clear_detections(pid)
-            log.info(
-                "Cleared existing predictions and detections for %d photos, model=%s (re-classify)",
-                len(photo_ids),
-                effective_name,
-            )
-
         # Phase 4: Initialize classifier
+        # The reclassify purge (destructive clears of detections + predictions +
+        # cascaded review state) is deferred until AFTER the classifier
+        # initializes. Running it before model load means any weight-load
+        # failure leaves affected photos with no predictions AND no
+        # detections AND no replacement results — shared-folder workspaces
+        # lose their cached state too. Deferring preserves the cache on
+        # setup failure; users see a clean error and their workspace is
+        # unchanged.
         runner.update_step(job["id"], "load_model", status="running")
         if model_type == "timm":
             phase_msg = f"Loading {effective_name} timm model..."
@@ -1129,6 +1445,23 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             summary=effective_name,
         )
 
+        # Classifier init succeeded — now it's safe to purge existing
+        # cache for reclassify. Any failure before this point leaves the
+        # cache intact (see comment at the top of this function).
+        if params.reclassify:
+            photo_ids = [p["id"] for p in photos]
+            thread_db.clear_predictions(
+                model=effective_name, collection_photo_ids=photo_ids,
+            )
+            # Also clear existing detections so they get re-detected.
+            for pid in photo_ids:
+                thread_db.clear_detections(pid)
+            log.info(
+                "Cleared existing predictions and detections for %d photos, "
+                "model=%s (re-classify, post-model-load)",
+                len(photo_ids), effective_name,
+            )
+
         # Phase 5: Detect subjects
         runner.update_step(job["id"], "detect", status="running")
         detection_map, detected = _detect_subjects(
@@ -1144,16 +1477,13 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             summary=f"{detected} animals detected in {total} photos",
         )
 
-        # Phase 6: Classify each photo
+        # Phase 6: Classify each photo. The per-detection classifier_runs
+        # gate inside _classify_photos skips already-done detections and
+        # still surfaces their cached predictions into raw_results, so a
+        # photo-level short-circuit is both unnecessary and actively
+        # harmful (it hides newly-surfaced detections after the user
+        # lowers detector_confidence).
         existing_preds = set()
-        if not params.reclassify:
-            existing_preds = thread_db.get_existing_prediction_photo_ids(model_name)
-            if existing_preds:
-                log.info(
-                    "Skipping %d photos with existing predictions (model=%s)",
-                    len(existing_preds),
-                    model_name,
-                )
 
         job["_start_time"] = time.time()  # reset rate timer for classification phase
 
@@ -1175,6 +1505,8 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             db=thread_db,
             top_k=top_k,
             vireo_dir=vireo_dir,
+            labels_fingerprint=fp,
+            reclassify=params.reclassify,
         )
         classified_count = len(raw_results) - skipped_existing
         parts = [f"{classified_count} classified"]
@@ -1209,6 +1541,7 @@ def run_classify_job(job, runner, db_path, workspace_id, params, vireo_dir=None)
             similarity_threshold=params.similarity_threshold,
             tax=tax,
             db=thread_db,
+            labels_fingerprint=fp,
         )
         finalize_parts = [f"{group_result['predictions_stored']} predictions"]
         if group_result["burst_groups"]:

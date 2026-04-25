@@ -145,6 +145,41 @@ def test_settings_page_has_preview_cache_field(app_and_db):
     assert b'clearPreviewCache' in resp.data
 
 
+def test_detection_cache_stats_endpoint(app_and_db):
+    """GET /api/detection-cache/stats reports global photo/model counts.
+
+    The cache is shared across workspaces, so the stat must reflect
+    every detector_runs row regardless of the active workspace.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Zero state: no detector runs recorded yet.
+    resp = client.get('/api/detection-cache/stats')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data == {"photo_count": 0, "model_count": 0}
+
+    # Settings page advertises the stat with the right DOM hooks.
+    page = client.get('/settings')
+    assert page.status_code == 200
+    assert b'detectionCacheStats' in page.data
+    assert b'photos' in page.data
+
+    # Record runs for two photos across two models and re-check.
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p1, p2 = photos[0]["id"], photos[1]["id"]
+    db.record_detector_run(p1, "megadetector-v6", box_count=2)
+    db.record_detector_run(p2, "megadetector-v6", box_count=0)
+    db.record_detector_run(p1, "megadetector-v5", box_count=1)
+
+    resp = client.get('/api/detection-cache/stats')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["photo_count"] == 2
+    assert data["model_count"] == 2
+
+
 def test_encounter_species_confirm(app_and_db):
     """POST /api/encounters/species tags photos with species keyword."""
     app, db = app_and_db
@@ -856,6 +891,63 @@ def test_api_photo_pipeline_detections(app_and_db):
     assert data["predictions"][0]["box_x"] == 0.1
     # crop_box should be computed from primary detection
     assert "crop_box" in data
+
+
+def test_api_photo_pipeline_predictions_honor_threshold_and_fingerprint(app_and_db):
+    """The pipeline-debug endpoint's `predictions` list must apply the same
+    detector_confidence floor and fingerprint scoping as `detections`,
+    so the two lists never disagree.
+    """
+    app, db = app_and_db
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    # Two detections on the same photo:
+    #   high-conf (0.9) — in active threshold → must surface predictions
+    #   low-conf  (0.05) — below default 0.2 → must be hidden
+    det_high, det_low = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.6, "w": 0.3, "h": 0.3},
+         "confidence": 0.05, "category": "animal"},
+    ], detector_model="MDV6")
+    # Stale and current fingerprints on the high-conf detection.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.95, '2026-01-01')",
+        (det_high,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.85, '2026-04-24')",
+        (det_high,),
+    )
+    # Prediction on the below-threshold detection — must NOT surface.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Sparrow', 0.9, '2026-04-24')",
+        (det_low,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get(f"/api/photos/{pid}/pipeline")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # Only the high-conf detection passes the threshold.
+    assert len(data["detections"]) == 1, (
+        f"detections list must apply detector_confidence floor; got "
+        f"{len(data['detections'])}"
+    )
+    # Predictions must match: no stale-fingerprint species, no
+    # below-threshold species.
+    species = [p["species"] for p in data["predictions"]]
+    assert species == ["Robin"], (
+        f"predictions must match detections (one current-fingerprint "
+        f"row, no stale, no below-threshold); got {species}"
+    )
 
 
 def test_compare_predictions_api_requires_collection(app_and_db):
