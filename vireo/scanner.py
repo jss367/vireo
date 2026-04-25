@@ -286,7 +286,10 @@ def _pair_raw_jpeg_companions(db):
             (primary["id"], companion["id"]),
         )
 
-        # Transfer pending_changes from companion to primary
+        # Transfer pending_changes from companion to primary. No dedup needed
+        # here (unlike the inat_submissions block below): pending_changes has
+        # no UNIQUE constraint that would crash on collision, and duplicate
+        # rows from a raw+JPEG pairing are harmless and vanishingly unlikely.
         db.conn.execute(
             "UPDATE pending_changes SET photo_id = ? WHERE photo_id = ?",
             (primary["id"], companion["id"]),
