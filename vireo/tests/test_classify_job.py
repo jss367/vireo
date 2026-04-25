@@ -1210,7 +1210,7 @@ def test_classify_photos_new_photo(tmp_path):
     assert raw_results[0]["confidence"] == 0.95
     assert failed == 0
     assert skipped == 0
-    mock_db.store_photo_embedding.assert_called_once()
+    mock_db.upsert_photo_embedding.assert_called_once()
 
 
 def test_classify_photos_skips_existing(tmp_path):

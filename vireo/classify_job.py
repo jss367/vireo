@@ -750,8 +750,8 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
             all_preds, embedding = result
 
             if embedding is not None:
-                db.store_photo_embedding(
-                    entry["photo"]["id"], embedding.tobytes(), model=model_name
+                db.upsert_photo_embedding(
+                    entry["photo"]["id"], model_name, embedding.tobytes()
                 )
 
             if not all_preds:
@@ -906,7 +906,9 @@ def _classify_photos(
                             top = cached[0]  # ordered by confidence DESC
                             embedding = None
                             if model_type != "timm":
-                                emb_blob = db.get_photo_embedding(photo["id"])
+                                emb_blob = db.get_photo_embedding(
+                                    photo["id"], model_name,
+                                )
                                 if emb_blob:
                                     import numpy as np
                                     embedding = np.frombuffer(
@@ -1002,7 +1004,9 @@ def _classify_photos(
                                 pass
                         embedding = None
                         if model_type != "timm":
-                            emb_blob = db.get_photo_embedding(photo["id"])
+                            emb_blob = db.get_photo_embedding(
+                                photo["id"], model_name,
+                            )
                             if emb_blob:
                                 import numpy as np
                                 embedding = np.frombuffer(

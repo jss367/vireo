@@ -129,8 +129,6 @@ class Database:
                 subject_sharpness        REAL,
                 subject_size             REAL,
                 quality_score            REAL,
-                embedding                BLOB,
-                embedding_model          TEXT,
                 latitude                 REAL,
                 longitude                REAL,
                 phash                    TEXT,
@@ -271,6 +269,15 @@ class Database:
                 run_at               TEXT DEFAULT (datetime('now')),
                 prediction_count     INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (detection_id, classifier_model, labels_fingerprint)
+            );
+
+            CREATE TABLE IF NOT EXISTS photo_embeddings (
+                photo_id    INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                model       TEXT NOT NULL,
+                variant     TEXT NOT NULL DEFAULT '',
+                embedding   BLOB NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (photo_id, model, variant)
             );
 
             CREATE TABLE IF NOT EXISTS labels_fingerprints (
@@ -416,6 +423,8 @@ class Database:
                                labels_fingerprint, species);
             CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection
                 ON classifier_runs(detection_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_embeddings_model
+                ON photo_embeddings(model, variant);
             CREATE INDEX IF NOT EXISTS idx_prediction_review_workspace
                 ON prediction_review(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_collections_workspace
@@ -424,6 +433,33 @@ class Database:
                 ON pending_changes(workspace_id);
         """
         )
+        # Phase 1 storage-philosophy migration: classifier embeddings move
+        # from single-slot photos.(embedding, embedding_model) columns into
+        # the per-(photo, model, variant) photo_embeddings table. Rows whose
+        # embedding_model was never recorded have no key in the new schema
+        # and are dropped — they are recomputable from pixels. Truly legacy
+        # databases that pre-date embedding_model fall into the same bucket.
+        try:
+            self.conn.execute("SELECT embedding FROM photos LIMIT 0")
+        except sqlite3.OperationalError:
+            pass
+        else:
+            try:
+                self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
+                has_embedding_model = True
+            except sqlite3.OperationalError:
+                has_embedding_model = False
+            if has_embedding_model:
+                self.conn.execute(
+                    """INSERT OR IGNORE INTO photo_embeddings
+                           (photo_id, model, variant, embedding)
+                       SELECT id, embedding_model, '', embedding
+                       FROM photos
+                       WHERE embedding IS NOT NULL
+                         AND embedding_model IS NOT NULL"""
+                )
+                self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
+            self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
         self.conn.commit()
 
     # -- Workspaces --
@@ -1634,7 +1670,7 @@ class Database:
         ("eye", "p.eye_x IS NOT NULL"),
         ("quality", "p.quality_score IS NOT NULL"),
         ("dino_embedding", "p.dino_subject_embedding IS NOT NULL"),
-        ("label_embedding", "p.embedding IS NOT NULL"),
+        ("label_embedding", "EXISTS (SELECT 1 FROM photo_embeddings pe WHERE pe.photo_id = p.id)"),
         ("burst", "p.burst_id IS NOT NULL"),
         ("rating", "p.rating IS NOT NULL AND p.rating > 0"),
     ]
@@ -4003,45 +4039,64 @@ class Database:
             (self._ws_id(), photo_id, model, labels_fingerprint),
         ).fetchone()
 
-    def get_photo_embedding(self, photo_id):
-        """Return the embedding blob for a photo, or None."""
+    def get_photo_embedding(self, photo_id, model, variant=''):
+        """Return the embedding blob for (photo_id, model, variant), or None."""
         row = self.conn.execute(
-            "SELECT embedding FROM photos WHERE id = ?", (photo_id,),
+            "SELECT embedding FROM photo_embeddings "
+            "WHERE photo_id = ? AND model = ? AND variant = ?",
+            (photo_id, model, variant),
         ).fetchone()
         return row["embedding"] if row else None
 
-    def store_photo_embedding(self, photo_id, embedding_bytes, model=None,
-                              verify_workspace=False):
-        """Store an embedding blob for a photo, optionally with model name.
+    def upsert_photo_embedding(self, photo_id, model, embedding_bytes,
+                               variant='', verify_workspace=False):
+        """Store an embedding blob for (photo_id, model, variant).
+
+        Replaces any existing row with the same primary key. ``model`` is
+        required because the storage philosophy keeps a per-model cache; a
+        missing model name has no key in the table.
 
         Args:
             verify_workspace: when True, raises ValueError if the photo is
-                not in the active workspace.  Defaults to False because this
+                not in the active workspace. Defaults to False because this
                 method is typically called from background classify jobs that
                 already iterate only over workspace-scoped photos.
         """
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         self.conn.execute(
-            "UPDATE photos SET embedding = ?, embedding_model = ? WHERE id = ?",
-            (embedding_bytes, model, photo_id),
+            """INSERT INTO photo_embeddings (photo_id, model, variant, embedding)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(photo_id, model, variant)
+               DO UPDATE SET embedding = excluded.embedding,
+                             created_at = datetime('now')""",
+            (photo_id, model, variant, embedding_bytes),
         )
         self.conn.commit()
 
-    def get_embeddings_by_model(self, model_name):
-        """Return (photo_id, embedding_blob) pairs for photos with given model.
+    def get_photos_with_embedding(self, model, variant='', photo_ids=None):
+        """Return (photo_id, embedding_blob) pairs in the active workspace
+        with a stored embedding for ``(model, variant)``.
 
-        Only returns photos in folders visible to the active workspace.
+        Pass ``photo_ids`` to restrict the result to a subset.
         """
-        rows = self.conn.execute(
-            """SELECT p.id, p.embedding FROM photos p
-               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE p.embedding IS NOT NULL
-                 AND p.embedding_model = ?
-                 AND wf.workspace_id = ?""",
-            (model_name, self._ws_id()),
-        ).fetchall()
-        return [(row["id"], row["embedding"]) for row in rows]
+        ws = self._ws_id()
+        sql = (
+            "SELECT pe.photo_id, pe.embedding FROM photo_embeddings pe "
+            "JOIN photos p ON p.id = pe.photo_id "
+            "JOIN workspace_folders wf "
+            "  ON wf.folder_id = p.folder_id AND wf.workspace_id = ? "
+            "WHERE pe.model = ? AND pe.variant = ?"
+        )
+        params = [ws, model, variant]
+        if photo_ids is not None:
+            if not photo_ids:
+                return []
+            placeholders = ",".join("?" * len(photo_ids))
+            sql += f" AND pe.photo_id IN ({placeholders})"
+            params.extend(photo_ids)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [(row["photo_id"], row["embedding"]) for row in rows]
 
     def update_prediction_group_info(self, detection_id, model, group_id,
                                      vote_count, total_votes, individual,
