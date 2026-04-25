@@ -52,12 +52,6 @@ Each workspace scopes predictions, collections, pending changes, and visible fol
 - Background job threads must call `thread_db.set_active_workspace(active_ws)` after creating a `Database` instance.
 - Per-workspace config overrides are stored in `workspaces.config_overrides` (JSON column). Use `db.get_effective_config(cfg.load())` to get config with workspace overrides applied.
 
-## Database schema (key tables)
-
-Global: `folders`, `photos`, `keywords`, `photo_keywords`
-Workspace-scoped: `predictions`, `collections`, `pending_changes` (all have `workspace_id` FK with `ON DELETE CASCADE`)
-Workspace management: `workspaces`, `workspace_folders`
-
 ## Workflow
 
 **All feature work, bug fixes, and non-trivial changes MUST be done in a git worktree.** Do not make changes directly on `main`. At the start of any implementation task, create a worktree before writing code.
