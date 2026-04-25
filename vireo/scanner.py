@@ -23,10 +23,18 @@ log = logging.getLogger(__name__)
 
 # scan() runs inside JobRunner/pipeline_job background threads, so the
 # default POSIX "fork" start method is unsafe here: forking a
-# multithreaded process can deadlock. Prefer "forkserver" (POSIX, cheap)
-# and fall back to "spawn" (universal).
+# multithreaded process can deadlock. In a PyInstaller bundle, forkserver
+# also fails on macOS — workers fork from a parent that has already
+# loaded PIL/Foundation, and the worker's first Cocoa-touching call
+# crashes the child, surfacing as EOFError on the forkserver handshake
+# in the parent. spawn does fork+exec for each worker, giving a clean
+# process; paired with multiprocessing.freeze_support() in app.py's
+# entry point it works inside the frozen sidecar. Dev runs keep
+# forkserver for its cheap warmup.
 _SCAN_MP_METHOD = (
-    "forkserver"
+    "spawn"
+    if getattr(sys, "frozen", False)
+    else "forkserver"
     if "forkserver" in multiprocessing.get_all_start_methods()
     else "spawn"
 )
