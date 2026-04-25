@@ -5143,6 +5143,57 @@ class Database:
         self.conn.commit()
         return ids
 
+    def write_detection_batch(self, photo_id, detector_model, detections):
+        """Atomically replace detections and record the detector_runs row.
+
+        Combines `save_detections` and `record_detector_run` under a single
+        transaction so readers never observe a torn state where one table
+        reflects the new run and the other still reflects the old one.
+        Callers in the detection write path (e.g. `_detect_batch`) should
+        prefer this over invoking the two methods separately.
+
+        Args:
+            photo_id: the photo
+            detector_model: required, e.g. "megadetector-v6"
+            detections: list of dicts {box: {x,y,w,h}, confidence, category}.
+                An empty list records an empty-scene run (box_count=0) and
+                clears any prior detection rows for the same (photo, model).
+        Returns:
+            list of new detection IDs (empty if detections was empty).
+        """
+        if detector_model is None:
+            raise ValueError("detector_model is required")
+        try:
+            self.conn.execute(
+                "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
+                (photo_id, detector_model),
+            )
+            ids = []
+            for det in detections:
+                box = det["box"]
+                cur = self.conn.execute(
+                    """INSERT INTO detections
+                         (photo_id, detector_model, box_x, box_y, box_w, box_h,
+                          detector_confidence, category)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (photo_id, detector_model, box["x"], box["y"], box["w"], box["h"],
+                     det["confidence"], det.get("category", "animal")),
+                )
+                ids.append(cur.lastrowid)
+            self.conn.execute(
+                """INSERT INTO detector_runs (photo_id, detector_model, box_count)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(photo_id, detector_model)
+                   DO UPDATE SET box_count = excluded.box_count,
+                                 run_at = datetime('now')""",
+                (photo_id, detector_model, len(detections)),
+            )
+            self.conn.commit()
+            return ids
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def get_detections(self, photo_id, min_conf=None, detector_model=None):
         """Return all boxes for a photo above `min_conf`, globally.
 
