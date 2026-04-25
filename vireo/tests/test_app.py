@@ -1698,6 +1698,29 @@ def test_workspace_config_post_preserves_non_whitelisted_keys(app_and_db):
         assert overrides["active_labels"] == ["/path/to/birds.txt"]
 
 
+def test_ws_detector_confidence_slider_has_explicit_default(app_and_db):
+    """The wsVal_detector_confidence range input must carry value="20".
+
+    HTML5 range inputs with no `value` initialize to (min+max)/2, so a
+    5..50 range silently sits at ~27 on first render. toggleWsOverride
+    only applies its 20 default when `!input.value`, which is never
+    falsy for range elements. Without the explicit attribute, enabling
+    the override would persist ~0.27 instead of 0.20 and unexpectedly
+    hide low-confidence detections.
+    """
+    import re
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/settings')
+    assert resp.status_code == 200
+    m = re.search(
+        rb'<input[^>]*\bid="wsVal_detector_confidence"[^>]*\bvalue="20"',
+        resp.data,
+    )
+    assert m, ('wsVal_detector_confidence range needs explicit value="20" '
+               'to avoid HTML5 range midpoint default (would persist ~0.27)')
+
+
 def test_get_all_keywords(app_and_db):
     """GET /api/keywords/all returns only keywords used in the active workspace."""
     app, db = app_and_db
