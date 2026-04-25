@@ -78,11 +78,15 @@ def analyze_for_culling(
             "photos_missing_phash": 0,
         }
 
-    # Load predictions (highest confidence per photo via detections)
+    # Load predictions (highest confidence per photo via detections). The
+    # prediction's classifier_model also drives which row in
+    # photo_embeddings we read for that photo — clustering vectors across
+    # model spaces is meaningless, so the photo's embedding must come from
+    # the same model that named its species.
     predictions = {}
     for pid in photo_ids:
         pred = db.conn.execute(
-            """SELECT pr.species, pr.confidence
+            """SELECT pr.species, pr.confidence, pr.classifier_model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                WHERE d.photo_id = ?
@@ -93,6 +97,7 @@ def analyze_for_culling(
             predictions[pid] = {
                 "species": pred["species"],
                 "confidence": pred["confidence"],
+                "classifier_model": pred["classifier_model"],
             }
 
     # Load embeddings, quality scores, file extensions, timestamps, phashes, and filenames
@@ -105,11 +110,14 @@ def analyze_for_culling(
     missing_phash = []
     for pid in photo_ids:
         row = db.conn.execute(
-            "SELECT embedding, quality_score, sharpness, subject_sharpness, extension, timestamp, phash, filename FROM photos WHERE id = ?",
+            "SELECT quality_score, sharpness, subject_sharpness, extension, timestamp, phash, filename FROM photos WHERE id = ?",
             (pid,),
         ).fetchone()
-        if row and row["embedding"]:
-            embeddings[pid] = np.frombuffer(row["embedding"], dtype=np.float32)
+        cm = predictions.get(pid, {}).get("classifier_model")
+        if cm:
+            emb_blob = db.get_photo_embedding(pid, cm)
+            if emb_blob:
+                embeddings[pid] = np.frombuffer(emb_blob, dtype=np.float32)
         q = row["quality_score"] or 0 if row else 0
         if q == 0 and row and row["sharpness"]:
             q = row["sharpness"] / 1000.0

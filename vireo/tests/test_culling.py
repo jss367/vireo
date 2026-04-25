@@ -505,24 +505,28 @@ def _setup_culling_db(tmp_path, with_embeddings=True):
         db.add_prediction(det_ids[0], "Robin", 0.95, "test-model")
 
     if with_embeddings:
-        # Add similar embeddings for first 3 (they should cluster), different for 4th
+        # Embeddings are keyed on the same classifier_model the predictions
+        # above use, since culling reads photo_embeddings via the top
+        # prediction's classifier_model.
         base_emb = np.random.randn(128).astype(np.float32)
         base_emb /= np.linalg.norm(base_emb)
         for i, pid in enumerate(photo_ids[:3]):
             noise = np.random.randn(128).astype(np.float32) * 0.01
             emb = base_emb + noise
             emb /= np.linalg.norm(emb)
+            db.upsert_photo_embedding(pid, "test-model", emb.tobytes())
             db.conn.execute(
-                "UPDATE photos SET embedding = ?, quality_score = ? WHERE id = ?",
-                (emb.tobytes(), 0.5 + i * 0.1, pid),
+                "UPDATE photos SET quality_score = ? WHERE id = ?",
+                (0.5 + i * 0.1, pid),
             )
         # 4th photo: orthogonal embedding
         diff_emb = np.random.randn(128).astype(np.float32)
         diff_emb -= diff_emb.dot(base_emb) * base_emb  # Gram-Schmidt
         diff_emb /= np.linalg.norm(diff_emb)
+        db.upsert_photo_embedding(photo_ids[3], "test-model", diff_emb.tobytes())
         db.conn.execute(
-            "UPDATE photos SET embedding = ?, quality_score = ? WHERE id = ?",
-            (diff_emb.tobytes(), 0.9, photo_ids[3]),
+            "UPDATE photos SET quality_score = ? WHERE id = ?",
+            (0.9, photo_ids[3]),
         )
 
     db.conn.commit()
