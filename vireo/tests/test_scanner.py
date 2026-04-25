@@ -2099,3 +2099,26 @@ def test_rescan_regenerates_working_copy_when_file_content_changes(tmp_path):
         f"Working copy pixel {pixel} does not reflect updated (blue) source; "
         "stale extraction from pre-change content was served."
     )
+
+
+def test_scan_mp_method_is_spawn_when_frozen(monkeypatch):
+    """Frozen (PyInstaller) sidecars must use spawn, not forkserver.
+
+    forkserver in a frozen bundle on macOS forks workers from a parent
+    that has loaded PIL/Foundation; the worker's first Cocoa-touching
+    call crashes the child and the parent sees EOFError on the handshake.
+    spawn does fork+exec for a clean worker process.
+    """
+    import importlib
+
+    import scanner
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    reloaded = importlib.reload(scanner)
+    try:
+        assert reloaded._SCAN_MP_METHOD == "spawn"
+    finally:
+        # Restore the unfrozen module-level constant so other tests in
+        # the same process see the dev-mode value.
+        monkeypatch.delattr(sys, "frozen", raising=False)
+        importlib.reload(scanner)

@@ -9023,4 +9023,13 @@ def main():
 
 
 if __name__ == "__main__":
+    # In a PyInstaller bundle, multiprocessing workers re-execute this binary.
+    # Without freeze_support, the child runs main() — argparse rejects the
+    # `--multiprocessing-fork ...` argv (or the `-c` bootstrap), the child
+    # exits, and the parent gets EOFError on the handshake socket. The
+    # PyInstaller runtime hook installs a freeze_support that intercepts
+    # those argv shapes and runs the worker bootstrap instead, but only
+    # when we actually call it.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
