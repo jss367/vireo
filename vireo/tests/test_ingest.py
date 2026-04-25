@@ -290,6 +290,72 @@ def test_ingest_skip_duplicates_via_db_hash(tmp_path):
     assert not list(dst.rglob("new_copy.jpg"))
 
 
+def test_ingest_skip_duplicates_false_does_not_skip_db_hash_match(tmp_path):
+    """skip_duplicates=False copies even when the source hash already lives in the DB."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    library = tmp_path / "library"
+    for d in [src, dst, library]:
+        d.mkdir()
+
+    img = Image.new("RGB", (100, 100), color="blue")
+    img.save(str(library / "existing.jpg"))
+    img.save(str(src / "new_copy.jpg"))
+
+    db = Database(str(tmp_path / "test.db"))
+    from scanner import scan
+    scan(str(library), db)
+
+    # Sanity-check: the DB does know about this hash, so any later
+    # silent dedup regression would still trigger here.
+    hash_count = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE file_hash IS NOT NULL"
+    ).fetchone()[0]
+    assert hash_count == 1
+
+    result = ingest(str(src), str(dst), db=db, skip_duplicates=False)
+    assert result["copied"] == 1
+    assert result["skipped_duplicate"] == 0
+    assert list(dst.rglob("new_copy.jpg"))
+
+
+def test_ingest_progress_callback_fires_on_failure(tmp_path, monkeypatch):
+    """The progress callback fires once per iteration even when copy fails."""
+    src = tmp_path / "sd_card"
+    dst = tmp_path / "nas"
+    src.mkdir()
+    dst.mkdir()
+
+    Image.new("RGB", (50, 50)).save(str(src / "ok1.jpg"))
+    Image.new("RGB", (50, 50)).save(str(src / "boom.jpg"))
+    Image.new("RGB", (50, 50)).save(str(src / "ok2.jpg"))
+
+    import ingest as ingest_module
+
+    real_copy2 = ingest_module.shutil.copy2
+
+    def fake_copy2(src_path, dst_path, *args, **kwargs):
+        if os.path.basename(str(src_path)) == "boom.jpg":
+            raise OSError("simulated copy failure")
+        return real_copy2(src_path, dst_path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_module.shutil, "copy2", fake_copy2)
+
+    progress_calls = []
+    db = Database(str(tmp_path / "test.db"))
+    result = ingest(
+        str(src), str(dst), db=db,
+        progress_callback=lambda cur, tot, fname: progress_calls.append((cur, tot, fname)),
+    )
+
+    assert result["failed"] == 1
+    assert result["total"] == 3
+    assert len(progress_calls) == 3
+    boom_calls = [c for c in progress_calls if c[2] == "boom.jpg"]
+    assert len(boom_calls) == 1
+    assert boom_calls[0][1] == 3  # total carried through
+
+
 def test_ingest_duplicate_folders_only_under_destination(tmp_path):
     """duplicate_folders must only contain paths under destination_dir.
 
