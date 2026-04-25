@@ -110,31 +110,68 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS photos (
-                id          INTEGER PRIMARY KEY,
-                folder_id   INTEGER REFERENCES folders(id),
-                filename    TEXT,
-                extension   TEXT,
-                file_size   INTEGER,
-                file_mtime  REAL,
-                xmp_mtime   REAL,
-                timestamp   TEXT,
-                width       INTEGER,
-                height      INTEGER,
-                rating      INTEGER DEFAULT 0,
-                flag        TEXT DEFAULT 'none',
-                thumb_path  TEXT,
-                sharpness   REAL,
-                detection_box TEXT,
-                detection_conf REAL,
-                subject_sharpness REAL,
-                subject_size REAL,
-                quality_score REAL,
-                embedding BLOB,
-                embedding_model TEXT,
-                latitude REAL,
-                longitude REAL,
-                phash TEXT,
+                id                       INTEGER PRIMARY KEY,
+                folder_id                INTEGER REFERENCES folders(id),
+                filename                 TEXT,
+                extension                TEXT,
+                file_size                INTEGER,
+                file_mtime               REAL,
+                xmp_mtime                REAL,
+                timestamp                TEXT,
+                width                    INTEGER,
+                height                   INTEGER,
+                rating                   INTEGER DEFAULT 0,
+                flag                     TEXT DEFAULT 'none',
+                thumb_path               TEXT,
+                sharpness                REAL,
+                detection_box            TEXT,
+                detection_conf           REAL,
+                subject_sharpness        REAL,
+                subject_size             REAL,
+                quality_score            REAL,
+                embedding                BLOB,
+                embedding_model          TEXT,
+                latitude                 REAL,
+                longitude                REAL,
+                phash                    TEXT,
+                mask_path                TEXT,
+                dino_subject_embedding   BLOB,
+                dino_global_embedding    BLOB,
+                subject_tenengrad        REAL,
+                bg_tenengrad             REAL,
+                crop_complete            REAL,
+                bg_separation            REAL,
+                subject_clip_high        REAL,
+                subject_clip_low         REAL,
+                subject_y_median         REAL,
+                phash_crop               TEXT,
+                noise_estimate           REAL,
+                dino_embedding_variant   TEXT,
+                focal_length             REAL,
+                burst_id                 TEXT,
+                file_hash                TEXT,
+                companion_path           TEXT,
+                exif_data                TEXT,
+                working_copy_path        TEXT,
+                eye_x                    REAL,
+                eye_y                    REAL,
+                eye_conf                 REAL,
+                eye_tenengrad            REAL,
+                miss_no_subject          INTEGER,
+                miss_clipped             INTEGER,
+                miss_oof                 INTEGER,
+                miss_computed_at         TEXT,
                 UNIQUE(folder_id, filename)
+            );
+
+            CREATE TABLE IF NOT EXISTS taxa (
+                id          INTEGER PRIMARY KEY,
+                inat_id     INTEGER UNIQUE,
+                name        TEXT NOT NULL,
+                common_name TEXT,
+                rank        TEXT NOT NULL,
+                parent_id   INTEGER REFERENCES taxa(id),
+                kingdom     TEXT
             );
 
             CREATE TABLE IF NOT EXISTS keywords (
@@ -142,6 +179,10 @@ class Database:
                 name        TEXT,
                 parent_id   INTEGER REFERENCES keywords(id),
                 is_species  INTEGER DEFAULT 0,
+                type        TEXT NOT NULL DEFAULT 'general',
+                latitude    REAL,
+                longitude   REAL,
+                taxon_id    INTEGER REFERENCES taxa(id),
                 UNIQUE(name, parent_id)
             );
 
@@ -184,17 +225,16 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS detections (
-                id                INTEGER PRIMARY KEY,
-                photo_id          INTEGER REFERENCES photos(id) ON DELETE CASCADE,
-                workspace_id      INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                box_x             REAL,
-                box_y             REAL,
-                box_w             REAL,
-                box_h             REAL,
+                id                  INTEGER PRIMARY KEY,
+                photo_id            INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                detector_model      TEXT NOT NULL DEFAULT 'megadetector-v6',
+                box_x               REAL,
+                box_y               REAL,
+                box_w               REAL,
+                box_h               REAL,
                 detector_confidence REAL,
-                category          TEXT DEFAULT 'animal',
-                detector_model    TEXT,
-                created_at        TEXT DEFAULT (datetime('now'))
+                category            TEXT,
+                created_at          TEXT DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS predictions (
@@ -281,21 +321,6 @@ class Database:
                 new_value TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS taxa (
-                id          INTEGER PRIMARY KEY,
-                inat_id     INTEGER UNIQUE,
-                name        TEXT NOT NULL,
-                common_name TEXT,
-                rank        TEXT NOT NULL,
-                parent_id   INTEGER REFERENCES taxa(id),
-                kingdom     TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
-            CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
-            CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
-            CREATE INDEX IF NOT EXISTS idx_taxa_common ON taxa(common_name);
-
             CREATE TABLE IF NOT EXISTS taxa_common_names (
                 taxon_id    INTEGER REFERENCES taxa(id) ON DELETE CASCADE,
                 name        TEXT NOT NULL,
@@ -339,19 +364,6 @@ class Database:
                 FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
-            CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
-            CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
-            CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
-            CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
-
-            CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
-            ON photo_color_labels(workspace_id);
-
-            CREATE INDEX IF NOT EXISTS preview_cache_last_access
-            ON preview_cache(last_access_at);
-
             CREATE TABLE IF NOT EXISTS new_image_snapshots (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -365,840 +377,52 @@ class Database:
               PRIMARY KEY (snapshot_id, file_path)
             );
 
+            CREATE INDEX IF NOT EXISTS idx_taxa_parent ON taxa(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_taxa_rank ON taxa(rank);
+            CREATE INDEX IF NOT EXISTS idx_taxa_name ON taxa(name);
+            CREATE INDEX IF NOT EXISTS idx_taxa_common ON taxa(common_name);
+
+            CREATE INDEX IF NOT EXISTS idx_photos_timestamp ON photos(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_photos_folder ON photos(folder_id);
+            CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating);
+            CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_keywords_name ON keywords(name);
+            CREATE INDEX IF NOT EXISTS idx_photo_keywords_photo ON photo_keywords(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_keywords_keyword ON photo_keywords(keyword_id);
+            CREATE INDEX IF NOT EXISTS idx_photo_color_labels_ws
+                ON photo_color_labels(workspace_id);
+            CREATE INDEX IF NOT EXISTS preview_cache_last_access
+                ON preview_cache(last_access_at);
             CREATE INDEX IF NOT EXISTS idx_new_image_snapshots_ws
-              ON new_image_snapshots(workspace_id);
+                ON new_image_snapshots(workspace_id);
+
+            CREATE INDEX IF NOT EXISTS idx_detections_photo
+                ON detections(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_detections_photo_model
+                ON detections(photo_id, detector_model);
+            CREATE INDEX IF NOT EXISTS idx_detections_conf
+                ON detections(photo_id, detector_confidence);
+            CREATE INDEX IF NOT EXISTS idx_predictions_detection
+                ON predictions(detection_id);
+            -- Explicit unique index on the predictions identity tuple. The
+            -- CREATE TABLE declares the same UNIQUE, but SQLite's auto-
+            -- generated unique index (sqlite_autoindex_*) has NULL `sql` in
+            -- sqlite_master, which makes it impossible to assert against in
+            -- tests that inspect index SQL. This explicit index gives us a
+            -- stable name and a visible CREATE statement.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_predictions_identity
+                ON predictions(detection_id, classifier_model,
+                               labels_fingerprint, species);
+            CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection
+                ON classifier_runs(detection_id);
+            CREATE INDEX IF NOT EXISTS idx_prediction_review_workspace
+                ON prediction_review(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_collections_workspace
+                ON collections(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_pending_workspace
+                ON pending_changes(workspace_id);
         """
-        )
-        # Migrations for existing databases
-        try:
-            self.conn.execute("SELECT is_species FROM keywords LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE keywords ADD COLUMN is_species INTEGER DEFAULT 0"
-            )
-        # group_id/vote_count/total_votes/individual were predictions columns
-        # for group-voting review. Task 12 drops them — review state now lives
-        # in prediction_review. No legacy ALTER re-adds here.
-        try:
-            self.conn.execute("SELECT sharpness FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN sharpness REAL")
-        try:
-            self.conn.execute("SELECT quality_score FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN detection_box TEXT")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN detection_conf REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_sharpness REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_size REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN quality_score REAL")
-        try:
-            self.conn.execute("SELECT embedding FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
-        try:
-            self.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN embedding_model TEXT")
-        try:
-            self.conn.execute("SELECT latitude FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN latitude REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN longitude REAL")
-        try:
-            self.conn.execute("SELECT phash FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN phash TEXT")
-        try:
-            self.conn.execute("SELECT taxonomy_kingdom FROM predictions LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE predictions ADD COLUMN taxonomy_kingdom TEXT"
-            )
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_phylum TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_class TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_order TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_family TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN taxonomy_genus TEXT")
-            self.conn.execute("ALTER TABLE predictions ADD COLUMN scientific_name TEXT")
-        # Pipeline feature columns (SAM2 masking + quality features)
-        try:
-            self.conn.execute("SELECT mask_path FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN mask_path TEXT")
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN dino_subject_embedding BLOB"
-            )
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN dino_global_embedding BLOB"
-            )
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_tenengrad REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN bg_tenengrad REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN crop_complete REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN bg_separation REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_clip_high REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_clip_low REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN subject_y_median REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN phash_crop TEXT")
-        # Noise estimate column
-        try:
-            self.conn.execute("SELECT noise_estimate FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN noise_estimate REAL")
-        # DINOv2 variant that produced the embeddings. NULL for legacy rows
-        # written before this column existed; pipeline treats those as "unknown"
-        # and drops them when the dim doesn't match the configured variant.
-        try:
-            self.conn.execute("SELECT dino_embedding_variant FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN dino_embedding_variant TEXT"
-            )
-        # Enhanced EXIF metadata columns
-        try:
-            self.conn.execute("SELECT focal_length FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN focal_length REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN burst_id TEXT")
-        # Ingest: file hash for duplicate detection + companion for raw/JPEG pairing
-        try:
-            self.conn.execute("SELECT file_hash FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN file_hash TEXT")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN companion_path TEXT")
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_photos_file_hash ON photos(file_hash)"
-        )
-
-        # Full EXIF metadata JSON blob
-        try:
-            self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN exif_data TEXT")
-
-        # Working copy path for JPG-centric pipeline
-        try:
-            self.conn.execute("SELECT working_copy_path FROM photos LIMIT 0")
-        except Exception:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_path TEXT")
-
-        # Eye-focus detection columns (keypoint + windowed tenengrad)
-        try:
-            self.conn.execute("SELECT eye_x FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_x REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_y REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_conf REAL")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_tenengrad REAL")
-
-        # Miss detection flags (derived from detection + quality + burst context)
-        try:
-            self.conn.execute("SELECT miss_no_subject FROM photos LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_no_subject INTEGER")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_clipped INTEGER")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_oof INTEGER")
-            self.conn.execute("ALTER TABLE photos ADD COLUMN miss_computed_at TEXT")
-
-        # Edit history tables migration
-        try:
-            self.conn.execute("SELECT id FROM edit_history LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.executescript("""
-                CREATE TABLE IF NOT EXISTS edit_history (
-                    id           INTEGER PRIMARY KEY,
-                    workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                    action_type  TEXT NOT NULL,
-                    description  TEXT NOT NULL,
-                    new_value    TEXT,
-                    is_batch     INTEGER DEFAULT 0,
-                    undone       INTEGER DEFAULT 0,
-                    created_at   TEXT DEFAULT (datetime('now'))
-                );
-                CREATE TABLE IF NOT EXISTS edit_history_items (
-                    id        INTEGER PRIMARY KEY,
-                    edit_id   INTEGER NOT NULL REFERENCES edit_history(id) ON DELETE CASCADE,
-                    photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-                    old_value TEXT,
-                    new_value TEXT
-                );
-            """)
-
-        # Add undone column to edit_history if missing (migration for existing databases)
-        try:
-            self.conn.execute("SELECT undone FROM edit_history LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE edit_history ADD COLUMN undone INTEGER DEFAULT 0")
-
-        # Workspace migration for existing databases
-        # Only triggers for legacy DBs that have predictions with photo_id
-        # but no workspace_id. New schema uses detection_id instead of photo_id,
-        # so this migration is skipped for fresh databases.
-        needs_workspace_migration = False
-        pred_schema = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
-        ).fetchone()
-        if pred_schema and "photo_id" in pred_schema[0].lower() and "workspace_id" not in pred_schema[0].lower():
-            needs_workspace_migration = True
-
-        if needs_workspace_migration:
-            # Create default workspace
-            self.conn.execute(
-                "INSERT OR IGNORE INTO workspaces (name) VALUES (?)", ("Default",)
-            )
-            default_id = self.conn.execute(
-                "SELECT id FROM workspaces WHERE name = 'Default'"
-            ).fetchone()[0]
-
-            # Link all existing folders to default workspace
-            self.conn.execute(
-                "INSERT OR IGNORE INTO workspace_folders (workspace_id, folder_id) "
-                "SELECT ?, id FROM folders", (default_id,)
-            )
-
-            # Recreate predictions table to change UNIQUE(photo_id, model)
-            # to UNIQUE(photo_id, model, workspace_id)
-            try:
-                self.conn.execute("SELECT workspace_id FROM predictions LIMIT 0")
-            except sqlite3.OperationalError:
-                self.conn.execute(
-                    """CREATE TABLE predictions_new (
-                        id          INTEGER PRIMARY KEY,
-                        photo_id    INTEGER REFERENCES photos(id),
-                        species     TEXT,
-                        confidence  REAL,
-                        model       TEXT,
-                        category    TEXT,
-                        status      TEXT DEFAULT 'pending',
-                        group_id    TEXT,
-                        vote_count  INTEGER,
-                        total_votes INTEGER,
-                        individual  TEXT,
-                        taxonomy_kingdom TEXT,
-                        taxonomy_phylum TEXT,
-                        taxonomy_class TEXT,
-                        taxonomy_order TEXT,
-                        taxonomy_family TEXT,
-                        taxonomy_genus TEXT,
-                        scientific_name TEXT,
-                        created_at  TEXT DEFAULT (datetime('now')),
-                        workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
-                        UNIQUE(photo_id, model, workspace_id)
-                    )"""
-                )
-                self.conn.execute(
-                    """INSERT INTO predictions_new
-                       (id, photo_id, species, confidence, model, category, status,
-                        group_id, vote_count, total_votes, individual,
-                        taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                        taxonomy_order, taxonomy_family, taxonomy_genus,
-                        scientific_name, created_at, workspace_id)
-                       SELECT id, photo_id, species, confidence, model, category, status,
-                              group_id, vote_count, total_votes, individual,
-                              taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                              taxonomy_order, taxonomy_family, taxonomy_genus,
-                              scientific_name, created_at, ?
-                       FROM predictions""",
-                    (default_id,)
-                )
-                self.conn.execute("DROP TABLE predictions")
-                self.conn.execute("ALTER TABLE predictions_new RENAME TO predictions")
-
-            # Add workspace_id to collections and pending_changes via ALTER TABLE
-            for table in ("collections", "pending_changes"):
-                try:
-                    self.conn.execute(f"SELECT workspace_id FROM {table} LIMIT 0")
-                except sqlite3.OperationalError:
-                    self.conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN workspace_id INTEGER "
-                        f"REFERENCES workspaces(id) ON DELETE CASCADE"
-                    )
-                    self.conn.execute(
-                        f"UPDATE {table} SET workspace_id = ?", (default_id,)
-                    )
-
-            self.conn.commit()
-
-        # Ensure change_token column exists (added after workspace migration)
-        try:
-            self.conn.execute("SELECT change_token FROM pending_changes LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE pending_changes ADD COLUMN change_token TEXT")
-            self.conn.commit()
-
-        # Keyword type/location/taxon columns (taxonomy support)
-        try:
-            self.conn.execute("SELECT type FROM keywords LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE keywords ADD COLUMN type TEXT NOT NULL DEFAULT 'general'"
-            )
-            # Migrate existing is_species=1 keywords to type='taxonomy'
-            self.conn.execute(
-                "UPDATE keywords SET type = 'taxonomy' WHERE is_species = 1"
-            )
-        try:
-            self.conn.execute("SELECT latitude FROM keywords LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute("ALTER TABLE keywords ADD COLUMN latitude REAL")
-            self.conn.execute("ALTER TABLE keywords ADD COLUMN longitude REAL")
-        try:
-            self.conn.execute("SELECT taxon_id FROM keywords LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE keywords ADD COLUMN taxon_id INTEGER REFERENCES taxa(id)"
-            )
-
-        # Multi-animal migration: restructure predictions to use detection_id.
-        # Check the predictions schema directly — the detections table is always
-        # created by the executescript above, so checking for its existence
-        # doesn't tell us whether predictions needs migration.
-        pred_schema_row = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='predictions'"
-        ).fetchone()
-        needs_pred_migration = (
-            pred_schema_row
-            and "photo_id" in pred_schema_row[0].lower()
-            and "detection_id" not in pred_schema_row[0].lower()
-        )
-
-        if needs_pred_migration:
-            # Drop old predictions — accepted keywords are in photo_keywords
-            # and survive. Pending/rejected predictions are lost.
-            self.conn.execute("DROP TABLE IF EXISTS predictions")
-            self.conn.execute("""
-                CREATE TABLE predictions (
-                    id              INTEGER PRIMARY KEY,
-                    detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
-                    species         TEXT,
-                    confidence      REAL,
-                    model           TEXT,
-                    category        TEXT,
-                    status          TEXT DEFAULT 'pending',
-                    group_id        TEXT,
-                    vote_count      INTEGER,
-                    total_votes     INTEGER,
-                    individual      TEXT,
-                    taxonomy_kingdom TEXT,
-                    taxonomy_phylum TEXT,
-                    taxonomy_class  TEXT,
-                    taxonomy_order  TEXT,
-                    taxonomy_family TEXT,
-                    taxonomy_genus  TEXT,
-                    scientific_name TEXT,
-                    created_at      TEXT DEFAULT (datetime('now')),
-                    reviewed_at     TEXT,
-                    UNIQUE(detection_id, model, species)
-                )
-            """)
-            self.conn.commit()
-
-        # Migrate: UNIQUE(detection_id, model) → UNIQUE(detection_id, model, species)
-        # Check if the unique index on predictions includes 'species'.
-        needs_topn_migration = False
-        for idx in self.conn.execute("PRAGMA index_list(predictions)").fetchall():
-            if idx["unique"]:
-                cols = [
-                    r["name"]
-                    for r in self.conn.execute(
-                        f"PRAGMA index_info({idx['name']})"
-                    ).fetchall()
-                ]
-                if "detection_id" in cols and "model" in cols and "species" not in cols:
-                    needs_topn_migration = True
-                    break
-
-        if needs_topn_migration:
-            log.info("Migrating predictions table: UNIQUE(detection_id, model) -> UNIQUE(detection_id, model, species)")
-            self.conn.executescript("""
-                CREATE TABLE predictions_topn (
-                    id              INTEGER PRIMARY KEY,
-                    detection_id    INTEGER REFERENCES detections(id) ON DELETE CASCADE,
-                    species         TEXT,
-                    confidence      REAL,
-                    model           TEXT,
-                    category        TEXT,
-                    status          TEXT DEFAULT 'pending',
-                    group_id        TEXT,
-                    vote_count      INTEGER,
-                    total_votes     INTEGER,
-                    individual      TEXT,
-                    taxonomy_kingdom TEXT,
-                    taxonomy_phylum TEXT,
-                    taxonomy_class  TEXT,
-                    taxonomy_order  TEXT,
-                    taxonomy_family TEXT,
-                    taxonomy_genus  TEXT,
-                    scientific_name TEXT,
-                    created_at      TEXT DEFAULT (datetime('now')),
-                    reviewed_at     TEXT,
-                    UNIQUE(detection_id, model, species)
-                );
-                INSERT INTO predictions_topn SELECT * FROM predictions;
-                DROP TABLE predictions;
-                ALTER TABLE predictions_topn RENAME TO predictions;
-            """)
-            self.conn.commit()
-
-        # Purge orphaned predictions with NULL detection_id.  These are
-        # invisible to every workspace-scoped query (which JOINs through
-        # detections) and accumulated on some installs before the
-        # add_prediction NOT-NULL guard existed.  Regenerable via reclassify.
-        orphan_cnt = self.conn.execute(
-            "SELECT COUNT(*) FROM predictions WHERE detection_id IS NULL"
-        ).fetchone()[0]
-        if orphan_cnt:
-            log.info("Purging %d orphaned predictions (NULL detection_id)", orphan_cnt)
-            self.conn.execute("DELETE FROM predictions WHERE detection_id IS NULL")
-            self.conn.commit()
-
-        # Legacy detector-key normalization: pre-redesign code wrote
-        # ``detector_model='MegaDetector'``; the new code standardizes on
-        # ``'megadetector-v6'``. Without this rewrite the very first run
-        # after upgrade would insert a parallel set of detections instead of
-        # replacing the legacy rows (save_detections keys off detector_model
-        # for clear-and-reinsert), duplicating downstream predictions/stats.
-        # Idempotent: only affects rows still keyed on the legacy string.
-        self.conn.execute(
-            "UPDATE detections SET detector_model='megadetector-v6' "
-            "WHERE detector_model='MegaDetector'"
-        )
-        self.conn.execute(
-            "UPDATE detector_runs SET detector_model='megadetector-v6' "
-            "WHERE detector_model='MegaDetector'"
-        )
-        self.conn.commit()
-
-        # detector_runs backfill (detection-storage redesign): derive one row per
-        # distinct (photo_id, detector_model) from existing detections so downstream
-        # skip checks don't re-run MegaDetector over photos it has already seen.
-        # Idempotent — only inserts rows whose (photo_id, detector_model) isn't
-        # already present.
-        existing_runs = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM detector_runs"
-        ).fetchone()["n"]
-        legacy_detection_count = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM detections"
-        ).fetchone()["n"]
-        if existing_runs == 0 and legacy_detection_count > 0:
-            self.conn.execute(
-                """INSERT OR IGNORE INTO detector_runs
-                     (photo_id, detector_model, box_count, run_at)
-                   SELECT photo_id, COALESCE(detector_model, 'megadetector-v6'),
-                          COUNT(*), MIN(created_at)
-                   FROM detections
-                   GROUP BY photo_id, COALESCE(detector_model, 'megadetector-v6')"""
-            )
-            self.conn.commit()
-
-        # Backfill prediction_review from legacy per-prediction review columns.
-        # Must run before the detections.workspace_id drop (Task 9) so we can route
-        # each prediction to the correct workspace. Legacy schemas may be missing
-        # some optional columns (reviewed_at/individual/group_id/vote_count/
-        # total_votes); substitute NULL in that case rather than erroring.
-        pred_cols = {r[1] for r in self.conn.execute(
-            "PRAGMA table_info(predictions)"
-        ).fetchall()}
-        review_exists = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM prediction_review"
-        ).fetchone()["n"]
-        if "status" in pred_cols and review_exists == 0:
-            def _col_or_null(name: str) -> str:
-                return f"p.{name}" if name in pred_cols else "NULL"
-            # Backfill any row that carries non-default review state OR any
-            # grouping metadata. Legacy grouped predictions commonly stored
-            # group_id/vote_count/individual on `pending` rows — the prior
-            # filter `status <> 'pending'` dropped all of that, so upgraded
-            # DBs silently lost their burst-group membership.
-            group_filter_parts = ["COALESCE(p.status, 'pending') <> 'pending'"]
-            for col in ("group_id", "individual", "vote_count", "total_votes"):
-                if col in pred_cols:
-                    group_filter_parts.append(f"p.{col} IS NOT NULL")
-            group_filter = " OR ".join(group_filter_parts)
-            self.conn.execute(f"""
-                INSERT OR IGNORE INTO prediction_review
-                    (prediction_id, workspace_id, status, reviewed_at,
-                     individual, group_id, vote_count, total_votes)
-                SELECT p.id, d.workspace_id,
-                       COALESCE(p.status, 'pending'),
-                       {_col_or_null('reviewed_at')},
-                       {_col_or_null('individual')},
-                       {_col_or_null('group_id')},
-                       {_col_or_null('vote_count')},
-                       {_col_or_null('total_votes')}
-                FROM predictions p
-                JOIN detections d ON d.id = p.detection_id
-                WHERE d.workspace_id IS NOT NULL
-                  AND ({group_filter})
-            """)
-            self.conn.commit()
-
-        # Global-detections migration: drop workspace_id from detections and dedupe
-        # identical boxes that were duplicated across workspaces. Re-point predictions
-        # at the canonical detection id.
-        #
-        # Follows the existing "create new, copy, drop old, rename" pattern used by
-        # the multi-animal migration above. Gated on the `detections` table still
-        # having a workspace_id column.
-        det_cols = {r[1] for r in self.conn.execute(
-            "PRAGMA table_info(detections)"
-        ).fetchall()}
-        if "workspace_id" in det_cols:
-            # Pick the lowest id per group as canonical.
-            self.conn.execute("""
-                CREATE TEMP TABLE detection_canonical AS
-                SELECT MIN(id) AS canonical_id, photo_id,
-                       COALESCE(detector_model, 'megadetector-v6') AS detector_model,
-                       box_x, box_y, box_w, box_h
-                FROM detections
-                GROUP BY photo_id, COALESCE(detector_model, 'megadetector-v6'),
-                         box_x, box_y, box_w, box_h
-            """)
-            # Legacy predictions carries UNIQUE(detection_id, model, species).
-            # When the same box was classified in multiple workspaces, each
-            # workspace has its own prediction row. Repointing both to the
-            # canonical detection_id would create a duplicate tuple and trip
-            # the UNIQUE. Preserve per-workspace review state on the survivor
-            # before deleting the loser.
-            #
-            # Only runs on truly legacy schemas (predictions still has the
-            # ``model`` column). Fresh installs go through CREATE with the
-            # new UNIQUE that already includes labels_fingerprint, so there
-            # are no collisions to pre-resolve.
-            legacy_pred_cols = {r[1] for r in self.conn.execute(
-                "PRAGMA table_info(predictions)"
-            ).fetchall()}
-            if "model" in legacy_pred_cols:
-                # Carry canonical_det_id alongside loser/canonical_pred_id
-                # so the loser-vs-loser dedup below can group by the
-                # eventual remap target without re-joining detections.
-                self.conn.execute("""
-                    CREATE TEMP TABLE predictions_to_dedup AS
-                    SELECT p.id AS loser_id,
-                           p.model AS loser_model,
-                           p.species AS loser_species,
-                           dc.canonical_id AS canonical_det_id,
-                           (SELECT p2.id FROM predictions p2
-                            WHERE p2.detection_id = dc.canonical_id
-                              AND COALESCE(p2.model, '') = COALESCE(p.model, '')
-                              AND COALESCE(p2.species, '') = COALESCE(p.species, '')
-                            LIMIT 1) AS canonical_pred_id
-                    FROM predictions p
-                    JOIN detections d ON d.id = p.detection_id
-                    JOIN detection_canonical dc
-                      ON dc.photo_id       = d.photo_id
-                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
-                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
-                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
-                    WHERE d.id <> dc.canonical_id
-                """)
-                # Move review rows from losers to canonicals so workspace-scoped
-                # status/individual/group_id survive the delete. INSERT OR IGNORE
-                # handles the case where a review row already exists on the
-                # canonical for the same workspace.
-                self.conn.execute("""
-                    INSERT OR IGNORE INTO prediction_review
-                        (prediction_id, workspace_id, status, reviewed_at,
-                         individual, group_id, vote_count, total_votes)
-                    SELECT ptd.canonical_pred_id, pr.workspace_id, pr.status,
-                           pr.reviewed_at, pr.individual, pr.group_id,
-                           pr.vote_count, pr.total_votes
-                    FROM prediction_review pr
-                    JOIN predictions_to_dedup ptd ON ptd.loser_id = pr.prediction_id
-                    WHERE ptd.canonical_pred_id IS NOT NULL
-                """)
-                # Delete the loser predictions whose canonical already covers
-                # (det, model, species) — their prediction_review rows cascade
-                # away, but the matching canonical rows were just created above.
-                self.conn.execute("""
-                    DELETE FROM predictions
-                    WHERE id IN (SELECT loser_id FROM predictions_to_dedup
-                                 WHERE canonical_pred_id IS NOT NULL)
-                """)
-                # Loser-vs-loser dedup: when the canonical detection has NO
-                # prediction yet (canonical_pred_id IS NULL) but multiple
-                # loser detections share the same (canonical_det_id, model,
-                # species), the upcoming remap would land all of them on
-                # the same (detection_id, model, species) tuple and trip
-                # legacy UNIQUE. Keep the lowest-id loser per group;
-                # delete the rest. Move their review rows to the survivor
-                # first so per-workspace review state is preserved.
-                self.conn.execute("""
-                    CREATE TEMP TABLE loser_survivors AS
-                    SELECT MIN(loser_id) AS survivor_id,
-                           canonical_det_id,
-                           COALESCE(loser_model, '') AS m_key,
-                           COALESCE(loser_species, '') AS s_key
-                    FROM predictions_to_dedup
-                    WHERE canonical_pred_id IS NULL
-                    GROUP BY canonical_det_id,
-                             COALESCE(loser_model, ''),
-                             COALESCE(loser_species, '')
-                """)
-                self.conn.execute("""
-                    INSERT OR IGNORE INTO prediction_review
-                        (prediction_id, workspace_id, status, reviewed_at,
-                         individual, group_id, vote_count, total_votes)
-                    SELECT ls.survivor_id, pr.workspace_id, pr.status,
-                           pr.reviewed_at, pr.individual, pr.group_id,
-                           pr.vote_count, pr.total_votes
-                    FROM prediction_review pr
-                    JOIN predictions_to_dedup ptd ON ptd.loser_id = pr.prediction_id
-                    JOIN loser_survivors ls
-                      ON ls.canonical_det_id = ptd.canonical_det_id
-                     AND ls.m_key = COALESCE(ptd.loser_model, '')
-                     AND ls.s_key = COALESCE(ptd.loser_species, '')
-                    WHERE ptd.canonical_pred_id IS NULL
-                      AND ptd.loser_id <> ls.survivor_id
-                """)
-                self.conn.execute("""
-                    DELETE FROM predictions
-                    WHERE id IN (
-                        SELECT ptd.loser_id
-                        FROM predictions_to_dedup ptd
-                        JOIN loser_survivors ls
-                          ON ls.canonical_det_id = ptd.canonical_det_id
-                         AND ls.m_key = COALESCE(ptd.loser_model, '')
-                         AND ls.s_key = COALESCE(ptd.loser_species, '')
-                        WHERE ptd.canonical_pred_id IS NULL
-                          AND ptd.loser_id <> ls.survivor_id
-                    )
-                """)
-                self.conn.execute("DROP TABLE loser_survivors")
-                self.conn.execute("DROP TABLE predictions_to_dedup")
-            # Re-point predictions that reference a non-canonical duplicate.
-            self.conn.execute("""
-                UPDATE predictions
-                SET detection_id = (
-                    SELECT dc.canonical_id
-                    FROM detections d
-                    JOIN detection_canonical dc
-                      ON dc.photo_id       = d.photo_id
-                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
-                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
-                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
-                    WHERE d.id = predictions.detection_id
-                )
-                WHERE detection_id IN (
-                    SELECT d.id
-                    FROM detections d
-                    JOIN detection_canonical dc
-                      ON dc.photo_id       = d.photo_id
-                     AND dc.detector_model = COALESCE(d.detector_model, 'megadetector-v6')
-                     AND dc.box_x = d.box_x AND dc.box_y = d.box_y
-                     AND dc.box_w = d.box_w AND dc.box_h = d.box_h
-                    WHERE d.id <> dc.canonical_id
-                )
-            """)
-            # Create new table without workspace_id
-            self.conn.execute("""
-                CREATE TABLE detections_new (
-                    id                   INTEGER PRIMARY KEY,
-                    photo_id             INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-                    detector_model       TEXT NOT NULL DEFAULT 'megadetector-v6',
-                    box_x REAL, box_y REAL, box_w REAL, box_h REAL,
-                    detector_confidence  REAL,
-                    category             TEXT,
-                    created_at           TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            self.conn.execute("""
-                INSERT INTO detections_new (id, photo_id, detector_model,
-                                            box_x, box_y, box_w, box_h,
-                                            detector_confidence, category, created_at)
-                SELECT d.id, d.photo_id,
-                       COALESCE(d.detector_model, 'megadetector-v6'),
-                       d.box_x, d.box_y, d.box_w, d.box_h,
-                       d.detector_confidence, d.category, d.created_at
-                FROM detections d
-                JOIN detection_canonical dc ON dc.canonical_id = d.id
-            """)
-            # Turn OFF foreign keys before dropping the old detections table.
-            # predictions.detection_id has ON DELETE CASCADE against detections,
-            # so DROP TABLE detections with FKs enabled cascade-deletes every
-            # prediction row (and then prediction_review via its own cascade),
-            # which is irreversible data loss during startup migration. After
-            # RENAME, the predictions.detection_id FK consistently points at
-            # the new table (ids are preserved), so re-enabling FKs is safe.
-            #
-            # PRAGMA foreign_keys is a no-op inside an open transaction, so
-            # commit the pending writes (INSERTs into detections_new, etc.)
-            # first and commit again before re-enabling.
-            self.conn.commit()
-            self.conn.execute("PRAGMA foreign_keys=OFF")
-            self.conn.execute("DROP TABLE detections")
-            self.conn.execute("ALTER TABLE detections_new RENAME TO detections")
-            self.conn.execute("DROP TABLE detection_canonical")
-            self.conn.commit()
-            self.conn.execute("PRAGMA foreign_keys=ON")
-            # Recreate the indexes (the CREATE INDEX IF NOT EXISTS at the bottom of
-            # __init__ will no-op if they already exist, but indexes tied to the
-            # dropped table are gone).
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_detections_photo ON detections(photo_id)"
-            )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_detections_photo_model "
-                "ON detections(photo_id, detector_model)"
-            )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_detections_conf "
-                "ON detections(photo_id, detector_confidence)"
-            )
-            self.conn.commit()
-
-        # Add labels_fingerprint column if missing. Existing rows get 'legacy'.
-        pred_cols = {r[1] for r in self.conn.execute(
-            "PRAGMA table_info(predictions)"
-        ).fetchall()}
-        if "labels_fingerprint" not in pred_cols:
-            self.conn.execute(
-                "ALTER TABLE predictions ADD COLUMN labels_fingerprint TEXT "
-                "NOT NULL DEFAULT 'legacy'"
-            )
-            self.conn.commit()
-
-        # Drop review + legacy model columns, rename `model` -> `classifier_model`,
-        # apply new UNIQUE key. Uses create-copy-drop-rename because SQLite
-        # can't drop columns + add constraints atomically.
-        #
-        # Legacy schemas vary: some are missing the taxonomy_* / scientific_name /
-        # category columns (they were added by an ALTER-based migration only).
-        # Substitute NULL for any column that isn't present so the SELECT that
-        # feeds predictions_new doesn't fail with "no such column".
-        #
-        # Foreign keys are turned off for the duration of the rewrite: the
-        # DROP TABLE predictions would otherwise cascade-delete every row in
-        # prediction_review (which Task 11 just backfilled). After the rename,
-        # prediction_review.prediction_id continues to point at the same
-        # integer ids (PRIMARY KEYs are copied verbatim into predictions_new),
-        # so the FK is consistent again.
-        pred_cols = {r[1] for r in self.conn.execute(
-            "PRAGMA table_info(predictions)"
-        ).fetchall()}
-        needs_pred_rewrite = "status" in pred_cols or "model" in pred_cols
-        if needs_pred_rewrite:
-            self.conn.execute("PRAGMA foreign_keys=OFF")
-            def _col_or_null(name: str) -> str:
-                return name if name in pred_cols else "NULL"
-            self.conn.execute("""
-                CREATE TABLE predictions_new (
-                    id                   INTEGER PRIMARY KEY,
-                    detection_id         INTEGER NOT NULL REFERENCES detections(id) ON DELETE CASCADE,
-                    classifier_model     TEXT NOT NULL,
-                    labels_fingerprint   TEXT NOT NULL DEFAULT 'legacy',
-                    species              TEXT,
-                    confidence           REAL,
-                    category             TEXT,
-                    scientific_name      TEXT,
-                    taxonomy_kingdom     TEXT,
-                    taxonomy_phylum      TEXT,
-                    taxonomy_class       TEXT,
-                    taxonomy_order       TEXT,
-                    taxonomy_family      TEXT,
-                    taxonomy_genus       TEXT,
-                    created_at           TEXT DEFAULT (datetime('now')),
-                    UNIQUE(detection_id, classifier_model, labels_fingerprint, species)
-                )
-            """)
-            self.conn.execute(f"""
-                INSERT OR IGNORE INTO predictions_new
-                    (id, detection_id, classifier_model, labels_fingerprint,
-                     species, confidence, category, scientific_name,
-                     taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                     taxonomy_order, taxonomy_family, taxonomy_genus, created_at)
-                SELECT id, detection_id,
-                       COALESCE(model, 'unknown'),
-                       COALESCE(labels_fingerprint, 'legacy'),
-                       species, confidence,
-                       {_col_or_null('category')},
-                       {_col_or_null('scientific_name')},
-                       {_col_or_null('taxonomy_kingdom')},
-                       {_col_or_null('taxonomy_phylum')},
-                       {_col_or_null('taxonomy_class')},
-                       {_col_or_null('taxonomy_order')},
-                       {_col_or_null('taxonomy_family')},
-                       {_col_or_null('taxonomy_genus')},
-                       created_at
-                FROM predictions
-            """)
-            self.conn.execute("DROP TABLE predictions")
-            self.conn.execute("ALTER TABLE predictions_new RENAME TO predictions")
-            self.conn.commit()
-            self.conn.execute("PRAGMA foreign_keys=ON")
-
-        # Folder health status
-        try:
-            self.conn.execute("SELECT status FROM folders LIMIT 0")
-        except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE folders ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'"
-            )
-
-        # Migrate pending_changes: add ON DELETE CASCADE to photo_id FK.
-        # SQLite doesn't support ALTER FOREIGN KEY, so recreate the table.
-        pc_schema = self.conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pending_changes'"
-        ).fetchone()
-        if pc_schema and "ON DELETE CASCADE" not in pc_schema[0].upper().split("PHOTO_ID", 1)[-1].split(",")[0]:
-            self.conn.executescript("""
-                CREATE TABLE pending_changes_new (
-                    id          INTEGER PRIMARY KEY,
-                    photo_id    INTEGER REFERENCES photos(id) ON DELETE CASCADE,
-                    change_type TEXT,
-                    value       TEXT,
-                    change_token TEXT,
-                    created_at  TEXT DEFAULT (datetime('now')),
-                    workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
-                );
-                INSERT INTO pending_changes_new
-                    SELECT id, photo_id, change_type, value, change_token, created_at, workspace_id
-                    FROM pending_changes;
-                DROP TABLE pending_changes;
-                ALTER TABLE pending_changes_new RENAME TO pending_changes;
-            """)
-            self.conn.commit()
-
-        # Ensure indexes exist (for fresh DBs that skip migration, and for
-        # legacy DBs where DROP TABLE predictions destroys earlier indexes)
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_detections_photo "
-            "ON detections(photo_id)"
-        )
-        # detections.workspace_id is dropped by the global-detections migration
-        # above, so we no longer create idx_detections_workspace here.
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_classifier_runs_detection "
-            "ON classifier_runs(detection_id)"
-        )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_prediction_review_workspace "
-            "ON prediction_review(workspace_id)"
-        )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_predictions_detection "
-            "ON predictions(detection_id)"
-        )
-        # Explicit unique index on the predictions identity tuple. The
-        # CREATE TABLE above declares the same UNIQUE, but SQLite's auto-
-        # generated unique index (sqlite_autoindex_*) has NULL `sql` in
-        # sqlite_master, which makes it impossible to assert against in tests
-        # that inspect index SQL. This explicit index gives us a stable name
-        # and a visible CREATE statement.
-        self.conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS "
-            "idx_predictions_identity "
-            "ON predictions(detection_id, classifier_model, "
-            "labels_fingerprint, species)"
-        )
-        # predictions.status was dropped in the legacy-column migration above;
-        # review state lives in prediction_review now, so no status index here.
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_collections_workspace "
-            "ON collections(workspace_id)"
-        )
-        self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pending_workspace "
-            "ON pending_changes(workspace_id)"
         )
         self.conn.commit()
 
