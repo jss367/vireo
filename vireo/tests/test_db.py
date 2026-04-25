@@ -234,6 +234,45 @@ def test_browse_summary_folder_includes_descendants(tmp_path):
     assert summary['filtered_total'] == 2
 
 
+def test_browse_summary_top_species_filters_to_latest_fingerprint(tmp_path):
+    """get_browse_summary's top-species ranking must pin to the most
+    recent labels_fingerprint per (detection, classifier_model).
+    Otherwise a stale higher-confidence row from an old label set wins
+    ROW_NUMBER() and `/api/browse/summary` reports the wrong species.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/p', name='p')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg',
+                       extension='.jpg', file_size=100, file_mtime=1.0)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # Stale fingerprint — HIGHER confidence + 'Finch'.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Finch', 0.99, '2026-01-01')",
+        (det_id,),
+    )
+    # Current fingerprint — lower confidence + 'Robin'.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Robin', 0.7, '2026-04-25')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    summary = db.get_browse_summary()
+    species_list = [(s["species"], s["count"]) for s in summary["top_species"]]
+    assert species_list == [("Robin", 1)], (
+        f"top_species must be the active-fingerprint Robin (lower "
+        f"confidence) — not stale-fingerprint Finch (higher); "
+        f"got {species_list}"
+    )
+
+
 def test_calendar_data_folder_includes_descendants(tmp_path):
     """get_calendar_data(folder_id=parent) counts descendants."""
     from db import Database
@@ -2913,6 +2952,53 @@ def test_list_photos_for_eye_keypoint_stage_keeps_confidence_order_when_routable
     rows = db.list_photos_for_eye_keypoint_stage()
     assert len(rows) == 1
     assert rows[0]["scientific_name"] == "Turdus migratorius"
+
+
+def test_list_photos_for_eye_keypoint_stage_filters_to_active_fingerprint(tmp_path):
+    """When a detection has cached predictions from multiple label-set
+    fingerprints, the eye-keypoint candidate query must pick from the
+    most recent one — otherwise a stale high-confidence row can drive
+    `_resolve_keypoint_model` with outdated taxonomy and route the
+    stage to the wrong model.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    fid = db.add_folder(str(tmp_path), name="photos")
+    db.add_workspace_folder(ws_id, fid)
+    pid = db.add_photo(fid, "a.jpg", ".jpg", 1000, 1.0, width=800, height=600)
+    db.update_photo_pipeline_features(pid, mask_path=str(tmp_path / "mask.png"))
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.95}
+    ], detector_model="MegaDetector")[0]
+    # Stale fingerprint — high confidence + bird taxonomy.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, taxonomy_class, "
+        "scientific_name, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.99, 'Aves', "
+        "'Turdus migratorius', '2026-01-01')",
+        (det_id,),
+    )
+    # Current fingerprint — lower confidence + mammal taxonomy.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, taxonomy_class, "
+        "scientific_name, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Vulpes vulpes', 0.6, 'Mammalia', "
+        "'Vulpes vulpes', '2026-04-25')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    rows = db.list_photos_for_eye_keypoint_stage()
+    assert len(rows) == 1
+    # Must pick the current-fingerprint row, not the stale higher-confidence one.
+    assert rows[0]["taxonomy_class"] == "Mammalia", (
+        f"Stale-fingerprint Robin row drove the eye-keypoint stage; "
+        f"expected current-fingerprint Vulpes; got {rows[0]['taxonomy_class']}"
+    )
 
 
 def test_list_photos_for_eye_keypoint_stage_scopes_to_photo_ids(tmp_path):

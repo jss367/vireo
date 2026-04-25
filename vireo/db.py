@@ -3054,6 +3054,10 @@ class Database:
         # Top species (within filter).  Review status is workspace-scoped via
         # prediction_review; absent rows are treated as 'pending' (which is
         # included — we only want to exclude 'rejected' reviews).
+        # Pin to the most recent labels_fingerprint per
+        # (detection, classifier_model) so a workspace that rotated label
+        # sets doesn't have stale higher-confidence rows from an old
+        # fingerprint dominating the top-species ranking.
         top_species = self.conn.execute(
             f"""WITH best_pred AS (
                     SELECT det.photo_id, pred.species,
@@ -3068,6 +3072,13 @@ class Database:
                      AND pr_rev.workspace_id = ?
                     WHERE det.detector_confidence >= ?
                       AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                      AND pred.labels_fingerprint = (
+                          SELECT pr2.labels_fingerprint FROM predictions pr2
+                          WHERE pr2.detection_id = pred.detection_id
+                            AND pr2.classifier_model = pred.classifier_model
+                          ORDER BY pr2.created_at DESC, pr2.id DESC
+                          LIMIT 1
+                      )
                 )
                 SELECT bp.species, COUNT(DISTINCT p.id) as count
                 FROM photos p
@@ -3750,6 +3761,13 @@ class Database:
                JOIN predictions pr ON pr.detection_id = d.id
                WHERE p.mask_path IS NOT NULL
                  AND p.eye_tenengrad IS NULL{extra_where}
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                ORDER BY p.id,
                         CASE
                             WHEN pr.taxonomy_class IS NOT NULL
