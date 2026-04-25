@@ -258,8 +258,15 @@ class NewImagesCache:
                     db_path, workspace_id,
                 )
                 with self._lock:
-                    self._errors[key] = (str(e) or e.__class__.__name__,
-                                         time.monotonic())
+                    # Drop the failure if the generation moved while we were
+                    # running. Mirrors the stale-write guard in :meth:`set`:
+                    # if ``invalidate_workspaces`` ran mid-compute (workspace
+                    # switched, scan completed), this error is for a key that
+                    # has already moved on and must not force the next
+                    # request into the 30s backoff window.
+                    if self._generations.get(key, 0) == generation:
+                        self._errors[key] = (str(e) or e.__class__.__name__,
+                                             time.monotonic())
             finally:
                 with self._lock:
                     self._inflight.pop(key, None)

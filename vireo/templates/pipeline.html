@@ -1097,14 +1097,20 @@ async function initNewImagesCard() {
   }
 }
 
-// Single-slot retry timer so a long pending state can't stack chains.
+// Single-slot retry timer + in-flight guard so a long pending state can't
+// stack chains: two ticks whose fetches overlap would otherwise both
+// schedule timers on response, leaking chains the start-of-call
+// clearTimeout can't catch (it only nulls the most recent handle).
 var _newImagesProbeTimer = null;
+var _newImagesProbeInFlight = false;
 
 async function probeNewImagesCard() {
+  if (_newImagesProbeInFlight) return;
   if (_newImagesProbeTimer !== null) {
     clearTimeout(_newImagesProbeTimer);
     _newImagesProbeTimer = null;
   }
+  _newImagesProbeInFlight = true;
   try {
     var r = await fetch('/api/workspaces/active/new-images');
     if (!r.ok) return;
@@ -1125,6 +1131,8 @@ async function probeNewImagesCard() {
     }
   } catch (e) {
     // Silent fail — card stays hidden.
+  } finally {
+    _newImagesProbeInFlight = false;
   }
 }
 
