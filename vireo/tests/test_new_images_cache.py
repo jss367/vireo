@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -222,6 +223,121 @@ def test_invalidate_workspaces_clears_error_only_for_targeted_keys():
 
     assert cache.get_recent_error(DB, 1) is None
     assert cache.get_recent_error(DB, 2) is not None
+
+
+def test_kickoff_compute_reuses_in_flight_for_current_generation():
+    """A second kickoff that arrives while a compute is in flight for the same
+    generation must reuse the existing thread — not spawn a duplicate walk."""
+    cache = NewImagesCache(ttl_seconds=60)
+    started = threading.Event()
+    proceed = threading.Event()
+    call_count = [0]
+
+    def slow_compute():
+        call_count[0] += 1
+        started.set()
+        proceed.wait(timeout=5.0)
+        return {"new_count": 3}
+
+    e1 = cache.kickoff_compute(DB, 1, slow_compute)
+    assert started.wait(timeout=2.0)
+    e2 = cache.kickoff_compute(DB, 1, slow_compute)
+    assert e1 is e2, "concurrent kickoff for same generation must reuse in-flight"
+    proceed.set()
+    assert e1.wait(timeout=2.0)
+    assert call_count[0] == 1
+
+
+def test_kickoff_compute_restarts_when_generation_advances():
+    """If ``invalidate_workspaces`` runs while a compute is in flight, the next
+    kickoff must start a fresh compute instead of waiting on the obsolete
+    thread. Otherwise pollers stay in ``pending`` for the full duration of an
+    outdated walk after a workspace/folder change."""
+    cache = NewImagesCache(ttl_seconds=60)
+    stale_started = threading.Event()
+    stale_proceed = threading.Event()
+
+    def stale_compute():
+        stale_started.set()
+        stale_proceed.wait(timeout=5.0)
+        return {"new_count": 999}  # stale value — must be dropped
+
+    e1 = cache.kickoff_compute(DB, 1, stale_compute)
+    assert stale_started.wait(timeout=2.0)
+
+    # Invalidation advances the generation while the compute is still running.
+    cache.invalidate_workspaces(DB, [1])
+
+    fresh_called = threading.Event()
+
+    def fresh_compute():
+        fresh_called.set()
+        return {"new_count": 7}
+
+    e2 = cache.kickoff_compute(DB, 1, fresh_compute)
+    assert e1 is not e2, "stale in-flight thread must not be reused after invalidation"
+    assert fresh_called.wait(timeout=2.0), "fresh compute must actually run"
+    assert e2.wait(timeout=2.0)
+    assert cache.get(DB, 1) == {"new_count": 7}
+
+    # Drain the stale thread; its result must not overwrite the fresh one.
+    stale_proceed.set()
+    assert e1.wait(timeout=2.0)
+    assert cache.get(DB, 1) == {"new_count": 7}, (
+        "stale compute result must be dropped by the generation guard in set()"
+    )
+
+
+def test_kickoff_compute_stale_thread_does_not_clear_inflight_for_fresh():
+    """When a stale thread finishes after a fresh compute has taken over the
+    in-flight slot, its cleanup must not pop the fresh entry."""
+    cache = NewImagesCache(ttl_seconds=60)
+    stale_started = threading.Event()
+    stale_proceed = threading.Event()
+
+    def stale_compute():
+        stale_started.set()
+        stale_proceed.wait(timeout=5.0)
+        return {"new_count": 1}
+
+    cache.kickoff_compute(DB, 1, stale_compute)
+    assert stale_started.wait(timeout=2.0)
+    cache.invalidate_workspaces(DB, [1])
+
+    fresh_started = threading.Event()
+    fresh_proceed = threading.Event()
+
+    def fresh_compute():
+        fresh_started.set()
+        fresh_proceed.wait(timeout=5.0)
+        return {"new_count": 2}
+
+    fresh_event = cache.kickoff_compute(DB, 1, fresh_compute)
+    assert fresh_started.wait(timeout=2.0)
+
+    # Let the stale thread finish first. Its finally block must not clear
+    # ``_inflight[key]`` because that slot now belongs to the fresh thread.
+    stale_proceed.set()
+
+    # The fresh thread is still running, so the in-flight slot must remain.
+    # Poll briefly to let the stale thread's finally complete.
+    import time as _t
+    deadline = _t.monotonic() + 1.0
+    while _t.monotonic() < deadline:
+        with cache._lock:
+            entry = cache._inflight.get((DB, 1))
+        if entry is not None and entry[0] is fresh_event:
+            break
+        _t.sleep(0.01)
+    with cache._lock:
+        entry = cache._inflight.get((DB, 1))
+    assert entry is not None and entry[0] is fresh_event, (
+        "stale thread's finally must not pop the fresh thread's in-flight slot"
+    )
+
+    fresh_proceed.set()
+    assert fresh_event.wait(timeout=2.0)
+    assert cache.get(DB, 1) == {"new_count": 2}
 
 
 def test_cache_generation_is_scoped_by_db_path():

@@ -142,8 +142,11 @@ class NewImagesCache:
         self._entries = {}
         # key=(db_path, workspace_id) -> int
         self._generations = {}
-        # key=(db_path, workspace_id) -> Event signalling the in-flight
-        # background compute has finished (success or failure).
+        # key=(db_path, workspace_id) -> (Event, generation) for the in-flight
+        # background compute. The generation is captured at kickoff so a
+        # subsequent invalidation makes the in-flight entry detectably stale —
+        # the next kickoff replaces it with a fresh compute instead of waiting
+        # on obsolete work.
         self._inflight = {}
         # key=(db_path, workspace_id) -> (error_message, set_at_monotonic).
         # Recent failures suppress retries within ``ERROR_BACKOFF_SECONDS``.
@@ -222,7 +225,10 @@ class NewImagesCache:
 
         Otherwise: if no compute is in flight, spawn a daemon thread that
         calls ``compute_fn()`` and stores the result in the cache. If one is
-        already in flight, the existing thread is reused. Either way, returns
+        already in flight *for the current generation*, the existing thread
+        is reused. If the in-flight thread belongs to an older generation
+        (an ``invalidate_workspaces`` ran mid-walk), a fresh compute is
+        started so callers don't block on obsolete work. Either way, returns
         an ``Event`` that fires when the compute finishes so the caller can
         ``Event.wait(timeout=...)`` to optionally block briefly for the result.
 
@@ -243,12 +249,22 @@ class NewImagesCache:
                 # Backoff window elapsed — let a fresh attempt run.
                 del self._errors[key]
 
+            generation = self._generations.get(key, 0)
             existing = self._inflight.get(key)
             if existing is not None:
-                return existing
+                existing_event, existing_generation = existing
+                if existing_generation == generation:
+                    return existing_event
+                # The in-flight thread is computing for an older generation
+                # (an ``invalidate_workspaces`` ran mid-walk). Its result
+                # would be dropped by :meth:`set`'s stale-write guard, so
+                # waiting on it would leave callers in ``pending`` for the
+                # full duration of obsolete work. Start a fresh compute and
+                # let the stale thread finish in the background — its
+                # finally block won't pop ``_inflight[key]`` because we're
+                # about to overwrite the entry with the new event.
             event = threading.Event()
-            self._inflight[key] = event
-            generation = self._generations.get(key, 0)
+            self._inflight[key] = (event, generation)
 
         def worker():
             try:
@@ -256,8 +272,11 @@ class NewImagesCache:
                 self.set(db_path, workspace_id, result, generation=generation)
                 # Successful compute clears any prior failure so a transient
                 # error doesn't keep suppressing retries after recovery.
+                # Generation-guarded so a stale thread finishing after a
+                # fresh one started doesn't wipe the fresh thread's error.
                 with self._lock:
-                    self._errors.pop(key, None)
+                    if self._generations.get(key, 0) == generation:
+                        self._errors.pop(key, None)
             except Exception as e:
                 log.exception(
                     "new-images background compute failed for %s ws=%s",
@@ -275,7 +294,14 @@ class NewImagesCache:
                                              time.monotonic())
             finally:
                 with self._lock:
-                    self._inflight.pop(key, None)
+                    # Only clear the in-flight slot if it still belongs to
+                    # this thread. A fresh kickoff may have superseded us
+                    # after the generation advanced; popping unconditionally
+                    # would drop the live entry and let two threads race to
+                    # repopulate it.
+                    current = self._inflight.get(key)
+                    if current is not None and current[0] is event:
+                        del self._inflight[key]
                 event.set()
 
         threading.Thread(
