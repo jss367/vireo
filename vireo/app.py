@@ -2220,7 +2220,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
-        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "review_min_confidence"}
+        allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "detector_confidence", "review_min_confidence"}
         # Merge into existing overrides to preserve non-whitelisted keys
         ws = db.get_workspace(db._active_workspace_id)
         existing = {}
