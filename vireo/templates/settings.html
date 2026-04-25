@@ -1078,12 +1078,17 @@ function saveWsConfig() {
     ['classification_threshold', 'grouping_window_seconds', 'similarity_threshold', 'detector_confidence'].forEach(function(key) {
       var checkbox = document.getElementById('wsOverride_' + key);
       var input = document.getElementById('wsVal_' + key);
-      if (checkbox && checkbox.checked && input) {
+      if (!checkbox || !input) return;
+      if (checkbox.checked) {
         if (key === 'classification_threshold' || key === 'similarity_threshold' || key === 'detector_confidence') {
           overrides[key] = parseInt(input.value) / 100;
         } else {
           overrides[key] = parseInt(input.value);
         }
+      } else {
+        // Explicit null tells the backend to clear this override.
+        // Without this, omitted keys are preserved and unchecking has no effect.
+        overrides[key] = null;
       }
     });
     try {
