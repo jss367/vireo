@@ -2272,6 +2272,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             payload["workspace_id"] = ws_id
             return jsonify(payload)
 
+        # If a recent compute failed and we're still inside the backoff
+        # window, surface the error instead of kicking off another walk.
+        # Without this, the navbar's pending re-poll keeps hammering a
+        # broken volume / DB and the UI is stuck "checking" forever.
+        recent_err = cache.get_recent_error(db_path, ws_id)
+        if recent_err is not None:
+            return jsonify({
+                "workspace_id": ws_id,
+                "new_count": None,
+                "per_root": [],
+                "sample": [],
+                "error": recent_err,
+            })
+
         # Cache cold: run the filesystem walk in a background thread so the
         # navbar's poll doesn't tie up a Flask worker for seconds while
         # os.walk grinds through a large library. Wait briefly so small
@@ -2293,6 +2307,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 payload = dict(cached)
                 payload["workspace_id"] = ws_id
                 return jsonify(payload)
+            # Compute finished but produced no cached entry — it must have
+            # raised. Surface the error captured by the worker.
+            recent_err = cache.get_recent_error(db_path, ws_id)
+            if recent_err is not None:
+                return jsonify({
+                    "workspace_id": ws_id,
+                    "new_count": None,
+                    "per_root": [],
+                    "sample": [],
+                    "error": recent_err,
+                })
 
         return jsonify({
             "workspace_id": ws_id,

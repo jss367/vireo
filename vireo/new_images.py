@@ -130,6 +130,12 @@ class NewImagesCache:
     silently dropped instead of repopulating the cache.
     """
 
+    # Persistent compute failures (unreachable volume, DB error) suppress
+    # retries for this long so we don't hammer the failing resource on every
+    # navbar poll. Short enough that natural recovery is observable; long
+    # enough that ten open tabs can't hot-loop the disk.
+    ERROR_BACKOFF_SECONDS = 30
+
     def __init__(self, ttl_seconds=300):
         self._ttl = ttl_seconds
         # key=(db_path, workspace_id) -> (result_dict, set_at_monotonic)
@@ -139,6 +145,9 @@ class NewImagesCache:
         # key=(db_path, workspace_id) -> Event signalling the in-flight
         # background compute has finished (success or failure).
         self._inflight = {}
+        # key=(db_path, workspace_id) -> (error_message, set_at_monotonic).
+        # Recent failures suppress retries within ``ERROR_BACKOFF_SECONDS``.
+        self._errors = {}
         self._lock = threading.Lock()
 
     def get(self, db_path, workspace_id):
@@ -183,15 +192,33 @@ class NewImagesCache:
                 self._entries.pop(key, None)
                 self._generations[key] = self._generations.get(key, 0) + 1
 
+    def get_recent_error(self, db_path, workspace_id):
+        """Return the most recent compute error if it's still inside the
+        backoff window, else None. Stale entries are cleared lazily."""
+        key = (db_path, workspace_id)
+        with self._lock:
+            entry = self._errors.get(key)
+            if entry is None:
+                return None
+            err_msg, set_at = entry
+            if time.monotonic() - set_at > self.ERROR_BACKOFF_SECONDS:
+                del self._errors[key]
+                return None
+            return err_msg
+
     def kickoff_compute(self, db_path, workspace_id, compute_fn):
         """Ensure a background compute is running for ``(db_path, workspace_id)``.
 
-        If no compute is in flight, spawn a daemon thread that calls
-        ``compute_fn()`` and stores the result in the cache. If one is already
-        in flight, the existing thread is reused. Either way, returns an
-        ``Event`` that fires when the in-flight compute finishes (success or
-        failure) so the caller can ``Event.wait(timeout=...)`` to optionally
-        block briefly for a fresh result.
+        If a recent compute failed (within ``ERROR_BACKOFF_SECONDS``), no new
+        compute is started — readers should call :meth:`get_recent_error` and
+        surface the failure instead of looping pending forever. Returns a
+        pre-set Event so callers that ``wait`` don't block.
+
+        Otherwise: if no compute is in flight, spawn a daemon thread that
+        calls ``compute_fn()`` and stores the result in the cache. If one is
+        already in flight, the existing thread is reused. Either way, returns
+        an ``Event`` that fires when the compute finishes so the caller can
+        ``Event.wait(timeout=...)`` to optionally block briefly for the result.
 
         The generation snapshot is taken inside the lock at kickoff time so a
         concurrent invalidation can still drop the stale write — same race
@@ -199,6 +226,17 @@ class NewImagesCache:
         """
         key = (db_path, workspace_id)
         with self._lock:
+            err_entry = self._errors.get(key)
+            if err_entry is not None:
+                _err_msg, set_at = err_entry
+                if time.monotonic() - set_at <= self.ERROR_BACKOFF_SECONDS:
+                    # Suppress retry inside the backoff window.
+                    done = threading.Event()
+                    done.set()
+                    return done
+                # Backoff window elapsed — let a fresh attempt run.
+                del self._errors[key]
+
             existing = self._inflight.get(key)
             if existing is not None:
                 return existing
@@ -210,11 +248,18 @@ class NewImagesCache:
             try:
                 result = compute_fn()
                 self.set(db_path, workspace_id, result, generation=generation)
-            except Exception:
+                # Successful compute clears any prior failure so a transient
+                # error doesn't keep suppressing retries after recovery.
+                with self._lock:
+                    self._errors.pop(key, None)
+            except Exception as e:
                 log.exception(
                     "new-images background compute failed for %s ws=%s",
                     db_path, workspace_id,
                 )
+                with self._lock:
+                    self._errors[key] = (str(e) or e.__class__.__name__,
+                                         time.monotonic())
             finally:
                 with self._lock:
                     self._inflight.pop(key, None)
@@ -230,6 +275,7 @@ class NewImagesCache:
             self._entries.clear()
             self._generations.clear()
             self._inflight.clear()
+            self._errors.clear()
 
 
 _shared_cache = NewImagesCache()

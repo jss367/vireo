@@ -149,6 +149,96 @@ def test_api_new_images_returns_cached_after_background_compute_finishes(app_and
     assert data["new_count"] == 1
 
 
+def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch):
+    """If the background walk raises (e.g. unavailable volume, DB error), the
+    endpoint must surface an error instead of looping forever on pending.
+
+    Without this, the navbar's 3s pending re-poll keeps firing because the
+    cache stays empty after every failed compute — leaving the UI in a
+    permanent retry state and hammering the failing resource.
+    """
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", boom)
+
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Wait briefly for the worker thread to finish raising and storing the
+    # error — the 500ms grace inside the endpoint may have already caught it,
+    # but in case it didn't, repoll once.
+    if data.get("pending"):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            data = client.get("/api/workspaces/active/new-images").get_json()
+            if not data.get("pending"):
+                break
+    assert data.get("error"), f"expected an error in payload, got {data!r}"
+    assert "disk unreachable" in data["error"]
+    assert data.get("pending") is None or data.get("pending") is False
+    assert data["new_count"] is None or data["new_count"] == 0
+    assert data["workspace_id"] == ws_id
+
+
+def test_api_new_images_does_not_hot_loop_on_persistent_failure(app_and_db, monkeypatch):
+    """Repeated requests within the error backoff window must not spawn a
+    fresh compute every time — otherwise a broken volume gets hammered by
+    every navbar poll across every open page."""
+    import threading
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    call_count = {"n": 0}
+    lock = threading.Lock()
+
+    def boom(*args, **kwargs):
+        with lock:
+            call_count["n"] += 1
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", boom)
+
+    client = app.test_client()
+    # Fire one request; wait for compute to finish and the error to land.
+    client.get("/api/workspaces/active/new-images")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if call_count["n"] >= 1:
+            break
+        time.sleep(0.01)
+    initial = call_count["n"]
+    assert initial >= 1, "compute_fn was never called for the first request"
+
+    # Hammer the endpoint several more times immediately. Each call is
+    # within the error backoff window so no new compute should fire.
+    for _ in range(5):
+        client.get("/api/workspaces/active/new-images")
+    # Give any spurious thread a moment to actually hit boom().
+    time.sleep(0.1)
+    assert call_count["n"] == initial, (
+        f"compute_fn called {call_count['n']} times; expected backoff after "
+        f"{initial} call(s)"
+    )
+
+
 def test_api_new_images_returns_null_workspace_when_none_active(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     # Each request creates its own Database via _get_db(), which auto-restores

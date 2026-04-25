@@ -4027,7 +4027,17 @@ function _isNewImagesDismissed(wsId, newCount) {
   return stored === Number(newCount);
 }
 
+// Single-slot retry timer so a long pending state can't stack independent
+// 3s polling chains on top of each 60s interval tick — without this dedup,
+// every interval that lands during pending forks another retry chain and
+// request volume snowballs over time.
+let _newImagesPendingTimer = null;
+
 async function checkNewImages() {
+  if (_newImagesPendingTimer !== null) {
+    clearTimeout(_newImagesPendingTimer);
+    _newImagesPendingTimer = null;
+  }
   try {
     const resp = await fetch('/api/workspaces/active/new-images');
     if (!resp.ok) return;
@@ -4036,7 +4046,15 @@ async function checkNewImages() {
     // running in the background. The result will land in the cache shortly,
     // so re-poll soon instead of waiting for the next 60s tick.
     if (data && data.pending) {
-      setTimeout(checkNewImages, 3000);
+      _newImagesPendingTimer = setTimeout(checkNewImages, 3000);
+      return;
+    }
+    // Persistent backend failure (unreachable volume, DB error). Don't
+    // re-poll fast — let the 60s interval try again after the backoff
+    // window so we don't hammer a broken resource. Hide the banner.
+    if (data && data.error) {
+      const banner = document.getElementById('newImagesBanner');
+      if (banner) banner.style.display = 'none';
       return;
     }
     const banner = document.getElementById('newImagesBanner');
