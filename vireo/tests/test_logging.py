@@ -6,10 +6,37 @@ workspace pollute the user's real Vireo log, mixing test tracebacks
 into logs the user is reading to debug their actual app session.
 """
 
+import logging
 import os
 import subprocess
 import sys
 import textwrap
+
+
+def test_setup_file_logging_is_idempotent(tmp_path):
+    """Repeated calls must not stack duplicate RotatingFileHandlers.
+
+    main() normally runs once per process, but harness scripts that call
+    main() repeatedly (or anything that re-invokes _setup_file_logging)
+    would otherwise leak handlers and duplicate every log entry.
+    """
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from app import _setup_file_logging
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        _setup_file_logging(log_dir=str(tmp_path))
+        _setup_file_logging(log_dir=str(tmp_path))
+        added = [h for h in root.handlers if h not in before]
+        assert len(added) == 1, (
+            f"Expected exactly one new handler after two calls, got {len(added)}"
+        )
+    finally:
+        for h in list(root.handlers):
+            if h not in before:
+                root.removeHandler(h)
+                h.close()
 
 
 def test_importing_app_does_not_create_log_file(tmp_path):
