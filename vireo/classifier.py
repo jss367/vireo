@@ -215,28 +215,55 @@ def _normalize(vec):
     return vec / norm
 
 
-def _run_text_batched(text_session, text_input_name, tokens):
+def _run_text_batched(text_session, text_input_name, tokens, model_dir=None):
     """Run the text encoder on a (N, seq_len) token batch.
 
     Vireo's text encoder ONNX exports are batch-agnostic (see
     ``scripts/export_onnx.py:_TextEncoderWrapper``). If a session rejects a
     batched input, the model file is from an older export with a hardcoded
-    batch dimension — fail loudly so the user re-downloads via the Models
-    page rather than silently falling back to a 50× slower per-row path.
+    batch dimension. We write the standard ``.verify_failed`` sentinel into
+    ``model_dir`` so Settings → Models flips the install to "incomplete"
+    and surfaces the existing Repair button — the same self-heal flow used
+    for hash-mismatch corruption — and raise the same incomplete-model
+    error the pipeline uses elsewhere.
+
+    The pinned-revision verifier can't catch this on its own: the user's
+    on-disk bytes legitimately match the upstream commit they were
+    downloaded from, so SHA256 verification passes even though the export
+    is broken. Detection has to happen at inference, repair has to happen
+    through Settings.
     """
     try:
         return text_session.run(None, {text_input_name: tokens})[0]
     except Exception as e:
+        if model_dir:
+            import model_verify
+            sentinel = os.path.join(
+                model_dir, model_verify.VERIFY_FAILED_SENTINEL
+            )
+            try:
+                with open(sentinel, "w") as f:
+                    f.write(
+                        "stale-export: text encoder rejected batched input "
+                        f"(underlying: {type(e).__name__}: {e})\n"
+                    )
+            except OSError:
+                pass
         raise RuntimeError(
-            "Text encoder ONNX rejected batched input — the local model "
-            "file is from a stale export with a hardcoded batch dimension. "
-            "Re-download the model from the Models page in Settings. "
+            "Text encoder is from a stale export with a hardcoded batch "
+            "dimension. Open Settings → Models and click Repair to "
+            "re-download the model. "
             f"Underlying error: {type(e).__name__}: {e}"
         ) from e
 
 
 def _compute_embeddings_with_progress(
-    text_session, text_input_name, tokenizer, labels, progress_callback=None
+    text_session,
+    text_input_name,
+    tokenizer,
+    labels,
+    progress_callback=None,
+    model_dir=None,
 ):
     """Compute text embeddings for labels with progress logging.
 
@@ -263,7 +290,9 @@ def _compute_embeddings_with_progress(
     for i, classname in enumerate(labels):
         txts = [template(classname) for template in OPENAI_IMAGENET_TEMPLATE]
         tokens = _tokenize(tokenizer, txts)
-        txt_features = _run_text_batched(text_session, text_input_name, tokens)
+        txt_features = _run_text_batched(
+            text_session, text_input_name, tokens, model_dir=model_dir
+        )
         txt_features = txt_features.astype(np.float32)
         # Normalize each template's output, then average
         txt_features = _normalize(txt_features)
@@ -485,6 +514,7 @@ class Classifier:
                         tokenizer,
                         self._classes,
                         progress_callback=embedding_progress_callback,
+                        model_dir=self._model_dir,
                     )
                 finally:
                     del text_session
