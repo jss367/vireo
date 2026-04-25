@@ -143,11 +143,18 @@ class NewImagesCache:
         # key=(db_path, workspace_id) -> int
         self._generations = {}
         # key=(db_path, workspace_id) -> (Event, generation) for the in-flight
-        # background compute. The generation is captured at kickoff so a
-        # subsequent invalidation makes the in-flight entry detectably stale —
-        # the next kickoff replaces it with a fresh compute instead of waiting
-        # on obsolete work.
+        # background compute. Only one compute per key runs at a time; stale-
+        # generation kickoffs queue a rerun token rather than spawning a
+        # parallel walk (see ``_rerun_pending``).
         self._inflight = {}
+        # key=(db_path, workspace_id) -> compute_fn for a deferred rerun. Set
+        # when a kickoff arrives during an in-flight stale-generation compute:
+        # rather than fan out a second concurrent ``os.walk`` (a real risk on
+        # the scan path where ``invalidate_workspaces`` fires per discovered
+        # folder), we let the current thread finish and have it spawn one
+        # follow-up using the latest compute_fn. Multiple kickoffs collapse to
+        # the same slot — last writer wins, so we never queue a backlog.
+        self._rerun_pending = {}
         # key=(db_path, workspace_id) -> (error_message, set_at_monotonic).
         # Recent failures suppress retries within ``ERROR_BACKOFF_SECONDS``.
         self._errors = {}
@@ -225,12 +232,21 @@ class NewImagesCache:
 
         Otherwise: if no compute is in flight, spawn a daemon thread that
         calls ``compute_fn()`` and stores the result in the cache. If one is
-        already in flight *for the current generation*, the existing thread
-        is reused. If the in-flight thread belongs to an older generation
-        (an ``invalidate_workspaces`` ran mid-walk), a fresh compute is
-        started so callers don't block on obsolete work. Either way, returns
-        an ``Event`` that fires when the compute finishes so the caller can
-        ``Event.wait(timeout=...)`` to optionally block briefly for the result.
+        already in flight — for the current or an older generation — the
+        existing thread is reused; the caller waits on its event. When the
+        in-flight thread is stale (an ``invalidate_workspaces`` ran mid-walk),
+        the latest ``compute_fn`` is stashed as a deferred rerun token and
+        the worker spawns one follow-up after it finishes. This keeps at most
+        one walk per key in flight even when generations advance repeatedly
+        (e.g. the scan path's per-folder ``invalidate_workspaces``), avoiding
+        a fan-out of concurrent ``os.walk`` jobs that would thrash disk/CPU
+        on large libraries.
+
+        Returns an ``Event`` that fires when the in-flight compute finishes
+        so the caller can ``Event.wait(timeout=...)`` to optionally block
+        briefly for the result. After a stale-generation compute finishes,
+        the deferred rerun runs asynchronously — callers re-poll to pick up
+        its result, exactly as they re-poll any ``pending: true`` response.
 
         The generation snapshot is taken inside the lock at kickoff time so a
         concurrent invalidation can still drop the stale write — same race
@@ -253,16 +269,15 @@ class NewImagesCache:
             existing = self._inflight.get(key)
             if existing is not None:
                 existing_event, existing_generation = existing
-                if existing_generation == generation:
-                    return existing_event
-                # The in-flight thread is computing for an older generation
-                # (an ``invalidate_workspaces`` ran mid-walk). Its result
-                # would be dropped by :meth:`set`'s stale-write guard, so
-                # waiting on it would leave callers in ``pending`` for the
-                # full duration of obsolete work. Start a fresh compute and
-                # let the stale thread finish in the background — its
-                # finally block won't pop ``_inflight[key]`` because we're
-                # about to overwrite the entry with the new event.
+                if existing_generation != generation:
+                    # Stale-generation compute is running. Coalesce: stash the
+                    # latest compute_fn so the worker spawns one follow-up
+                    # when it finishes, instead of starting a parallel walk.
+                    # Last writer wins — multiple kickoffs collapse to one
+                    # rerun, so a burst of polls during scan-time invalidation
+                    # storms can't queue a backlog of walks.
+                    self._rerun_pending[key] = compute_fn
+                return existing_event
             event = threading.Event()
             self._inflight[key] = (event, generation)
 
@@ -295,14 +310,24 @@ class NewImagesCache:
             finally:
                 with self._lock:
                     # Only clear the in-flight slot if it still belongs to
-                    # this thread. A fresh kickoff may have superseded us
-                    # after the generation advanced; popping unconditionally
-                    # would drop the live entry and let two threads race to
-                    # repopulate it.
+                    # this thread. Defensive: under the coalescing design
+                    # nothing else writes to this slot while we're alive,
+                    # but the identity check keeps the invariant locally
+                    # checkable rather than relying on global reasoning.
                     current = self._inflight.get(key)
                     if current is not None and current[0] is event:
                         del self._inflight[key]
+                    rerun_fn = self._rerun_pending.pop(key, None)
                 event.set()
+                if rerun_fn is not None:
+                    # A kickoff arrived during this compute while the
+                    # generation was stale. Fire the deferred rerun now that
+                    # the in-flight slot is free; it picks up the current
+                    # generation inside the lock. Recursion depth is bounded:
+                    # each rerun consumes its token and a new one is only
+                    # added by another stale-generation kickoff arriving
+                    # during the next worker.
+                    self.kickoff_compute(db_path, workspace_id, rerun_fn)
 
         threading.Thread(
             target=worker, daemon=True, name="new-images-compute",
@@ -315,6 +340,7 @@ class NewImagesCache:
             self._generations.clear()
             self._inflight.clear()
             self._errors.clear()
+            self._rerun_pending.clear()
 
 
 _shared_cache = NewImagesCache()

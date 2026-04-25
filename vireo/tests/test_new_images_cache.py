@@ -248,11 +248,17 @@ def test_kickoff_compute_reuses_in_flight_for_current_generation():
     assert call_count[0] == 1
 
 
-def test_kickoff_compute_restarts_when_generation_advances():
+def test_kickoff_compute_coalesces_stale_generation_into_deferred_rerun():
     """If ``invalidate_workspaces`` runs while a compute is in flight, the next
-    kickoff must start a fresh compute instead of waiting on the obsolete
-    thread. Otherwise pollers stay in ``pending`` for the full duration of an
-    outdated walk after a workspace/folder change."""
+    kickoff must NOT spawn a parallel walk. Generations advance per discovered
+    folder during a scan, and the navbar re-polls pending every 3s; without
+    coalescing, both effects fan out concurrent ``os.walk`` jobs that thrash
+    disk/CPU on large libraries.
+
+    The contract: at most one walk per key in flight; the latest
+    ``compute_fn`` is queued as a deferred rerun and fires once the current
+    walk finishes."""
+    import time as _t
     cache = NewImagesCache(ttl_seconds=60)
     stale_started = threading.Event()
     stale_proceed = threading.Event()
@@ -275,22 +281,102 @@ def test_kickoff_compute_restarts_when_generation_advances():
         return {"new_count": 7}
 
     e2 = cache.kickoff_compute(DB, 1, fresh_compute)
-    assert e1 is not e2, "stale in-flight thread must not be reused after invalidation"
-    assert fresh_called.wait(timeout=2.0), "fresh compute must actually run"
-    assert e2.wait(timeout=2.0)
-    assert cache.get(DB, 1) == {"new_count": 7}
+    # Caller waits on the in-flight (stale) event; no parallel walk spawned.
+    assert e1 is e2, "stale-generation kickoff must reuse in-flight, not fork"
+    assert not fresh_called.is_set(), (
+        "fresh compute must not run in parallel with stale in-flight thread"
+    )
 
-    # Drain the stale thread; its result must not overwrite the fresh one.
+    # A burst of polls during the scan-time invalidation storm must collapse
+    # to a single rerun token, not queue a backlog of walks.
+    e3 = cache.kickoff_compute(DB, 1, fresh_compute)
+    e4 = cache.kickoff_compute(DB, 1, fresh_compute)
+    assert e3 is e1 and e4 is e1
+    assert not fresh_called.is_set()
+
+    # Release the stale thread; the deferred rerun fires asynchronously after
+    # its finally block runs.
     stale_proceed.set()
     assert e1.wait(timeout=2.0)
+    assert fresh_called.wait(timeout=2.0), (
+        "deferred rerun must spawn fresh compute after stale finishes"
+    )
+
+    # Wait for the rerun's result to land in the cache.
+    deadline = _t.monotonic() + 2.0
+    while _t.monotonic() < deadline:
+        if cache.get(DB, 1) == {"new_count": 7}:
+            break
+        _t.sleep(0.01)
     assert cache.get(DB, 1) == {"new_count": 7}, (
-        "stale compute result must be dropped by the generation guard in set()"
+        "stale result must be dropped by set()'s generation guard, and the "
+        "deferred rerun's result must populate the cache"
     )
 
 
-def test_kickoff_compute_stale_thread_does_not_clear_inflight_for_fresh():
-    """When a stale thread finishes after a fresh compute has taken over the
-    in-flight slot, its cleanup must not pop the fresh entry."""
+def test_kickoff_compute_coalesces_repeated_invalidations_into_single_rerun():
+    """Multiple stale-generation kickoffs during a single in-flight walk must
+    all collapse onto one rerun token (last writer wins). Otherwise a long
+    walk plus repeated scan-time invalidations could backlog walks."""
+    cache = NewImagesCache(ttl_seconds=60)
+    stale_started = threading.Event()
+    stale_proceed = threading.Event()
+    stale_calls = [0]
+
+    def stale_compute():
+        stale_calls[0] += 1
+        stale_started.set()
+        stale_proceed.wait(timeout=5.0)
+        return {"new_count": 0}
+
+    cache.kickoff_compute(DB, 1, stale_compute)
+    assert stale_started.wait(timeout=2.0)
+
+    # Several rounds of invalidation + kickoff with different compute_fns;
+    # only the last one's result should ultimately land in the cache.
+    rerun_calls = {"a": 0, "b": 0, "c": 0}
+
+    def make_rerun(tag, value):
+        def fn():
+            rerun_calls[tag] += 1
+            return {"new_count": value, "tag": tag}
+        return fn
+
+    cache.invalidate_workspaces(DB, [1])
+    cache.kickoff_compute(DB, 1, make_rerun("a", 1))
+    cache.invalidate_workspaces(DB, [1])
+    cache.kickoff_compute(DB, 1, make_rerun("b", 2))
+    cache.invalidate_workspaces(DB, [1])
+    cache.kickoff_compute(DB, 1, make_rerun("c", 3))
+
+    stale_proceed.set()
+
+    # Wait for the deferred rerun to finish populating the cache.
+    import time as _t
+    deadline = _t.monotonic() + 2.0
+    while _t.monotonic() < deadline:
+        cached = cache.get(DB, 1)
+        if cached is not None and cached.get("tag") == "c":
+            break
+        _t.sleep(0.01)
+
+    assert cache.get(DB, 1) == {"new_count": 3, "tag": "c"}, (
+        "last queued compute_fn must win — earlier ones are overwritten "
+        "in the rerun slot, not run as parallel walks"
+    )
+    assert stale_calls[0] == 1
+    assert rerun_calls["a"] == 0 and rerun_calls["b"] == 0, (
+        "earlier rerun candidates must not run — they were superseded "
+        f"in the rerun slot before the stale walk finished (got {rerun_calls})"
+    )
+    assert rerun_calls["c"] == 1
+
+
+def test_kickoff_compute_stale_thread_clears_inflight_slot_for_rerun():
+    """The stale worker's finally block must clear ``_inflight[key]`` so the
+    deferred rerun spawned from that finally can take ownership of the slot.
+    Otherwise the rerun's ``kickoff_compute`` would see a stale in-flight
+    entry and queue itself as another rerun, deadlocking progress."""
     cache = NewImagesCache(ttl_seconds=60)
     stale_started = threading.Event()
     stale_proceed = threading.Event()
@@ -304,39 +390,26 @@ def test_kickoff_compute_stale_thread_does_not_clear_inflight_for_fresh():
     assert stale_started.wait(timeout=2.0)
     cache.invalidate_workspaces(DB, [1])
 
-    fresh_started = threading.Event()
-    fresh_proceed = threading.Event()
+    rerun_done = threading.Event()
 
-    def fresh_compute():
-        fresh_started.set()
-        fresh_proceed.wait(timeout=5.0)
+    def rerun_compute():
+        rerun_done.set()
         return {"new_count": 2}
 
-    fresh_event = cache.kickoff_compute(DB, 1, fresh_compute)
-    assert fresh_started.wait(timeout=2.0)
-
-    # Let the stale thread finish first. Its finally block must not clear
-    # ``_inflight[key]`` because that slot now belongs to the fresh thread.
+    cache.kickoff_compute(DB, 1, rerun_compute)
     stale_proceed.set()
 
-    # The fresh thread is still running, so the in-flight slot must remain.
-    # Poll briefly to let the stale thread's finally complete.
-    import time as _t
-    deadline = _t.monotonic() + 1.0
-    while _t.monotonic() < deadline:
-        with cache._lock:
-            entry = cache._inflight.get((DB, 1))
-        if entry is not None and entry[0] is fresh_event:
-            break
-        _t.sleep(0.01)
-    with cache._lock:
-        entry = cache._inflight.get((DB, 1))
-    assert entry is not None and entry[0] is fresh_event, (
-        "stale thread's finally must not pop the fresh thread's in-flight slot"
+    assert rerun_done.wait(timeout=2.0), (
+        "rerun must run after stale thread finishes and frees the in-flight slot"
     )
 
-    fresh_proceed.set()
-    assert fresh_event.wait(timeout=2.0)
+    # Cache eventually reflects the rerun's result.
+    import time as _t
+    deadline = _t.monotonic() + 2.0
+    while _t.monotonic() < deadline:
+        if cache.get(DB, 1) == {"new_count": 2}:
+            break
+        _t.sleep(0.01)
     assert cache.get(DB, 1) == {"new_count": 2}
 
 
