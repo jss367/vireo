@@ -884,11 +884,15 @@ def _classify_photos(
                     pass
 
             for detection in photo_detections:
-                # Classifier-run gate: skip (detection, model, fingerprint)
-                # triples that have already produced results, unless the
-                # caller asked for a reclassify pass. For gated detections
-                # we still surface the cached top-1 prediction into
-                # raw_results so downstream grouping sees it.
+                # Classifier-run gate: if (detection, model, fingerprint)
+                # has a run key AND has cached prediction rows, surface the
+                # cached top-1 and skip inference. If the run key exists
+                # but no cached rows do (e.g. the prior pass stored
+                # `category == 'match'` which is intentionally not written,
+                # or transient ordering between record_classifier_run and
+                # _store_grouped_predictions), DON'T short-circuit —
+                # otherwise the photo is stranded until the user forces
+                # --reclassify. Fall through to re-classify instead.
                 if not reclassify:
                     run_keys = db.get_classifier_run_keys(detection["id"])
                     if (model_name, fp) in run_keys:
@@ -923,7 +927,9 @@ def _classify_photos(
                                 "alternatives": [],
                                 "_existing": True,
                             })
-                        continue
+                            continue
+                        # Run key without cached rows → fall through to
+                        # classify this detection.
 
                 img, det_folder_path, det_image_path = _prepare_image(
                     photo, folders, detection, vireo_dir=vireo_dir
@@ -1017,7 +1023,9 @@ def _classify_photos(
                             "alternatives": [],
                             "_existing": True,
                         })
-                    continue
+                        continue
+                    # Run key without cached rows → fall through to
+                    # re-classify this full-image detection.
             img, folder_path, image_path = _prepare_image(photo, folders, None, vireo_dir=vireo_dir)
             if img is None:
                 failed += 1

@@ -1915,7 +1915,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params):
                                         "taxonomy": None,
                                         "_existing": True,
                                     })
-                                continue
+                                    continue
+                                # Run key with no cached rows (e.g.
+                                # prior pass stored `category == 'match'`
+                                # so the prediction was intentionally not
+                                # written). Fall through to re-classify
+                                # instead of stranding the detection.
 
                         img, folder_path, image_path = _prepare_image(
                             photo, folders, primary_det,

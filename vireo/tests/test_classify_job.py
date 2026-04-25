@@ -623,6 +623,72 @@ def test_detect_batch_does_not_cache_failed_detector_runs(tmp_path, monkeypatch)
     assert call_count["n"] == 2, "failed photos must be retried on next pass"
 
 
+def test_classify_photos_reclassifies_when_gate_has_no_cached_rows(tmp_path):
+    """If classifier_runs has a (model, fp) key but get_predictions_for_detection
+    returns nothing (e.g. a prior pass stored `category == 'match'` which
+    is intentionally not written, or transient ordering between the run
+    record and _store_grouped_predictions), the detection must fall
+    through to classification — not short-circuit forever.
+    """
+    from unittest.mock import MagicMock
+
+    from classify_job import _classify_photos
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    photos = [
+        {"id": 1, "filename": "bird.jpg", "folder_id": 10,
+         "timestamp": "2024-01-15T10:00:00"},
+    ]
+    folders = {10: str(tmp_path)}
+
+    mock_clf = MagicMock()
+    mock_clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Robin", "score": 0.9}], None),
+    ]
+    mock_db = MagicMock()
+    # Gate fires (run key present) but no cached prediction rows.
+    mock_db.get_classifier_run_keys.return_value = {("BioCLIP", "fp-x")}
+    mock_db.get_predictions_for_detection.return_value = []
+    mock_db.get_photo_embedding.return_value = None
+
+    # Need a real image on disk so _prepare_image succeeds.
+    import os
+    img_path = os.path.join(str(tmp_path), "bird.jpg")
+    Image.new("RGB", (400, 400), color="green").save(img_path)
+
+    detection_map = {
+        1: [{"id": 101, "box_x": 0.1, "box_y": 0.1,
+             "box_w": 0.5, "box_h": 0.5, "confidence": 0.9,
+             "category": "animal"}],
+    }
+
+    _classify_photos(
+        photos=photos,
+        folders=folders,
+        detection_map=detection_map,
+        existing_preds=set(),
+        clf=mock_clf,
+        model_type="bioclip",
+        model_name="BioCLIP",
+        runner=runner,
+        job=job,
+        db=mock_db,
+        labels_fingerprint="fp-x",
+    )
+
+    # The classifier must have actually been invoked — if the gate
+    # short-circuited on the empty cached result, this assertion fails.
+    assert (
+        mock_clf.classify_batch_with_embedding.called
+        or mock_clf.classify_with_embedding.called
+    ), (
+        "Gate fired with no cached rows and short-circuited classification; "
+        "the detection is stranded until --reclassify."
+    )
+
+
 def test_reclassify_preserves_cache_on_model_load_failure(tmp_path, monkeypatch):
     """If the classifier fails to load, a reclassify must NOT have already
     purged cached predictions/detections — otherwise weight-corruption
