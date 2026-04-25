@@ -8056,7 +8056,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Get predictions for this photo (through detections JOIN).  Per-
         # workspace review state (status, group_id, individual, vote counts)
         # is left-joined from prediction_review; absent rows are 'pending'.
+        #
+        # Apply the same workspace-effective detector_confidence floor used
+        # by `db.get_detections` above so result["predictions"] stays in
+        # sync with result["detections"]. Otherwise raising the threshold
+        # leaves stale species rows for detections the UI is meant to hide.
+        # Also pin to the most recent labels_fingerprint per
+        # (detection, classifier_model) so a workspace that rotated label
+        # sets doesn't see a debug payload mixing stale and current labels.
+        import config as cfg
         ws = db._active_workspace_id
+        min_conf = db.get_effective_config(cfg.load()).get(
+            "detector_confidence", 0.2
+        )
         preds = db.conn.execute(
             """SELECT pr.species, pr.confidence, pr.classifier_model AS model,
                       pr.category,
@@ -8071,8 +8083,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                LEFT JOIN prediction_review pr_rev
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.photo_id = ?
+                 AND d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 )
                ORDER BY pr.confidence DESC""",
-            (ws, photo_id),
+            (ws, photo_id, min_conf),
         ).fetchall()
         result["predictions"] = [dict(p) for p in preds]
 
