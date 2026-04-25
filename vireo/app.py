@@ -6788,26 +6788,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         distance_threshold = request.args.get("threshold", 0.4, type=float)
 
+        # Cluster within a single classifier model. A workspace whose
+        # detections were classified under both BioCLIP-2 and BioCLIP-3
+        # would otherwise emit one prediction row per model, double-count
+        # the photo, and cluster vectors from incompatible model spaces.
+        from models import get_active_model
+        active_model = get_active_model()
+        if not active_model or active_model.get("model_type", "bioclip") == "timm":
+            return jsonify({
+                "species": species_name,
+                "clusters": [],
+                "total_photos": 0,
+            })
+        classifier_model = active_model["name"]
+
         # Find all photos with this species prediction in the active
         # workspace. Predictions are global but membership in the
         # workspace is expressed through workspace_folders.
         #
-        # Fingerprint filter: for each (detection, classifier_model) only
-        # surface rows from the most recent labels_fingerprint. Without
-        # this, a workspace that rotated label sets would cluster stale
-        # species rows alongside current ones, distorting cluster
-        # membership / counts / variant labels and duplicating the same
-        # photo embedding.
+        # Fingerprint filter: for the chosen classifier_model surface only
+        # rows from the most recent labels_fingerprint. Without this, a
+        # workspace that rotated label sets would cluster stale species
+        # rows alongside current ones, distorting cluster membership /
+        # counts / variant labels and duplicating the same photo embedding.
         rows = db.conn.execute(
-            """SELECT d.photo_id, p.embedding, p.filename, p.thumb_path,
+            """SELECT d.photo_id, pe.embedding, p.filename, p.thumb_path,
                       pr.confidence, pr.taxonomy_order, pr.taxonomy_family
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN photo_embeddings pe
+                 ON pe.photo_id = d.photo_id
+                AND pe.model = pr.classifier_model
+                AND pe.variant = ''
                WHERE pr.species = ?
-                 AND p.embedding IS NOT NULL
+                 AND pr.classifier_model = ?
                  AND d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -6816,7 +6833,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
                  )""",
-            (ws, species_name, min_conf),
+            (ws, species_name, classifier_model, min_conf),
         ).fetchall()
 
         if len(rows) < 2:
@@ -8249,7 +8266,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "reason": "model_no_text_search"})
 
         # Load embeddings for current model
-        emb_pairs = db.get_embeddings_by_model(model_name)
+        emb_pairs = db.get_photos_with_embedding(model_name)
         if not emb_pairs:
             return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
                             "reason": "no_embeddings"})
@@ -8307,22 +8324,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         limit = min(max(1, request.args.get("limit", 20, type=int)), 1000)
 
-        # Get the source photo's embedding
-        source = db.conn.execute(
-            "SELECT embedding FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone()
-        if not source or not source["embedding"]:
-            return json_error("No embedding for this photo — run classification first")
+        # Compare against the active classifier's embedding. The per-model
+        # cache means a photo classified under BioCLIP-2 cannot be compared
+        # to one classified under BioCLIP-3 — that mixing is exactly what
+        # Phase 1 of the storage philosophy refactor stops.
+        from models import get_active_model
+        active_model = get_active_model()
+        if not active_model:
+            return json_error("No active classifier configured")
+        model_name = active_model["name"]
+        if active_model.get("model_type", "bioclip") == "timm":
+            return json_error("Active classifier does not produce embeddings")
 
-        source_emb = np.frombuffer(source["embedding"], dtype=np.float32)
+        source_blob = db.get_photo_embedding(photo_id, model_name)
+        if not source_blob:
+            return json_error(
+                f"No {model_name} embedding for this photo — "
+                "run classification first"
+            )
+        source_emb = np.frombuffer(source_blob, dtype=np.float32)
 
-        # Load all embeddings (excluding source photo)
-        rows = db.conn.execute(
-            """SELECT p.id, p.embedding FROM photos p
-            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.embedding IS NOT NULL AND p.id != ? AND wf.workspace_id = ?""",
-            (photo_id, db._active_workspace_id),
-        ).fetchall()
+        # Load all workspace embeddings for the same model, then drop the
+        # source photo before stacking.
+        rows = [
+            (pid, blob)
+            for pid, blob in db.get_photos_with_embedding(model_name)
+            if pid != photo_id
+        ]
 
         if not rows:
             return jsonify({"similar": [], "total_compared": 0})
@@ -8330,9 +8358,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Compute cosine similarities (embeddings are already normalized)
         photo_ids = []
         embeddings = []
-        for row in rows:
-            photo_ids.append(row["id"])
-            embeddings.append(np.frombuffer(row["embedding"], dtype=np.float32))
+        for pid, blob in rows:
+            photo_ids.append(pid)
+            embeddings.append(np.frombuffer(blob, dtype=np.float32))
 
         emb_matrix = np.stack(embeddings)
         similarities = emb_matrix @ source_emb

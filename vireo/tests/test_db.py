@@ -1147,13 +1147,15 @@ def test_get_coverage_stats_counts_each_stage(tmp_path):
          'latitude': 10.0, 'longitude': 20.0, 'file_hash': 'h1',
          'working_copy_path': '/wc/1.jpg', 'mask_path': '/m/1.png',
          'subject_tenengrad': 1.5, 'bg_tenengrad': 0.2,
-         'eye_x': 0.5, 'embedding': b'e', 'burst_id': 'b1',
+         'eye_x': 0.5, 'burst_id': 'b1',
          'rating': 4, 'exif_data': '{}',
          'timestamp': '2024-01-01T00:00:00'},
         {'thumb_path': '/t/2.jpg', 'phash': 'def',
          'timestamp': '2024-02-01T00:00:00'},
         {},  # Nothing set
     ])
+    # Classifier embedding lives in photo_embeddings now, not on photos.
+    db.upsert_photo_embedding(pids[0], 'test', b'e')
     # Add a detection + prediction for the first photo only.
     det_ids = db.save_detections(pids[0], [
         {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
@@ -1542,6 +1544,12 @@ def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monke
     monkeypatch.setenv("HOME", str(tmp_path))
     import config as cfg
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "bioclip-2",
+        "model_str": "hf-hub:imageomics/bioclip-2",
+        "model_type": "bioclip", "downloaded": True,
+    })
     from app import create_app
 
     db_path = str(tmp_path / "test.db")
@@ -1556,10 +1564,9 @@ def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monke
                        file_size=100, file_mtime=1.0)
     import numpy as np
     emb = np.zeros(512, dtype=np.float32).tobytes()
-    db.conn.execute(
-        "UPDATE photos SET embedding=?, embedding_model='test' WHERE id=?",
-        (emb, pid),
-    )
+    # /clusters joins photo_embeddings on pr.classifier_model, so the cached
+    # embedding must be keyed on the same model the predictions below use.
+    db.upsert_photo_embedding(pid, "bioclip-2", emb)
     det_id = db.save_detections(pid, [
         {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}
     ], detector_model="MDV6")[0]
@@ -1588,6 +1595,78 @@ def test_species_clusters_endpoint_filters_to_active_fingerprint(tmp_path, monke
     # not twice (one per fingerprint row).
     assert data["total_photos"] == 1, (
         f"Expected one photo (deduped to current fingerprint), got "
+        f"{data['total_photos']}"
+    )
+
+
+def test_species_clusters_endpoint_filters_to_active_classifier_model(
+    tmp_path, monkeypatch,
+):
+    """/api/species/<name>/clusters must constrain predictions to a single
+    classifier model — otherwise a workspace whose detection has predictions
+    from two models (e.g. BioCLIP-2 and BioCLIP-3) clusters vectors from
+    two different model spaces and shows the same photo twice (one prediction
+    row per model).
+    """
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-3", "name": "bioclip-3",
+        "model_str": "hf-hub:imageomics/bioclip-3",
+        "model_type": "bioclip", "downloaded": True,
+    })
+    from app import create_app
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+    from db import Database
+    db = Database(db_path)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder("/p", name="p")
+    pid = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                       file_size=100, file_mtime=1.0)
+    import numpy as np
+    emb_old = np.zeros(512, dtype=np.float32).tobytes()
+    emb_new = np.ones(512, dtype=np.float32).tobytes()
+    # Same photo has embeddings under both models — exactly the state Phase 1
+    # is meant to support — but /clusters must pick one.
+    db.upsert_photo_embedding(pid, "bioclip-2", emb_old)
+    db.upsert_photo_embedding(pid, "bioclip-3", emb_new)
+    det_id = db.save_detections(pid, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+         "confidence": 0.9, "category": "animal"}
+    ], detector_model="MDV6")[0]
+    # One prediction row per model on the same detection + species.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.95, '2026-01-01')",
+        (det_id,),
+    )
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-3', 'fp-new', 'Robin', 0.80, '2026-04-24')",
+        (det_id,),
+    )
+    db.conn.commit()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir,
+                     api_token="t")
+    client = app.test_client()
+    resp = client.get("/api/species/Robin/clusters")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # The photo must appear exactly once (filtered to the active classifier
+    # model), not twice (one per classifier model row).
+    assert data["total_photos"] == 1, (
+        f"Expected one photo (filtered to active classifier model), got "
         f"{data['total_photos']}"
     )
 
@@ -2089,16 +2168,48 @@ def test_get_prediction_for_photo(tmp_path):
     assert db.get_prediction_for_photo(pids[0], 'other') is None
 
 
-def test_get_and_store_photo_embedding(tmp_path):
-    """Stores and retrieves a photo embedding."""
+def test_get_and_upsert_photo_embedding(tmp_path):
+    """Stores and retrieves a photo embedding keyed on model."""
     db, pids = _make_workspace_with_photos(tmp_path, [{}])
 
-    assert db.get_photo_embedding(pids[0]) is None
+    assert db.get_photo_embedding(pids[0], "BioCLIP") is None
 
-    db.store_photo_embedding(pids[0], b'\x01\x02\x03\x04')
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02\x03\x04')
 
-    result = db.get_photo_embedding(pids[0])
+    result = db.get_photo_embedding(pids[0], "BioCLIP")
     assert result == b'\x01\x02\x03\x04'
+
+
+def test_upsert_photo_embedding_replaces_same_model(tmp_path):
+    """Upsert with the same (model, variant) overwrites the previous blob."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01\x02')
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x03\x04')
+
+    assert db.get_photo_embedding(pids[0], "BioCLIP") == b'\x03\x04'
+
+
+def test_photo_embeddings_per_model_isolation(tmp_path):
+    """Two models for the same photo coexist; neither overwrites the other."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\x01')
+    db.upsert_photo_embedding(pids[0], "BioCLIP-2", b'\x02')
+
+    assert db.get_photo_embedding(pids[0], "BioCLIP") == b'\x01'
+    assert db.get_photo_embedding(pids[0], "BioCLIP-2") == b'\x02'
+
+
+def test_photo_embeddings_variant_isolation(tmp_path):
+    """Different variants for the same model coexist."""
+    db, pids = _make_workspace_with_photos(tmp_path, [{}])
+
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xaa', variant='v1')
+    db.upsert_photo_embedding(pids[0], "BioCLIP", b'\xbb', variant='v2')
+
+    assert db.get_photo_embedding(pids[0], "BioCLIP", variant='v1') == b'\xaa'
+    assert db.get_photo_embedding(pids[0], "BioCLIP", variant='v2') == b'\xbb'
 
 
 def test_update_prediction_group_info(tmp_path):
@@ -2605,51 +2716,110 @@ def test_photo_keywords_includes_type(tmp_path):
     assert keywords[0]['type'] == 'general'
 
 
-def test_embedding_model_column_exists(tmp_path):
-    """The photos table has an embedding_model column."""
+def test_photo_embeddings_table_exists(tmp_path):
+    """photo_embeddings table is created on init with the expected columns."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    db.conn.execute("SELECT embedding_model FROM photos LIMIT 0")
+    cols = {row[1] for row in db.conn.execute("PRAGMA table_info(photo_embeddings)")}
+    assert {"photo_id", "model", "variant", "embedding", "created_at"} <= cols
 
 
-def test_store_photo_embedding_with_model(tmp_path):
-    """store_photo_embedding saves model name alongside the embedding."""
+def test_photos_embedding_columns_dropped(tmp_path):
+    """photos.embedding and photos.embedding_model are no longer present."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cols = {row[1] for row in db.conn.execute("PRAGMA table_info(photos)")}
+    assert "embedding" not in cols
+    assert "embedding_model" not in cols
+
+
+def test_get_photos_with_embedding_filters_by_model(tmp_path):
+    """get_photos_with_embedding returns only workspace photos with matching model."""
     import numpy as np
-    from db import Database
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.conn.execute("INSERT INTO folders (path, name) VALUES ('/tmp', 'tmp')").lastrowid
-    pid = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)).lastrowid
-    db.conn.commit()
-    emb = np.random.randn(512).astype(np.float32)
-    db.store_photo_embedding(pid, emb.tobytes(), model="BioCLIP")
-    row = db.conn.execute("SELECT embedding_model FROM photos WHERE id = ?", (pid,)).fetchone()
-    assert row["embedding_model"] == "BioCLIP"
+    db, pids = _make_workspace_with_photos(tmp_path, [{}, {}, {}])
+    emb1 = np.random.randn(512).astype(np.float32).tobytes()
+    emb2 = np.random.randn(512).astype(np.float32).tobytes()
+    db.upsert_photo_embedding(pids[0], "BioCLIP", emb1)
+    db.upsert_photo_embedding(pids[1], "BioCLIP-2", emb2)
+    # pids[2] has no embedding
 
-
-def test_get_embeddings_by_model(tmp_path):
-    """get_embeddings_by_model returns only photos with matching model."""
-    import numpy as np
-    from db import Database
-    db = Database(str(tmp_path / "test.db"))
-    fid = db.conn.execute("INSERT INTO folders (path, name) VALUES ('/tmp', 'tmp')").lastrowid
-    # Link folder to workspace
-    db.conn.execute(
-        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
-        (db._active_workspace_id, fid),
-    )
-    emb1 = np.random.randn(512).astype(np.float32)
-    emb2 = np.random.randn(512).astype(np.float32)
-    p1 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)).lastrowid
-    p2 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'b.jpg')", (fid,)).lastrowid
-    p3 = db.conn.execute("INSERT INTO photos (folder_id, filename) VALUES (?, 'c.jpg')", (fid,)).lastrowid
-    db.store_photo_embedding(p1, emb1.tobytes(), model="BioCLIP")
-    db.store_photo_embedding(p2, emb2.tobytes(), model="BioCLIP-2")
-    # p3 has no embedding
-    db.conn.commit()
-
-    results = db.get_embeddings_by_model("BioCLIP")
+    results = db.get_photos_with_embedding("BioCLIP")
     assert len(results) == 1
-    assert results[0][0] == p1
+    assert results[0][0] == pids[0]
+    assert results[0][1] == emb1
+
+
+def test_get_photos_with_embedding_excludes_other_workspaces(tmp_path):
+    """Only photos in the active workspace are returned."""
+    import numpy as np
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_a = db.ensure_default_workspace()
+    ws_b = db.create_workspace("Other")
+    # add_folder auto-links to the active workspace, so switch before each.
+    db.set_active_workspace(ws_a)
+    fid_a = db.add_folder('/a', name='a')
+    db.set_active_workspace(ws_b)
+    fid_b = db.add_folder('/b', name='b')
+    pid_a = db.add_photo(folder_id=fid_a, filename='a.jpg', extension='.jpg',
+                         file_size=1, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid_b, filename='b.jpg', extension='.jpg',
+                         file_size=1, file_mtime=1.0)
+    emb = np.zeros(8, dtype=np.float32).tobytes()
+    db.upsert_photo_embedding(pid_a, "BioCLIP", emb)
+    db.upsert_photo_embedding(pid_b, "BioCLIP", emb)
+
+    db.set_active_workspace(ws_a)
+    results_a = db.get_photos_with_embedding("BioCLIP")
+    assert [r[0] for r in results_a] == [pid_a]
+
+    db.set_active_workspace(ws_b)
+    results_b = db.get_photos_with_embedding("BioCLIP")
+    assert [r[0] for r in results_b] == [pid_b]
+
+
+def test_migration_from_legacy_embedding_columns(tmp_path):
+    """Legacy photos.(embedding, embedding_model) data migrates into photo_embeddings on open."""
+    from db import Database
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    fid = db.add_folder('/photos', name='photos')
+    p_with_model = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                                file_size=1, file_mtime=1.0)
+    p_no_model = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                              file_size=1, file_mtime=1.0)
+
+    # Simulate a pre-Phase-1 database by re-adding the legacy columns and
+    # populating them. Closing+reopening triggers the migration.
+    db.conn.execute("ALTER TABLE photos ADD COLUMN embedding BLOB")
+    db.conn.execute("ALTER TABLE photos ADD COLUMN embedding_model TEXT")
+    db.conn.execute(
+        "UPDATE photos SET embedding=?, embedding_model=? WHERE id=?",
+        (b'\x01\x02\x03', 'BioCLIP', p_with_model),
+    )
+    db.conn.execute(
+        "UPDATE photos SET embedding=?, embedding_model=NULL WHERE id=?",
+        (b'\x04\x05\x06', p_no_model),
+    )
+    # Clear any embeddings already migrated by Database.__init__.
+    db.conn.execute("DELETE FROM photo_embeddings")
+    db.conn.commit()
+    db.conn.close()
+
+    db2 = Database(db_path)
+
+    cols = {row[1] for row in db2.conn.execute("PRAGMA table_info(photos)")}
+    assert "embedding" not in cols
+    assert "embedding_model" not in cols
+
+    rows = db2.conn.execute(
+        "SELECT photo_id, model, embedding FROM photo_embeddings ORDER BY photo_id"
+    ).fetchall()
+    # Only the row with a non-NULL model is migrated; the other is dropped.
+    assert len(rows) == 1
+    assert rows[0]["photo_id"] == p_with_model
+    assert rows[0]["model"] == "BioCLIP"
+    assert rows[0]["embedding"] == b'\x01\x02\x03'
 
 
 # -- Edit history --

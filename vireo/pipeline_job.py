@@ -1942,7 +1942,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     embedding = None
                                     if model_type != "timm":
                                         emb_blob = thread_db.get_photo_embedding(
-                                            photo["id"]
+                                            photo["id"], model_name,
                                         )
                                         if emb_blob:
                                             import numpy as np
