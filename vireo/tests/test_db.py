@@ -5408,6 +5408,70 @@ def test_migration_dedupes_detections_and_repoints_predictions(tmp_path):
     assert "workspace_id" not in cols
 
 
+def test_migration_handles_loser_vs_loser_collision(tmp_path):
+    """When the canonical detection has NO prediction yet but two
+    *non-canonical* duplicate detections both have the same
+    (model, species), the upcoming remap would collapse both onto the
+    same (canonical_id, model, species) tuple and trip the legacy
+    UNIQUE. The pre-remap dedup must keep one loser as the survivor.
+    """
+    import sqlite3
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT);
+        CREATE TABLE photos (id INTEGER PRIMARY KEY, folder_id INTEGER,
+                             filename TEXT, timestamp TEXT, rating INTEGER,
+                             UNIQUE(folder_id, filename));
+        CREATE TABLE workspaces (id INTEGER PRIMARY KEY, name TEXT UNIQUE,
+                                 config_overrides TEXT, ui_state TEXT,
+                                 last_opened_at TEXT);
+        CREATE TABLE detections (
+            id INTEGER PRIMARY KEY, photo_id INTEGER, workspace_id INTEGER,
+            box_x REAL, box_y REAL, box_w REAL, box_h REAL,
+            detector_confidence REAL, category TEXT, detector_model TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY, detection_id INTEGER, species TEXT,
+            confidence REAL, model TEXT, status TEXT DEFAULT 'pending',
+            individual TEXT, group_id TEXT, created_at TEXT,
+            UNIQUE(detection_id, model, species)
+        );
+        INSERT INTO folders VALUES (1, '/p');
+        INSERT INTO photos (id, folder_id, filename) VALUES (10, 1, 'a.jpg');
+        INSERT INTO workspaces (id, name) VALUES (1, 'A'), (2, 'B'), (3, 'C');
+        -- Three detections on the same box, three workspaces.
+        -- d1 will be the canonical (lowest id). Critically, d1 has NO
+        -- prediction; predictions exist only on d2 and d3.
+        INSERT INTO detections (id, photo_id, workspace_id, box_x, box_y, box_w, box_h,
+                                detector_confidence, category, detector_model, created_at)
+          VALUES (100, 10, 1, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't1'),
+                 (200, 10, 2, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't2'),
+                 (300, 10, 3, 0.1, 0.1, 0.5, 0.5, 0.9, 'animal', 'megadetector-v6', 't3');
+        -- Two non-canonical losers, same (model, species), no canonical
+        -- prediction. The naive remap would put both on (100, 'bioclip-2',
+        -- 'Robin') and trip UNIQUE.
+        INSERT INTO predictions (id, detection_id, species, model, status) VALUES
+            (2000, 200, 'Robin', 'bioclip-2', 'approved'),
+            (3000, 300, 'Robin', 'bioclip-2', 'pending');
+    """)
+    conn.commit()
+    conn.close()
+
+    # Init must not raise IntegrityError.
+    from db import Database
+    db = Database(db_path)
+    rows = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Robin' "
+        "AND classifier_model='bioclip-2'"
+    ).fetchall()
+    assert len(rows) == 1, (
+        f"Expected exactly one Robin prediction after loser-vs-loser "
+        f"dedup; got {len(rows)}"
+    )
+
+
 def test_migration_handles_prediction_collision_on_repoint(tmp_path):
     """When two workspaces had the SAME (detection, model, species) prediction
     on duplicate detection rows (one per workspace), repointing both to the

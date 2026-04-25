@@ -868,9 +868,15 @@ class Database:
                 "PRAGMA table_info(predictions)"
             ).fetchall()}
             if "model" in legacy_pred_cols:
+                # Carry canonical_det_id alongside loser/canonical_pred_id
+                # so the loser-vs-loser dedup below can group by the
+                # eventual remap target without re-joining detections.
                 self.conn.execute("""
                     CREATE TEMP TABLE predictions_to_dedup AS
                     SELECT p.id AS loser_id,
+                           p.model AS loser_model,
+                           p.species AS loser_species,
+                           dc.canonical_id AS canonical_det_id,
                            (SELECT p2.id FROM predictions p2
                             WHERE p2.detection_id = dc.canonical_id
                               AND COALESCE(p2.model, '') = COALESCE(p.model, '')
@@ -908,6 +914,56 @@ class Database:
                     WHERE id IN (SELECT loser_id FROM predictions_to_dedup
                                  WHERE canonical_pred_id IS NOT NULL)
                 """)
+                # Loser-vs-loser dedup: when the canonical detection has NO
+                # prediction yet (canonical_pred_id IS NULL) but multiple
+                # loser detections share the same (canonical_det_id, model,
+                # species), the upcoming remap would land all of them on
+                # the same (detection_id, model, species) tuple and trip
+                # legacy UNIQUE. Keep the lowest-id loser per group;
+                # delete the rest. Move their review rows to the survivor
+                # first so per-workspace review state is preserved.
+                self.conn.execute("""
+                    CREATE TEMP TABLE loser_survivors AS
+                    SELECT MIN(loser_id) AS survivor_id,
+                           canonical_det_id,
+                           COALESCE(loser_model, '') AS m_key,
+                           COALESCE(loser_species, '') AS s_key
+                    FROM predictions_to_dedup
+                    WHERE canonical_pred_id IS NULL
+                    GROUP BY canonical_det_id,
+                             COALESCE(loser_model, ''),
+                             COALESCE(loser_species, '')
+                """)
+                self.conn.execute("""
+                    INSERT OR IGNORE INTO prediction_review
+                        (prediction_id, workspace_id, status, reviewed_at,
+                         individual, group_id, vote_count, total_votes)
+                    SELECT ls.survivor_id, pr.workspace_id, pr.status,
+                           pr.reviewed_at, pr.individual, pr.group_id,
+                           pr.vote_count, pr.total_votes
+                    FROM prediction_review pr
+                    JOIN predictions_to_dedup ptd ON ptd.loser_id = pr.prediction_id
+                    JOIN loser_survivors ls
+                      ON ls.canonical_det_id = ptd.canonical_det_id
+                     AND ls.m_key = COALESCE(ptd.loser_model, '')
+                     AND ls.s_key = COALESCE(ptd.loser_species, '')
+                    WHERE ptd.canonical_pred_id IS NULL
+                      AND ptd.loser_id <> ls.survivor_id
+                """)
+                self.conn.execute("""
+                    DELETE FROM predictions
+                    WHERE id IN (
+                        SELECT ptd.loser_id
+                        FROM predictions_to_dedup ptd
+                        JOIN loser_survivors ls
+                          ON ls.canonical_det_id = ptd.canonical_det_id
+                         AND ls.m_key = COALESCE(ptd.loser_model, '')
+                         AND ls.s_key = COALESCE(ptd.loser_species, '')
+                        WHERE ptd.canonical_pred_id IS NULL
+                          AND ptd.loser_id <> ls.survivor_id
+                    )
+                """)
+                self.conn.execute("DROP TABLE loser_survivors")
                 self.conn.execute("DROP TABLE predictions_to_dedup")
             # Re-point predictions that reference a non-canonical duplicate.
             self.conn.execute("""
