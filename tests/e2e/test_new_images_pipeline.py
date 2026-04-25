@@ -15,7 +15,6 @@ temp folder.
 import os
 import sys
 import threading
-import time
 
 import pytest
 from PIL import Image
@@ -133,22 +132,20 @@ def test_new_images_banner_drives_pipeline(fresh_server, page):
     expect(start_btn).to_be_enabled(timeout=5000)
     start_btn.click()
 
-    # --- Step 6: wait for the job to finish. The snapshot pipeline path runs
-    # scan-only when all the optional stages are skipped, which is fast.
-    # Poll the DB directly rather than scraping the UI.
-    deadline = time.time() + 30
-    photo_row = None
-    while time.time() < deadline:
-        photo_row = db.conn.execute(
-            "SELECT id, filename FROM photos WHERE filename = ?",
-            ("IMG_0001.JPG",),
-        ).fetchone()
-        if photo_row is not None:
-            break
-        time.sleep(0.25)
-    assert photo_row is not None, (
-        "Pipeline never ingested IMG_0001.JPG within 30s"
-    )
+    # --- Step 6: wait for the pipeline to finish. On success the SSE
+    # 'completed' handler in pipeline.html does
+    # `window.location.href = '/pipeline/review'`, so wait for that
+    # redirect rather than polling the DB. Polling and then immediately
+    # calling page.goto('/browse') races against the JS redirect and
+    # produces net::ERR_ABORTED in Chromium.
+    page.wait_for_url("**/pipeline/review", timeout=30000)
+
+    # Sanity-check that the scan actually ingested the photo.
+    photo_row = db.conn.execute(
+        "SELECT id, filename FROM photos WHERE filename = ?",
+        ("IMG_0001.JPG",),
+    ).fetchone()
+    assert photo_row is not None, "Pipeline did not ingest IMG_0001.JPG"
 
     # --- Step 7: navigate to /browse and confirm the photo is visible. ---
     page.goto(f"{url}/browse")
