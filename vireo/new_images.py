@@ -196,6 +196,16 @@ class NewImagesCache:
                 # fresh recompute via the 30s backoff window in
                 # ``kickoff_compute``.
                 self._errors.pop(key, None)
+                # Drop the in-flight handle so the next ``kickoff_compute``
+                # starts a fresh worker instead of waiting on the obsolete
+                # walk. The stale worker keeps running but its ``set`` call
+                # is dropped by the per-key generation guard, and any error
+                # it raises is dropped by the worker's own gen check. Without
+                # this, a long walk that's mid-flight when a folder/workspace
+                # change fires would force
+                # ``/api/workspaces/active/new-images`` to keep returning
+                # ``pending`` for the full duration of the stale walk.
+                self._inflight.pop(key, None)
                 self._generations[key] = self._generations.get(key, 0) + 1
 
     def get_recent_error(self, db_path, workspace_id):
@@ -275,7 +285,12 @@ class NewImagesCache:
                                              time.monotonic())
             finally:
                 with self._lock:
-                    self._inflight.pop(key, None)
+                    # Identity check: ``invalidate_workspaces`` may have
+                    # cleared our handle and a fresh worker may have
+                    # registered its own event under the same key. Only
+                    # pop our own entry so we don't trample the new worker.
+                    if self._inflight.get(key) is event:
+                        del self._inflight[key]
                 event.set()
 
         threading.Thread(

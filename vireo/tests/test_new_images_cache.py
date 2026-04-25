@@ -205,6 +205,56 @@ def test_invalidate_workspaces_clears_recent_error():
     assert cache.get(DB, 1) == {"new_count": 4}
 
 
+def test_invalidate_workspaces_starts_fresh_compute_after_in_flight_walk():
+    """A long walk that's still running when ``invalidate_workspaces`` fires
+    must not block a fresh recompute. The next ``kickoff_compute`` should
+    start a new worker rather than handing back the in-flight event for the
+    obsolete walk — otherwise ``/api/workspaces/active/new-images`` keeps
+    waiting on stale work for the full duration of the original walk and
+    the UI stays in pending while a folder/workspace change is unreflected.
+    """
+    import threading
+
+    cache = NewImagesCache(ttl_seconds=60)
+
+    release_stale = threading.Event()
+    stale_started = threading.Event()
+    fresh_call_count = {"n": 0}
+
+    def stale_compute():
+        stale_started.set()
+        release_stale.wait(timeout=5)
+        return {"new_count": 999}
+
+    def fresh_compute():
+        fresh_call_count["n"] += 1
+        return {"new_count": 4}
+
+    try:
+        # Kick off a long-running walk and wait until the worker has actually
+        # entered ``stale_compute`` so the in-flight entry exists.
+        cache.kickoff_compute(DB, 1, stale_compute)
+        assert stale_started.wait(timeout=2.0), "stale worker never started"
+
+        # Folder/workspace state changes mid-walk.
+        cache.invalidate_workspaces(DB, [1])
+
+        # The next request must run a fresh compute, not silently wait on
+        # the obsolete in-flight event for the rest of the stale walk.
+        fresh_event = cache.kickoff_compute(DB, 1, fresh_compute)
+        assert fresh_event.wait(timeout=2.0), (
+            "fresh compute after invalidation never finished"
+        )
+        assert fresh_call_count["n"] == 1, (
+            f"expected fresh_compute to run after invalidation; "
+            f"called {fresh_call_count['n']} times"
+        )
+        assert cache.get(DB, 1) == {"new_count": 4}
+    finally:
+        # Let the stale worker finish before the test exits.
+        release_stale.set()
+
+
 def test_invalidate_workspaces_clears_error_only_for_targeted_keys():
     """Invalidation is scoped: a failure on workspace 2 must survive when
     workspace 1's cache is invalidated."""
