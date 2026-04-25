@@ -2263,10 +2263,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         if ws_id is None:
             return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
-        payload = db.get_new_images_for_workspace(ws_id)
-        payload = dict(payload)
-        payload["workspace_id"] = ws_id
-        return jsonify(payload)
+
+        cache = db._new_images_cache
+        db_path = db._db_path
+        cached = cache.get(db_path, ws_id)
+        if cached is not None:
+            payload = dict(cached)
+            payload["workspace_id"] = ws_id
+            return jsonify(payload)
+
+        # Cache cold: run the filesystem walk in a background thread so the
+        # navbar's poll doesn't tie up a Flask worker for seconds while
+        # os.walk grinds through a large library. Wait briefly so small
+        # libraries (and the test suite's tmp_path filesystems) still
+        # observe a real count synchronously; longer walks return
+        # ``pending: true`` and the front-end re-polls.
+        from db import Database
+        from new_images import count_new_images_for_workspace
+
+        def compute():
+            wdb = Database(db_path)
+            wdb.set_active_workspace(ws_id)
+            return count_new_images_for_workspace(wdb, ws_id)
+
+        event = cache.kickoff_compute(db_path, ws_id, compute)
+        if event.wait(timeout=0.5):
+            cached = cache.get(db_path, ws_id)
+            if cached is not None:
+                payload = dict(cached)
+                payload["workspace_id"] = ws_id
+                return jsonify(payload)
+
+        return jsonify({
+            "workspace_id": ws_id,
+            "new_count": None,
+            "per_root": [],
+            "sample": [],
+            "pending": True,
+        })
 
     @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
     def api_workspace_new_images_snapshot_create():

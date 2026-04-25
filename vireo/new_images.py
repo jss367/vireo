@@ -1,10 +1,13 @@
 """Detect image files present on disk but not yet ingested into a workspace."""
+import logging
 import os
 import threading
 import time
 from pathlib import Path
 
 from image_loader import SUPPORTED_EXTENSIONS
+
+log = logging.getLogger(__name__)
 
 
 def _known_paths_for_workspace(db, workspace_id):
@@ -133,6 +136,9 @@ class NewImagesCache:
         self._entries = {}
         # key=(db_path, workspace_id) -> int
         self._generations = {}
+        # key=(db_path, workspace_id) -> Event signalling the in-flight
+        # background compute has finished (success or failure).
+        self._inflight = {}
         self._lock = threading.Lock()
 
     def get(self, db_path, workspace_id):
@@ -177,10 +183,53 @@ class NewImagesCache:
                 self._entries.pop(key, None)
                 self._generations[key] = self._generations.get(key, 0) + 1
 
+    def kickoff_compute(self, db_path, workspace_id, compute_fn):
+        """Ensure a background compute is running for ``(db_path, workspace_id)``.
+
+        If no compute is in flight, spawn a daemon thread that calls
+        ``compute_fn()`` and stores the result in the cache. If one is already
+        in flight, the existing thread is reused. Either way, returns an
+        ``Event`` that fires when the in-flight compute finishes (success or
+        failure) so the caller can ``Event.wait(timeout=...)`` to optionally
+        block briefly for a fresh result.
+
+        The generation snapshot is taken inside the lock at kickoff time so a
+        concurrent invalidation can still drop the stale write — same race
+        protection as :meth:`get_new_images_for_workspace`.
+        """
+        key = (db_path, workspace_id)
+        with self._lock:
+            existing = self._inflight.get(key)
+            if existing is not None:
+                return existing
+            event = threading.Event()
+            self._inflight[key] = event
+            generation = self._generations.get(key, 0)
+
+        def worker():
+            try:
+                result = compute_fn()
+                self.set(db_path, workspace_id, result, generation=generation)
+            except Exception:
+                log.exception(
+                    "new-images background compute failed for %s ws=%s",
+                    db_path, workspace_id,
+                )
+            finally:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                event.set()
+
+        threading.Thread(
+            target=worker, daemon=True, name="new-images-compute",
+        ).start()
+        return event
+
     def clear(self):
         with self._lock:
             self._entries.clear()
             self._generations.clear()
+            self._inflight.clear()
 
 
 _shared_cache = NewImagesCache()

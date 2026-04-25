@@ -1102,6 +1102,12 @@ async function probeNewImagesCard() {
     var r = await fetch('/api/workspaces/active/new-images');
     if (!r.ok) return;
     var data = await r.json();
+    // Cache cold: backend returned pending while a background walk runs.
+    // Re-probe shortly so the card appears once the count is ready.
+    if (data && data.pending) {
+      setTimeout(probeNewImagesCard, 3000);
+      return;
+    }
     if ((data.new_count || 0) > 0) {
       var folders = (data.per_root || [])
         .filter(function(pr) { return (pr.new_count || 0) > 0; })
