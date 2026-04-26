@@ -3858,7 +3858,7 @@ class Database:
                    WHERE k.parent_id IS NOT NULL
                )
                SELECT k.id, k.name, k.parent_id, k.type, k.taxon_id,
-                      k.latitude, k.longitude,
+                      k.latitude, k.longitude, k.place_id,
                       t.name AS taxon_name, t.common_name AS taxon_common_name,
                       COUNT(ws_photo.photo_id) AS photo_count
                FROM keywords k
