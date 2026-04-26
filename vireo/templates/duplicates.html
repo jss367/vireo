@@ -554,7 +554,11 @@
       return;
     }
     if (!confirm('Move ' + ids.length + ' file' + (ids.length === 1 ? '' : 's') +
-                 ' to Trash? The DB rows stay rejected; only the on-disk files move.')) {
+                 ' to Trash and remove their entries from Vireo?\n\n' +
+                 'Files go to your OS Trash (recoverable from there). The ' +
+                 'corresponding loser records (and their thumbnails/previews) ' +
+                 'are deleted from Vireo. Winners keep all merged keywords ' +
+                 'and ratings.')) {
       return;
     }
 
