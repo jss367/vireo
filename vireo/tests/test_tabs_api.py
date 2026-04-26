@@ -66,3 +66,25 @@ def test_visiting_logs_url_auto_opens_tab(app_and_db):
     r = client.get("/logs")
     assert r.status_code == 200
     assert "logs" in db.get_open_tabs()
+
+
+import pytest
+
+
+@pytest.mark.parametrize("nav_id,url", [
+    ("settings", "/settings"),
+    ("workspace", "/workspace"),
+    ("lightroom", "/lightroom"),
+    ("shortcuts", "/shortcuts"),
+    ("keywords", "/keywords"),
+    ("duplicates", "/duplicates"),
+    ("logs", "/logs"),
+])
+def test_visiting_openable_url_auto_opens_tab(app_and_db, nav_id, url):
+    app, db = app_and_db
+    client = app.test_client()
+    client.post("/api/workspace/tabs/close", json={"nav_id": nav_id})
+    assert nav_id not in db.get_open_tabs()
+    r = client.get(url)
+    assert r.status_code == 200
+    assert nav_id in db.get_open_tabs()
