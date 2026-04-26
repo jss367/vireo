@@ -1,10 +1,13 @@
 """Detect image files present on disk but not yet ingested into a workspace."""
+import logging
 import os
 import threading
 import time
 from pathlib import Path
 
 from image_loader import SUPPORTED_EXTENSIONS
+
+log = logging.getLogger(__name__)
 
 
 def _known_paths_for_workspace(db, workspace_id):
@@ -127,12 +130,34 @@ class NewImagesCache:
     silently dropped instead of repopulating the cache.
     """
 
+    # Persistent compute failures (unreachable volume, DB error) suppress
+    # retries for this long so we don't hammer the failing resource on every
+    # navbar poll. Short enough that natural recovery is observable; long
+    # enough that ten open tabs can't hot-loop the disk.
+    ERROR_BACKOFF_SECONDS = 30
+
     def __init__(self, ttl_seconds=300):
         self._ttl = ttl_seconds
         # key=(db_path, workspace_id) -> (result_dict, set_at_monotonic)
         self._entries = {}
         # key=(db_path, workspace_id) -> int
         self._generations = {}
+        # key=(db_path, workspace_id) -> (Event, generation) for the in-flight
+        # background compute. Only one compute per key runs at a time; stale-
+        # generation kickoffs queue a rerun token rather than spawning a
+        # parallel walk (see ``_rerun_pending``).
+        self._inflight = {}
+        # key=(db_path, workspace_id) -> compute_fn for a deferred rerun. Set
+        # when a kickoff arrives during an in-flight stale-generation compute:
+        # rather than fan out a second concurrent ``os.walk`` (a real risk on
+        # the scan path where ``invalidate_workspaces`` fires per discovered
+        # folder), we let the current thread finish and have it spawn one
+        # follow-up using the latest compute_fn. Multiple kickoffs collapse to
+        # the same slot — last writer wins, so we never queue a backlog.
+        self._rerun_pending = {}
+        # key=(db_path, workspace_id) -> (error_message, set_at_monotonic).
+        # Recent failures suppress retries within ``ERROR_BACKOFF_SECONDS``.
+        self._errors = {}
         self._lock = threading.Lock()
 
     def get(self, db_path, workspace_id):
@@ -175,12 +200,147 @@ class NewImagesCache:
             for wid in workspace_ids:
                 key = (db_path, wid)
                 self._entries.pop(key, None)
+                # Drop any recorded failure too: the cache key has moved on
+                # (folder/workspace change, completed scan), so the old error
+                # no longer reflects the current state and must not gate a
+                # fresh recompute via the 30s backoff window in
+                # ``kickoff_compute``.
+                self._errors.pop(key, None)
                 self._generations[key] = self._generations.get(key, 0) + 1
+
+    def get_recent_error(self, db_path, workspace_id):
+        """Return the most recent compute error if it's still inside the
+        backoff window, else None. Stale entries are cleared lazily."""
+        key = (db_path, workspace_id)
+        with self._lock:
+            entry = self._errors.get(key)
+            if entry is None:
+                return None
+            err_msg, set_at = entry
+            if time.monotonic() - set_at > self.ERROR_BACKOFF_SECONDS:
+                del self._errors[key]
+                return None
+            return err_msg
+
+    def kickoff_compute(self, db_path, workspace_id, compute_fn):
+        """Ensure a background compute is running for ``(db_path, workspace_id)``.
+
+        If a recent compute failed (within ``ERROR_BACKOFF_SECONDS``), no new
+        compute is started — readers should call :meth:`get_recent_error` and
+        surface the failure instead of looping pending forever. Returns a
+        pre-set Event so callers that ``wait`` don't block.
+
+        Otherwise: if no compute is in flight, spawn a daemon thread that
+        calls ``compute_fn()`` and stores the result in the cache. If one is
+        already in flight — for the current or an older generation — the
+        existing thread is reused; the caller waits on its event. When the
+        in-flight thread is stale (an ``invalidate_workspaces`` ran mid-walk),
+        the latest ``compute_fn`` is stashed as a deferred rerun token and
+        the worker spawns one follow-up after it finishes. This keeps at most
+        one walk per key in flight even when generations advance repeatedly
+        (e.g. the scan path's per-folder ``invalidate_workspaces``), avoiding
+        a fan-out of concurrent ``os.walk`` jobs that would thrash disk/CPU
+        on large libraries.
+
+        Returns an ``Event`` that fires when the in-flight compute finishes
+        so the caller can ``Event.wait(timeout=...)`` to optionally block
+        briefly for the result. After a stale-generation compute finishes,
+        the deferred rerun runs asynchronously — callers re-poll to pick up
+        its result, exactly as they re-poll any ``pending: true`` response.
+
+        The generation snapshot is taken inside the lock at kickoff time so a
+        concurrent invalidation can still drop the stale write — same race
+        protection as :meth:`get_new_images_for_workspace`.
+        """
+        key = (db_path, workspace_id)
+        with self._lock:
+            err_entry = self._errors.get(key)
+            if err_entry is not None:
+                _err_msg, set_at = err_entry
+                if time.monotonic() - set_at <= self.ERROR_BACKOFF_SECONDS:
+                    # Suppress retry inside the backoff window.
+                    done = threading.Event()
+                    done.set()
+                    return done
+                # Backoff window elapsed — let a fresh attempt run.
+                del self._errors[key]
+
+            generation = self._generations.get(key, 0)
+            existing = self._inflight.get(key)
+            if existing is not None:
+                existing_event, existing_generation = existing
+                if existing_generation != generation:
+                    # Stale-generation compute is running. Coalesce: stash the
+                    # latest compute_fn so the worker spawns one follow-up
+                    # when it finishes, instead of starting a parallel walk.
+                    # Last writer wins — multiple kickoffs collapse to one
+                    # rerun, so a burst of polls during scan-time invalidation
+                    # storms can't queue a backlog of walks.
+                    self._rerun_pending[key] = compute_fn
+                return existing_event
+            event = threading.Event()
+            self._inflight[key] = (event, generation)
+
+        def worker():
+            try:
+                result = compute_fn()
+                self.set(db_path, workspace_id, result, generation=generation)
+                # Successful compute clears any prior failure so a transient
+                # error doesn't keep suppressing retries after recovery.
+                # Generation-guarded so a stale thread finishing after a
+                # fresh one started doesn't wipe the fresh thread's error.
+                with self._lock:
+                    if self._generations.get(key, 0) == generation:
+                        self._errors.pop(key, None)
+            except Exception as e:
+                log.exception(
+                    "new-images background compute failed for %s ws=%s",
+                    db_path, workspace_id,
+                )
+                with self._lock:
+                    # Drop the failure if the generation moved while we were
+                    # running. Mirrors the stale-write guard in :meth:`set`:
+                    # if ``invalidate_workspaces`` ran mid-compute (workspace
+                    # switched, scan completed), this error is for a key that
+                    # has already moved on and must not force the next
+                    # request into the 30s backoff window.
+                    if self._generations.get(key, 0) == generation:
+                        self._errors[key] = (str(e) or e.__class__.__name__,
+                                             time.monotonic())
+            finally:
+                with self._lock:
+                    # Only clear the in-flight slot if it still belongs to
+                    # this thread. Defensive: under the coalescing design
+                    # nothing else writes to this slot while we're alive,
+                    # but the identity check keeps the invariant locally
+                    # checkable rather than relying on global reasoning.
+                    current = self._inflight.get(key)
+                    if current is not None and current[0] is event:
+                        del self._inflight[key]
+                    rerun_fn = self._rerun_pending.pop(key, None)
+                event.set()
+                if rerun_fn is not None:
+                    # A kickoff arrived during this compute while the
+                    # generation was stale. Fire the deferred rerun now that
+                    # the in-flight slot is free; it picks up the current
+                    # generation inside the lock. Recursion depth is bounded:
+                    # each rerun consumes its token and a new one is only
+                    # added by another stale-generation kickoff arriving
+                    # during the next worker.
+                    self.kickoff_compute(db_path, workspace_id, rerun_fn)
+
+        threading.Thread(
+            target=worker, daemon=True, name="new-images-compute",
+        ).start()
+        return event
 
     def clear(self):
         with self._lock:
             self._entries.clear()
             self._generations.clear()
+            self._inflight.clear()
+            self._errors.clear()
+            self._rerun_pending.clear()
 
 
 _shared_cache = NewImagesCache()

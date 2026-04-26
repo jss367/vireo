@@ -4027,11 +4027,40 @@ function _isNewImagesDismissed(wsId, newCount) {
   return stored === Number(newCount);
 }
 
+// Single-slot retry timer + in-flight guard so a long pending state can't
+// stack independent 3s polling chains on top of each 60s interval tick.
+// Without the in-flight guard, two ticks whose fetches are still in flight
+// both schedule timers when their responses land, leaking chains; the
+// start-of-call clearTimeout only catches the most recent handle.
+let _newImagesPendingTimer = null;
+let _newImagesInFlight = false;
+
 async function checkNewImages() {
+  if (_newImagesInFlight) return;
+  if (_newImagesPendingTimer !== null) {
+    clearTimeout(_newImagesPendingTimer);
+    _newImagesPendingTimer = null;
+  }
+  _newImagesInFlight = true;
   try {
     const resp = await fetch('/api/workspaces/active/new-images');
     if (!resp.ok) return;
     const data = await resp.json();
+    // The backend returns ``pending: true`` when a fresh-cache walk is still
+    // running in the background. The result will land in the cache shortly,
+    // so re-poll soon instead of waiting for the next 60s tick.
+    if (data && data.pending) {
+      _newImagesPendingTimer = setTimeout(checkNewImages, 3000);
+      return;
+    }
+    // Persistent backend failure (unreachable volume, DB error). Don't
+    // re-poll fast — let the 60s interval try again after the backoff
+    // window so we don't hammer a broken resource. Hide the banner.
+    if (data && data.error) {
+      const banner = document.getElementById('newImagesBanner');
+      if (banner) banner.style.display = 'none';
+      return;
+    }
     const banner = document.getElementById('newImagesBanner');
     const msg = document.getElementById('newImagesMsg');
     if (!banner || !msg) return;
@@ -4057,6 +4086,7 @@ async function checkNewImages() {
       banner.style.display = 'none';
     }
   } catch (e) { /* ignore */ }
+  finally { _newImagesInFlight = false; }
 }
 
 function dismissNewImagesBanner() {

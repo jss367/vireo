@@ -70,6 +70,175 @@ def test_api_new_images_zero_when_fully_ingested(app_and_db):
     assert data["workspace_id"] == ws_id
 
 
+def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatch):
+    """Cold-cache calls return pending instead of blocking the request thread
+    on a long os.walk. Without this, the navbar's poll on app start ties up a
+    Flask worker for the entire walk (observed at 12.9s on a real library)."""
+    import threading
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    release = threading.Event()
+    started = threading.Event()
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def slow_count(*args, **kwargs):
+        started.set()
+        # Block until the test releases us, so the kickoff thread is still
+        # in flight when the request returns.
+        release.wait(timeout=5)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", slow_count)
+
+    client = app.test_client()
+    try:
+        resp = client.get("/api/workspaces/active/new-images")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data.get("pending") is True, (
+            f"expected pending=True while walk is in flight, got {data!r}"
+        )
+        assert data["new_count"] is None
+        assert data["workspace_id"] == ws_id
+        # The endpoint must have actually kicked off the background compute.
+        assert started.is_set()
+    finally:
+        # Let the background thread finish before pytest tears down tmp_path,
+        # otherwise it walks a deleted directory tree.
+        release.set()
+
+
+def test_api_new_images_returns_cached_after_background_compute_finishes(app_and_db):
+    """Once the background walk finishes, the cache is populated and the next
+    request returns the real count instantly — no second walk."""
+    import time
+
+    from new_images import get_shared_cache
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    client = app.test_client()
+    # First request: walk is fast on tmp_path so the 500ms wait will catch it
+    # and we'll see the count synchronously. To exercise the *cache hit after
+    # async compute* path we wait for the cache key to appear, then re-probe.
+    resp1 = client.get("/api/workspaces/active/new-images")
+    assert resp1.status_code == 200
+
+    cache = get_shared_cache()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if cache.get(db._db_path, ws_id) is not None:
+            break
+        time.sleep(0.01)
+    assert cache.get(db._db_path, ws_id) is not None, (
+        "background compute never populated the cache"
+    )
+
+    resp2 = client.get("/api/workspaces/active/new-images")
+    data = resp2.get_json()
+    assert data.get("pending") is None or data.get("pending") is False
+    assert data["new_count"] == 1
+
+
+def test_api_new_images_returns_error_when_compute_fails(app_and_db, monkeypatch):
+    """If the background walk raises (e.g. unavailable volume, DB error), the
+    endpoint must surface an error instead of looping forever on pending.
+
+    Without this, the navbar's 3s pending re-poll keeps firing because the
+    cache stays empty after every failed compute — leaving the UI in a
+    permanent retry state and hammering the failing resource.
+    """
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", boom)
+
+    client = app.test_client()
+    resp = client.get("/api/workspaces/active/new-images")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Wait briefly for the worker thread to finish raising and storing the
+    # error — the 500ms grace inside the endpoint may have already caught it,
+    # but in case it didn't, repoll once.
+    if data.get("pending"):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            data = client.get("/api/workspaces/active/new-images").get_json()
+            if not data.get("pending"):
+                break
+    assert data.get("error"), f"expected an error in payload, got {data!r}"
+    assert "disk unreachable" in data["error"]
+    assert data.get("pending") is None or data.get("pending") is False
+    assert data["new_count"] is None or data["new_count"] == 0
+    assert data["workspace_id"] == ws_id
+
+
+def test_api_new_images_does_not_hot_loop_on_persistent_failure(app_and_db, monkeypatch):
+    """Repeated requests within the error backoff window must not spawn a
+    fresh compute every time — otherwise a broken volume gets hammered by
+    every navbar poll across every open page."""
+    import threading
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    call_count = {"n": 0}
+    lock = threading.Lock()
+
+    def boom(*args, **kwargs):
+        with lock:
+            call_count["n"] += 1
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(new_images_module, "count_new_images_for_workspace", boom)
+
+    client = app.test_client()
+    # Fire one request; wait for compute to finish and the error to land.
+    client.get("/api/workspaces/active/new-images")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if call_count["n"] >= 1:
+            break
+        time.sleep(0.01)
+    initial = call_count["n"]
+    assert initial >= 1, "compute_fn was never called for the first request"
+
+    # Hammer the endpoint several more times immediately. Each call is
+    # within the error backoff window so no new compute should fire.
+    for _ in range(5):
+        client.get("/api/workspaces/active/new-images")
+    # Give any spurious thread a moment to actually hit boom().
+    time.sleep(0.1)
+    assert call_count["n"] == initial, (
+        f"compute_fn called {call_count['n']} times; expected backoff after "
+        f"{initial} call(s)"
+    )
+
+
 def test_api_new_images_returns_null_workspace_when_none_active(app_and_db, monkeypatch):
     app, db, ws_id, tmp_path = app_and_db
     # Each request creates its own Database via _get_db(), which auto-restores
