@@ -255,7 +255,7 @@
   <p class="misses-intro">
     Frames flagged as misses by the pipeline. Bulk-reject a category to set
     <code>flag=rejected</code> on every photo in it; photos aren't deleted.
-    Click a thumbnail to open at 1:1 zoom.
+    Click a thumbnail to open at fit-to-screen; click the photo to toggle 1:1 zoom.
   </p>
 
   <div id="scopeBanner" style="display:none;padding:8px 12px;margin-bottom:12px;
@@ -376,7 +376,7 @@ function render() {
       'Shortcuts: ' +
       '<kbd>J</kbd>/<kbd>K</kbd> next/prev in section &middot; ' +
       '<kbd>U</kbd> unflag focused thumbnail &middot; ' +
-      'click to open lightbox at 1:1 zoom' +
+      'click to open lightbox; click photo to toggle 1:1 zoom' +
     '</div>';
   root.innerHTML = html;
 }
@@ -490,36 +490,6 @@ function openMiss(cat, idx, e) {
 
   if (typeof openLightbox !== 'function') return;
   openLightbox(p.id, p.filename || '', photoList);
-
-  // 1:1 zoom on open.
-  //
-  // openLightbox() does not currently accept a zoom option. The navbar
-  // defines _lbNativeZoom (computed once image metadata + natural size are
-  // available) and _lbSetZoom. We poll briefly and trigger 1:1 once the
-  // native zoom is known, bailing if the user already interacted.
-  //
-  // TODO(task-12): Playwright scenario should verify this lands at 1:1.
-  // If this proves flaky, we should extend openLightbox() in _navbar.html
-  // to accept an {zoom: '1:1'} option that sets _lbPending1To1 internally.
-  try {
-    var tries = 0;
-    var targetId = p.id;
-    var t = setInterval(function() {
-      tries += 1;
-      if (tries > 40) { clearInterval(t); return; }  // ~4s
-      if (typeof _lightboxCurrentId !== 'undefined' && _lightboxCurrentId !== targetId) {
-        clearInterval(t); return;
-      }
-      if (typeof _lbZoom !== 'undefined' && _lbZoom > 1.001) {
-        // User already zoomed; respect that.
-        clearInterval(t); return;
-      }
-      if (typeof _lbNativeZoom !== 'undefined' && _lbNativeZoom && typeof _lbSetZoom === 'function') {
-        _lbSetZoom(_lbNativeZoom, null, null);
-        clearInterval(t);
-      }
-    }, 100);
-  } catch (err) { /* no-op */ }
 }
 
 /* ---------- Bulk reject ---------- */
