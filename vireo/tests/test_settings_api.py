@@ -138,6 +138,20 @@ def test_get_values_effective_falls_through_layers(app_and_db):
     assert values["effective"]["similarity_threshold"] == 0.95
 
 
+def test_get_values_global_excludes_keys_equal_to_default(app_and_db):
+    """Legacy save paths write the entire DEFAULTS dict to disk; a value matching
+    the default must not appear as a "globally set" override."""
+    app, _ = app_and_db
+    import config as cfg
+
+    # cfg.save(cfg.load()) is what the legacy POST /api/config does — it
+    # produces a file containing every default key.
+    cfg.save(cfg.load())
+    client = app.test_client()
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"] == {}
+
+
 def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
     """Internal keys stored in config_overrides (e.g. active_labels) are not exposed."""
     app, db = app_and_db
@@ -158,3 +172,164 @@ def test_get_values_workspace_excludes_non_schema_keys(app_and_db):
 
 def client_get(app, path):
     return app.test_client().get(path).get_json()
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/settings/global
+# ---------------------------------------------------------------------------
+
+
+def test_patch_global_persists_value(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": 0.65},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["value"] == 0.65
+    # Persisted to disk.
+    assert cfg.load()["classification_threshold"] == 0.65
+
+
+def test_patch_global_coerces_string_to_float(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": "0.42"},
+    )
+    assert resp.status_code == 200
+    assert cfg.load()["classification_threshold"] == 0.42
+
+
+def test_patch_global_writes_nested_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "pipeline.w_focus", "value": 0.5},
+    )
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["w_focus"] == 0.5
+
+
+def test_patch_global_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "no_such_key", "value": 1},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_out_of_range(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "classification_threshold", "value": 5.0},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_unknown_enum(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "keyword_case", "value": "screaming-snake"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_rejects_type_mismatch(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/global",
+        json={"key": "photos_per_page", "value": "not-a-number"},
+    )
+    assert resp.status_code == 400
+
+
+def test_patch_global_updates_hf_token_env(app_and_db, monkeypatch):
+    """Setting hf_token also pushes it into HF_TOKEN env var (legacy POST behavior)."""
+    app, _ = app_and_db
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    client = app.test_client()
+    client.patch(
+        "/api/settings/global",
+        json={"key": "hf_token", "value": "hf_test_xyz"},
+    )
+    assert os.environ.get("HF_TOKEN") == "hf_test_xyz"
+
+
+def test_patch_global_clears_hf_token_env(app_and_db, monkeypatch):
+    app, _ = app_and_db
+    monkeypatch.setenv("HF_TOKEN", "previous")
+    import config as cfg
+
+    cfg.set("hf_token", "previous")
+    client = app.test_client()
+    client.patch(
+        "/api/settings/global",
+        json={"key": "hf_token", "value": ""},
+    )
+    assert "HF_TOKEN" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/settings/global/<dotted-key>
+# ---------------------------------------------------------------------------
+
+
+def test_delete_global_reverts_to_default(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.65)
+    assert cfg.load()["classification_threshold"] == 0.65
+
+    client = app.test_client()
+    resp = client.delete("/api/settings/global/classification_threshold")
+    assert resp.status_code == 200
+    # Reverted to the DEFAULTS value (deep-merge fills it back in).
+    assert cfg.load()["classification_threshold"] == cfg.DEFAULTS["classification_threshold"]
+
+
+def test_delete_global_nested_key(app_and_db):
+    app, _ = app_and_db
+    import config as cfg
+
+    client = app.test_client()
+    client.patch("/api/settings/global", json={"key": "pipeline.w_focus", "value": 0.99})
+    assert cfg.load()["pipeline"]["w_focus"] == 0.99
+
+    resp = client.delete("/api/settings/global/pipeline.w_focus")
+    assert resp.status_code == 200
+    assert cfg.load()["pipeline"]["w_focus"] == cfg.DEFAULTS["pipeline"]["w_focus"]
+
+
+def test_delete_global_idempotent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    # Delete a key that has no override — should not error.
+    resp = client.delete("/api/settings/global/classification_threshold")
+    assert resp.status_code == 200
+
+
+def test_delete_global_rejects_unknown_key(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.delete("/api/settings/global/no_such_key")
+    assert resp.status_code == 400

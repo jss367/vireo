@@ -3051,16 +3051,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         default_layer = {k: default_flat[k] for k in schema_keys if k in default_flat}
 
         # Global layer: read the raw file (not cfg.load(), which deep-merges
-        # with DEFAULTS — we want only what the user explicitly set).
-        global_layer = {}
-        if os.path.exists(cfg.CONFIG_PATH):
-            try:
-                with open(cfg.CONFIG_PATH) as f:
-                    raw = json.load(f)
-                global_flat = schema.flatten(raw if isinstance(raw, dict) else {})
-                global_layer = {k: v for k, v in global_flat.items() if k in schema_keys}
-            except (OSError, json.JSONDecodeError):
-                global_layer = {}
+        # with DEFAULTS — we want only what the user explicitly set). Also
+        # filter out keys whose value equals the default: legacy save paths
+        # write the entire deep-merged config, but a value matching the
+        # default is not really a user override and should not show as one.
+        global_flat = schema.flatten(_read_raw_config_file())
+        global_layer = {
+            k: v for k, v in global_flat.items()
+            if k in schema_keys and default_layer.get(k) != v
+        }
 
         # Workspace layer: parse config_overrides for the active workspace.
         workspace_layer = {}
@@ -3094,6 +3093,75 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "workspace": workspace_layer,
             "effective": effective_layer,
         })
+
+    def _settings_post_save_side_effects(current):
+        """Side effects mirrored from the legacy /api/config POST handler.
+
+        Keeps the new schema-driven write path behaviorally identical to the
+        old curated-form save: HF_TOKEN env var is kept in sync, and the
+        preview cache is evicted if its budget shrunk.
+        """
+        hf_token = current.get("hf_token", "")
+        if hf_token:
+            os.environ["HF_TOKEN"] = hf_token
+        elif "HF_TOKEN" in os.environ:
+            del os.environ["HF_TOKEN"]
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
+
+    def _read_raw_config_file():
+        """Return the parsed contents of ~/.vireo/config.json, or {}.
+
+        Unlike cfg.load(), this does NOT merge DEFAULTS — so it contains
+        only the keys the user has actually set. Used by write paths so the
+        on-disk file stays minimal.
+        """
+        import config as cfg
+
+        if not os.path.exists(cfg.CONFIG_PATH):
+            return {}
+        try:
+            with open(cfg.CONFIG_PATH) as f:
+                raw = json.load(f)
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @app.route("/api/settings/global", methods=["PATCH"])
+    def api_settings_global_patch():
+        """Set a single global config value (validated against SCHEMA)."""
+        import config as cfg
+        import config_schema as schema
+
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        if not isinstance(key, str) or key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+        try:
+            value = schema.validate_value(key, body.get("value"))
+        except schema.ValidationError as e:
+            return json_error(str(e), status=400)
+
+        raw = _read_raw_config_file()
+        schema.set_dotted(raw, key, value)
+        cfg.save(raw)
+        _settings_post_save_side_effects(cfg.load())
+        return jsonify({"ok": True, "key": key, "value": value})
+
+    @app.route("/api/settings/global/<path:key>", methods=["DELETE"])
+    def api_settings_global_delete(key):
+        """Remove a key from the global config file (reverts to default)."""
+        import config as cfg
+        import config_schema as schema
+
+        if key not in schema.SCHEMA:
+            return json_error(f"unknown setting {key!r}", status=400)
+
+        raw = _read_raw_config_file()
+        schema.delete_dotted(raw, key)
+        cfg.save(raw)
+        _settings_post_save_side_effects(cfg.load())
+        return jsonify({"ok": True, "key": key})
 
     @app.route("/api/darktable/status")
     def api_darktable_status():

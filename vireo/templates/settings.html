@@ -1013,7 +1013,7 @@
              style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-      Every Vireo setting, including ones not surfaced by the curated sections above. Read-only — edit from the curated sections.
+      Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert to the default.
     </div>
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
       <span style="display:inline-flex;align-items:center;gap:6px;"><span class="provenance-dot dot-default" style="margin-top:0;"></span> default</span>
@@ -2510,7 +2510,10 @@ async function doInstallUpdate() {
   }
 }
 
-// --- All settings (schema-rendered, read-only) -----------------------------
+// --- All settings (schema-rendered, editable) ------------------------------
+
+var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
+var ALL_SETTINGS_DEBOUNCE = {};   // key -> setTimeout id
 
 async function loadAllSettings() {
   var container = document.getElementById('allSettingsCategories');
@@ -2522,14 +2525,29 @@ async function loadAllSettings() {
     if (!schemaRes.ok || !valuesRes.ok) throw new Error('HTTP error');
     var schemaData = await schemaRes.json();
     var values = await valuesRes.json();
-    renderAllSettings(schemaData.schema, schemaData.categories, values, container);
+    ALL_SETTINGS_CACHE.schema = schemaData.schema;
+    ALL_SETTINGS_CACHE.categories = schemaData.categories;
+    ALL_SETTINGS_CACHE.values = values;
+    renderAllSettings(container);
+    filterAllSettings();
   } catch (err) {
     container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load settings: '
       + escapeHtml(err && err.message || String(err)) + '</span>';
   }
 }
 
-function renderAllSettings(schema, categories, values, container) {
+async function refreshAllSettingsValues() {
+  var r = await fetch('/api/settings/values');
+  if (!r.ok) return;
+  ALL_SETTINGS_CACHE.values = await r.json();
+}
+
+function renderAllSettings(container) {
+  var schema = ALL_SETTINGS_CACHE.schema;
+  var categories = ALL_SETTINGS_CACHE.categories;
+  var values = ALL_SETTINGS_CACHE.values;
+  if (!schema || !categories || !values) return;
+
   var byCategory = {};
   categories.forEach(function(c) { byCategory[c] = []; });
   Object.keys(schema).sort().forEach(function(key) {
@@ -2546,14 +2564,30 @@ function renderAllSettings(schema, categories, values, container) {
     parts.push('<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;border-bottom:1px solid var(--border-primary);padding-bottom:4px;">'
       + escapeHtml(cat) + '</div>');
     keys.forEach(function(key) {
-      parts.push(renderSettingRow(key, schema[key], values));
+      parts.push(renderSettingRow(key));
     });
     parts.push('</div>');
   });
   container.innerHTML = parts.join('');
 }
 
-function renderSettingRow(key, spec, values) {
+function rerenderSettingRow(key) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  var tmp = document.createElement('div');
+  tmp.innerHTML = renderSettingRow(key);
+  var fresh = tmp.firstElementChild;
+  if (fresh) row.replaceWith(fresh);
+}
+
+function cssEscape(s) {
+  if (window.CSS && window.CSS.escape) return window.CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+function renderSettingRow(key) {
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var values = ALL_SETTINGS_CACHE.values;
   var hasWs = Object.prototype.hasOwnProperty.call(values.workspace, key);
   var hasGlobal = Object.prototype.hasOwnProperty.call(values['global'], key);
   var dotClass, dotTitle;
@@ -2569,10 +2603,16 @@ function renderSettingRow(key, spec, values) {
   }
   var effective = values.effective[key];
   var defaultVal = values['default'][key];
-  var displayValue = formatSettingValue(effective, spec, true);
-  var fullValue = formatSettingValue(effective, spec, false);
+  var widget = renderSettingWidget(key, spec, effective);
+  var resetBtn = '';
+  if (hasGlobal) {
+    resetBtn = '<button type="button" onclick="resetSchemaSetting(\'' + escapeHtml(key) + '\')" '
+             +    'title="Reset to default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true)) + '" '
+             +    'style="background:transparent;border:1px solid var(--border-secondary);color:var(--text-dim);border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;flex-shrink:0;">'
+             +  'Reset</button>';
+  }
   var meta = escapeHtml(key);
-  if (hasWs || hasGlobal) {
+  if (hasGlobal) {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
   var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
@@ -2580,17 +2620,170 @@ function renderSettingRow(key, spec, values) {
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
        +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeHtml(dotTitle) + '"></span>'
        +   '<div style="flex:1;min-width:0;">'
-       +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">'
-       +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;">' + escapeHtml(spec.label) + '</div>'
-       +       '<div title="' + escapeHtml(fullValue) + '" '
-       +            'style="font-size:12px;color:var(--text-secondary);font-family:monospace;text-align:right;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
-       +         escapeHtml(displayValue)
+       +     '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+       +       '<div style="font-size:13px;color:var(--text-primary);font-weight:500;flex:1;min-width:140px;">' + escapeHtml(spec.label) + '</div>'
+       +       '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">'
+       +         widget
+       +         resetBtn
        +       '</div>'
        +     '</div>'
        +     '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + escapeHtml(spec.desc) + '</div>'
-       +     '<div style="font-size:11px;color:var(--text-ghost);margin-top:2px;font-family:monospace;">' + meta + '</div>'
+       +     '<div style="display:flex;justify-content:space-between;gap:8px;margin-top:2px;">'
+       +       '<div style="font-size:11px;color:var(--text-ghost);font-family:monospace;">' + meta + '</div>'
+       +       '<div class="setting-row-status" style="font-size:11px;color:var(--text-dim);min-height:14px;"></div>'
+       +     '</div>'
        +   '</div>'
        + '</div>';
+}
+
+function renderSettingWidget(key, spec, effective) {
+  var inputStyle = 'background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:12px;';
+  var keyAttr = 'data-input-key="' + escapeHtml(key) + '"';
+  if (spec.type === 'bool') {
+    return '<input type="checkbox" ' + keyAttr + ' '
+         +     (effective ? 'checked ' : '')
+         +     'onchange="onSchemaInputChange(this, true)" '
+         +     'style="accent-color:var(--accent);transform:scale(1.1);">';
+  }
+  if (spec.type === 'enum') {
+    var opts = (spec.enum || []).map(function(opt) {
+      var label = (spec.enum_labels && spec.enum_labels[opt]) ? spec.enum_labels[opt] : opt;
+      var sel = (opt === effective) ? ' selected' : '';
+      return '<option value="' + escapeHtml(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
+    }).join('');
+    return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
+         +    'style="' + inputStyle + 'min-width:120px;">'
+         +   opts + '</select>';
+  }
+  if (spec.type === 'int' || spec.type === 'float') {
+    var step = spec.step != null ? spec.step : (spec.type === 'int' ? 1 : 0.01);
+    var min = spec.min != null ? ' min="' + spec.min + '"' : '';
+    var max = spec.max != null ? ' max="' + spec.max + '"' : '';
+    var val = (effective != null) ? effective : '';
+    return '<input type="number" ' + keyAttr + ' value="' + escapeHtml(String(val)) + '" '
+         +     'step="' + step + '"' + min + max + ' '
+         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'style="' + inputStyle + 'width:100px;text-align:right;">';
+  }
+  if (spec.type === 'secret') {
+    var sval = (effective != null) ? String(effective) : '';
+    return '<input type="password" ' + keyAttr + ' value="' + escapeHtml(sval) + '" '
+         +     'placeholder="(unset)" autocomplete="off" '
+         +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+         +     'style="' + inputStyle + 'width:200px;font-family:monospace;">';
+  }
+  if (spec.type === 'list_string') {
+    if (Array.isArray(spec.items_enum)) {
+      var current = Array.isArray(effective) ? effective : [];
+      var checks = spec.items_enum.map(function(item) {
+        var checked = current.indexOf(item) !== -1 ? ' checked' : '';
+        return '<label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);cursor:pointer;">'
+             +   '<input type="checkbox" data-list-item="' + escapeHtml(item) + '" data-list-key="' + escapeHtml(key) + '"' + checked
+             +     ' onchange="onSchemaListChange(\'' + escapeHtml(key) + '\')" style="accent-color:var(--accent);">'
+             +   escapeHtml(item)
+             + '</label>';
+      }).join(' ');
+      return '<div style="display:flex;flex-wrap:wrap;gap:6px;max-width:380px;justify-content:flex-end;">' + checks + '</div>';
+    }
+    // Read-only fallback for list_string without items_enum (e.g. scan_roots).
+    var asText = (Array.isArray(effective) && effective.length) ? effective.join(', ') : '(empty)';
+    return '<span style="font-size:12px;color:var(--text-secondary);font-family:monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;" title="' + escapeHtml(asText) + '">'
+         +   escapeHtml(asText)
+         + '</span>'
+         + '<span style="font-size:10px;color:var(--text-ghost);margin-left:6px;">(edit above)</span>';
+  }
+  // string / path / fallback
+  var tval = (effective != null) ? String(effective) : '';
+  return '<input type="text" ' + keyAttr + ' value="' + escapeHtml(tval) + '" '
+       +     'placeholder="(empty)" '
+       +     'oninput="this.dataset.dirty = \'1\'; onSchemaInputChange(this, false)" '
+     +     'onblur="if (this.dataset.dirty) { delete this.dataset.dirty; onSchemaInputChange(this, true); }" '
+       +     'style="' + inputStyle + 'width:240px;font-family:monospace;">';
+}
+
+function onSchemaInputChange(el, immediate) {
+  var key = el.getAttribute('data-input-key');
+  if (!key) return;
+  var spec = ALL_SETTINGS_CACHE.schema[key];
+  var raw;
+  if (spec.type === 'bool') {
+    raw = el.checked;
+  } else if (spec.type === 'int' || spec.type === 'float') {
+    raw = el.value;     // server coerces strings to numbers
+  } else {
+    raw = el.value;
+  }
+  scheduleSchemaSave(key, raw, immediate);
+}
+
+function onSchemaListChange(key) {
+  var checked = [];
+  document.querySelectorAll('input[type="checkbox"][data-list-key="' + cssEscape(key) + '"]:checked').forEach(function(cb) {
+    checked.push(cb.getAttribute('data-list-item'));
+  });
+  scheduleSchemaSave(key, checked, true);
+}
+
+function scheduleSchemaSave(key, value, immediate) {
+  if (ALL_SETTINGS_DEBOUNCE[key]) {
+    clearTimeout(ALL_SETTINGS_DEBOUNCE[key]);
+  }
+  var delay = immediate ? 0 : 300;
+  ALL_SETTINGS_DEBOUNCE[key] = setTimeout(function() {
+    ALL_SETTINGS_DEBOUNCE[key] = null;
+    saveSchemaSetting(key, value);
+  }, delay);
+}
+
+async function saveSchemaSetting(key, value) {
+  setRowStatus(key, 'Saving…', false);
+  try {
+    var resp = await fetch('/api/settings/global', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key, value: value }),
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      setRowStatus(key, err.error || 'Save failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+    setRowStatus(key, '✓ Saved', false);
+    setTimeout(function() { setRowStatus(key, '', false); }, 1500);
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+async function resetSchemaSetting(key) {
+  setRowStatus(key, 'Resetting…', false);
+  try {
+    var resp = await fetch('/api/settings/global/' + encodeURIComponent(key), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      var err = await resp.json().catch(function() { return { error: resp.statusText }; });
+      setRowStatus(key, err.error || 'Reset failed', true);
+      return;
+    }
+    await refreshAllSettingsValues();
+    rerenderSettingRow(key);
+  } catch (err) {
+    setRowStatus(key, 'Network error', true);
+  }
+}
+
+function setRowStatus(key, msg, isError) {
+  var row = document.querySelector('#allSettingsCategories .setting-row-card[data-key="' + cssEscape(key) + '"]');
+  if (!row) return;
+  var status = row.querySelector('.setting-row-status');
+  if (!status) return;
+  status.textContent = msg;
+  status.style.color = isError ? 'var(--danger)' : 'var(--text-dim)';
 }
 
 function formatSettingValue(v, spec, mask) {
