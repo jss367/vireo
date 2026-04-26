@@ -2230,21 +2230,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         # Only allow workspace-overridable keys
         allowed = {"classification_threshold", "grouping_window_seconds", "similarity_threshold", "detector_confidence", "review_min_confidence"}
-        # Merge into existing overrides to preserve non-whitelisted keys
-        ws = db.get_workspace(db._active_workspace_id)
-        existing = {}
-        if ws and ws["config_overrides"]:
-            try:
-                existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
-            except Exception:
-                pass
-        for k, v in body.items():
-            if k in allowed:
-                if v is None:
-                    existing.pop(k, None)
-                else:
-                    existing[k] = v
-        db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
+        # Share the schema-driven settings write lock so an autosave in the
+        # All-settings region can't race with a curated workspace-form save
+        # and silently drop a recent override.
+        with _settings_write_lock:
+            ws = db.get_workspace(db._active_workspace_id)
+            existing = {}
+            if ws and ws["config_overrides"]:
+                try:
+                    existing = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                except Exception:
+                    pass
+            if not isinstance(existing, dict):
+                existing = {}
+            for k, v in body.items():
+                if k in allowed:
+                    if v is None:
+                        existing.pop(k, None)
+                    else:
+                        existing[k] = v
+            db.update_workspace(db._active_workspace_id, config_overrides=existing if existing else None)
         return jsonify({"ok": True, "overrides": existing})
 
     @app.route("/api/workspaces/active/nav-order", methods=["PUT"])
@@ -2981,41 +2986,45 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         body = request.get_json(silent=True) or {}
-        current = cfg.load()
+        # Share the schema-driven settings write lock so an autosave in the
+        # All-settings region can't race with the curated form's full-snapshot
+        # save and silently overwrite a recently-saved schema value.
+        with _settings_write_lock:
+            current = cfg.load()
 
-        # Handle keyboard_shortcuts with validation
-        if "keyboard_shortcuts" in body:
-            shortcuts = body["keyboard_shortcuts"]
-            if isinstance(shortcuts, dict):
-                valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
-                validated = {}
-                for ctx_name, actions in shortcuts.items():
-                    if ctx_name in valid_contexts and isinstance(actions, dict):
-                        validated[ctx_name] = {}
-                        for action, key_str in actions.items():
-                            if action in valid_contexts[ctx_name] and isinstance(key_str, str):
-                                validated[ctx_name][action] = key_str.strip().lower()
-                current["keyboard_shortcuts"] = cfg._deep_merge(
-                    cfg.DEFAULTS["keyboard_shortcuts"], validated
-                )
+            # Handle keyboard_shortcuts with validation
+            if "keyboard_shortcuts" in body:
+                shortcuts = body["keyboard_shortcuts"]
+                if isinstance(shortcuts, dict):
+                    valid_contexts = cfg.DEFAULTS["keyboard_shortcuts"]
+                    validated = {}
+                    for ctx_name, actions in shortcuts.items():
+                        if ctx_name in valid_contexts and isinstance(actions, dict):
+                            validated[ctx_name] = {}
+                            for action, key_str in actions.items():
+                                if action in valid_contexts[ctx_name] and isinstance(key_str, str):
+                                    validated[ctx_name][action] = key_str.strip().lower()
+                    current["keyboard_shortcuts"] = cfg._deep_merge(
+                        cfg.DEFAULTS["keyboard_shortcuts"], validated
+                    )
 
-        for key in body:
-            if key == "keyboard_shortcuts":
-                continue
-            if key in cfg.DEFAULTS:
-                current[key] = body[key]
-        # Apply HF token to environment immediately
-        hf_token = current.get("hf_token", "")
-        if hf_token:
-            os.environ["HF_TOKEN"] = hf_token
-        elif "HF_TOKEN" in os.environ:
-            del os.environ["HF_TOKEN"]
-        cfg.save(current)
-        # If the user shrunk the preview cache quota, evict immediately to the
-        # new size rather than waiting for the next cache write. No-op when
-        # already under quota, so always safe to call.
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
+            for key in body:
+                if key == "keyboard_shortcuts":
+                    continue
+                if key in cfg.DEFAULTS:
+                    current[key] = body[key]
+            # Apply HF token to environment immediately
+            hf_token = current.get("hf_token", "")
+            if hf_token:
+                os.environ["HF_TOKEN"] = hf_token
+            elif "HF_TOKEN" in os.environ:
+                del os.environ["HF_TOKEN"]
+            cfg.save(current)
+            # If the user shrunk the preview cache quota, evict immediately to the
+            # new size rather than waiting for the next cache write. No-op when
+            # already under quota, so always safe to call.
+            vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+            evict_preview_cache_if_over_quota(_get_db(), vireo_dir)
         return jsonify({"ok": True})
 
     @app.route("/api/settings/schema")
