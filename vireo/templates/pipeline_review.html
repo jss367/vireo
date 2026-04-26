@@ -1335,7 +1335,7 @@ function renderPhotoCard(p, encIdx, burstIdx) {
   var label = (p.label || '').toLowerCase();
   var q = p.quality_composite || 0;
   var qPct = Math.round(q * 100);
-  var html = '<div class="photo-card ' + label + '">';
+  var html = '<div class="photo-card ' + label + '" data-photo-id="' + p.id + '">';
   html += '<img src="/thumbnails/' + p.id + '.jpg" loading="lazy" alt="" onclick="openInspect(' + p.id + ')">';
   if (p.label) html += '<span class="photo-label ' + label + '">' + p.label + '</span>';
   if (p.rarity_protected) html += '<span class="photo-rarity">protected</span>';
@@ -2715,6 +2715,19 @@ document.addEventListener('keydown', function(e) {
   }
   if (e.key === 'Delete' || e.key === 'Backspace') { grmRemoveFromGroup(); e.preventDefault(); return; }
   if (e.key === ' ') { grmMoveCandidate(); e.preventDefault(); return; }
+});
+
+/* --- Right-click → open in Browse view ---
+ * Catches contextmenu on photo cards (main grid) and grm-cards (group review
+ * modal). Opens /browse?photo_id=<id> in a new tab so the user keeps their
+ * pipeline-review state intact. */
+document.addEventListener('contextmenu', function(e) {
+  var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
+  if (!card) return;
+  var pid = parseInt(card.dataset.photoId, 10);
+  if (!pid) return;
+  e.preventDefault();
+  window.open('/browse?photo_id=' + pid, '_blank', 'noopener');
 });
 
 /* --- Apply & Close --- */
