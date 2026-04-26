@@ -2277,6 +2277,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tabs = db.open_tab(nav_id)
         return jsonify({"ok": True, "open_tabs": tabs})
 
+    @app.route("/api/workspace/tabs/close", methods=["POST"])
+    def api_close_tab():
+        from db import OPENABLE_NAV_IDS
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_id = body.get("nav_id")
+        if nav_id not in OPENABLE_NAV_IDS:
+            return json_error("nav_id is not openable", 400)
+        tabs = db.close_tab(nav_id)
+        return jsonify({"ok": True, "open_tabs": tabs})
+
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()
