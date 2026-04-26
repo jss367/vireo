@@ -270,3 +270,12 @@ def test_miss_defaults_present():
     assert d["miss_bbox_area_min"] == 0.005
     assert d["miss_bbox_area_min_singleton"] == 0.002
     assert d["miss_oof_ratio"] == 0.5
+
+
+def test_default_subject_types_includes_taxonomy_individual_scene(tmp_path, monkeypatch):
+    """Default subject_types is the set of keyword types that count as
+    'identifying' a photo — taxonomy + individual + scene by default."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    loaded = cfg.load()
+    assert set(loaded.get("subject_types", [])) == {"taxonomy", "individual", "scene"}
