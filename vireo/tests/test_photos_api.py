@@ -1758,3 +1758,143 @@ def test_delete_photo_location_records_edit(app_and_db):
     entry = post_history[0]
     assert entry["action_type"] == "location_clear"
     assert entry["description"] == "cleared location"
+
+
+# --- POST /api/photos/<id>/location/text ------------------------------------
+#
+# Free-text fallback path: user types a name and hits Enter without picking a
+# Google suggestion (or no API key is configured). No Google round-trip.
+
+def test_post_photo_location_text_creates_keyword_and_links(app_and_db):
+    """Free-text POST creates a no-place_id keyword and links it to the photo."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    loc = data["location"]
+    assert loc["name"] == "the meadow"
+    assert loc["place_id"] is None
+    assert loc["parent_chain"] == []
+
+    # DB-level: photo has exactly one type='location' keyword link, on a row
+    # with no place_id (free-text).
+    rows = db.conn.execute(
+        "SELECT k.id, k.name, k.place_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "the meadow"
+    assert rows[0]["place_id"] is None
+
+
+def test_post_photo_location_text_strips_whitespace(app_and_db):
+    """Surrounding whitespace is stripped before the keyword is created."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "  the meadow  "},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["location"]["name"] == "the meadow"
+
+    rows = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "the meadow"
+
+
+def test_post_photo_location_text_400_on_missing_name(app_and_db):
+    """Empty body / missing name is a 400."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(f"/api/photos/{pid}/location/text", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing name"
+
+
+def test_post_photo_location_text_400_on_empty_name(app_and_db):
+    """Whitespace-only name is rejected as 400."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "   "},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing name"
+
+
+def test_post_photo_location_text_replaces_existing_location(app_and_db):
+    """A second free-text POST replaces (not adds to) the existing location link."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    r1 = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "first place"},
+    )
+    assert r1.status_code == 200
+    r2 = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "second place"},
+    )
+    assert r2.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "second place"
+
+
+def test_post_photo_location_text_records_edit(app_and_db):
+    """Free-text POST adds an audit-log entry under the same 'location_set' type."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    pre_history = db.get_edit_history()
+    pre_count = len(pre_history)
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location/text",
+        json={"name": "the meadow"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    post_history = db.get_edit_history()
+    assert len(post_history) == pre_count + 1
+    entry = post_history[0]
+    assert entry["action_type"] == "location_set"
+    assert "the meadow" in entry["description"]

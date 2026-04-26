@@ -1603,6 +1603,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"location": _serialize_photo_location(db, photo_id)})
 
+    @app.route("/api/photos/<int:photo_id>/location/text", methods=["POST"])
+    def api_set_photo_location_text(photo_id):
+        """Attach a free-text location keyword (no Google data) to ``photo_id``.
+
+        Body: ``{"name": "the meadow behind the cabin"}``. Used when the user
+        types a name and hits Enter without picking a Google suggestion, or
+        when no API key is configured. Reuses the ``location_set`` audit
+        action_type so the audit log filters consistently across both paths.
+        """
+        body = request.get_json(silent=True) or {}
+        name = body.get("name") or ""
+        if not name.strip():
+            return json_error("missing name", 400)
+        stripped = name.strip()
+
+        db = _get_db()
+        try:
+            leaf_id = db.get_or_create_text_location(stripped)
+        except ValueError:
+            # Defensive: validation above should already catch empty input.
+            return json_error("missing name", 400)
+        db.set_photo_location(photo_id, leaf_id)
+        db.record_edit(
+            'location_set',
+            f"set location: {stripped}",
+            str(leaf_id),
+            [{'photo_id': photo_id, 'old_value': '', 'new_value': str(leaf_id)}],
+        )
+        return jsonify({"location": _serialize_photo_location(db, photo_id)})
+
     @app.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
     def api_clear_photo_location(photo_id):
         """Remove all ``type='location'`` keyword links for ``photo_id``."""
