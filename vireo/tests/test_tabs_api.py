@@ -45,3 +45,24 @@ def test_close_tab_endpoint_rejects_unknown_navid(app_and_db):
     client = app.test_client()
     r = client.post("/api/workspace/tabs/close", json={"nav_id": "browse"})
     assert r.status_code == 400
+
+
+def test_visiting_lightroom_url_auto_opens_tab(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    # Close lightroom first
+    client.post("/api/workspace/tabs/close", json={"nav_id": "lightroom"})
+    assert "lightroom" not in db.get_open_tabs()
+    # Visit the page
+    r = client.get("/lightroom")
+    assert r.status_code == 200
+    assert "lightroom" in db.get_open_tabs()
+
+
+def test_visiting_logs_url_auto_opens_tab(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    client.post("/api/workspace/tabs/close", json={"nav_id": "logs"})
+    r = client.get("/logs")
+    assert r.status_code == 200
+    assert "logs" in db.get_open_tabs()
