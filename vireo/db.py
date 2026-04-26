@@ -103,9 +103,11 @@ class Database:
         self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
-        self.migrate_legacy_keyword_types()
+        # Idempotent default-keyword seed. Cheap warm-path (single
+        # SELECT 1 LIMIT 1 short-circuit) — matches ensure_default_workspace
+        # above. One-shot migrations and backfills are hoisted to create_app
+        # so they don't run on every request via _get_db().
         self.ensure_default_genre_keywords()
-        self.backfill_wildlife_genre()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
