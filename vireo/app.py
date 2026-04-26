@@ -2304,12 +2304,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from db import Database
         from new_images import count_new_images_for_workspace
 
+        # Shared holder for the cache worker's exception (if any), read by
+        # the ephemeral job's work_fn after the cache event fires. Without
+        # this, a walk that raises (e.g. unreadable volume, DB error) would
+        # still mark the job ``completed`` while ``/api/.../new-images``
+        # returns the error from ``get_recent_error`` — contradictory state
+        # in the bottom panel.
+        walk_error = {"exc": None}
+
         def compute(progress_callback=None):
             wdb = Database(db_path)
             wdb.set_active_workspace(ws_id)
-            return count_new_images_for_workspace(
-                wdb, ws_id, progress_callback=progress_callback,
-            )
+            try:
+                return count_new_images_for_workspace(
+                    wdb, ws_id, progress_callback=progress_callback,
+                )
+            except Exception as e:
+                walk_error["exc"] = e
+                raise
 
         # Surface the walk as an ephemeral job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.
@@ -2328,8 +2340,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # in the worker's finally clause, so we wake when the walk
                 # ends regardless of success or failure. Final totals come
                 # from progress_state, which the cache worker populated via
-                # progress_callback.
+                # progress_callback. If the walk raised, re-raise the same
+                # exception so JobRunner marks the job ``failed`` with the
+                # original message — keeping the bottom panel and the
+                # ``/api/.../new-images`` payload in agreement.
                 spawn_event.wait()
+                if walk_error["exc"] is not None:
+                    raise walk_error["exc"]
                 return {
                     "files_checked": progress_state["checked"],
                     "new_count": progress_state["found"],

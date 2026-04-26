@@ -266,6 +266,57 @@ def test_api_new_images_registers_ephemeral_job_on_cache_cold(app_and_db, monkey
     )
 
 
+def test_api_new_images_job_marked_failed_when_walk_raises(app_and_db, monkeypatch):
+    """If the cache worker raises (unreadable volume, DB error, etc.) the
+    ephemeral job must be reported as ``failed`` rather than ``completed``.
+
+    Without this, /api/jobs and /api/workspaces/active/new-images disagree:
+    the endpoint surfaces an error via get_recent_error but the job entry
+    still says it succeeded — misleading the user about what actually
+    happened.
+    """
+    import time
+
+    import new_images as new_images_module
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk unreachable")
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", boom,
+    )
+
+    client = app.test_client()
+    client.get("/api/workspaces/active/new-images")
+
+    deadline = time.monotonic() + 2.0
+    walk_job = None
+    while time.monotonic() < deadline:
+        active = client.get("/api/jobs").get_json()["active"]
+        candidates = [j for j in active if j["type"] == "new_images_walk"]
+        if candidates and candidates[0]["status"] in ("failed", "completed"):
+            walk_job = candidates[0]
+            break
+        time.sleep(0.02)
+
+    assert walk_job is not None, "ephemeral new_images_walk job never finished"
+    assert walk_job["status"] == "failed", (
+        f"job should be 'failed' when walk raised, got {walk_job['status']}; "
+        f"errors={walk_job.get('errors')}"
+    )
+    # The walker's exception message is preserved on the job so the user can
+    # see WHY it failed in the bottom panel, not just that something failed.
+    assert any("disk unreachable" in e for e in walk_job["errors"]), (
+        f"job errors should include the walker's failure message; "
+        f"got {walk_job['errors']}"
+    )
+
+
 def test_api_new_images_no_extra_job_on_cache_hit(app_and_db):
     """A second request that hits the cache must NOT spawn another job entry —
     only the cache-cold path surfaces a job, otherwise every navbar poll
