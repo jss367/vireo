@@ -6417,3 +6417,264 @@ def test_upsert_place_chain_shares_parents_across_leaves(db):
         "SELECT COUNT(*) AS n FROM keywords WHERE type='location'"
     ).fetchone()["n"]
     assert total == 6
+
+
+def _make_photo(db, filename="loc.jpg"):
+    """Helper: create a folder + a single photo, return its id."""
+    fid = db.add_folder(f"/photos/{filename}-folder", name="loc")
+    return db.add_photo(
+        folder_id=fid, filename=filename, extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+
+
+def test_set_photo_location_replaces_existing(db):
+    """set_photo_location removes any existing 'location' link before inserting."""
+    pid = _make_photo(db)
+    # Pre-existing location keyword link.
+    old_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("Old Park",),
+    ).lastrowid
+    new_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("New Park",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, old_id),
+    )
+    db.conn.commit()
+
+    db.set_photo_location(pid, new_id)
+
+    rows = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchall()
+    keyword_ids = {r["keyword_id"] for r in rows}
+    assert keyword_ids == {new_id}, "old location link must be removed; new one present"
+
+
+def test_set_photo_location_preserves_non_location_keywords(db):
+    """set_photo_location must only touch 'location' links, not other tag types."""
+    pid = _make_photo(db)
+    general_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("Bird",),
+    ).lastrowid
+    loc_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("Park",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, general_id),
+    )
+    db.conn.commit()
+
+    db.set_photo_location(pid, loc_id)
+
+    rows = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchall()
+    keyword_ids = {r["keyword_id"] for r in rows}
+    assert keyword_ids == {general_id, loc_id}
+
+
+def test_clear_photo_location_removes_links_but_keeps_keyword_rows(db):
+    """clear_photo_location deletes the link only, never the keyword row."""
+    pid = _make_photo(db)
+    loc_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'location')",
+        ("Park",),
+    ).lastrowid
+    general_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("Bird",),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, loc_id),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, general_id),
+    )
+    db.conn.commit()
+
+    db.clear_photo_location(pid)
+
+    # Location link gone, general link survives.
+    rows = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (pid,),
+    ).fetchall()
+    assert {r["keyword_id"] for r in rows} == {general_id}
+
+    # Both keyword rows still exist.
+    kept = db.conn.execute(
+        "SELECT id FROM keywords WHERE id IN (?, ?)", (loc_id, general_id),
+    ).fetchall()
+    assert len(kept) == 2
+
+
+def test_get_or_create_text_location_creates_new(db):
+    """First call creates, second with same name returns same id."""
+    first = db.get_or_create_text_location("the dog park")
+    row = db.conn.execute(
+        "SELECT name, type, place_id, parent_id, latitude, longitude "
+        "FROM keywords WHERE id = ?",
+        (first,),
+    ).fetchone()
+    assert row["name"] == "the dog park"
+    assert row["type"] == "location"
+    assert row["place_id"] is None
+    assert row["parent_id"] is None
+    assert row["latitude"] is None
+    assert row["longitude"] is None
+
+    second = db.get_or_create_text_location("the dog park")
+    assert second == first
+
+
+def test_get_or_create_text_location_strips_whitespace_and_rejects_empty(db):
+    """Whitespace stripped; empty/whitespace-only raises ValueError."""
+    import pytest
+
+    a = db.get_or_create_text_location("  Café Park  ")
+    b = db.get_or_create_text_location("Café Park")
+    assert a == b
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (a,),
+    ).fetchone()
+    assert row["name"] == "Café Park"
+
+    with pytest.raises(ValueError):
+        db.get_or_create_text_location("")
+    with pytest.raises(ValueError):
+        db.get_or_create_text_location("   ")
+
+
+def test_link_keyword_to_place_attaches_metadata(db):
+    """An existing free-text keyword gets place_id, coords, and parent chain."""
+    # Create a free-text "Central Park" with a photo tagged.
+    pid = _make_photo(db)
+    free_id = db.get_or_create_text_location("Central Park")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, free_id),
+    )
+    db.conn.commit()
+
+    details = _central_park_details()
+    result = db.link_keyword_to_place(free_id, details)
+
+    assert result["merged"] is False
+    assert result["keyword_id"] == free_id
+
+    row = db.conn.execute(
+        "SELECT name, type, place_id, latitude, longitude, parent_id "
+        "FROM keywords WHERE id = ?",
+        (free_id,),
+    ).fetchone()
+    assert row["place_id"] == details["place_id"]
+    assert row["latitude"] == details["lat"]
+    assert row["longitude"] == details["lng"]
+    assert row["name"] == "Central Park"
+    # Parent chain attached.
+    assert row["parent_id"] is not None
+
+    # Photo link preserved.
+    pk = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (pid, free_id),
+    ).fetchone()
+    assert pk is not None
+
+
+def test_link_keyword_to_place_merges_on_existing_place_id(db):
+    """If the place_id already belongs to another keyword, merge into it."""
+    # First: create the canonical place-bearing keyword via upsert_place_chain.
+    details = _central_park_details()
+    canonical_id = db.upsert_place_chain(details)
+
+    # Tag photo A with the canonical row.
+    pid_a = _make_photo(db, "a.jpg")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid_a, canonical_id),
+    )
+
+    # Now: a separate free-text "Central Park (free)" keyword, tagged on photo B.
+    pid_b = _make_photo(db, "b.jpg")
+    free_id = db.get_or_create_text_location("Central Park (free)")
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid_b, free_id),
+    )
+    db.conn.commit()
+
+    # Link the free-text keyword to the same place_id → should merge into canonical.
+    result = db.link_keyword_to_place(free_id, details)
+
+    assert result["merged"] is True
+    assert result["keyword_id"] == canonical_id
+
+    # Old free-text row gone.
+    gone = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (free_id,),
+    ).fetchone()
+    assert gone is None
+
+    # Both photos now linked to canonical.
+    rows = db.conn.execute(
+        "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+        (canonical_id,),
+    ).fetchall()
+    photo_ids = {r["photo_id"] for r in rows}
+    assert photo_ids == {pid_a, pid_b}
+
+    # No leftover links to the old free-text id.
+    stale = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE keyword_id = ?", (free_id,),
+    ).fetchone()
+    assert stale is None
+
+
+def test_upsert_place_chain_raises_on_cross_type_collision(db):
+    """A pre-existing non-location keyword on the same (name, parent_id) must
+    raise a clear error rather than silently merging or surfacing a raw
+    sqlite3.IntegrityError. The user's existing tags must not be corrupted.
+
+    Note: SQLite's UNIQUE(name, parent_id) doesn't fire when parent_id is
+    NULL (NULL != NULL in SQL), so the collision can only occur on
+    non-root chain levels. We pre-build the "United States" → "New York"
+    (state) → "New York" (locality) location parents directly, then plant
+    a 'general' keyword "Manhattan" under the locality. The next
+    upsert_place_chain walk will try to INSERT a 'location' "Manhattan"
+    in the same slot, triggering the UNIQUE(name, parent_id) collision.
+    """
+    import pytest
+
+    us_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', NULL)",
+        ("United States",),
+    ).lastrowid
+    state_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', ?)",
+        ("New York", us_id),
+    ).lastrowid
+    locality_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'location', ?)",
+        ("New York", state_id),
+    ).lastrowid
+    # Plant a 'general' "Manhattan" under the locality New York row.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, parent_id) VALUES (?, 'general', ?)",
+        ("Manhattan", locality_id),
+    )
+    db.conn.commit()
+
+    # Chain walk wants a 'location' "Manhattan" under the same locality →
+    # UNIQUE(name, parent_id) blows up; we must surface a clear RuntimeError.
+    with pytest.raises(RuntimeError, match="Manhattan"):
+        db.upsert_place_chain(_central_park_details())

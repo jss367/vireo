@@ -3249,15 +3249,16 @@ class Database:
           ``INSERT OR IGNORE``) so we never collide a coordless parent row
           with a place_id-bearing leaf that happens to share a name+parent.
 
-        TODO(task-6): Cross-type (name, parent_id) collision. The table-level
-        UNIQUE(name, parent_id) constraint doesn't filter by `type`, so the
-        narrow SELECT here (which only matches type='location' rows) can miss
-        a row of a different type, then the INSERT fails. Realistically rare
-        (general/people/event keywords don't usually collide with country/
-        city/admin names), but Task 6's get_or_create_text_location faces the
-        same issue and should fix both — likely by replacing the table-level
-        UNIQUE with partial unique indexes scoped by type, or by catching the
-        IntegrityError and re-SELECTing without the type filter.
+        Cross-type collision handling: the table-level ``UNIQUE(name,
+        parent_id)`` constraint doesn't filter by ``type``, so a pre-existing
+        keyword of a *different* type with the same ``(name, parent_id)`` can
+        cause our INSERT to raise ``sqlite3.IntegrityError``. Rather than
+        silently merging into an unrelated keyword (which would corrupt the
+        user's existing tags), we catch that error, re-SELECT to confirm
+        what's actually there, and raise a descriptive ``RuntimeError``. If
+        the existing row turns out to be a coordless ``type='location'``
+        row that our narrow SELECT somehow missed, we defensively return its
+        id.
         """
         if place_id is not None:
             cur = self.conn.execute(
@@ -3291,13 +3292,62 @@ class Database:
         if existing:
             return existing["id"]
 
-        cur = self.conn.execute(
-            "INSERT INTO keywords "
-            "(name, parent_id, type, place_id, latitude, longitude) "
-            "VALUES (?, ?, 'location', NULL, ?, ?)",
-            (name, parent_id, latitude, longitude),
-        )
-        return cur.lastrowid
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO keywords "
+                "(name, parent_id, type, place_id, latitude, longitude) "
+                "VALUES (?, ?, 'location', NULL, ?, ?)",
+                (name, parent_id, latitude, longitude),
+            )
+            return cur.lastrowid
+        except sqlite3.IntegrityError as integrity_err:
+            # UNIQUE(name, parent_id) violated by a row our type-filtered
+            # SELECT didn't see. Find out what's actually there.
+            if parent_id is None:
+                clash = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL",
+                    (name,),
+                ).fetchone()
+            else:
+                clash = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
+                    "WHERE name = ? AND parent_id = ?",
+                    (name, parent_id),
+                ).fetchone()
+            if clash is None:
+                # Should be unreachable — re-raise the original error
+                # rather than swallow it.
+                raise
+            if clash["type"] == "location" and clash["place_id"] is None:
+                # Defensive: our narrow SELECT missed it (shouldn't happen,
+                # but reusing it is safe and idempotent).
+                return clash["id"]
+            raise RuntimeError(
+                f"keyword '{name}' (parent_id={parent_id}) exists with "
+                f"type={clash['type']!r}, can't reuse for location chain"
+            ) from integrity_err
+
+    def _upsert_location_parent_chain(self, components):
+        """Upsert a chain of parent location keywords from ``address_components``.
+
+        Walks broadest → narrowest, returning the deepest parent's id (or
+        ``None`` if ``components`` is empty / all entries lack a name).
+        Caller is responsible for the surrounding transaction.
+        """
+        parent_id = None
+        # Reverse Google's narrowest-first list to walk broadest → narrowest.
+        for comp in reversed(components or []):
+            if not comp.get("name"):
+                continue
+            parent_id = self._upsert_one_keyword(
+                name=comp["name"],
+                parent_id=parent_id,
+                place_id=None,
+                latitude=None,
+                longitude=None,
+            )
+        return parent_id
 
     def upsert_place_chain(self, details):
         """Upsert a Google Place + its parent chain. Returns the leaf id.
@@ -3321,24 +3371,10 @@ class Database:
         name = details.get("name", "")
         lat = details.get("lat")
         lng = details.get("lng")
-
-        # Reverse Google's narrowest-first list to walk broadest → narrowest.
-        # Don't sort by type — trust Google's ordering (per plan).
-        components = list(reversed(details.get("address_components") or []))
+        components = details.get("address_components") or []
 
         with self.conn:
-            parent_id = None
-            for comp in components:
-                if not comp.get("name"):
-                    continue
-                parent_id = self._upsert_one_keyword(
-                    name=comp["name"],
-                    parent_id=parent_id,
-                    place_id=None,
-                    latitude=None,
-                    longitude=None,
-                )
-
+            parent_id = self._upsert_location_parent_chain(components)
             leaf_id = self._upsert_one_keyword(
                 name=name,
                 parent_id=parent_id,
@@ -3347,6 +3383,133 @@ class Database:
                 longitude=lng,
             )
         return leaf_id
+
+    def set_photo_location(self, photo_id, leaf_keyword_id):
+        """Set ``photo_id``'s location to ``leaf_keyword_id``.
+
+        Removes any existing ``type='location'`` keyword links for the photo,
+        then inserts the new link. Atomic.
+        """
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM photo_keywords WHERE photo_id = ? "
+                "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",
+                (photo_id,),
+            )
+            self.conn.execute(
+                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
+                "VALUES (?, ?)",
+                (photo_id, leaf_keyword_id),
+            )
+
+    def clear_photo_location(self, photo_id):
+        """Remove any ``type='location'`` keyword links for ``photo_id``.
+
+        Does NOT delete the keyword rows themselves — other photos may still
+        reference them, and even if they don't, free-text/place-id keywords
+        are part of the user's vocabulary.
+        """
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM photo_keywords WHERE photo_id = ? "
+                "AND keyword_id IN (SELECT id FROM keywords WHERE type='location')",
+                (photo_id,),
+            )
+
+    def get_or_create_text_location(self, name):
+        """Find or create a free-text ``type='location'`` keyword.
+
+        No ``place_id``, no coords, no parent. Whitespace is stripped from
+        ``name``; raises ``ValueError`` if the stripped result is empty.
+        Returns the keyword id.
+        """
+        if name is None:
+            raise ValueError("location name must not be empty")
+        stripped = name.strip()
+        if not stripped:
+            raise ValueError("location name must not be empty")
+        with self.conn:
+            return self._upsert_one_keyword(
+                name=stripped,
+                parent_id=None,
+                place_id=None,
+                latitude=None,
+                longitude=None,
+            )
+
+    def link_keyword_to_place(self, keyword_id, details):
+        """Attach Google place data to an existing keyword.
+
+        ``details`` has the same shape as :meth:`upsert_place_chain`'s input.
+        Builds the parent chain, then tries to UPDATE the target keyword with
+        ``place_id``, coords, name, and the deepest parent's id. If another
+        keyword already has the target ``place_id`` (UNIQUE collision on the
+        partial index), the existing canonical row absorbs all
+        ``photo_keywords`` rows from the target, and the now-empty target
+        row is deleted.
+
+        Returns ``{"keyword_id": <final id>, "merged": <bool>}``. ``merged``
+        is True when an existing place-bearing row absorbed the target.
+        """
+        if not details.get("place_id"):
+            raise ValueError("link_keyword_to_place requires details['place_id']")
+
+        place_id = details["place_id"]
+        new_name = details.get("name", "")
+        lat = details.get("lat")
+        lng = details.get("lng")
+        components = details.get("address_components") or []
+
+        with self.conn:
+            parent_id = self._upsert_location_parent_chain(components)
+
+            # If the chain itself ended up choosing this very keyword (e.g.,
+            # a free-text "United States" keyword that we just promoted to
+            # the country parent), the UPDATE below would reparent it onto
+            # itself or a descendant. Guard against that by treating it the
+            # same as the merge case — the chain row is the canonical one.
+            if parent_id == keyword_id:
+                # The keyword we were asked to "link" got reused as a parent
+                # in the chain. Nothing to merge from photo_keywords (it is
+                # already the canonical row for its slot), so just return it.
+                return {"keyword_id": keyword_id, "merged": False}
+
+            try:
+                self.conn.execute(
+                    "UPDATE keywords SET "
+                    "  place_id = ?, "
+                    "  latitude = ?, "
+                    "  longitude = ?, "
+                    "  name = ?, "
+                    "  parent_id = ? "
+                    "WHERE id = ?",
+                    (place_id, lat, lng, new_name, parent_id, keyword_id),
+                )
+                return {"keyword_id": keyword_id, "merged": False}
+            except sqlite3.IntegrityError:
+                # Another keyword already owns this place_id. Merge.
+                canonical = self.conn.execute(
+                    "SELECT id FROM keywords WHERE place_id = ?", (place_id,),
+                ).fetchone()
+                if canonical is None:
+                    # Shouldn't happen — re-raise so we don't lose info.
+                    raise
+                canonical_id = canonical["id"]
+                # Re-point photo_keywords from old → canonical.
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
+                    "SELECT photo_id, ? FROM photo_keywords WHERE keyword_id = ?",
+                    (canonical_id, keyword_id),
+                )
+                self.conn.execute(
+                    "DELETE FROM photo_keywords WHERE keyword_id = ?",
+                    (keyword_id,),
+                )
+                # Delete the now-empty old keyword row.
+                self.conn.execute(
+                    "DELETE FROM keywords WHERE id = ?", (keyword_id,),
+                )
+                return {"keyword_id": canonical_id, "merged": True}
 
     def merge_duplicate_keywords(self):
         """Find and merge case-insensitive duplicate keywords in active workspace.
