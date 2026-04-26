@@ -489,6 +489,10 @@ function openMiss(cat, idx, e) {
   var photoList = photos.map(function(q) { return { id: q.id, filename: q.filename }; });
 
   if (typeof openLightbox !== 'function') return;
+  // The wrap onclick handler in _navbar.html guards on !window._lightboxZoomHandled,
+  // and the mouseup zoom-out path sets it to true. Without resetting here, a stale
+  // true from a prior session would swallow the first click-to-zoom.
+  window._lightboxZoomHandled = false;
   openLightbox(p.id, p.filename || '', photoList);
 }
 
