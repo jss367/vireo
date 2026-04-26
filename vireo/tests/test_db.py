@@ -6288,3 +6288,132 @@ def test_place_reverse_geocode_cache_table_exists(db):
         ).fetchall()
     }
     assert cols >= {"lat_grid", "lng_grid", "place_id", "response", "fetched_at"}
+
+
+def _central_park_details():
+    """Canned Place Details payload (matches places.place_details() shape)."""
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "lat": 40.7829,
+        "lng": -73.9654,
+        "address_components": [
+            # Google's response order: narrowest → broadest.
+            {"name": "Manhattan", "short_name": "Manhattan",
+             "types": ["sublocality_level_1", "sublocality", "political"]},
+            {"name": "New York", "short_name": "New York",
+             "types": ["locality", "political"]},
+            {"name": "New York", "short_name": "NY",
+             "types": ["administrative_area_level_1", "political"]},
+            {"name": "United States", "short_name": "US",
+             "types": ["country", "political"]},
+        ],
+    }
+
+
+def test_upsert_place_chain_creates_leaf_with_coords_and_place_id(db):
+    details = _central_park_details()
+    leaf_id = db.upsert_place_chain(details)
+    leaf = db.conn.execute(
+        "SELECT name, type, place_id, latitude, longitude, parent_id "
+        "FROM keywords WHERE id = ?",
+        (leaf_id,),
+    ).fetchone()
+    assert leaf is not None
+    assert leaf["name"] == "Central Park"
+    assert leaf["type"] == "location"
+    assert leaf["place_id"] == details["place_id"]
+    assert leaf["latitude"] == details["lat"]
+    assert leaf["longitude"] == details["lng"]
+    # Parent chain populated, so leaf must have a non-null parent_id.
+    assert leaf["parent_id"] is not None
+
+
+def test_upsert_place_chain_walks_full_parent_chain(db):
+    details = _central_park_details()
+    leaf_id = db.upsert_place_chain(details)
+
+    # Walk leaf → root, collecting names + place_ids.
+    chain = []
+    cur_id = leaf_id
+    while cur_id is not None:
+        row = db.conn.execute(
+            "SELECT id, name, parent_id, type, place_id, latitude, longitude "
+            "FROM keywords WHERE id = ?",
+            (cur_id,),
+        ).fetchone()
+        chain.append(row)
+        cur_id = row["parent_id"]
+
+    # Leaf + 4 address_components → 5 total.
+    assert len(chain) == 5
+    # Order is leaf → narrowest parent → … → broadest.
+    names = [r["name"] for r in chain]
+    assert names == [
+        "Central Park",
+        "Manhattan",
+        "New York",       # locality
+        "New York",       # state (admin_area_1)
+        "United States",
+    ]
+    # Only the leaf carries place_id and coords.
+    leaf, *parents = chain
+    assert leaf["place_id"] == details["place_id"]
+    assert leaf["latitude"] == details["lat"]
+    for p in parents:
+        assert p["type"] == "location"
+        assert p["place_id"] is None
+        assert p["latitude"] is None
+        assert p["longitude"] is None
+    # Root (broadest) must have NULL parent_id.
+    assert chain[-1]["parent_id"] is None
+
+
+def test_upsert_place_chain_is_idempotent(db):
+    details = _central_park_details()
+    first_id = db.upsert_place_chain(details)
+    before_count = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords"
+    ).fetchone()["n"]
+
+    second_id = db.upsert_place_chain(details)
+    after_count = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords"
+    ).fetchone()["n"]
+
+    assert second_id == first_id
+    assert after_count == before_count
+
+
+def test_upsert_place_chain_shares_parents_across_leaves(db):
+    """Two leaves under the same NY/USA chain must reuse parent rows."""
+    central_park = _central_park_details()
+    times_square = {
+        "place_id": "ChIJmQJIxlVYwokRLgeuocVOGVU",
+        "name": "Times Square",
+        "lat": 40.7580,
+        "lng": -73.9855,
+        "address_components": list(central_park["address_components"]),
+    }
+    cp_leaf = db.upsert_place_chain(central_park)
+    ts_leaf = db.upsert_place_chain(times_square)
+
+    assert cp_leaf != ts_leaf
+
+    # Both leaves should chain up to the same broadest ancestor (United States).
+    def root_of(kid):
+        cur = kid
+        while True:
+            row = db.conn.execute(
+                "SELECT parent_id FROM keywords WHERE id = ?", (cur,),
+            ).fetchone()
+            if row["parent_id"] is None:
+                return cur
+            cur = row["parent_id"]
+
+    assert root_of(cp_leaf) == root_of(ts_leaf)
+    # Total keywords: 4 shared parents + 2 leaves = 6 (no duplicate parents).
+    total = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM keywords WHERE type='location'"
+    ).fetchone()["n"]
+    assert total == 6

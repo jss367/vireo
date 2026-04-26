@@ -3233,6 +3233,102 @@ class Database:
             self.conn.commit()
         return cur.lastrowid
 
+    def _upsert_one_keyword(
+        self, name, parent_id, place_id=None, latitude=None, longitude=None,
+    ):
+        """Insert-or-fetch a single ``type='location'`` keyword row.
+
+        Two dedupe modes:
+
+        * ``place_id`` is given: dedupe on the partial unique index over
+          ``place_id``. If a row with that ``place_id`` already exists, update
+          its name/parent/coords (the user just re-picked the same Google
+          place) and return its id.
+        * ``place_id`` is ``None``: dedupe on ``(name, parent_id)`` among rows
+          whose ``place_id`` is also NULL. SELECT-then-INSERT (rather than
+          ``INSERT OR IGNORE``) so we never collide a coordless parent row
+          with a place_id-bearing leaf that happens to share a name+parent.
+        """
+        if place_id is not None:
+            cur = self.conn.execute(
+                "INSERT INTO keywords "
+                "(name, parent_id, type, place_id, latitude, longitude) "
+                "VALUES (?, ?, 'location', ?, ?, ?) "
+                "ON CONFLICT(place_id) WHERE place_id IS NOT NULL DO UPDATE SET "
+                "  name = excluded.name, "
+                "  parent_id = excluded.parent_id, "
+                "  latitude = excluded.latitude, "
+                "  longitude = excluded.longitude "
+                "RETURNING id",
+                (name, parent_id, place_id, latitude, longitude),
+            )
+            return cur.fetchone()["id"]
+
+        if parent_id is None:
+            existing = self.conn.execute(
+                "SELECT id FROM keywords "
+                "WHERE name = ? AND parent_id IS NULL "
+                "  AND type = 'location' AND place_id IS NULL",
+                (name,),
+            ).fetchone()
+        else:
+            existing = self.conn.execute(
+                "SELECT id FROM keywords "
+                "WHERE name = ? AND parent_id = ? "
+                "  AND type = 'location' AND place_id IS NULL",
+                (name, parent_id),
+            ).fetchone()
+        if existing:
+            return existing["id"]
+
+        cur = self.conn.execute(
+            "INSERT INTO keywords "
+            "(name, parent_id, type, place_id, latitude, longitude) "
+            "VALUES (?, ?, 'location', NULL, ?, ?)",
+            (name, parent_id, latitude, longitude),
+        )
+        return cur.lastrowid
+
+    def upsert_place_chain(self, details):
+        """Upsert a Google Place + its parent chain. Returns the leaf id.
+
+        ``details`` is the normalized dict produced by
+        :func:`vireo.places.place_details`: ``place_id``, ``name``, ``lat``,
+        ``lng``, ``address_components`` (Google's narrowest-first order).
+
+        Each ``address_component`` becomes a parent ``type='location'``
+        keyword chained via ``parent_id``. Per Task 4's finding, Google's
+        standard responses do NOT carry a per-component ``place_id``, so
+        parents dedupe on ``(name, parent_id)`` and only the leaf carries
+        ``place_id``/coords.
+
+        Idempotent: calling twice with the same ``details`` returns the same
+        leaf id and does not create duplicate rows.
+        """
+        # Reverse Google's narrowest-first list to walk broadest → narrowest.
+        # Don't sort by type — trust Google's ordering (per plan).
+        components = list(reversed(details.get("address_components") or []))
+
+        with self.conn:
+            parent_id = None
+            for comp in components:
+                parent_id = self._upsert_one_keyword(
+                    name=comp["name"],
+                    parent_id=parent_id,
+                    place_id=None,
+                    latitude=None,
+                    longitude=None,
+                )
+
+            leaf_id = self._upsert_one_keyword(
+                name=details["name"],
+                parent_id=parent_id,
+                place_id=details["place_id"],
+                latitude=details.get("lat"),
+                longitude=details.get("lng"),
+            )
+        return leaf_id
+
     def merge_duplicate_keywords(self):
         """Find and merge case-insensitive duplicate keywords in active workspace.
 
