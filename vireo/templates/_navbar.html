@@ -1483,6 +1483,91 @@ function sendReport() {
 </div>
 
 <script>
+/* ---------- Openable tabs: open/close + Tools dropdown ---------- */
+(function() {
+  // Treat these as "linger" pages; everything else is an openable tab
+  var LINGER_PAGES = ["pipeline","jobs","pipeline-review","review","cull","misses",
+                      "highlights","browse","map","variants","dashboard","audit","compare"];
+
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {}),
+    }).then(function(r) { return r.json(); });
+  }
+
+  // Compute current page nav-id from the URL path
+  function currentNavId() {
+    var p = window.location.pathname;
+    if (p.startsWith('/pipeline/review')) return 'pipeline-review';
+    if (p === '/' || p.startsWith('/browse')) return 'browse';
+    var seg = p.split('/')[1] || '';
+    return seg;
+  }
+
+  window.closeTab = function(navId) {
+    postJSON('/api/workspace/tabs/close', {nav_id: navId}).then(function(res) {
+      if (currentNavId() === navId) {
+        // Navigate to the next remaining tab, or fall back to /browse
+        var next = (res.open_tabs || [])[0];
+        window.location.href = next ? ('/' + next) : '/browse';
+      } else {
+        window.location.reload();
+      }
+    });
+  };
+
+  window.openTab = function(navId) {
+    postJSON('/api/workspace/tabs/open', {nav_id: navId}).then(function() {
+      window.location.href = '/' + navId;
+    });
+  };
+
+  window.toggleTabFromMenu = function(navId) {
+    var item = document.querySelector('.nav-tools-item[data-nav-id="' + navId + '"]');
+    var isOpen = item && item.dataset.open === '1';
+    if (isOpen) {
+      // Toggle off — remove tab. If user is currently on it, navigate away first.
+      window.closeTab(navId);
+    } else {
+      window.openTab(navId);
+    }
+  };
+
+  window.toggleToolsMenu = function(ev) {
+    if (ev) ev.stopPropagation();
+    var menu = document.getElementById('navToolsMenu');
+    if (!menu) return;
+    if (menu.hasAttribute('hidden')) {
+      menu.removeAttribute('hidden');
+      // Position it under the button
+      var btn = document.querySelector('.nav-tools-btn');
+      var rect = btn.getBoundingClientRect();
+      menu.style.left = rect.left + 'px';
+      // Close on outside click
+      setTimeout(function() {
+        document.addEventListener('click', closeMenuOnOutside, {once: true});
+      }, 0);
+    } else {
+      menu.setAttribute('hidden', '');
+    }
+  };
+
+  function closeMenuOnOutside(e) {
+    var menu = document.getElementById('navToolsMenu');
+    if (!menu) return;
+    if (e.target.closest('.nav-tools-menu, .nav-tools-btn')) {
+      // re-arm the listener
+      document.addEventListener('click', closeMenuOnOutside, {once: true});
+      return;
+    }
+    menu.setAttribute('hidden', '');
+  }
+})();
+</script>
+
+<script>
 /* ---------- Nav reorder + Active page highlighting ---------- */
 (function() {
   // Reorder nav links from workspace config
