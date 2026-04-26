@@ -18,6 +18,7 @@ from datetime import UTC
 from pathlib import Path
 from urllib.parse import quote
 
+import places
 from db import Database
 from flask import (
     Flask,
@@ -1508,6 +1509,93 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (keyword_id,))
         db.conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
         db.conn.commit()
+        return jsonify({"ok": True})
+
+    def _serialize_photo_location(db, photo_id):
+        """Return a summary dict for the photo's current location keyword.
+
+        The shape matches the JSON the location section UI expects::
+
+            {
+                "keyword_id":   int,
+                "name":         str,
+                "place_id":     str | None,
+                "latitude":     float | None,
+                "longitude":    float | None,
+                "parent_chain": [{"id": int, "name": str}, ...],  # broadest -> narrowest, EXCLUDES leaf
+            }
+
+        Returns ``None`` if the photo has no ``type='location'`` keyword link.
+        Walks ``parent_id`` upward via repeated SELECTs — fine for v1 since the
+        chain is bounded (~5 deep).
+        """
+        leaf = db.conn.execute(
+            "SELECT k.id, k.name, k.place_id, k.latitude, k.longitude, k.parent_id "
+            "FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ? AND k.type = 'location' "
+            "LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+        if leaf is None:
+            return None
+
+        parents = []
+        current_parent_id = leaf["parent_id"]
+        while current_parent_id is not None:
+            row = db.conn.execute(
+                "SELECT id, name, parent_id FROM keywords WHERE id = ?",
+                (current_parent_id,),
+            ).fetchone()
+            if row is None:
+                break
+            parents.append({"id": row["id"], "name": row["name"]})
+            current_parent_id = row["parent_id"]
+        # Reverse so broadest (e.g. country) comes first, narrowest last.
+        parents.reverse()
+
+        return {
+            "keyword_id": leaf["id"],
+            "name": leaf["name"],
+            "place_id": leaf["place_id"],
+            "latitude": leaf["latitude"],
+            "longitude": leaf["longitude"],
+            "parent_chain": parents,
+        }
+
+    @app.route("/api/photos/<int:photo_id>/location", methods=["POST"])
+    def api_set_photo_location(photo_id):
+        """Attach a Google place to ``photo_id`` via the autocomplete flow.
+
+        Body: ``{"place_id": "ChIJ..."}``. Looks up the place via
+        :func:`places.place_details`, upserts the leaf + parent chain into
+        ``keywords``, and links the leaf to the photo (replacing any existing
+        ``type='location'`` link).
+        """
+        body = request.get_json(silent=True) or {}
+        place_id = (body.get("place_id") or "").strip()
+        if not place_id:
+            return json_error("missing place_id", 400)
+
+        import config as cfg
+        key = cfg.load().get("google_maps_api_key", "")
+        if not key:
+            return json_error("no_api_key", 400)
+
+        details = places.place_details(place_id, key)
+        if details is None:
+            return json_error("place_not_found", 404)
+
+        db = _get_db()
+        leaf_id = db.upsert_place_chain(details)
+        db.set_photo_location(photo_id, leaf_id)
+        return jsonify({"location": _serialize_photo_location(db, photo_id)})
+
+    @app.route("/api/photos/<int:photo_id>/location", methods=["DELETE"])
+    def api_clear_photo_location(photo_id):
+        """Remove all ``type='location'`` keyword links for ``photo_id``."""
+        db = _get_db()
+        db.clear_photo_location(photo_id)
         return jsonify({"ok": True})
 
     # -- Batch operations --

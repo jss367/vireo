@@ -1526,3 +1526,183 @@ def test_zero_byte_cache_file_is_regenerated(client_with_photo):
     row = db.preview_cache_get(photo_id, 1920)
     assert row is not None
     assert row["bytes"] > 0
+
+
+# --- POST/DELETE /api/photos/<id>/location ----------------------------------
+#
+# The autocomplete pick path: client sends a Google ``place_id``, server
+# looks it up via the Places HTTP wrapper and writes a leaf+parent-chain of
+# ``type='location'`` keywords. ``places.place_details`` is monkeypatched
+# so no HTTP traffic happens during tests.
+
+def _central_park_details():
+    """Canned Place Details dict shaped like ``vireo.places.place_details``.
+
+    Mirrors what Google would return for Central Park, NYC: a leaf with
+    coords + a four-level parent chain (city -> county -> state -> country).
+    Google's ``address_components`` order is narrowest-first, which the
+    upsert logic in ``Database._upsert_location_parent_chain`` reverses
+    when chaining ``parent_id`` upward.
+    """
+    return {
+        "place_id": "ChIJ4zGFAZpYwokRGUGph3Mf37k",
+        "name": "Central Park",
+        "lat": 40.7828,
+        "lng": -73.9654,
+        "address_components": [
+            {"name": "New York", "short_name": "New York", "types": ["locality"]},
+            {"name": "New York County", "short_name": "New York County",
+             "types": ["administrative_area_level_2"]},
+            {"name": "New York", "short_name": "NY", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "short_name": "US", "types": ["country"]},
+        ],
+    }
+
+
+def test_post_photo_location_with_valid_place_id(app_and_db, monkeypatch):
+    """Valid pick: route stores leaf + parents and returns the serialized location."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    # API key must be present or the route short-circuits with no_api_key.
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+
+    captured = {}
+
+    def fake_place_details(place_id, key):
+        captured["place_id"] = place_id
+        captured["key"] = key
+        return _central_park_details()
+
+    # The route imports ``places`` at module level via ``import places``.
+    monkeypatch.setattr(places, "place_details", fake_place_details)
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+
+    # Response shape — leaf fields + parent chain (broadest -> narrowest, no leaf).
+    loc = data["location"]
+    assert loc["name"] == "Central Park"
+    assert loc["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert loc["latitude"] == 40.7828
+    assert loc["longitude"] == -73.9654
+    assert [p["name"] for p in loc["parent_chain"]] == [
+        "United States", "New York", "New York County", "New York",
+    ]
+
+    # And the route actually called Google with the body's place_id + config key.
+    assert captured == {"place_id": "ChIJ_x", "key": "FAKE-KEY"}
+
+    # Photo now has exactly one type='location' keyword link, pointing at the
+    # leaf row that carries the place_id.
+    rows = db.conn.execute(
+        "SELECT k.id, k.name, k.place_id FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["place_id"] == "ChIJ4zGFAZpYwokRGUGph3Mf37k"
+    assert rows[0]["name"] == "Central Park"
+
+
+def test_post_photo_location_returns_400_on_missing_place_id(app_and_db):
+    """Empty body / missing place_id is a 400 — never reaches Google."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(f"/api/photos/{pid}/location", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing place_id"
+
+
+def test_post_photo_location_returns_400_on_empty_api_key(app_and_db):
+    """No configured API key: degrade to a 400 ``no_api_key`` error."""
+    import config as cfg
+    app, db = app_and_db
+    # Explicitly clear the key so the route hits the empty-key branch even
+    # if a previous test left one behind in the same temp config file.
+    cfg.save({**cfg.load(), "google_maps_api_key": ""})
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_x"},
+    )
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "no_api_key"
+
+
+def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, monkeypatch):
+    """Google returns ZERO_RESULTS / NOT_FOUND -> wrapper returns None -> 404."""
+    import config as cfg
+    import places
+    app, db = app_and_db
+
+    cfg.save({**cfg.load(), "google_maps_api_key": "FAKE-KEY"})
+    monkeypatch.setattr(places, "place_details", lambda place_id, key: None)
+
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{pid}/location",
+        json={"place_id": "ChIJ_unknown"},
+    )
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "place_not_found"
+
+
+def test_delete_photo_location_clears_links(app_and_db):
+    """DELETE removes location keyword links but leaves the keyword row intact."""
+    app, db = app_and_db
+    photo = db.get_photos()[0]
+    pid = photo["id"]
+
+    # Set up an existing location link directly via DB methods (no Google
+    # round-trip needed for the delete path).
+    leaf_id = db.upsert_place_chain(_central_park_details())
+    db.set_photo_location(pid, leaf_id)
+    # Sanity: the link exists before DELETE.
+    pre_links = db.conn.execute(
+        "SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert len(pre_links) == 1
+
+    client = app.test_client()
+    resp = client.delete(f"/api/photos/{pid}/location")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True}
+
+    # No location links remain on the photo.
+    post_links = db.conn.execute(
+        "SELECT 1 FROM photo_keywords pk JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.type = 'location'",
+        (pid,),
+    ).fetchall()
+    assert post_links == []
+
+    # The keyword row itself is preserved — other photos / future links may
+    # still reference it.
+    leaf_row = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert leaf_row is not None
+    assert leaf_row["name"] == "Central Park"
