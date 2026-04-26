@@ -1115,6 +1115,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
+        # Location section: pre-resolved leaf + parent chain so the photo
+        # detail panel can render the filled state without a second roundtrip.
+        result["location"] = _serialize_photo_location(db, photo_id)
+
         # Read XMP sidecar keywords
         folder = db.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)

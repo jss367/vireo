@@ -403,6 +403,66 @@ body {
   outline: none;
 }
 .add-kw-input:focus { border-color: var(--accent); }
+.location-section .filled-place {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.location-section .filled-parents {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.8;
+  margin-top: 2px;
+  word-break: break-word;
+}
+.location-section .clear-location {
+  background: transparent;
+  border: none;
+  color: var(--text-ghost);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.location-section .clear-location:hover { color: var(--danger, var(--warning)); }
+.location-section .filled-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+}
+.location-section .filled-text { flex: 1; min-width: 0; }
+.location-section .location-suggestion {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.location-section .location-suggestion .accept-btn {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.location-section .location-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--warning);
+}
+/* Google Places autocomplete dropdown z-index — must sit above the detail panel. */
+.pac-container { z-index: 10000 !important; }
 .detail-summary {
   font-size: 12px;
   color: var(--text-dim);
@@ -937,6 +997,16 @@ body {
         </div>
       </div>
 
+      <div class="detail-section location-section" id="locationSection">
+        <div class="detail-section-title">Location</div>
+        <div id="locationFilled" hidden></div>
+        <div id="locationEmpty">
+          <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+          <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
+          <div id="locationError" class="location-error" hidden></div>
+        </div>
+      </div>
+
       <div class="detail-section">
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords"></div>
@@ -1021,6 +1091,11 @@ body {
 
 
 <script>
+/* Google Maps API key — populated from /api/config below (window._cfgPromise).
+   Empty string when no key is configured; the Location section then
+   degrades to free-text-only (no autocomplete, no script injection). */
+window.GOOGLE_MAPS_API_KEY = '';
+
 /* ---------- State ---------- */
 var photos = [];
 var totalPhotos = 0;
@@ -1057,6 +1132,7 @@ var _cfgPromise = (async function() {
     var saved = (cfg.keyboard_shortcuts || {}).browse || {};
     _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS, saved);
     window._vireoShortcuts = cfg.keyboard_shortcuts || {};
+    window.GOOGLE_MAPS_API_KEY = cfg.google_maps_api_key || '';
     return cfg;
   } catch(e) {
     _shortcuts = Object.assign({}, _BROWSE_SC_DEFAULTS);
@@ -2343,6 +2419,13 @@ function renderDetail(photo) {
   });
   document.getElementById('detailKeywords').innerHTML = kwHtml;
 
+  // Location section
+  if (photo.location) {
+    renderLocationFilled(photo.location);
+  } else {
+    renderLocationEmpty();
+  }
+
   // XMP sidecar
   var xmpEl = document.getElementById('detailXmp');
   if (photo.xmp_exists === false) {
@@ -2701,6 +2784,194 @@ async function removeKeyword(photoId, keywordId) {
     loadDetail(photoId);
   } catch(e) {}
 }
+
+/* ---------- Location section ---------- */
+let googleMapsLoadPromise = null;
+function loadGoogleMapsJs() {
+  if (googleMapsLoadPromise) return googleMapsLoadPromise;
+  const apiKey = window.GOOGLE_MAPS_API_KEY || '';
+  if (!apiKey) {
+    googleMapsLoadPromise = Promise.reject(new Error('no_api_key'));
+    return googleMapsLoadPromise;
+  }
+  googleMapsLoadPromise = new Promise(function(resolve, reject) {
+    window._gmapsCallback = function() { resolve(window.google); };
+    var s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' +
+      encodeURIComponent(apiKey) +
+      '&libraries=places&loading=async&callback=_gmapsCallback';
+    s.async = true;
+    s.onerror = function() { reject(new Error('gmaps_load_failed')); };
+    document.head.appendChild(s);
+  });
+  return googleMapsLoadPromise;
+}
+
+// Per-input autocomplete state. Keyed by `input` element so we can detect
+// whether a `place_changed` event recently fired (and thus the Enter
+// handler should defer to it).
+var _locationAutocomplete = null;
+var _locationLastPickedAt = 0;
+var _locationAutocompleteBound = false;
+
+function _showLocationError(msg) {
+  var el = document.getElementById('locationError');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  setTimeout(function() {
+    if (el.textContent === msg) el.hidden = true;
+  }, 4000);
+}
+
+function _hideLocationError() {
+  var el = document.getElementById('locationError');
+  if (el) el.hidden = true;
+}
+
+async function bindLocationAutocomplete() {
+  if (_locationAutocompleteBound) return;
+  // Wait for the /api/config fetch to resolve so window.GOOGLE_MAPS_API_KEY
+  // is populated. The user can focus the input before _cfgPromise has
+  // resolved on a slow page load — without this await we'd take the
+  // empty-key branch permanently.
+  try { await _cfgPromise; } catch(e) {}
+  if (!window.GOOGLE_MAPS_API_KEY) return;  // no key -> free-text only
+  _locationAutocompleteBound = true;
+  var input = document.getElementById('locationInput');
+  if (!input) return;
+  loadGoogleMapsJs().then(function(google) {
+    if (!google || !google.maps || !google.maps.places) return;
+    _locationAutocomplete = new google.maps.places.Autocomplete(input, {
+      types: ['geocode', 'establishment'],
+      fields: ['place_id', 'name', 'formatted_address'],
+    });
+    _locationAutocomplete.addListener('place_changed', function() {
+      var place = _locationAutocomplete.getPlace();
+      if (!place || !place.place_id) return;
+      _locationLastPickedAt = Date.now();
+      _submitLocationPlace(place.place_id);
+    });
+  }).catch(function(err) {
+    console.warn('Google Maps load failed:', err);
+    // Don't disable the input — free-text Enter still works.
+  });
+}
+
+async function _submitLocationPlace(placeId) {
+  var photoId = window._detailPhotoId;
+  if (!photoId) return;
+  _hideLocationError();
+  try {
+    var resp = await safeFetch('/api/photos/' + photoId + '/location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ place_id: placeId }),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+      // The location keyword may also appear in the Keywords list; refresh.
+      loadDetail(photoId);
+    }
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
+}
+
+async function _submitLocationText(name) {
+  var photoId = window._detailPhotoId;
+  if (!photoId) return;
+  _hideLocationError();
+  try {
+    var resp = await safeFetch('/api/photos/' + photoId + '/location/text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    if (resp && resp.location) {
+      renderLocationFilled(resp.location);
+      loadDetail(photoId);
+    }
+  } catch(e) {
+    _showLocationError('Could not save location.');
+  }
+}
+
+async function clearPhotoLocation() {
+  var photoId = window._detailPhotoId;
+  if (!photoId) return;
+  _hideLocationError();
+  try {
+    await safeFetch('/api/photos/' + photoId + '/location', { method: 'DELETE' });
+    renderLocationEmpty();
+    loadDetail(photoId);
+  } catch(e) {
+    _showLocationError('Could not clear location.');
+  }
+}
+
+function renderLocationFilled(loc) {
+  var filled = document.getElementById('locationFilled');
+  var empty = document.getElementById('locationEmpty');
+  if (!filled || !empty) return;
+  if (!loc) { renderLocationEmpty(); return; }
+  var parents = (loc.parent_chain || [])
+    .map(function(p) { return p && p.name ? p.name : ''; })
+    .filter(Boolean);
+  var parentsHtml = parents.length
+    ? '<span class="filled-parents">' + parents.map(escapeHtml).join(' · ') + '</span>'
+    : '';
+  filled.innerHTML =
+    '<div class="filled-row">' +
+      '<div class="filled-text">' +
+        '<span class="filled-place">' + escapeHtml(loc.name || '') + '</span>' +
+        parentsHtml +
+      '</div>' +
+      '<button class="clear-location" type="button" title="Clear location" onclick="clearPhotoLocation()">×</button>' +
+    '</div>';
+  filled.hidden = false;
+  empty.hidden = true;
+  // Reset the input value for next time.
+  var input = document.getElementById('locationInput');
+  if (input) input.value = '';
+}
+
+function renderLocationEmpty() {
+  var filled = document.getElementById('locationFilled');
+  var empty = document.getElementById('locationEmpty');
+  if (!filled || !empty) return;
+  filled.innerHTML = '';
+  filled.hidden = true;
+  empty.hidden = false;
+  var input = document.getElementById('locationInput');
+  if (input) input.value = '';
+}
+
+function _onLocationInputFocus() {
+  bindLocationAutocomplete();
+}
+
+function _onLocationInputKeydown(e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  // If a Google place was just picked (within ~500ms), the place_changed
+  // listener already submitted it; ignore the redundant Enter.
+  if (Date.now() - _locationLastPickedAt < 500) return;
+  var input = e.target;
+  var val = (input.value || '').trim();
+  if (!val) return;
+  _submitLocationText(val);
+}
+
+// Wire up listeners once on initial script load. The input element exists
+// in the DOM unconditionally (server renders the section), so we don't need
+// to re-bind on every photo load.
+document.addEventListener('DOMContentLoaded', function() {
+  var input = document.getElementById('locationInput');
+  if (!input) return;
+  input.addEventListener('focus', _onLocationInputFocus);
+  input.addEventListener('keydown', _onLocationInputKeydown);
+});
 
 /* ---------- Keyword Type Dropdown ---------- */
 function toggleTypeDropdown(indicator, kwId) {
