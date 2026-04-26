@@ -2921,6 +2921,14 @@ async function importSettingsFile(file) {
     alert('Could not read file: ' + (err && err.message || err));
     return;
   }
+  // Cancel any queued debounced autosaves first — a PATCH that fires
+  // mid-import would clobber part of the just-restored config.
+  Object.keys(ALL_SETTINGS_DEBOUNCE).forEach(function(token) {
+    if (ALL_SETTINGS_DEBOUNCE[token]) {
+      clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+      ALL_SETTINGS_DEBOUNCE[token] = null;
+    }
+  });
   try {
     var resp = await fetch('/api/settings/import', {
       method: 'POST',

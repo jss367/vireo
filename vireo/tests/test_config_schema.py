@@ -149,6 +149,18 @@ def test_is_excluded_matches_prefixes():
 # ---------------------------------------------------------------------------
 
 
+def test_cull_thresholds_remain_global_until_consumers_wired():
+    """The cull workflow (cull.html init, culling.analyze_for_culling) reads
+    only the global cfg.load(), so a workspace override of these keys would
+    be silently ignored. Pin the scope so a future re-promotion to ``both``
+    has to reckon with the consumer side first.
+    """
+    from config_schema import SCHEMA
+
+    assert SCHEMA["cull_time_window"]["scope"] == "global"
+    assert SCHEMA["cull_phash_threshold"]["scope"] == "global"
+
+
 def test_validate_unknown_key_raises():
     from config_schema import ValidationError, validate_value
 

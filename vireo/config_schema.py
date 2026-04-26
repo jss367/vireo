@@ -103,15 +103,20 @@ SCHEMA = {
     },
 
     # --- Culling ----------------------------------------------------------
+    # NOTE: scope is "global" — the cull workflow (cull.html init via
+    # /api/config, culling.analyze_for_culling default-fill via cfg.load())
+    # reads only the global config, so a workspace override here would be
+    # silently ignored. Promote to "both" only after wiring those consumers
+    # to db.get_effective_config(cfg.load()).
     "cull_time_window": {
         "type": "int", "min": 0, "max": 3600,
-        "category": "Culling", "scope": "both",
+        "category": "Culling", "scope": "global",
         "label": "Cull time window (seconds)",
         "desc": "Burst window for the cull workflow — photos within this gap are eligible for grouping.",
     },
     "cull_phash_threshold": {
         "type": "int", "min": 0, "max": 64,
-        "category": "Culling", "scope": "both",
+        "category": "Culling", "scope": "global",
         "label": "Cull pHash threshold",
         "desc": "Maximum perceptual-hash distance for two photos to be considered visually similar.",
     },
