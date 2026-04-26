@@ -794,6 +794,26 @@
     <div id="inatTokenStatus" style="font-size:12px;margin-top:4px;min-height:18px;"></div>
   </div>
 
+  <!-- Google Maps -->
+  <div class="section">
+    <div class="section-title">Google Maps</div>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+      Used for location autocomplete on photo keywords. Get a key from the Google Cloud console (Maps JavaScript API + Places API + Geocoding API enabled). Add an HTTP referrer restriction in the console (e.g. <code>localhost:8080/*</code>) so the key can only be used from your machine.
+    </p>
+    <div class="setting-row">
+      <div class="setting-label">
+        API Key
+        <small>Stored in <code>~/.vireo/config.json</code>. The key is embedded in the browse page when set so the Google Maps JS library can call autocomplete client-side.</small>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="password" id="cfgGoogleMapsApiKey" placeholder="AIza..."
+               style="width:260px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:12px;font-family:monospace;"
+               onchange="saveConfig()">
+        <button onclick="toggleGoogleMapsKeyVisibility()" style="background:var(--bg-tertiary);color:var(--text-dim);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 10px;font-size:11px;cursor:pointer;">Show</button>
+      </div>
+    </div>
+  </div>
+
   <!-- External Editor -->
   <div class="section">
     <div class="section-title">External Editor</div>
@@ -1121,6 +1141,7 @@ async function loadConfig() {
     document.getElementById('cfgHfToken').value = cfg.hf_token || '';
     document.getElementById('cfgInatToken').value = cfg.inat_token || '';
     if (cfg.inat_token) validateInatToken();
+    document.getElementById('cfgGoogleMapsApiKey').value = cfg.google_maps_api_key || '';
     document.getElementById('cfgKeywordCase').value = cfg.keyword_case || 'auto';
     document.getElementById('cfgMaxEditHistory').value = cfg.max_edit_history != null ? cfg.max_edit_history : 1000;
     // Load darktable settings
@@ -1314,6 +1335,7 @@ function saveConfig() {
           max_edit_history: maxEditHistory,
           hf_token: hfToken,
           inat_token: document.getElementById('cfgInatToken').value.trim(),
+          google_maps_api_key: document.getElementById('cfgGoogleMapsApiKey').value.trim(),
           external_editor: document.getElementById('cfgExternalEditor').value.trim(),
           darktable_bin: document.getElementById('cfgDarktableBin').value.trim(),
           darktable_style: document.getElementById('cfgDarktableStyle').value.trim(),
@@ -1446,6 +1468,11 @@ function resetPipelineDefaults() {
 
 function toggleInatTokenVisibility() {
   var inp = document.getElementById('cfgInatToken');
+  inp.type = inp.type === 'password' ? 'text' : 'password';
+}
+
+function toggleGoogleMapsKeyVisibility() {
+  var inp = document.getElementById('cfgGoogleMapsApiKey');
   inp.type = inp.type === 'password' ? 'text' : 'password';
 }
 
