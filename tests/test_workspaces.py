@@ -918,3 +918,20 @@ def test_close_tab_rejects_non_openable_navid(db):
     db.set_active_workspace(ws_id)
     with pytest.raises(ValueError):
         db.close_tab("browse")
+
+
+def test_open_tabs_are_per_workspace(db):
+    ws_a = db.create_workspace("A")
+    ws_b = db.create_workspace("B")
+
+    db.set_active_workspace(ws_a)
+    db.open_tab("keywords")
+
+    db.set_active_workspace(ws_b)
+    assert "keywords" not in db.get_open_tabs()
+    db.open_tab("logs")
+
+    db.set_active_workspace(ws_a)
+    tabs = db.get_open_tabs()
+    assert "keywords" in tabs
+    assert "logs" not in tabs
