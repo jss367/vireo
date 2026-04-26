@@ -428,16 +428,16 @@ def test_add_keyword_with_type_override(app_and_db):
     pid = photos[0]['id']
 
     resp = client.post(f'/api/photos/{pid}/keywords',
-                       json={"name": "Tim", "type": "people"})
+                       json={"name": "Tim", "type": "individual"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["ok"] is True
     kid = data["keyword_id"]
 
-    # Verify the keyword type is "people" in the database
+    # Verify the keyword type is "individual" in the database
     row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
     assert row is not None
-    assert row["type"] == "people"
+    assert row["type"] == "individual"
 
 
 def test_batch_keyword_with_type_override(app_and_db):

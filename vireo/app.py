@@ -18,7 +18,7 @@ from datetime import UTC
 from pathlib import Path
 from urllib.parse import quote
 
-from db import Database
+from db import KEYWORD_TYPES, Database
 from flask import (
     Flask,
     Response,
@@ -1428,7 +1428,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         kid = db.add_keyword(name)
         # Override type if explicitly provided
         kw_type = body.get("type")
-        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+        if kw_type and kw_type in KEYWORD_TYPES:
             db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
             db.conn.commit()
         db.tag_photo(photo_id, kid)
@@ -1588,7 +1588,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids and name required")
         kid = db.add_keyword(name)
         kw_type = body.get("type")
-        if kw_type and kw_type in ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event'):
+        if kw_type and kw_type in KEYWORD_TYPES:
             db.conn.execute("UPDATE keywords SET type = ? WHERE id = ?", (kw_type, kid))
             db.conn.commit()
         for pid in photo_ids:

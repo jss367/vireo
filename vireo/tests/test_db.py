@@ -712,7 +712,7 @@ def test_has_subject_rule_matches_photos_without_subject_keywords(tmp_path, monk
     p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
-    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)  # p1 is identified, p2 is not
 
     cid = db.add_collection(
@@ -740,7 +740,7 @@ def test_has_subject_rule_value_one_matches_identified_photos(tmp_path, monkeypa
     p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
 
-    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
 
     cid = db.add_collection(
@@ -768,9 +768,9 @@ def test_has_subject_rule_empty_subject_types_value_one_matches_no_photos(tmp_pa
     fid = db.add_folder('/photos', name='photos')
     p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    # Tag with a scene keyword anyway — but with empty subject_types, no
+    # Tag with a genre keyword anyway — but with empty subject_types, no
     # type counts as identifying, so this photo still does not match.
-    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
 
     cid = db.add_collection(
@@ -1096,26 +1096,26 @@ def test_migration_skips_user_customized_collection(tmp_path):
     assert cols["Needs Classification"] == custom
 
 
-def test_default_scene_keywords_inserted(tmp_path):
-    """Database init populates the four default scene keywords."""
+def test_default_genre_keywords_inserted(tmp_path):
+    """Database init populates the default genre keywords."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     rows = db.conn.execute(
-        "SELECT name FROM keywords WHERE type = 'scene' ORDER BY name"
+        "SELECT name FROM keywords WHERE type = 'genre' ORDER BY name"
     ).fetchall()
-    assert [r["name"] for r in rows] == ["Abstract", "Architecture", "Landscape", "Sunset"]
+    assert [r["name"] for r in rows] == ["Abstract", "Architecture", "Landscape", "Sunset", "Wildlife"]
 
 
-def test_default_scene_keywords_idempotent(tmp_path):
-    """Calling ensure_default_scene_keywords multiple times doesn't duplicate."""
+def test_default_genre_keywords_idempotent(tmp_path):
+    """Calling ensure_default_genre_keywords multiple times doesn't duplicate."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
-    db.ensure_default_scene_keywords()
-    db.ensure_default_scene_keywords()
+    db.ensure_default_genre_keywords()
+    db.ensure_default_genre_keywords()
     n = db.conn.execute(
-        "SELECT COUNT(*) AS n FROM keywords WHERE type = 'scene'"
+        "SELECT COUNT(*) AS n FROM keywords WHERE type = 'genre'"
     ).fetchone()["n"]
-    assert n == 4
+    assert n == 5
 
 
 def test_all_photos_collection_returns_all_photos(tmp_path):
@@ -2839,19 +2839,39 @@ def test_is_species_migrated_to_taxonomy_type(tmp_path):
     assert row["is_species"] == 1
 
 
-def test_add_keyword_people_type(tmp_path):
-    """A keyword can be created with type='people' via direct SQL update."""
+def test_add_keyword_individual_type(tmp_path):
+    """A keyword can be created with type='individual' via direct SQL update."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     kid = db.add_keyword("John Doe")
     db.conn.execute(
-        "UPDATE keywords SET type = 'people' WHERE id = ?", (kid,)
+        "UPDATE keywords SET type = 'individual' WHERE id = ?", (kid,)
     )
     db.conn.commit()
     row = db.conn.execute(
         "SELECT type FROM keywords WHERE id = ?", (kid,)
     ).fetchone()
-    assert row["type"] == "people"
+    assert row["type"] == "individual"
+
+
+def test_migrate_legacy_keyword_types_renames_people_descriptive_event(tmp_path):
+    """Pre-existing keywords of types 'people', 'descriptive', 'event' get
+    migrated to 'individual', 'general', 'general' respectively. Idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    # Force-create legacy rows via direct SQL (bypassing add_keyword's validation).
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'people')", ("John",))
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'descriptive')", ("blurry",))
+    db.conn.execute("INSERT INTO keywords (name, type) VALUES (?, 'event')", ("wedding",))
+    db.conn.commit()
+    db.migrate_legacy_keyword_types()
+    db.migrate_legacy_keyword_types()  # idempotent
+    rows = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE name IN ('John', 'blurry', 'wedding') ORDER BY name"
+    ).fetchall()
+    types = {r["name"]: r["type"] for r in rows}
+    assert types == {"John": "individual", "blurry": "general", "wedding": "general"}
 
 
 def test_keyword_tree_includes_type(tmp_path):
@@ -2878,7 +2898,7 @@ def test_photo_keywords_includes_type(tmp_path):
     fid = db.add_folder('/photos', name='photos')
     pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
-    # Use a name that isn't pre-seeded as a default scene keyword.
+    # Use a name that isn't pre-seeded as a default genre keyword.
     kid = db.add_keyword('MyTag')
     db.tag_photo(pid, kid)
 
@@ -6426,7 +6446,7 @@ def test_get_folder_tree_includes_partial_folders_with_status(tmp_path):
 def test_keyword_types_constant():
     """KEYWORD_TYPES contains exactly the five valid enum values."""
     from db import KEYWORD_TYPES
-    assert frozenset({"taxonomy", "individual", "place", "scene", "general"}) == KEYWORD_TYPES
+    assert frozenset({"taxonomy", "individual", "location", "genre", "general"}) == KEYWORD_TYPES
 
 
 def test_add_keyword_accepts_valid_types(tmp_path):
@@ -6495,15 +6515,15 @@ def test_add_keyword_existing_general_upgrades_to_requested_type(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    # Use a name that isn't pre-seeded as a default scene keyword.
+    # Use a name that isn't pre-seeded as a default genre keyword.
     kid1 = db.add_keyword("Cityscape")
     row1 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid1,)).fetchone()
     assert row1["type"] == "general"
 
-    kid2 = db.add_keyword("Cityscape", kw_type="scene")
+    kid2 = db.add_keyword("Cityscape", kw_type="genre")
     assert kid2 == kid1
     row2 = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid2,)).fetchone()
-    assert row2["type"] == "scene"
+    assert row2["type"] == "genre"
 
 
 def test_add_keyword_existing_general_upgrades_to_taxonomy_sets_is_species(tmp_path):
@@ -6535,7 +6555,7 @@ def test_get_subject_types_returns_default(tmp_path, monkeypatch):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    assert db.get_subject_types() == {"taxonomy", "individual", "scene"}
+    assert db.get_subject_types() == {"taxonomy", "individual", "genre"}
 
 
 def test_get_subject_types_honors_workspace_override(tmp_path, monkeypatch):
@@ -6574,12 +6594,12 @@ def test_filter_out_subject_tagged_excludes_tagged_photos(tmp_path):
                       file_size=100, file_mtime=1.0)
     p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
                       file_size=100, file_mtime=1.0)
-    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
     gen_kid = db.add_keyword("note", kw_type="general")
     db.tag_photo(p1, scene_kid)
     db.tag_photo(p2, gen_kid)
 
-    kept = db.filter_out_subject_tagged([p1, p2], {"scene"})
+    kept = db.filter_out_subject_tagged([p1, p2], {"genre"})
     assert kept == [p2]
 
 
@@ -6600,7 +6620,7 @@ def test_filter_out_subject_tagged_empty_photo_ids_returns_empty(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     db.set_active_workspace(db.create_workspace("ws"))
-    assert db.filter_out_subject_tagged([], {"scene"}) == []
+    assert db.filter_out_subject_tagged([], {"genre"}) == []
 
 
 def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
@@ -6622,4 +6642,4 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     # No subject-tagged photos here — all three should be kept.
     # Provide ids in non-sorted order to confirm the helper preserves input order.
     ordered = [p_c, p_a, p_b]
-    assert db.filter_out_subject_tagged(ordered, {"scene"}) == ordered
+    assert db.filter_out_subject_tagged(ordered, {"genre"}) == ordered

@@ -1746,12 +1746,12 @@ def test_update_keyword_type(app_and_db):
     app, db = app_and_db
     client = app.test_client()
     kid = db.add_keyword("Tim")
-    resp = client.put(f"/api/keywords/{kid}", json={"type": "people"})
+    resp = client.put(f"/api/keywords/{kid}", json={"type": "individual"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["ok"] is True
     row = db.conn.execute("SELECT type FROM keywords WHERE id = ?", (kid,)).fetchone()
-    assert row["type"] == "people"
+    assert row["type"] == "individual"
 
 
 def test_update_keyword_type_invalid(app_and_db):
@@ -2197,14 +2197,14 @@ def test_put_subject_types_persists_valid_values(app_and_db):
     client = app.test_client()
     resp = client.put(
         f"/api/workspaces/{ws_id}/subject-types",
-        json={"types": ["taxonomy", "scene"]},
+        json={"types": ["taxonomy", "genre"]},
         content_type="application/json",
     )
     assert resp.status_code == 200
     body = resp.get_json()
-    assert set(body["types"]) == {"taxonomy", "scene"}
+    assert set(body["types"]) == {"taxonomy", "genre"}
     overrides = _read_workspace_overrides(db, ws_id)
-    assert set(overrides.get("subject_types", [])) == {"taxonomy", "scene"}
+    assert set(overrides.get("subject_types", [])) == {"taxonomy", "genre"}
 
 
 def test_put_subject_types_drops_unknown_values(app_and_db):

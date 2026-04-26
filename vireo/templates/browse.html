@@ -1286,7 +1286,7 @@ function renderKeywordTree(keywords) {
     byParent[pid].push(k);
   });
 
-  var treeTypeIcons = {general:'',taxonomy:'🌿',location:'📍',descriptive:'◆',people:'👤',event:'📅'};
+  var treeTypeIcons = {general:'',taxonomy:'🌿',individual:'👤',location:'📍',genre:'🎭'};
   function buildTree(parentId, depth) {
     var children = byParent[parentId] || [];
     var html = '';
@@ -2324,8 +2324,8 @@ function renderDetail(photo) {
   updateDetailColors();
 
   // Keywords
-  var kwTypeIcons = {general:'●', taxonomy:'🌿', location:'📍', descriptive:'◆', people:'👤', event:'📅'};
-  var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', location:'Location', descriptive:'Descriptive', people:'People', event:'Event'};
+  var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
+  var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
     var ktype = k.type || 'general';

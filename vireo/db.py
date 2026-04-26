@@ -16,14 +16,14 @@ _UNSET = object()  # sentinel for "not provided" vs explicit None
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
 # - individual: a named person, pet, or otherwise tracked individual
-# - place: a named location ("Yosemite", "backyard")
-# - scene: a non-subject visual category ("Landscape", "Sunset")
+# - location: a named location ("Yosemite", "backyard")
+# - genre: a non-subject visual category ("Landscape", "Sunset")
 # - general: catch-all/free-form tag (the legacy default)
-KEYWORD_TYPES = frozenset({"taxonomy", "individual", "place", "scene", "general"})
+KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "general"})
 
 # Default set of types that count as "identifying" a photo for queue
 # membership / classifier skip purposes. Workspaces can override.
-SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "scene"})
+SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
@@ -103,7 +103,8 @@ class Database:
         self._new_images_cache = get_shared_cache()
         self._create_tables()
         self.ensure_default_workspace()
-        self.ensure_default_scene_keywords()
+        self.migrate_legacy_keyword_types()
+        self.ensure_default_genre_keywords()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
@@ -846,23 +847,31 @@ class Database:
             return row[0]
         return self.create_workspace("Default")
 
-    def ensure_default_scene_keywords(self):
-        """Insert the default scene keywords if none exist of type='scene'.
+    def ensure_default_genre_keywords(self):
+        """Insert the default genre keywords if none exist of type='genre'.
 
-        Idempotent: a single existing scene keyword (user-created or otherwise)
+        Idempotent: a single existing genre keyword (user-created or otherwise)
         short-circuits the insert. Keywords are global, so this runs once per
         database (not per workspace).
         """
         existing = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE type = 'scene' LIMIT 1"
+            "SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1"
         ).fetchone()
         if existing:
             return
-        for name in ("Landscape", "Sunset", "Architecture", "Abstract"):
+        for name in ("Landscape", "Sunset", "Architecture", "Abstract", "Wildlife"):
             self.conn.execute(
-                "INSERT OR IGNORE INTO keywords (name, type, is_species) VALUES (?, 'scene', 0)",
+                "INSERT OR IGNORE INTO keywords (name, type, is_species) VALUES (?, 'genre', 0)",
                 (name,),
             )
+        self.conn.commit()
+
+    def migrate_legacy_keyword_types(self):
+        """One-shot migration of legacy keyword type names to the canonical enum.
+        Idempotent — running again is a no-op once all rows are migrated."""
+        self.conn.execute("UPDATE keywords SET type = 'individual' WHERE type = 'people'")
+        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'descriptive'")
+        self.conn.execute("UPDATE keywords SET type = 'general' WHERE type = 'event'")
         self.conn.commit()
 
     # -- Folders --
@@ -3545,11 +3554,9 @@ class Database:
             (ws, ws, ws),
         ).fetchall()
 
-    VALID_KEYWORD_TYPES = ('general', 'taxonomy', 'location', 'descriptive', 'people', 'event')
-
     def update_keyword(self, keyword_id, **kwargs):
         """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name."""
-        if 'type' in kwargs and kwargs['type'] not in self.VALID_KEYWORD_TYPES:
+        if 'type' in kwargs and kwargs['type'] not in KEYWORD_TYPES:
             raise ValueError(f"Invalid keyword type: {kwargs['type']}")
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}

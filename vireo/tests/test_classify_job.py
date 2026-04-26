@@ -1783,7 +1783,7 @@ def test_prepare_image_no_vireo_dir_uses_original(tmp_path):
 
 def _setup_two_photo_classify_workspace(tmp_path):
     """Create a real DB with two photos in a static collection.
-    p1 is tagged with a 'scene' keyword (Landscape); p2 is untagged.
+    p1 is tagged with a 'genre' keyword (Landscape); p2 is untagged.
     Returns (db_path, ws_id, col_id, p1, p2)."""
     from db import Database
 
@@ -1801,8 +1801,8 @@ def _setup_two_photo_classify_workspace(tmp_path):
         folder_id, "p2.jpg", extension=".jpg", file_size=100, file_mtime=2.0,
     )
 
-    # Tag p1 with a scene keyword so it should be filtered out by the skip-gate.
-    scene_kid = db.add_keyword("Landscape", kw_type="scene")
+    # Tag p1 with a genre keyword so it should be filtered out by the skip-gate.
+    scene_kid = db.add_keyword("Landscape", kw_type="genre")
     db.tag_photo(p1, scene_kid)
 
     col_id = db.add_collection(
@@ -1869,7 +1869,7 @@ def test_classify_job_skips_photos_with_subject_keywords(tmp_path):
 
     Verified by capturing the photo IDs passed into the (stubbed)
     _detect_subjects step. Only p2 (untagged) should reach detection;
-    p1 (tagged 'Landscape', type='scene') is skipped at the load step.
+    p1 (tagged 'Landscape', type='genre') is skipped at the load step.
     """
     db_path, ws, col_id, p1, p2 = _setup_two_photo_classify_workspace(tmp_path)
 
