@@ -7,6 +7,30 @@ import os
 
 from duplicates import DupCandidate, resolve_duplicates
 
+# SQLite's legacy ``SQLITE_MAX_VARIABLE_NUMBER`` cap is 999 on older builds.
+# An auto-resolved group can exceed that when many `-2` copies of one
+# file accumulate over repeated scans, so any single-statement IN-clause
+# over a group's photo_ids would fail the duplicate-scan job entirely.
+# Sized below 999 to leave headroom for additional bound parameters.
+_SQL_PARAM_CHUNK = 900
+
+
+def _fetch_photo_rows(db, photo_ids, columns, where_extra=""):
+    """Run ``SELECT {columns} FROM photos p LEFT JOIN folders f WHERE p.id IN (...) {where_extra}``
+    in chunks below the SQLite parameter cap. Returns a flat list of rows.
+    """
+    rows = []
+    for i in range(0, len(photo_ids), _SQL_PARAM_CHUNK):
+        chunk = photo_ids[i:i + _SQL_PARAM_CHUNK]
+        placeholders = ",".join("?" * len(chunk))
+        sql = (
+            f"SELECT {columns} "
+            f"FROM photos p LEFT JOIN folders f ON f.id = p.folder_id "
+            f"WHERE p.id IN ({placeholders}){where_extra}"
+        )
+        rows.extend(db.conn.execute(sql, chunk).fetchall())
+    return rows
+
 
 def _row_to_info(row, folder_path):
     """Shape a photos row into the dict the UI consumes for a proposal entry."""
@@ -24,16 +48,12 @@ def _row_to_info(row, folder_path):
 
 def _build_unresolved_proposal(db, group):
     """Return a proposal dict for an unresolved group, or None on race."""
-    photo_ids = group["photo_ids"]
-    placeholders = ",".join("?" * len(photo_ids))
-    rows = db.conn.execute(
-        f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.file_size,
-                   f.path AS folder_path
-            FROM photos p
-            LEFT JOIN folders f ON f.id = p.folder_id
-            WHERE p.id IN ({placeholders}) AND p.flag != 'rejected'""",
-        photo_ids,
-    ).fetchall()
+    rows = _fetch_photo_rows(
+        db, group["photo_ids"],
+        columns="p.id, p.filename, p.file_mtime, p.rating, p.file_size, "
+                "f.path AS folder_path",
+        where_extra=" AND p.flag != 'rejected'",
+    )
 
     info_by_id = {r["id"]: _row_to_info(r, r["folder_path"]) for r in rows}
     candidates = [
@@ -73,16 +93,11 @@ def _build_resolved_proposal(db, group):
 
     Returns None if a race shrinks the group below 2 active rows.
     """
-    photo_ids = group["photo_ids"]
-    placeholders = ",".join("?" * len(photo_ids))
-    rows = db.conn.execute(
-        f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.file_size, p.flag,
-                   f.path AS folder_path
-            FROM photos p
-            LEFT JOIN folders f ON f.id = p.folder_id
-            WHERE p.id IN ({placeholders})""",
-        photo_ids,
-    ).fetchall()
+    rows = _fetch_photo_rows(
+        db, group["photo_ids"],
+        columns="p.id, p.filename, p.file_mtime, p.rating, p.file_size, p.flag, "
+                "f.path AS folder_path",
+    )
     if len(rows) < 2:
         return None
 

@@ -516,8 +516,16 @@
         showToast('Moved 1 file to Trash', 'success');
       } else if ((data.skipped || []).length) {
         var reason = data.skipped[0].reason || 'skipped';
-        if (status) status.textContent = 'Skipped: ' + reason;
-        if (btn) btn.disabled = false;
+        // "file already missing" still drops the orphan DB row server-side,
+        // so the row + on-disk file are both gone — treat as terminal-done
+        // rather than re-offering the button.
+        if (reason === 'file already missing') {
+          card.classList.add('trashed');
+          if (status) status.textContent = 'Cleaned up (file was already gone)';
+        } else {
+          if (status) status.textContent = 'Skipped: ' + reason;
+          if (btn) btn.disabled = false;
+        }
       } else if ((data.failed || []).length) {
         var err = data.failed[0].error || 'failed';
         if (status) status.textContent = 'Failed: ' + err;
@@ -563,20 +571,28 @@
       var skipped = (data.skipped || []).length;
       var failed = (data.failed || []).length;
 
-      // Mark trashed cards in the UI by id. Skipped/failed entries report
-      // their photo id so we can show per-card status without reloading.
+      // Mark trashed cards. The API also deletes DB rows for "file already
+      // missing" skips (the file is gone, the row would otherwise be orphaned
+      // and re-counted forever), so we treat those as terminal completions
+      // here too — without this, the bulk button keeps re-offering files
+      // that don't exist and repeat clicks degrade into "photo not found".
+      var TERMINAL_SKIPS = new Set(['file already missing']);
       var trashedSet = new Set(ids);
-      (data.skipped || []).forEach(function(s) { trashedSet.delete(s.id); });
+      (data.skipped || []).forEach(function(s) {
+        if (!TERMINAL_SKIPS.has(s.reason)) trashedSet.delete(s.id);
+      });
       (data.failed || []).forEach(function(f) { trashedSet.delete(f.id); });
       trashedSet.forEach(function(pid) {
         var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
         if (card) {
           card.classList.add('trashed');
           var s = card.querySelector('[data-trash-status]');
-          if (s) s.textContent = 'Moved to Trash';
+          if (s) s.textContent = 'Cleaned up';
         }
       });
       (data.skipped || []).forEach(function(s) {
+        // Terminal skips were already handled in trashedSet above.
+        if (TERMINAL_SKIPS.has(s.reason)) return;
         var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
         if (card) {
           var st = card.querySelector('[data-trash-status]');
@@ -591,8 +607,11 @@
         }
       });
 
+      var actionableSkips = (data.skipped || []).filter(function(s) {
+        return !TERMINAL_SKIPS.has(s.reason);
+      }).length;
       var msg = 'Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') + ' to Trash';
-      if (skipped) msg += ', ' + skipped + ' skipped';
+      if (actionableSkips) msg += ', ' + actionableSkips + ' skipped';
       if (failed) msg += ', ' + failed + ' failed';
       showToast(msg, failed ? 'error' : 'success');
 

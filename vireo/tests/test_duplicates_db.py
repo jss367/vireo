@@ -433,6 +433,33 @@ def test_run_duplicate_scan_excludes_resolved_when_opt_out(tmp_path):
     assert result["resolved_group_count"] == 0
 
 
+def test_run_duplicate_scan_chunks_large_groups(tmp_path, monkeypatch):
+    """A single resolved group with more than ``_SQL_PARAM_CHUNK`` photo_ids
+    must not raise ``OperationalError`` on SQLite builds with the legacy
+    999-parameter cap. Patch the cap down to 2 and seed 5 rows in one group
+    so the chunked SELECT path has to run multiple iterations.
+    """
+    import duplicate_scan as ds
+    from duplicate_scan import run_duplicate_scan
+
+    monkeypatch.setattr(ds, "_SQL_PARAM_CHUNK", 2)
+
+    db = Database(str(tmp_path / "t.db"))
+    fid = db.add_folder(str(tmp_path))
+    # 1 winner + 4 rejected siblings sharing a hash. The hook auto-rejects
+    # everything but the cleanest filename, so we end up with 1 kept + 4
+    # rejected — a "resolved" group with 5 photo_ids in scope.
+    _add(db, fid, "owl.jpg", file_hash="HBIG")
+    for i in range(2, 6):
+        _add(db, fid, f"owl-{i}.jpg", file_hash="HBIG")
+
+    result = run_duplicate_scan({"progress": {}}, db, include_resolved=True)
+    resolved = [p for p in result["proposals"] if p["status"] == "resolved"]
+    assert len(resolved) == 1
+    # All 4 losers surface even though each chunked SELECT only saw 2 ids.
+    assert len(resolved[0]["losers"]) == 4
+
+
 # -----------------------------------------------------------------------------
 # Scanner-order regression: XMP import must land BEFORE auto-resolve so a
 # loser's keywords are merged onto the winner (Codex review fix #1).
