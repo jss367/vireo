@@ -3337,10 +3337,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 errors[schema_key] = str(e)
 
         # Structured non-schema keys still need shape validation, otherwise a
-        # malformed payload like {"keyboard_shortcuts": 5} would write through
-        # to the file and crash downstream UI (shortcuts.html dereferences
-        # `cfg.keyboard_shortcuts.<ctx>.<action>` and assumes a dict tree).
+        # malformed payload would write through to the file and crash
+        # downstream UI consumers that assume a specific shape.
         if "keyboard_shortcuts" in payload:
+            # shortcuts.html dereferences `cfg.keyboard_shortcuts.<ctx>.<action>`
+            # and assumes a dict tree.
             ks = payload["keyboard_shortcuts"]
             if not isinstance(ks, dict):
                 errors["keyboard_shortcuts"] = "keyboard_shortcuts must be a JSON object"
@@ -3356,6 +3357,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             errors[f"keyboard_shortcuts.{ctx_name}.{action}"] = (
                                 "must be a string"
                             )
+
+        # ingest.recent_destinations is also EXCLUDED from SCHEMA but is a
+        # structured value (list[str]). pipeline.html calls
+        # `recents.forEach(...)` on it, so a non-list value would crash the
+        # pipeline page after a bad import.
+        ingest_section = payload.get("ingest")
+        if isinstance(ingest_section, dict) and "recent_destinations" in ingest_section:
+            recents = ingest_section["recent_destinations"]
+            if not isinstance(recents, list):
+                errors["ingest.recent_destinations"] = (
+                    "ingest.recent_destinations must be a JSON array"
+                )
+            else:
+                for i, item in enumerate(recents):
+                    if not isinstance(item, str):
+                        errors[f"ingest.recent_destinations[{i}]"] = (
+                            "must be a string"
+                        )
+                        break
 
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400

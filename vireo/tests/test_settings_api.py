@@ -793,6 +793,36 @@ def test_import_rejects_non_dict_keyboard_shortcut_context(app_and_db):
     assert "keyboard_shortcuts.navigation" in body["errors"]
 
 
+def test_import_rejects_non_list_recent_destinations(app_and_db):
+    """ingest.recent_destinations is in EXCLUDED but pipeline.html iterates it
+    with .forEach. A non-list value would crash the page after import."""
+    app, _ = app_and_db
+    import config as cfg
+
+    cfg.set("classification_threshold", 0.5)
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": {"recent_destinations": "/tmp/out"}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert "ingest.recent_destinations" in body["errors"]
+    assert cfg.load()["classification_threshold"] == 0.5
+
+
+def test_import_rejects_non_string_inside_recent_destinations(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps({"ingest": {"recent_destinations": ["/a", 5]}})},
+    )
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert any(k.startswith("ingest.recent_destinations") for k in body["errors"])
+
+
 def test_import_accepts_well_formed_keyboard_shortcuts(app_and_db):
     app, _ = app_and_db
     import config as cfg
