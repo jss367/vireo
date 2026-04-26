@@ -1493,6 +1493,7 @@ function sendReport() {
     var tabsHost = document.getElementById('navOpenTabs');
     if (tabsHost) {
       tabsHost.textContent = '';  // clear
+      var path = window.location.pathname;
       openTabs.forEach(function(tabId) {
         var page = pageById[tabId];
         if (!page) return;  // unknown id — skip
@@ -1501,6 +1502,11 @@ function sendReport() {
         a.className = 'nav-tab';
         a.dataset.navId = page.id;
         a.dataset.tab = '1';
+        // Active-state: linger-page highlighting runs before tabs are rendered,
+        // so apply it here for tabs matching the current path.
+        if (path === page.href || (page.href !== '/' && path.startsWith(page.href + '/'))) {
+          a.classList.add('active');
+        }
         a.appendChild(document.createTextNode(page.label));
         var close = document.createElement('span');
         close.className = 'nav-tab-close';
@@ -1552,12 +1558,31 @@ function sendReport() {
       .catch(function() { /* silently ignore — empty containers are fine */ });
   }
 
+  // Find the tab adjacent to navId in the rendered tab strip — prefer the
+  // next sibling so closing feels like advancing through the strip, fall back
+  // to the previous sibling if navId is the last tab.
+  function adjacentTabId(navId) {
+    var hostEl = document.getElementById('navOpenTabs');
+    if (!hostEl) return null;
+    var anchors = Array.prototype.slice.call(hostEl.querySelectorAll('a[data-nav-id]'));
+    var idx = -1;
+    for (var i = 0; i < anchors.length; i++) {
+      if (anchors[i].dataset.navId === navId) { idx = i; break; }
+    }
+    if (idx === -1) return null;
+    if (idx + 1 < anchors.length) return anchors[idx + 1].dataset.navId;
+    if (idx - 1 >= 0) return anchors[idx - 1].dataset.navId;
+    return null;
+  }
+
   window.closeTab = function(navId) {
+    // Compute the destination BEFORE the close so we can pick the tab
+    // adjacent to the one being closed, not just the new tabs[0].
+    var isOnTab = currentNavId() === navId;
+    var nextNavId = isOnTab ? adjacentTabId(navId) : null;
     postJSON('/api/workspace/tabs/close', {nav_id: navId}).then(function(res) {
-      if (currentNavId() === navId) {
-        // Navigate to the next remaining tab, or fall back to /browse
-        var next = (res.open_tabs || [])[0];
-        window.location.href = next ? ('/' + next) : '/browse';
+      if (isOnTab) {
+        window.location.href = nextNavId ? ('/' + nextNavId) : '/browse';
       } else {
         // Update DOM in place — no full reload needed
         fetchAndRender();
