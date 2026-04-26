@@ -3127,6 +3127,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except (OSError, json.JSONDecodeError):
             return {}
 
+    # Serializes read-modify-write of ~/.vireo/config.json and the active
+    # workspace's config_overrides across the schema-driven settings
+    # endpoints (PATCH/DELETE/import). Without this, with per-field autosave
+    # and `app.run(threaded=True)` two concurrent requests can read the same
+    # snapshot and the later writer drops the earlier change.
+    _settings_write_lock = threading.Lock()
+
     @app.route("/api/settings/global", methods=["PATCH"])
     def api_settings_global_patch():
         """Set a single global config value (validated against SCHEMA)."""
@@ -3142,10 +3149,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except schema.ValidationError as e:
             return json_error(str(e), status=400)
 
-        raw = _read_raw_config_file()
-        schema.set_dotted(raw, key, value)
-        cfg.save(raw)
-        _settings_post_save_side_effects(cfg.load())
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            schema.set_dotted(raw, key, value)
+            cfg.save(raw)
+            _settings_post_save_side_effects(cfg.load())
         return jsonify({"ok": True, "key": key, "value": value})
 
     @app.route("/api/settings/global/<path:key>", methods=["DELETE"])
@@ -3157,22 +3165,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if key not in schema.SCHEMA:
             return json_error(f"unknown setting {key!r}", status=400)
 
-        raw = _read_raw_config_file()
-        schema.delete_dotted(raw, key)
-        cfg.save(raw)
-        _settings_post_save_side_effects(cfg.load())
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            schema.delete_dotted(raw, key)
+            cfg.save(raw)
+            _settings_post_save_side_effects(cfg.load())
         return jsonify({"ok": True, "key": key})
 
     def _read_workspace_overrides(db):
-        """Return the active workspace's config_overrides as a dict (or {})."""
+        """Return the active workspace's config_overrides as a dict (or {}).
+
+        Coerces non-dict payloads (possible via legacy workspace
+        create/update APIs) to ``{}`` so dotted-key mutation in the schema
+        write paths can't crash on a malformed override.
+        """
         ws = db.get_workspace(db._active_workspace_id)
         if not ws or not ws["config_overrides"]:
             return {}
         try:
             raw = ws["config_overrides"]
-            return json.loads(raw) if isinstance(raw, str) else raw
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
         except (json.JSONDecodeError, TypeError):
             return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _write_workspace_overrides(db, overrides):
         db.update_workspace(
@@ -3200,9 +3215,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), status=400)
 
         db = _get_db()
-        overrides = _read_workspace_overrides(db)
-        schema.set_dotted(overrides, key, value)
-        _write_workspace_overrides(db, overrides)
+        with _settings_write_lock:
+            overrides = _read_workspace_overrides(db)
+            schema.set_dotted(overrides, key, value)
+            _write_workspace_overrides(db, overrides)
         return jsonify({"ok": True, "key": key, "value": value})
 
     @app.route("/api/settings/workspace/<path:key>", methods=["DELETE"])
@@ -3213,9 +3229,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if key not in schema.SCHEMA:
             return json_error(f"unknown setting {key!r}", status=400)
         db = _get_db()
-        overrides = _read_workspace_overrides(db)
-        schema.delete_dotted(overrides, key)
-        _write_workspace_overrides(db, overrides)
+        with _settings_write_lock:
+            overrides = _read_workspace_overrides(db)
+            schema.delete_dotted(overrides, key)
+            _write_workspace_overrides(db, overrides)
         return jsonify({"ok": True, "key": key})
 
     @app.route("/api/settings/export")
@@ -3282,8 +3299,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if errors:
             return jsonify({"error": "validation failed", "errors": errors}), 400
 
-        cfg.save(payload)
-        _settings_post_save_side_effects(cfg.load())
+        with _settings_write_lock:
+            cfg.save(payload)
+            _settings_post_save_side_effects(cfg.load())
         return jsonify({"ok": True})
 
     @app.route("/api/darktable/status")

@@ -2824,6 +2824,10 @@ async function saveSchemaSetting(key, value, scope) {
     }
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
+    // The curated form above this panel posts a full snapshot from its own
+    // inputs. Repopulate those inputs from the server so a later curated
+    // edit doesn't overwrite the value we just saved with a stale snapshot.
+    if (scope === 'global') await loadConfig();
     setRowStatus(key, '✓ Saved', false);
     setTimeout(function() { setRowStatus(key, '', false); }, 1500);
   } catch (err) {
@@ -2834,7 +2838,8 @@ async function saveSchemaSetting(key, value, scope) {
 async function resetSchemaSetting(key) {
   setRowStatus(key, 'Resetting…', false);
   try {
-    var resp = await fetch(_settingsScopeBaseFor(ALL_SETTINGS_SCOPE) + '/' + encodeURIComponent(key), {
+    var scope = ALL_SETTINGS_SCOPE;
+    var resp = await fetch(_settingsScopeBaseFor(scope) + '/' + encodeURIComponent(key), {
       method: 'DELETE',
     });
     if (!resp.ok) {
@@ -2844,6 +2849,7 @@ async function resetSchemaSetting(key) {
     }
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
+    if (scope === 'global') await loadConfig();
   } catch (err) {
     setRowStatus(key, 'Network error', true);
   }
@@ -2912,6 +2918,9 @@ async function importSettingsFile(file) {
     await refreshAllSettingsValues();
     renderAllSettings(document.getElementById('allSettingsCategories'));
     filterAllSettings();
+    // Curated form posts its own snapshot — repull so a later edit doesn't
+    // overwrite imported global values with stale form state.
+    await loadConfig();
     alert('Settings imported. Workspace overrides preserved.');
   } catch (err) {
     alert('Network error: ' + (err && err.message || err));

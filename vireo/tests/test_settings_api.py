@@ -689,3 +689,84 @@ def test_delete_workspace_preserves_active_labels(app_and_db):
     overrides = _ws_overrides(db)
     assert overrides.get("active_labels") == ["birds.txt"]
     assert "classification_threshold" not in overrides
+
+
+# ---------------------------------------------------------------------------
+# Workspace override payload coercion (defensive: non-dict on disk)
+# ---------------------------------------------------------------------------
+
+
+def test_patch_workspace_recovers_from_non_dict_overrides(app_and_db):
+    """A scalar payload in config_overrides must not crash the schema PATCH."""
+    app, db = app_and_db
+    # Simulate a malformed override row (e.g. from a hand-edited DB or a
+    # legacy code path) by writing a non-object JSON value.
+    db.update_workspace(db._active_workspace_id, config_overrides=5)
+    client = app.test_client()
+    resp = client.patch(
+        "/api/settings/workspace",
+        json={"key": "classification_threshold", "value": 0.55},
+    )
+    assert resp.status_code == 200
+    overrides = _ws_overrides(db)
+    assert overrides == {"classification_threshold": 0.55}
+
+
+def test_delete_workspace_recovers_from_non_dict_overrides(app_and_db):
+    """A list payload in config_overrides must not crash the schema DELETE."""
+    app, db = app_and_db
+    db.update_workspace(db._active_workspace_id, config_overrides=["junk"])
+    client = app.test_client()
+    resp = client.delete("/api/settings/workspace/classification_threshold")
+    assert resp.status_code == 200
+    # No prior key existed; nothing to remove. Override coerces to {} → cleared.
+    assert _ws_overrides(db) == {}
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: per-key autosave race
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_global_patch_does_not_drop_writes(app_and_db):
+    """Two concurrent PATCHes for different keys must both persist.
+
+    Without a write lock, the read-modify-write (`_read_raw_config_file`
+    → `set_dotted` → `cfg.save`) lets a slow writer overwrite a fast
+    writer's change.
+    """
+    import threading as _threading
+    import time as _time
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    barrier = _threading.Barrier(2)
+    results = {}
+
+    def patch(key, value, slot):
+        barrier.wait()
+        # Stagger reads slightly so without the lock the second writer
+        # would deterministically clobber the first.
+        if slot == "slow":
+            _time.sleep(0.05)
+        results[slot] = client.patch(
+            "/api/settings/global",
+            json={"key": key, "value": value},
+        ).status_code
+
+    t1 = _threading.Thread(
+        target=patch, args=("classification_threshold", 0.31, "fast"),
+    )
+    t2 = _threading.Thread(
+        target=patch, args=("similarity_threshold", 0.77, "slow"),
+    )
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert results == {"fast": 200, "slow": 200}
+
+    values = client.get("/api/settings/values").get_json()
+    assert values["global"]["classification_threshold"] == 0.31
+    assert values["global"]["similarity_threshold"] == 0.77
