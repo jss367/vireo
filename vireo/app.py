@@ -537,43 +537,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         variant, e,
                     )
 
-    @app.context_processor
-    def _inject_navbar_state():
-        """Make open-tabs state available to every rendered template."""
-        from db import OPENABLE_NAV_IDS
-        try:
-            tabs = _get_db().get_open_tabs()
-        except Exception:
-            tabs = []
-        # Canonical display order for the Tools dropdown
-        TOOLS_ORDER = ["settings", "workspace", "lightroom",
-                       "shortcuts", "keywords", "duplicates", "logs"]
-        TAB_LABELS = {
-            "settings": "Settings",
-            "workspace": "Workspace",
-            "lightroom": "Lightroom",
-            "shortcuts": "Shortcuts",
-            "keywords": "Keywords",
-            "duplicates": "Duplicates",
-            "logs": "Logs",
-        }
-        TAB_HREFS = {
-            "settings": "/settings",
-            "workspace": "/workspace",
-            "lightroom": "/lightroom",
-            "shortcuts": "/shortcuts",
-            "keywords": "/keywords",
-            "duplicates": "/duplicates",
-            "logs": "/logs",
-        }
-        return {
-            "open_tabs": tabs,
-            "openable_nav_ids": list(OPENABLE_NAV_IDS),
-            "tools_order": TOOLS_ORDER,
-            "tab_labels": TAB_LABELS,
-            "tab_hrefs": TAB_HREFS,
-        }
-
     @app.before_request
     def _enforce_api_v1_token():
         if not request.path.startswith("/api/v1/"):
@@ -2341,6 +2304,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("nav_id is not openable", 400)
         tabs = db.close_tab(nav_id)
         return jsonify({"ok": True, "open_tabs": tabs})
+
+    @app.route("/api/workspace/tabs", methods=["GET"])
+    def api_get_tabs():
+        from db import OPENABLE_NAV_IDS  # noqa: F401  (kept for future use/symmetry)
+        db = _get_db()
+        try:
+            open_tabs = db.get_open_tabs()
+        except Exception:
+            open_tabs = []
+        TOOLS_ORDER = ["settings", "workspace", "lightroom",
+                       "shortcuts", "keywords", "duplicates", "logs"]
+        TAB_LABELS = {
+            "settings": "Settings", "workspace": "Workspace",
+            "lightroom": "Lightroom", "shortcuts": "Shortcuts",
+            "keywords": "Keywords", "duplicates": "Duplicates", "logs": "Logs",
+        }
+        openable_pages = [
+            {"id": t, "label": TAB_LABELS[t], "href": "/" + t}
+            for t in TOOLS_ORDER
+        ]
+        return jsonify({"open_tabs": open_tabs, "openable_pages": openable_pages})
 
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():

@@ -1160,35 +1160,12 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   <a href="/audit" data-nav-id="audit">Audit</a>
   <a href="/compare" data-nav-id="compare">Compare</a>
   <span class="nav-tab-divider" aria-hidden="true"></span>
-  {% for tab_id in open_tabs %}
-    {% if tab_id in tab_labels %}
-    <a href="{{ tab_hrefs[tab_id] }}"
-       data-nav-id="{{ tab_id }}"
-       data-tab="1"
-       class="nav-tab">
-      {{ tab_labels[tab_id] }}
-      <span class="nav-tab-close"
-            title="Close tab"
-            onclick="event.preventDefault(); event.stopPropagation(); closeTab('{{ tab_id }}'); return false;">&times;</span>
-    </a>
-    {% endif %}
-  {% endfor %}
+  <span id="navOpenTabs"></span>
   <button type="button"
           class="nav-tools-btn"
           data-testid="nav-tools-btn"
           onclick="toggleToolsMenu(event)">+ Tools &#9662;</button>
-  <div class="nav-tools-menu" id="navToolsMenu" hidden>
-    {% for tab_id in tools_order %}
-      <button type="button"
-              class="nav-tools-item"
-              data-nav-id="{{ tab_id }}"
-              data-open="{{ '1' if tab_id in open_tabs else '0' }}"
-              onclick="toggleTabFromMenu('{{ tab_id }}')">
-        <span class="nav-tools-check">{% if tab_id in open_tabs %}&check;{% else %}&nbsp;{% endif %}</span>
-        {{ tab_labels[tab_id] }}
-      </button>
-    {% endfor %}
-  </div>
+  <div class="nav-tools-menu" id="navToolsMenu" hidden></div>
   <span class="nav-spacer"></span>
   <span class="nav-icon" onclick="openReportModal()" title="Report Issue" id="reportToggle">&#9888;</span>
   <span class="nav-icon" onclick="openHelpModal()" title="Help (F1)" id="helpToggle">&#63;</span>
@@ -1485,10 +1462,6 @@ function sendReport() {
 <script>
 /* ---------- Openable tabs: open/close + Tools dropdown ---------- */
 (function() {
-  // Treat these as "linger" pages; everything else is an openable tab
-  var LINGER_PAGES = ["pipeline","jobs","pipeline-review","review","cull","misses",
-                      "highlights","browse","map","variants","dashboard","audit","compare"];
-
   function postJSON(url, body) {
     return fetch(url, {
       method: 'POST',
@@ -1506,6 +1479,79 @@ function sendReport() {
     return seg;
   }
 
+  // Render open tabs into #navOpenTabs and Tools dropdown items into #navToolsMenu
+  // based on the {open_tabs, openable_pages} state returned by /api/workspace/tabs.
+  function renderTabs(state) {
+    var openTabs = (state && state.open_tabs) || [];
+    var pages = (state && state.openable_pages) || [];
+
+    // Build a label/href lookup from openable_pages for the open tabs strip
+    var pageById = {};
+    pages.forEach(function(p) { pageById[p.id] = p; });
+
+    // ---- Open tabs strip ----
+    var tabsHost = document.getElementById('navOpenTabs');
+    if (tabsHost) {
+      tabsHost.textContent = '';  // clear
+      openTabs.forEach(function(tabId) {
+        var page = pageById[tabId];
+        if (!page) return;  // unknown id — skip
+        var a = document.createElement('a');
+        a.href = page.href;
+        a.className = 'nav-tab';
+        a.dataset.navId = page.id;
+        a.dataset.tab = '1';
+        a.appendChild(document.createTextNode(page.label));
+        var close = document.createElement('span');
+        close.className = 'nav-tab-close';
+        close.title = 'Close tab';
+        close.innerHTML = '&times;';
+        close.addEventListener('click', function(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          window.closeTab(page.id);
+        });
+        a.appendChild(close);
+        tabsHost.appendChild(a);
+      });
+    }
+
+    // ---- Tools dropdown items ----
+    var menu = document.getElementById('navToolsMenu');
+    if (menu) {
+      var wasOpen = !menu.hasAttribute('hidden');
+      menu.textContent = '';  // clear
+      pages.forEach(function(page) {
+        var isOpen = openTabs.indexOf(page.id) !== -1;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'nav-tools-item';
+        btn.dataset.navId = page.id;
+        btn.dataset.open = isOpen ? '1' : '0';
+        btn.addEventListener('click', function() {
+          window.toggleTabFromMenu(page.id);
+        });
+        var check = document.createElement('span');
+        check.className = 'nav-tools-check';
+        check.innerHTML = isOpen ? '&check;' : '&nbsp;';
+        btn.appendChild(check);
+        btn.appendChild(document.createTextNode(page.label));
+        menu.appendChild(btn);
+      });
+      if (!wasOpen) menu.setAttribute('hidden', '');
+    }
+  }
+
+  function fetchAndRender() {
+    return fetch('/api/workspace/tabs')
+      .then(function(r) { return r.json(); })
+      .then(function(state) {
+        renderTabs(state);
+        return state;
+      })
+      .catch(function() { /* silently ignore — empty containers are fine */ });
+  }
+
   window.closeTab = function(navId) {
     postJSON('/api/workspace/tabs/close', {nav_id: navId}).then(function(res) {
       if (currentNavId() === navId) {
@@ -1513,7 +1559,8 @@ function sendReport() {
         var next = (res.open_tabs || [])[0];
         window.location.href = next ? ('/' + next) : '/browse';
       } else {
-        window.location.reload();
+        // Update DOM in place — no full reload needed
+        fetchAndRender();
       }
     });
   };
@@ -1563,6 +1610,13 @@ function sendReport() {
       return;
     }
     menu.setAttribute('hidden', '');
+  }
+
+  // Initial population from server state
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fetchAndRender);
+  } else {
+    fetchAndRender();
   }
 })();
 </script>
