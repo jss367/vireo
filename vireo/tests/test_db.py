@@ -6679,6 +6679,44 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     assert db.filter_out_subject_tagged(ordered, {"genre"}) == ordered
 
 
+def test_filter_out_subject_tagged_chunks_large_input(tmp_path, monkeypatch):
+    """Regression: photo_ids larger than the SQLite bind-var limit must be
+    chunked, not passed as a single oversized IN clause. The classify job
+    sources up to ~1M photos via get_collection_photos(per_page=999999),
+    which would trip 'too many SQL variables' on builds with the historical
+    999-var cap.
+
+    Force a tiny chunk size so we exercise the chunking path with a small
+    number of real photos, then assert filtering correctness across the
+    boundary.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+
+    # 25 photos, alternating tagged/untagged so the result spans multiple
+    # chunks under our forced chunk size of 10.
+    monkeypatch.setattr(Database, "_FILTER_SUBJECT_CHUNK", 10)
+    genre_kid = db.add_keyword("Landscape", kw_type="genre")
+    pids = []
+    for i in range(25):
+        p = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=float(i),
+        )
+        pids.append(p)
+        # Tag every even-index photo with the genre keyword.
+        if i % 2 == 0:
+            db.tag_photo(p, genre_kid)
+
+    kept = db.filter_out_subject_tagged(pids, {"genre"})
+    expected = [p for i, p in enumerate(pids) if i % 2 == 1]
+    assert kept == expected, (
+        f"Chunking corrupted result. Expected odd-index photos, got {kept}"
+    )
+
+
 def test_tag_photo_with_first_taxonomy_keyword_adds_wildlife_genre(tmp_path):
     """Tagging a photo with its first taxonomy keyword auto-adds the
     Wildlife genre keyword."""

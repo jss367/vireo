@@ -665,30 +665,46 @@ class Database:
             return set(SUBJECT_TYPES_DEFAULT)
         return {t for t in raw if t in KEYWORD_TYPES}
 
+    # Conservative chunk size for filter_out_subject_tagged. Most modern
+    # SQLite builds default to SQLITE_MAX_VARIABLE_NUMBER=32766, but older
+    # / Linux-distro builds still ship with the historical 999 cap. 800
+    # leaves comfortable headroom for the type binds (up to 5) plus a
+    # safety margin. Module-level constant so tests can monkeypatch.
+    _FILTER_SUBJECT_CHUNK = 800
+
     def filter_out_subject_tagged(self, photo_ids, subject_types):
         """Return the subset of photo_ids whose photos do NOT have any keyword
         of a type in subject_types. Empty subject_types or empty photo_ids
-        returns photo_ids unchanged (preserving input order)."""
+        returns photo_ids unchanged (preserving input order).
+
+        Photo ids are chunked under SQLite's bind-variable limit so callers
+        can safely pass arbitrarily large lists. The classify job sources
+        photo ids from get_collection_photos(per_page=999999), which can
+        exceed older SQLite builds' 999-variable cap and trip
+        OperationalError: too many SQL variables.
+        """
         if not subject_types or not photo_ids:
             return list(photo_ids)
         types = [t for t in subject_types if t in KEYWORD_TYPES]
         if not types:
             return list(photo_ids)
-        pid_placeholders = ",".join("?" * len(photo_ids))
         type_placeholders = ",".join("?" * len(types))
-        rows = self.conn.execute(
-            f"""SELECT id FROM photos
-                WHERE id IN ({pid_placeholders})
-                  AND id NOT IN (
-                    SELECT pk.photo_id FROM photo_keywords pk
+        photo_ids_list = list(photo_ids)
+        excluded = set()
+        chunk_size = self._FILTER_SUBJECT_CHUNK
+        for i in range(0, len(photo_ids_list), chunk_size):
+            chunk = photo_ids_list[i:i + chunk_size]
+            pid_placeholders = ",".join("?" * len(chunk))
+            rows = self.conn.execute(
+                f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
                     WHERE k.type IN ({type_placeholders})
-                  )""",
-            list(photo_ids) + types,
-        ).fetchall()
-        kept_set = {r["id"] for r in rows}
-        # Preserve original input order for kept rows.
-        return [pid for pid in photo_ids if pid in kept_set]
+                      AND pk.photo_id IN ({pid_placeholders})""",
+                types + chunk,
+            ).fetchall()
+            for r in rows:
+                excluded.add(r["photo_id"])
+        return [pid for pid in photo_ids_list if pid not in excluded]
 
     def get_workspace_active_labels(self):
         """Return the active_labels list from workspace config_overrides, or None."""
