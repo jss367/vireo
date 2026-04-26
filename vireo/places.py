@@ -62,7 +62,7 @@ def _get_json(url: str) -> dict:
 
     Kept tiny so tests can monkeypatch ``urllib.request.urlopen`` directly.
     """
-    with urllib.request.urlopen(url) as f:
+    with urllib.request.urlopen(url, timeout=10) as f:
         body = f.read()
     return json.loads(body)
 
