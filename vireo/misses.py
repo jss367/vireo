@@ -18,6 +18,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 import config as _cfg
+from db import commit_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -231,5 +232,5 @@ def compute_misses_for_workspace(
         "miss_computed_at=? WHERE id=?",
         updates,
     )
-    db.conn.commit()
+    commit_with_retry(db.conn)
     return len(updates)

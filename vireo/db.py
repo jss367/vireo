@@ -25,6 +25,11 @@ KEYWORD_TYPES = frozenset({"taxonomy", "individual", "location", "genre", "gener
 # membership / classifier skip purposes. Workspaces can override.
 SUBJECT_TYPES_DEFAULT = frozenset({"taxonomy", "individual", "genre"})
 
+OPENABLE_NAV_IDS = frozenset({
+    "settings", "workspace", "lightroom",
+    "shortcuts", "keywords", "duplicates", "logs",
+})
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -80,6 +85,8 @@ class Database:
     Args:
         db_path: path to the SQLite database file (created if missing)
     """
+
+    DEFAULT_OPEN_TABS = ["settings", "workspace", "lightroom"]
 
     def __init__(self, db_path):
         db_dir = os.path.dirname(db_path)
@@ -212,6 +219,7 @@ class Database:
                 name            TEXT NOT NULL UNIQUE,
                 config_overrides TEXT,
                 ui_state        TEXT,
+                open_tabs       TEXT,
                 created_at      TEXT DEFAULT (datetime('now')),
                 last_opened_at  TEXT
             );
@@ -477,6 +485,15 @@ class Database:
                 )
                 self.conn.execute("ALTER TABLE photos DROP COLUMN embedding_model")
             self.conn.execute("ALTER TABLE photos DROP COLUMN embedding")
+        # Migration: add open_tabs column to existing workspaces tables, with defaults
+        try:
+            self.conn.execute("SELECT open_tabs FROM workspaces LIMIT 0")
+        except sqlite3.OperationalError:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN open_tabs TEXT")
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE open_tabs IS NULL",
+                (json.dumps(["settings", "workspace", "lightroom"]),),
+            )
         self.conn.commit()
 
     # -- Workspaces --
@@ -554,11 +571,12 @@ class Database:
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state)
-               VALUES (?, ?, ?)""",
+            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs)
+               VALUES (?, ?, ?, ?)""",
             (name,
              json.dumps(config_overrides) if config_overrides else None,
-             json.dumps(ui_state) if ui_state else None),
+             json.dumps(ui_state) if ui_state else None,
+             json.dumps(self.DEFAULT_OPEN_TABS)),
         )
         self.conn.commit()
         workspace_id = cur.lastrowid
@@ -674,6 +692,53 @@ class Database:
             return labels if isinstance(labels, list) else None
         except (json.JSONDecodeError, TypeError):
             return None
+
+    def get_open_tabs(self):
+        """Return the active workspace's list of open tab nav-ids in display order."""
+        ws = self.get_workspace(self._ws_id())
+        if not ws or not ws["open_tabs"]:
+            return []
+        try:
+            value = json.loads(ws["open_tabs"]) if isinstance(ws["open_tabs"], str) else ws["open_tabs"]
+            return value if isinstance(value, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def open_tab(self, nav_id):
+        """Append nav_id to the active workspace's open_tabs if not present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id not in tabs:
+            tabs.append(nav_id)
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
+
+    def close_tab(self, nav_id):
+        """Remove nav_id from the active workspace's open_tabs if present.
+
+        Raises ValueError if nav_id is not in OPENABLE_NAV_IDS.
+        Returns the new list.
+        """
+        if nav_id not in OPENABLE_NAV_IDS:
+            raise ValueError(f"{nav_id!r} is not an openable nav id")
+        tabs = self.get_open_tabs()
+        if nav_id in tabs:
+            tabs = [t for t in tabs if t != nav_id]
+            self.conn.execute(
+                "UPDATE workspaces SET open_tabs = ? WHERE id = ?",
+                (json.dumps(tabs), self._ws_id()),
+            )
+            self.conn.commit()
+        return tabs
 
     def set_workspace_active_labels(self, labels_files):
         """Store active_labels in the workspace's config_overrides."""
@@ -2883,7 +2948,7 @@ class Database:
         self.conn.execute(
             "UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id)
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_quality(
         self,
@@ -2906,7 +2971,7 @@ class Database:
                 photo_id,
             ),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_mask(self, photo_id, mask_path):
         """Store the mask file path for a photo."""
@@ -2914,7 +2979,7 @@ class Database:
             "UPDATE photos SET mask_path=? WHERE id=?",
             (mask_path, photo_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def update_photo_pipeline_features(
         self,
@@ -2963,7 +3028,7 @@ class Database:
         self.conn.execute(
             f"UPDATE photos SET {set_clause} WHERE id=?", values
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def get_photos_missing_masks(self, folder_ids=None):
         """Get photos that have detections but no masks yet.
@@ -3161,7 +3226,7 @@ class Database:
             "dino_embedding_variant=? WHERE id=?",
             (dino_subject_embedding, dino_global_embedding, variant, photo_id),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     # -- Keywords --
 
@@ -3612,13 +3677,77 @@ class Database:
         ).fetchall()
 
     def update_keyword(self, keyword_id, **kwargs):
-        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name."""
+        """Update keyword fields. Supports: type, taxon_id, latitude, longitude, name.
+
+        On a name change, re-runs the same taxonomy auto-detection that
+        add_keyword does on insert: if the keyword's current type is
+        'general' and the new name matches a taxon, it's promoted to
+        type='taxonomy' with the matching taxon_id. If the current type is
+        already 'taxonomy' and the new name matches a different taxon,
+        taxon_id is updated. Manually-set non-'general' types (e.g.
+        'location', 'individual') are preserved. Explicit type/taxon_id
+        kwargs always win over auto-detection.
+        """
         if 'type' in kwargs and kwargs['type'] not in KEYWORD_TYPES:
             raise ValueError(f"Invalid keyword type: {kwargs['type']}")
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return
+
+        # Auto-retype on rename: same logic as add_keyword. Only fires
+        # on an actual name change so idempotent PUT-style updates
+        # (client re-sending the existing name) don't unexpectedly
+        # reclassify a 'general' keyword once the taxa table is
+        # populated.
+        if 'name' in updates:
+            new_name = updates['name']
+            current = self.conn.execute(
+                "SELECT name, type, taxon_id FROM keywords WHERE id = ?",
+                (keyword_id,),
+            ).fetchone()
+            if current is not None and new_name != current["name"]:
+                cur_type = current["type"]
+                taxon = self.conn.execute(
+                    """SELECT t.id FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (new_name, new_name),
+                ).fetchone()
+                if not taxon:
+                    taxon = self.conn.execute(
+                        """SELECT t.taxon_id AS id FROM taxa_common_names t
+                           WHERE t.name = ? COLLATE NOCASE
+                           LIMIT 1""",
+                        (new_name,),
+                    ).fetchone()
+
+                if cur_type == 'general':
+                    # Only promote to taxonomy if a match exists; otherwise
+                    # leave type/taxon_id alone.
+                    if taxon:
+                        updates.setdefault('type', 'taxonomy')
+                        # Gate taxon_id on the EFFECTIVE type so an
+                        # explicit non-taxonomy type kwarg (e.g.
+                        # type='location') doesn't end up with a
+                        # taxonomy link. Mirror add_keyword's invariant
+                        # for the auto-promoted case: type='taxonomy'
+                        # backed by a matched taxon implies is_species=1.
+                        if updates.get('type') == 'taxonomy':
+                            updates.setdefault('taxon_id', taxon["id"])
+                            updates['is_species'] = 1
+                elif (cur_type == 'taxonomy' and taxon
+                      and updates.get('type', 'taxonomy') == 'taxonomy'):
+                    # Already taxonomy: refresh taxon_id only if the new
+                    # name matches a (possibly different) taxon AND the
+                    # effective type stays 'taxonomy' (caller may demote
+                    # to 'location' etc.). If no match, leave the existing
+                    # link in place.
+                    updates.setdefault('taxon_id', taxon["id"])
+                # Other manual types ('location', 'people', etc.) are
+                # preserved — user intent wins.
+
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
@@ -4316,7 +4445,7 @@ class Database:
                              reviewed_at = excluded.reviewed_at""",
             (pred_id, ws, individual, group_id, vote_count, total_votes),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def is_keyword_species(self, keyword_id):
         """Return True if the keyword is marked as a species."""
@@ -4499,7 +4628,7 @@ class Database:
                              run_at = datetime('now')""",
             (detection_id, classifier_model, labels_fingerprint, prediction_count),
         )
-        self.conn.commit()
+        commit_with_retry(self.conn)
 
     def get_classifier_run_keys(self, detection_id):
         rows = self.conn.execute(
@@ -4579,7 +4708,7 @@ class Database:
                  det["confidence"], det.get("category", "animal")),
             )
             ids.append(cur.lastrowid)
-        self.conn.commit()
+        commit_with_retry(self.conn)
         return ids
 
     def write_detection_batch(self, photo_id, detector_model, detections):
@@ -4627,7 +4756,7 @@ class Database:
                                  run_at = datetime('now')""",
                 (photo_id, detector_model, len(detections)),
             )
-            self.conn.commit()
+            commit_with_retry(self.conn)
             return ids
         except Exception:
             self.conn.rollback()

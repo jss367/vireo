@@ -322,6 +322,62 @@ def test_job_history_persistence(tmp_path):
     assert rows[0]['status'] == 'completed'
 
 
+def test_ephemeral_job_skips_history_persistence(tmp_path):
+    """Ephemeral jobs run normally but never write a row to job_history."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        return {"new_count": 7}
+
+    job_id = runner.start("new_images_walk", work, ephemeral=True)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job and job["status"] == "completed":
+            break
+        time.sleep(0.05)
+    time.sleep(0.1)
+
+    job = runner.get(job_id)
+    assert job["status"] == "completed"
+    assert job["result"] == {"new_count": 7}
+
+    rows = db.conn.execute(
+        "SELECT * FROM job_history WHERE id = ?", (job_id,)
+    ).fetchall()
+    assert rows == [], "ephemeral jobs must not be persisted to job_history"
+
+
+def test_ephemeral_failed_job_skips_history_persistence(tmp_path):
+    """Ephemeral jobs that fail still must not be persisted."""
+    from db import Database
+    from jobs import JobRunner
+
+    db = Database(str(tmp_path / "test.db"))
+    runner = JobRunner(db=db)
+
+    def work(job):
+        raise RuntimeError("boom")
+
+    job_id = runner.start("new_images_walk", work, ephemeral=True)
+
+    for _ in range(50):
+        job = runner.get(job_id)
+        if job and job["status"] == "failed":
+            break
+        time.sleep(0.05)
+    time.sleep(0.1)
+
+    rows = db.conn.execute(
+        "SELECT * FROM job_history WHERE id = ?", (job_id,)
+    ).fetchall()
+    assert rows == []
+
+
 def test_job_history_stores_tree_and_summary(tmp_path):
     """Job history persists tree JSON and summary string."""
     from db import Database

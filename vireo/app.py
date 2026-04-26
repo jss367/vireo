@@ -718,6 +718,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         cfg.save(user_cfg)
         return jsonify({"ok": True})
 
+    def _auto_open_tab(nav_id):
+        """Best-effort: append nav_id to the active workspace's open_tabs.
+
+        Called from openable page routes so direct URL visits / shortcuts
+        keep the navbar consistent. Errors are swallowed (the page still renders).
+        """
+        try:
+            _get_db().open_tab(nav_id)
+        except Exception:
+            log.exception("Failed to auto-open tab %r", nav_id)
+
     @app.route("/browse")
     def browse():
         return render_template("browse.html")
@@ -728,6 +739,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/lightroom")
     def lightroom_page():
+        _auto_open_tab("lightroom")
         return render_template("lightroom.html")
 
     @app.route("/audit")
@@ -752,6 +764,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/workspace")
     def workspace_page():
+        _auto_open_tab("workspace")
         return render_template("workspace.html")
 
     @app.route("/compare")
@@ -760,14 +773,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/settings")
     def settings():
+        _auto_open_tab("settings")
         return render_template("settings.html")
 
     @app.route("/shortcuts")
     def shortcuts_page():
+        _auto_open_tab("shortcuts")
         return render_template("shortcuts.html")
 
     @app.route("/keywords")
     def keywords_page():
+        _auto_open_tab("keywords")
         return render_template("keywords.html")
 
     @app.route("/jobs")
@@ -776,6 +792,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/duplicates")
     def duplicates_page():
+        _auto_open_tab("duplicates")
         return render_template("duplicates.html")
 
     @app.route("/move")
@@ -2311,6 +2328,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
+    @app.route("/api/workspace/tabs/open", methods=["POST"])
+    def api_open_tab():
+        from db import OPENABLE_NAV_IDS
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_id = body.get("nav_id")
+        if nav_id not in OPENABLE_NAV_IDS:
+            return json_error("nav_id is not openable", 400)
+        tabs = db.open_tab(nav_id)
+        return jsonify({"ok": True, "open_tabs": tabs})
+
+    @app.route("/api/workspace/tabs/close", methods=["POST"])
+    def api_close_tab():
+        from db import OPENABLE_NAV_IDS
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        nav_id = body.get("nav_id")
+        if nav_id not in OPENABLE_NAV_IDS:
+            return json_error("nav_id is not openable", 400)
+        tabs = db.close_tab(nav_id)
+        return jsonify({"ok": True, "open_tabs": tabs})
+
+    @app.route("/api/workspace/tabs", methods=["GET"])
+    def api_get_tabs():
+        db = _get_db()
+        try:
+            open_tabs = db.get_open_tabs()
+        except Exception:
+            open_tabs = []
+        TOOLS_ORDER = ["settings", "workspace", "lightroom",
+                       "shortcuts", "keywords", "duplicates", "logs"]
+        TAB_LABELS = {
+            "settings": "Settings", "workspace": "Workspace",
+            "lightroom": "Lightroom", "shortcuts": "Shortcuts",
+            "keywords": "Keywords", "duplicates": "Duplicates", "logs": "Logs",
+        }
+        openable_pages = [
+            {"id": t, "label": TAB_LABELS[t], "href": "/" + t}
+            for t in TOOLS_ORDER
+        ]
+        return jsonify({"open_tabs": open_tabs, "openable_pages": openable_pages})
+
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()
@@ -2349,12 +2408,82 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from db import Database
         from new_images import count_new_images_for_workspace
 
-        def compute():
+        # Shared holder for the cache worker's exception (if any), read by
+        # the ephemeral job's work_fn after the cache event fires. Without
+        # this, a walk that raises (e.g. unreadable volume, DB error) would
+        # still mark the job ``completed`` while ``/api/.../new-images``
+        # returns the error from ``get_recent_error`` — contradictory state
+        # in the bottom panel.
+        walk_error = {"exc": None}
+
+        def compute(progress_callback=None):
             wdb = Database(db_path)
             wdb.set_active_workspace(ws_id)
-            return count_new_images_for_workspace(wdb, ws_id)
+            try:
+                return count_new_images_for_workspace(
+                    wdb, ws_id, progress_callback=progress_callback,
+                )
+            except Exception as e:
+                walk_error["exc"] = e
+                raise
 
-        event = cache.kickoff_compute(db_path, ws_id, compute)
+        # Surface the walk as an ephemeral job so the user can see it in the
+        # bottom panel rather than wondering why their workspace is silent.
+        # ``on_spawn`` only fires when this kickoff actually starts a new
+        # worker (cache truly cold) — cache hits and reuse of an in-flight
+        # walk skip job creation, so navbar polls don't clutter the list.
+        ws_row = db.get_workspace(ws_id)
+        ws_name = ws_row["name"] if ws_row else f"workspace #{ws_id}"
+        runner = app._job_runner
+
+        def on_spawn(spawn_event):
+            progress_state = {"checked": 0, "found": 0}
+
+            def job_work_fn(job):
+                # Mirror the cache worker's lifecycle. ``spawn_event`` fires
+                # in the worker's finally clause, so we wake when the walk
+                # ends regardless of success or failure. Final totals come
+                # from progress_state, which the cache worker populated via
+                # progress_callback. If the walk raised, re-raise the same
+                # exception so JobRunner marks the job ``failed`` with the
+                # original message — keeping the bottom panel and the
+                # ``/api/.../new-images`` payload in agreement.
+                spawn_event.wait()
+                if walk_error["exc"] is not None:
+                    raise walk_error["exc"]
+                return {
+                    "files_checked": progress_state["checked"],
+                    "new_count": progress_state["found"],
+                }
+
+            job_id = runner.start(
+                "new_images_walk",
+                job_work_fn,
+                ephemeral=True,
+                workspace_id=ws_id,
+                config={"workspace_name": ws_name},
+            )
+
+            def progress_callback(files_checked, new_found):
+                progress_state["checked"] = files_checked
+                progress_state["found"] = new_found
+                runner.push_event(
+                    job_id,
+                    "progress",
+                    {
+                        "current": files_checked,
+                        "total": 0,
+                        "phase": (
+                            f"{files_checked:,} checked, {new_found:,} new"
+                        ),
+                        "files_checked": files_checked,
+                        "new_count": new_found,
+                    },
+                )
+
+            return progress_callback
+
+        event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
             if cached is not None:
@@ -8920,6 +9049,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/logs")
     def logs_page():
+        _auto_open_tab("logs")
         return render_template("logs.html")
 
     @app.route("/map")

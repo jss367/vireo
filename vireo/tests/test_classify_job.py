@@ -1911,3 +1911,51 @@ def test_classify_job_reclassify_true_bypasses_subject_skip(tmp_path):
         f"reclassify=True should not surface a skipped_subject event, got "
         f"{skip_events}"
     )
+
+
+def test_run_classifier_retries_on_database_is_locked(tmp_path):
+    """Per-detection prediction commit must retry transient 'database is locked'.
+
+    Concurrent pipelines on the same SQLite file (observed in production: a
+    second pipeline failed at classify after ~5h with 'Fatal: database is
+    locked') exceed the 30s busy_timeout under sustained writer contention.
+    Without retry the whole stage aborts and the run is lost.
+    """
+    import sqlite3
+
+    import classify_job
+    from db import Database
+    from tests.test_scanner import _FlakyConn
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/tmp/p")
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_ids = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+          "category": "animal"}],
+        detector_model="megadetector-v6",
+    )
+    det_id = det_ids[0]
+
+    locked = sqlite3.OperationalError("database is locked")
+    db.conn = _FlakyConn(db.conn, fail_on_calls={1: locked, 2: locked})
+
+    classify_job._run_classifier_on_detection(
+        db=db, detection_id=det_id,
+        classifier_model="bioclip-2",
+        labels=["Robin"],
+        labels_fingerprint="abc123",
+        classify_fn=lambda: [{"species": "Robin", "confidence": 0.9}],
+    )
+
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM predictions WHERE detection_id = ?",
+        (det_id,),
+    ).fetchone()["n"]
+    assert n == 1, "prediction must be persisted after transient lock retries"

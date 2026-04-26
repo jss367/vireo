@@ -30,7 +30,7 @@ except ImportError:
     load_image = None
     load_working_image = None
 
-from db import Database
+from db import Database, commit_with_retry
 from models import get_active_model, get_models
 
 try:
@@ -225,7 +225,7 @@ def _run_classifier_on_detection(db, detection_id, classifier_model, labels,
                 tax.get("genus"),
             ),
         )
-    db.conn.commit()
+    commit_with_retry(db.conn)
     return predictions
 
 
