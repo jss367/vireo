@@ -1267,10 +1267,11 @@ def test_get_dashboard_stats_with_data(tmp_path):
 
     stats = db.get_dashboard_stats()
 
-    # top_keywords: Robin with 2 photos
-    assert len(stats['top_keywords']) == 1
-    assert stats['top_keywords'][0]['name'] == 'Robin'
-    assert stats['top_keywords'][0]['photo_count'] == 2
+    # top_keywords: Robin with 2 photos. Wildlife is auto-added by the
+    # first-species rule, so it also appears with 2 photos.
+    by_name = {k['name']: k['photo_count'] for k in stats['top_keywords']}
+    assert by_name.get('Robin') == 2
+    assert by_name.get('Wildlife') == 2
 
     # photos_by_month: 2 in 2024-06, 1 in 2024-07
     months = {r['month']: r['count'] for r in stats['photos_by_month']}
@@ -6643,3 +6644,152 @@ def test_filter_out_subject_tagged_preserves_input_order(tmp_path):
     # Provide ids in non-sorted order to confirm the helper preserves input order.
     ordered = [p_c, p_a, p_b]
     assert db.filter_out_subject_tagged(ordered, {"genre"}) == ordered
+
+
+def test_tag_photo_with_first_taxonomy_keyword_adds_wildlife_genre(tmp_path):
+    """Tagging a photo with its first taxonomy keyword auto-adds the
+    Wildlife genre keyword."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    species_kid = db.add_keyword("Northern cardinal", is_species=True)
+
+    db.tag_photo(p1, species_kid)
+
+    # Photo should now have BOTH the species keyword AND Wildlife genre.
+    rows = db.conn.execute(
+        """SELECT k.name, k.type FROM photo_keywords pk
+           JOIN keywords k ON k.id = pk.keyword_id
+           WHERE pk.photo_id = ?
+           ORDER BY k.name""",
+        (p1,),
+    ).fetchall()
+    by_name = {r["name"]: r["type"] for r in rows}
+    assert by_name == {
+        "Northern cardinal": "taxonomy",
+        "Wildlife": "genre",
+    }
+
+
+def test_tag_photo_second_species_does_not_re_add_wildlife(tmp_path):
+    """If a photo already has at least one taxonomy keyword, tagging a
+    second species does NOT touch the Wildlife genre keyword (so user
+    removal sticks)."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    sp_b = db.add_keyword("Sparrow", is_species=True)
+
+    db.tag_photo(p1, sp_a)  # Wildlife auto-added
+    # User manually removes Wildlife
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)
+
+    db.tag_photo(p1, sp_b)  # second species — should NOT re-add Wildlife
+
+    has_wildlife = db.conn.execute(
+        """SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?""",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is False
+
+
+def test_tag_photo_with_non_taxonomy_does_not_add_wildlife(tmp_path):
+    """Tagging with a non-species keyword (location, individual, etc.)
+    does NOT add Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    loc_kid = db.add_keyword("Park", kw_type="location")
+
+    db.tag_photo(p1, loc_kid)
+
+    n = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND k.name = 'Wildlife'",
+        (p1,),
+    ).fetchone()["n"]
+    assert n == 0
+
+
+def test_tag_photo_re_adds_wildlife_after_all_species_removed_and_new_added(tmp_path):
+    """Sticky removal only sticks while at least one taxonomy keyword
+    exists. Removing all species and tagging a new one re-adds Wildlife."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    sp_b = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(p1, sp_a)  # Wildlife added
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+    db.untag_photo(p1, wildlife_id)
+    # Remove the only species
+    db.untag_photo(p1, sp_a)
+
+    # Tag a new species — this is the "first species again" case
+    db.tag_photo(p1, sp_b)
+
+    has_wildlife = db.conn.execute(
+        """SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?""",
+        (p1, wildlife_id),
+    ).fetchone() is not None
+    assert has_wildlife is True
+
+
+def test_backfill_auto_wildlife_for_existing_species_tagged_photos(tmp_path):
+    """The one-shot backfill adds Wildlife to every photo with a species
+    keyword that doesn't already have Wildlife. Idempotent."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.set_active_workspace(db.create_workspace("ws"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    p3 = db.add_photo(folder_id=fid, filename='p3.jpg', extension='.jpg', file_size=100, file_mtime=1.0)
+    sp_a = db.add_keyword("Robin", is_species=True)
+    # Bypass tag_photo so the auto-Wildlife rule does NOT fire — this
+    # simulates a pre-existing DB.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p1, sp_a),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (p2, sp_a),
+    )
+    db.conn.commit()
+
+    db.backfill_wildlife_genre()
+    db.backfill_wildlife_genre()  # idempotent
+
+    wildlife_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre'"
+    ).fetchone()["id"]
+
+    # p1, p2 should have Wildlife. p3 (no species) should not.
+    def has_wildlife(pid):
+        return db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (pid, wildlife_id),
+        ).fetchone() is not None
+    assert has_wildlife(p1) is True
+    assert has_wildlife(p2) is True
+    assert has_wildlife(p3) is False

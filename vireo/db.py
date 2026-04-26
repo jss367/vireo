@@ -105,6 +105,7 @@ class Database:
         self.ensure_default_workspace()
         self.migrate_legacy_keyword_types()
         self.ensure_default_genre_keywords()
+        self.backfill_wildlife_genre()
         # Restore last-used workspace, or fall back to Default
         last = self.conn.execute(
             "SELECT id FROM workspaces ORDER BY CASE WHEN last_opened_at IS NULL THEN 0 ELSE 1 END DESC, last_opened_at DESC, id ASC LIMIT 1"
@@ -3401,8 +3402,62 @@ class Database:
             "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
             (photo_id, keyword_id),
         )
+        # If we just attached a taxonomy keyword AND this is the first
+        # taxonomy keyword on the photo, auto-add the Wildlife genre keyword.
+        # The "first species" check makes sticky-removal work: a user-removed
+        # Wildlife isn't re-added on subsequent species tags as long as at
+        # least one species remains.
+        self._maybe_apply_auto_wildlife(photo_id, keyword_id)
         if _commit:
             self.conn.commit()
+
+    def _maybe_apply_auto_wildlife(self, photo_id, just_added_keyword_id):
+        """If just_added_keyword_id is a taxonomy keyword AND it's the only
+        taxonomy keyword on this photo, also add the Wildlife genre."""
+        row = self.conn.execute(
+            "SELECT type FROM keywords WHERE id = ?",
+            (just_added_keyword_id,),
+        ).fetchone()
+        if not row or row["type"] != "taxonomy":
+            return
+        # Count taxonomy keywords on this photo. If > 1, this isn't the first
+        # — skip (sticky removal).
+        species_count = self.conn.execute(
+            """SELECT COUNT(*) AS n FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ? AND k.type = 'taxonomy'""",
+            (photo_id,),
+        ).fetchone()["n"]
+        if species_count != 1:
+            return
+        wildlife_row = self.conn.execute(
+            "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' LIMIT 1"
+        ).fetchone()
+        if not wildlife_row:
+            return
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (photo_id, wildlife_row["id"]),
+        )
+
+    def backfill_wildlife_genre(self):
+        """One-shot backfill: every photo that has at least one taxonomy
+        keyword AND no Wildlife genre keyword gets Wildlife added. Idempotent."""
+        wildlife_row = self.conn.execute(
+            "SELECT id FROM keywords WHERE name = 'Wildlife' AND type = 'genre' LIMIT 1"
+        ).fetchone()
+        if not wildlife_row:
+            return  # No Wildlife keyword exists yet (very early init); nothing to do.
+        wildlife_id = wildlife_row["id"]
+        self.conn.execute(
+            """INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id)
+               SELECT DISTINCT pk.photo_id, ?
+               FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE k.type = 'taxonomy'""",
+            (wildlife_id,),
+        )
+        self.conn.commit()
 
     def untag_photo(self, photo_id, keyword_id, _commit=True):
         """Remove a keyword association from a photo.
