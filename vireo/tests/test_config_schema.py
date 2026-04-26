@@ -170,6 +170,12 @@ def test_keys_with_global_only_consumers_remain_global():
     assert SCHEMA["max_edit_history"]["scope"] == "global"
     # Database.add_keyword reads cfg.get('keyword_case').
     assert SCHEMA["keyword_case"]["scope"] == "global"
+    # Ingest endpoints read these only from request body params with
+    # hardcoded fallbacks; neither cfg.load() nor db.get_effective_config
+    # is consulted, so a workspace override would silently no-op.
+    assert SCHEMA["ingest.folder_template"]["scope"] == "global"
+    assert SCHEMA["ingest.skip_duplicates"]["scope"] == "global"
+    assert SCHEMA["ingest.file_types"]["scope"] == "global"
 
 
 def test_validate_unknown_key_raises():

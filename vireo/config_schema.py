@@ -263,15 +263,22 @@ SCHEMA = {
     },
 
     # --- Ingest -----------------------------------------------------------
+    # NOTE: scope=global for all three. Ingest endpoints currently read
+    # these only from request bodies with hardcoded fallbacks
+    # ("%Y/%Y-%m-%d", "both", True) — neither cfg.load() nor
+    # db.get_effective_config(...) is consulted, so a workspace override
+    # would be silently ignored. The UI exposes them so they round-trip
+    # through Export/Import; promote to "both" only after wiring the ingest
+    # endpoints (and the import page initializer) to the effective config.
     "ingest.folder_template": {
         "type": "string",
-        "category": "Ingest", "scope": "both",
+        "category": "Ingest", "scope": "global",
         "label": "Ingest folder template",
         "desc": "Strftime template for ingest destination subfolders (e.g. %Y/%Y-%m-%d).",
     },
     "ingest.skip_duplicates": {
         "type": "bool",
-        "category": "Ingest", "scope": "both",
+        "category": "Ingest", "scope": "global",
         "label": "Skip duplicates on ingest",
         "desc": "Skip files whose hash already exists in the database.",
     },
@@ -279,7 +286,7 @@ SCHEMA = {
         "type": "enum",
         "enum": ["both", "raw", "jpg"],
         "enum_labels": {"both": "RAW + JPEG", "raw": "RAW only", "jpg": "JPEG only"},
-        "category": "Ingest", "scope": "both",
+        "category": "Ingest", "scope": "global",
         "label": "Ingest file types",
         "desc": "Which file types to import.",
     },
