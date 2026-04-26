@@ -842,3 +842,13 @@ def test_existing_workspaces_get_default_open_tabs_on_migration(tmp_path):
     ).fetchone()
     assert row[0] is not None
     assert _json.loads(row[0]) == ["settings", "workspace", "lightroom"]
+
+
+def test_new_workspace_gets_default_open_tabs(db):
+    import json as _json
+    ws_id = db.create_workspace("Fresh")
+    row = db.conn.execute(
+        "SELECT open_tabs FROM workspaces WHERE id = ?", (ws_id,)
+    ).fetchone()
+    assert row["open_tabs"] is not None
+    assert _json.loads(row["open_tabs"]) == ["settings", "workspace", "lightroom"]

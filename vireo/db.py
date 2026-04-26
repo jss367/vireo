@@ -69,6 +69,8 @@ class Database:
         db_path: path to the SQLite database file (created if missing)
     """
 
+    DEFAULT_OPEN_TABS = ["settings", "workspace", "lightroom"]
+
     def __init__(self, db_path):
         db_dir = os.path.dirname(db_path)
         if db_path != ":memory:" and db_dir:
@@ -547,11 +549,12 @@ class Database:
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
-            """INSERT INTO workspaces (name, config_overrides, ui_state)
-               VALUES (?, ?, ?)""",
+            """INSERT INTO workspaces (name, config_overrides, ui_state, open_tabs)
+               VALUES (?, ?, ?, ?)""",
             (name,
              json.dumps(config_overrides) if config_overrides else None,
-             json.dumps(ui_state) if ui_state else None),
+             json.dumps(ui_state) if ui_state else None,
+             json.dumps(self.DEFAULT_OPEN_TABS)),
         )
         self.conn.commit()
         workspace_id = cur.lastrowid
