@@ -1077,37 +1077,37 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   padding: 0 4px;
   font-size: 14px;
   line-height: 1;
-  color: var(--muted, #999);
+  color: var(--text-muted, #999);
   border-radius: 3px;
   cursor: pointer;
 }
 .navbar .nav-tab:hover .nav-tab-close,
 .navbar .nav-tab.active .nav-tab-close { display: inline-block; }
-.navbar .nav-tab-close:hover { background: var(--hover, rgba(255,255,255,0.1)); color: var(--text); }
+.navbar .nav-tab-close:hover { background: var(--bg-tertiary, rgba(255,255,255,0.1)); color: var(--text-primary); }
 .navbar .nav-tab-divider {
   display: inline-block;
   width: 1px;
   height: 18px;
   margin: 0 8px;
-  background: var(--border, rgba(255,255,255,0.15));
+  background: var(--border-primary, rgba(255,255,255,0.15));
   vertical-align: middle;
 }
 .navbar .nav-tools-btn {
   background: none;
-  border: 1px dashed var(--border, rgba(255,255,255,0.2));
-  color: var(--muted, #999);
+  border: 1px dashed var(--border-primary, rgba(255,255,255,0.2));
+  color: var(--text-muted, #999);
   padding: 2px 8px;
   border-radius: 4px;
   cursor: pointer;
   font: inherit;
   margin-left: 4px;
 }
-.navbar .nav-tools-btn:hover { color: var(--text); border-color: var(--text); }
+.navbar .nav-tools-btn:hover { color: var(--text-primary); border-color: var(--text-primary); }
 .nav-tools-menu {
   position: absolute;
   top: 36px;
-  background: var(--bg-elev, #2a2a2a);
-  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  background: var(--bg-secondary, #2a2a2a);
+  border: 1px solid var(--border-primary, rgba(255,255,255,0.15));
   border-radius: 6px;
   padding: 4px;
   z-index: 1000;
@@ -1121,14 +1121,14 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   width: 100%;
   background: none;
   border: 0;
-  color: var(--text);
+  color: var(--text-primary);
   text-align: left;
   padding: 6px 8px;
   font: inherit;
   cursor: pointer;
   border-radius: 4px;
 }
-.nav-tools-item:hover { background: var(--hover, rgba(255,255,255,0.08)); }
+.nav-tools-item:hover { background: var(--bg-tertiary, rgba(255,255,255,0.08)); }
 .nav-tools-check { display: inline-block; width: 16px; color: var(--accent); }
 </style>
 
