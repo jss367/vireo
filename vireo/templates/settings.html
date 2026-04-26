@@ -1085,6 +1085,12 @@ async function loadWsOverrides() {
           input.value = overrides[key];
         }
         updateWsLabel(key);
+      } else {
+        // Sync removal too — when re-called after a schema-row reset, an
+        // override may have been deleted server-side. Leaving the checkbox
+        // checked would cause the next saveWsConfig to re-add it.
+        checkbox.checked = false;
+        ctrl.style.display = 'none';
       }
     });
     _wsOverridesLoaded = true;
@@ -2528,7 +2534,9 @@ async function doInstallUpdate() {
 // --- All settings (schema-rendered, editable) ------------------------------
 
 var ALL_SETTINGS_CACHE = { schema: null, categories: null, values: null };
-var ALL_SETTINGS_DEBOUNCE = {};   // key -> setTimeout id
+// Keyed by `<key>|<scope>` so a quick edit to the same key in a different
+// scope tab can't clear the pending write of the first scope's edit.
+var ALL_SETTINGS_DEBOUNCE = {};
 var ALL_SETTINGS_SCOPE = 'global';  // 'global' | 'workspace'
 
 function setSettingsScope(scope) {
@@ -2791,15 +2799,16 @@ function onSchemaListChange(key) {
 }
 
 function scheduleSchemaSave(key, value, immediate) {
-  if (ALL_SETTINGS_DEBOUNCE[key]) {
-    clearTimeout(ALL_SETTINGS_DEBOUNCE[key]);
-  }
   // Capture the scope at edit time so a tab switch during the debounce window
   // doesn't redirect the pending write to the wrong layer.
   var scope = ALL_SETTINGS_SCOPE;
+  var token = key + '|' + scope;
+  if (ALL_SETTINGS_DEBOUNCE[token]) {
+    clearTimeout(ALL_SETTINGS_DEBOUNCE[token]);
+  }
   var delay = immediate ? 0 : 300;
-  ALL_SETTINGS_DEBOUNCE[key] = setTimeout(function() {
-    ALL_SETTINGS_DEBOUNCE[key] = null;
+  ALL_SETTINGS_DEBOUNCE[token] = setTimeout(function() {
+    ALL_SETTINGS_DEBOUNCE[token] = null;
     saveSchemaSetting(key, value, scope);
   }, delay);
 }
@@ -2824,10 +2833,14 @@ async function saveSchemaSetting(key, value, scope) {
     }
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
-    // The curated form above this panel posts a full snapshot from its own
+    // The curated forms above this panel post full snapshots from their own
     // inputs. Repopulate those inputs from the server so a later curated
-    // edit doesn't overwrite the value we just saved with a stale snapshot.
+    // edit doesn't overwrite the value we just saved with a stale snapshot —
+    // both the global form (`saveConfig`) and the workspace-overrides form
+    // (`saveWsConfig`, which sends `null` for unchecked rows and would clear
+    // a freshly-saved override).
     if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
     setRowStatus(key, '✓ Saved', false);
     setTimeout(function() { setRowStatus(key, '', false); }, 1500);
   } catch (err) {
@@ -2850,6 +2863,7 @@ async function resetSchemaSetting(key) {
     await refreshAllSettingsValues();
     rerenderSettingRow(key);
     if (scope === 'global') await loadConfig();
+    else if (scope === 'workspace') await loadWsOverrides();
   } catch (err) {
     setRowStatus(key, 'Network error', true);
   }
